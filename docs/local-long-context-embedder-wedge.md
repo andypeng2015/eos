@@ -258,7 +258,7 @@ For promotion runs, set `MANTA_ALIGN_GATE_CANDIDATE=1`. The gate writes the summ
 
 ## Current Retrieval Alignment Findings
 
-The credible wedge is improving the in-repo embedder on selected BEIR-style retrieval tasks without losing the consumer-GPU training/export loop. The current best balanced checkpoint is the lower-weight hybrid InfoNCE NF-biased candidate:
+The credible wedge is improving the in-repo embedder on selected BEIR-style retrieval tasks without losing the consumer-GPU training/export loop. The current best nDCG checkpoint is the fresh-mined lower-weight hybrid InfoNCE candidate:
 
 | Candidate | SciFact nDCG@10 | NFCorpus nDCG@10 | FiQA nDCG@10 | Macro | Outcome |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -270,7 +270,9 @@ The credible wedge is improving the in-repo embedder on selected BEIR-style retr
 | Source family safe | 0.305378 | 0.068838 | 0.024872 | 0.133029 | rejected as balanced candidate |
 | Grouped InfoNCE only | 0.222989 | 0.048378 | 0.020070 | 0.097146 | rejected by promotion gate |
 | Hybrid InfoNCE w0.25 | 0.303582 | 0.069264 | 0.024596 | 0.132481 | FiQA gain, rejected by balanced gate |
-| Hybrid InfoNCE w0.10 NF2 LR25 | 0.310343 | 0.077658 | 0.027189 | 0.138397 | current balanced best, gate pass |
+| Hybrid InfoNCE w0.10 NF2 LR25 | 0.310343 | 0.077658 | 0.027189 | 0.138397 | superseded; balanced gate pass |
+| Hybrid ratchet w0.05 NF3 LR12.5 | 0.309634 | 0.074894 | 0.026093 | 0.136874 | rejected; pairwise AUC up, retrieval down |
+| Fresh-mine hybrid w0.05 NF3mine/NF2train LR12.5 | 0.324437 | 0.084556 | 0.027711 | 0.145568 | current nDCG best, gate pass |
 
 Interpretation:
 
@@ -280,6 +282,8 @@ Interpretation:
 - `grouped_infonce` is implemented and validated mechanically, but the first grouped-only gated run regressed every retrieval task. It used `26,076` grouped train pairs per epoch and zero contrastive accelerator calls, then failed the gate with macro nDCG@10 delta `-0.038675`. Treat grouped-only ranking as a negative objective result.
 - `hybrid_infonce` keeps the rectangular query-candidate accelerator path active while adding explicit per-query hard-negative ordering. The first weight-`0.25` run processed `1,693,284` train pairs per epoch with `204` contrastive accelerator calls and improved FiQA nDCG@10 from `0.022386` to `0.024596`, but regressed SciFact and NFCorpus enough to fail the balanced gate.
 - The lower-weight hybrid run (`grouped_loss_weight=0.10`, LR `0.000025`, source weights `scifact=1,nfcorpus=2,fiqa=1`) passed the strict promotion gate: macro nDCG@10 moved from `0.135821` to `0.138397`, SciFact improved, FiQA improved, and NFCorpus stayed inside the allowed regression band while recall@100 improved. This is the current balanced checkpoint to promote and rebase the next round from.
+- A lower-LR ratchet from the promoted checkpoint (`grouped_loss_weight=0.05`, LR `0.0000125`, source weights `scifact=1,nfcorpus=3,fiqa=1`) improved pairwise eval AUC to `0.832026` but failed the promotion gate: macro nDCG@10 moved from `0.138397` to `0.136874`, NFCorpus fell by `0.002764`, and FiQA fell by `0.001096`. Stop ratcheting the same mined blend; the next proof layer should remine model-hard negatives from the promoted artifact or add teacher-score distillation so training sees new ranking signal.
+- Fresh mining from the promoted checkpoint validated that proof layer. The fresh-mined candidate used `6000` max model-hard examples with mining weights `scifact=1,nfcorpus=3,fiqa=1`, training source weights `scifact=1,nfcorpus=2,fiqa=1`, `grouped_loss_weight=0.05`, and LR `0.0000125`; it passed the gate with macro nDCG@10 delta `+0.007171`. Recall@100 dipped on all three retrieval sets, especially FiQA (`0.171556` to `0.164380`), so the next promotion guard should add a recall floor or teacher-score distillation that preserves wider top-k coverage.
 
 Short retrieval metrics:
 
