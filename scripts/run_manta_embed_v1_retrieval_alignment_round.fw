@@ -45,14 +45,16 @@ type alignConfig struct {
 	CandidateScoreboardTSV   string
 	SummaryTSV               string
 	SummaryJSON              string
-	GateCandidate            bool
-	GateMinMacroNDCGAt10Delta float64
-	GateMaxDatasetNDCGAt10Regression float64
-	GateMinDatasetNDCGAt10Ratio float64
-	ScoreBaseline            bool
-	RunMining                bool
-	RunTraining              bool
-	ScoreCandidate           bool
+	GateCandidate                         bool
+	GateMinMacroNDCGAt10Delta            float64
+	GateMaxDatasetNDCGAt10Regression     float64
+	GateMinDatasetNDCGAt10Ratio          float64
+	GateMaxDatasetRecallAt100Regression float64
+	GateMinDatasetRecallAt100Ratio       float64
+	ScoreBaseline                        bool
+	RunMining                            bool
+	RunTraining                          bool
+	ScoreCandidate                       bool
 }
 
 type retrievalScore struct {
@@ -73,6 +75,7 @@ type summaryRow struct {
 	BaselineRecallAt100  float64 `json:"baseline_recall_at_100"`
 	CandidateRecallAt100 float64 `json:"candidate_recall_at_100"`
 	RecallAt100Delta     float64 `json:"recall_at_100_delta"`
+	RecallAt100Ratio     float64 `json:"recall_at_100_ratio,omitempty"`
 }
 
 type alignmentGate struct {
@@ -81,6 +84,8 @@ type alignmentGate struct {
 	MinMacroNDCGAt10Delta           float64  `json:"min_macro_ndcg_at_10_delta"`
 	MaxDatasetNDCGAt10Regression    float64  `json:"max_dataset_ndcg_at_10_regression"`
 	MinDatasetNDCGAt10Ratio         float64  `json:"min_dataset_ndcg_at_10_ratio,omitempty"`
+	MaxDatasetRecallAt100Regression float64  `json:"max_dataset_recall_at_100_regression,omitempty"`
+	MinDatasetRecallAt100Ratio      float64  `json:"min_dataset_recall_at_100_ratio,omitempty"`
 	BaselineMacroNDCGAt10           float64  `json:"baseline_macro_ndcg_at_10"`
 	CandidateMacroNDCGAt10          float64  `json:"candidate_macro_ndcg_at_10"`
 	MacroNDCGAt10Delta              float64  `json:"macro_ndcg_at_10_delta"`
@@ -133,6 +138,8 @@ Defaults:
   MANTA_ALIGN_MIN_MACRO_NDCG_DELTA=0
   MANTA_ALIGN_MAX_DATASET_NDCG_REGRESSION=0
   MANTA_ALIGN_MIN_DATASET_NDCG_RATIO=0
+  MANTA_ALIGN_MAX_DATASET_RECALL_AT_100_REGRESSION=0
+  MANTA_ALIGN_MIN_DATASET_RECALL_AT_100_RATIO=0
   MANTA_ALIGN_MAX_DOCS=0
   MANTA_ALIGN_MAX_QUERIES=0`)
 }
@@ -352,6 +359,10 @@ func prepareConfig(root string) (alignConfig, error) {
 	guard err == nil else return alignConfig{}, err
 	gateMinRatio, err := getenvFloat("MANTA_ALIGN_MIN_DATASET_NDCG_RATIO", 0)
 	guard err == nil else return alignConfig{}, err
+	gateMaxRecallRegression, err := getenvFloat("MANTA_ALIGN_MAX_DATASET_RECALL_AT_100_REGRESSION", 0)
+	guard err == nil else return alignConfig{}, err
+	gateMinRecallRatio, err := getenvFloat("MANTA_ALIGN_MIN_DATASET_RECALL_AT_100_RATIO", 0)
+	guard err == nil else return alignConfig{}, err
 
 	cfg := alignConfig{
 		Root:                     root,
@@ -384,14 +395,16 @@ func prepareConfig(root string) (alignConfig, error) {
 		CandidateScoreboardTSV:   filepath.Join(runDir, candidateScoreboardRunID, "scoreboard.tsv"),
 		SummaryTSV:               filepath.Join(runDir, "retrieval-alignment-summary.tsv"),
 		SummaryJSON:              filepath.Join(runDir, "retrieval-alignment-summary.json"),
-		GateCandidate:            envEnabledDefault("MANTA_ALIGN_GATE_CANDIDATE", false),
-		GateMinMacroNDCGAt10Delta: gateMinMacro,
-		GateMaxDatasetNDCGAt10Regression: gateMaxRegression,
-		GateMinDatasetNDCGAt10Ratio: gateMinRatio,
-		ScoreBaseline:            envEnabledDefault("MANTA_ALIGN_SCORE_BASELINE", true),
-		RunMining:                envEnabledDefault("MANTA_ALIGN_MINE_MODEL_HARD_NEGATIVES", true),
-		RunTraining:              envEnabledDefault("MANTA_ALIGN_TRAIN_CANDIDATE", true),
-		ScoreCandidate:           envEnabledDefault("MANTA_ALIGN_SCORE_CANDIDATE", true),
+		GateCandidate:                         envEnabledDefault("MANTA_ALIGN_GATE_CANDIDATE", false),
+		GateMinMacroNDCGAt10Delta:            gateMinMacro,
+		GateMaxDatasetNDCGAt10Regression:     gateMaxRegression,
+		GateMinDatasetNDCGAt10Ratio:          gateMinRatio,
+		GateMaxDatasetRecallAt100Regression: gateMaxRecallRegression,
+		GateMinDatasetRecallAt100Ratio:       gateMinRecallRatio,
+		ScoreBaseline:                        envEnabledDefault("MANTA_ALIGN_SCORE_BASELINE", true),
+		RunMining:                            envEnabledDefault("MANTA_ALIGN_MINE_MODEL_HARD_NEGATIVES", true),
+		RunTraining:                          envEnabledDefault("MANTA_ALIGN_TRAIN_CANDIDATE", true),
+		ScoreCandidate:                       envEnabledDefault("MANTA_ALIGN_SCORE_CANDIDATE", true),
 	}
 	guard len(cfg.Datasets) > 0 else return alignConfig{}, fmt.Errorf("MANTA_ALIGN_DATASETS is empty")
 	cfg.EvalJSONL, err = requireFile(cfg.EvalJSONL, "MANTA_ALIGN_EVAL_JSONL")
@@ -555,11 +568,13 @@ func readScoreboard(path string) (map[string]retrievalScore, error) {
 
 func evaluateAlignmentGate(cfg alignConfig, rows []summaryRow) alignmentGate {
 	gate := alignmentGate{
-		Enabled:                      cfg.GateCandidate,
-		MinMacroNDCGAt10Delta:        cfg.GateMinMacroNDCGAt10Delta,
-		MaxDatasetNDCGAt10Regression: cfg.GateMaxDatasetNDCGAt10Regression,
-		MinDatasetNDCGAt10Ratio:      cfg.GateMinDatasetNDCGAt10Ratio,
-		Passed:                       true,
+		Enabled:                         cfg.GateCandidate,
+		MinMacroNDCGAt10Delta:           cfg.GateMinMacroNDCGAt10Delta,
+		MaxDatasetNDCGAt10Regression:    cfg.GateMaxDatasetNDCGAt10Regression,
+		MinDatasetNDCGAt10Ratio:         cfg.GateMinDatasetNDCGAt10Ratio,
+		MaxDatasetRecallAt100Regression: cfg.GateMaxDatasetRecallAt100Regression,
+		MinDatasetRecallAt100Ratio:      cfg.GateMinDatasetRecallAt100Ratio,
+		Passed:                          true,
 	}
 	if len(rows) == 0 {
 		gate.Passed = false
@@ -574,6 +589,12 @@ func evaluateAlignmentGate(cfg alignConfig, rows []summaryRow) alignmentGate {
 		}
 		if cfg.GateCandidate && cfg.GateMinDatasetNDCGAt10Ratio > 0 && row.NDCGAt10Ratio < cfg.GateMinDatasetNDCGAt10Ratio {
 			gate.Failures = append(gate.Failures, fmt.Sprintf("%s ndcg@10 ratio %.3f below %.3f", row.Dataset, row.NDCGAt10Ratio, cfg.GateMinDatasetNDCGAt10Ratio))
+		}
+		if cfg.GateCandidate && cfg.GateMaxDatasetRecallAt100Regression > 0 && row.RecallAt100Delta < -cfg.GateMaxDatasetRecallAt100Regression {
+			gate.Failures = append(gate.Failures, fmt.Sprintf("%s recall@100 delta %.6f below allowed regression -%.6f", row.Dataset, row.RecallAt100Delta, cfg.GateMaxDatasetRecallAt100Regression))
+		}
+		if cfg.GateCandidate && cfg.GateMinDatasetRecallAt100Ratio > 0 && row.RecallAt100Ratio < cfg.GateMinDatasetRecallAt100Ratio {
+			gate.Failures = append(gate.Failures, fmt.Sprintf("%s recall@100 ratio %.3f below %.3f", row.Dataset, row.RecallAt100Ratio, cfg.GateMinDatasetRecallAt100Ratio))
 		}
 	}
 	scale := 1.0 / float64(len(rows))
@@ -601,12 +622,14 @@ func printAlignmentGate(gate alignmentGate) {
 	if !gate.Passed {
 		status = "FAIL"
 	}
-	fmt.Printf("promotion_gate=%s macro_ndcg_at_10_delta=%.6f min_macro_delta=%.6f max_dataset_regression=%.6f min_dataset_ratio=%.3f baseline_macro=%.6f candidate_macro=%.6f\n",
+	fmt.Printf("promotion_gate=%s macro_ndcg_at_10_delta=%.6f min_macro_delta=%.6f max_dataset_regression=%.6f min_dataset_ratio=%.3f max_recall_regression=%.6f min_recall_ratio=%.3f baseline_macro=%.6f candidate_macro=%.6f\n",
 		status,
 		gate.MacroNDCGAt10Delta,
 		gate.MinMacroNDCGAt10Delta,
 		gate.MaxDatasetNDCGAt10Regression,
 		gate.MinDatasetNDCGAt10Ratio,
+		gate.MaxDatasetRecallAt100Regression,
+		gate.MinDatasetRecallAt100Ratio,
 		gate.BaselineMacroNDCGAt10,
 		gate.CandidateMacroNDCGAt10)
 	for _, failure := range gate.Failures {
@@ -630,6 +653,10 @@ func writeSummary(cfg alignConfig) error {
 		if base.NDCGAt10 != 0 {
 			ratio = cand.NDCGAt10 / base.NDCGAt10
 		}
+		recallRatio := 0.0
+		if base.RecallAt100 != 0 {
+			recallRatio = cand.RecallAt100 / base.RecallAt100
+		}
 		rows = append(rows, summaryRow{
 			Dataset:              dataset,
 			BaselineNDCGAt10:     base.NDCGAt10,
@@ -639,13 +666,14 @@ func writeSummary(cfg alignConfig) error {
 			BaselineRecallAt100:  base.RecallAt100,
 			CandidateRecallAt100: cand.RecallAt100,
 			RecallAt100Delta:     cand.RecallAt100 - base.RecallAt100,
+			RecallAt100Ratio:     recallRatio,
 		})
 	}
 	guard len(rows) > 0 else return fmt.Errorf("no comparable manta retrieval rows found")
 	gate := evaluateAlignmentGate(cfg, rows)
-	tsv := "dataset\tbaseline_ndcg_at_10\tcandidate_ndcg_at_10\tndcg_at_10_delta\tndcg_at_10_ratio\tbaseline_recall_at_100\tcandidate_recall_at_100\trecall_at_100_delta\n"
+	tsv := "dataset\tbaseline_ndcg_at_10\tcandidate_ndcg_at_10\tndcg_at_10_delta\tndcg_at_10_ratio\tbaseline_recall_at_100\tcandidate_recall_at_100\trecall_at_100_delta\trecall_at_100_ratio\n"
 	for _, row := range rows {
-		tsv += fmt.Sprintf("%s\t%.6f\t%.6f\t%.6f\t%.3f\t%.6f\t%.6f\t%.6f\n",
+		tsv += fmt.Sprintf("%s\t%.6f\t%.6f\t%.6f\t%.3f\t%.6f\t%.6f\t%.6f\t%.3f\n",
 			row.Dataset,
 			row.BaselineNDCGAt10,
 			row.CandidateNDCGAt10,
@@ -653,7 +681,8 @@ func writeSummary(cfg alignConfig) error {
 			row.NDCGAt10Ratio,
 			row.BaselineRecallAt100,
 			row.CandidateRecallAt100,
-			row.RecallAt100Delta)
+			row.RecallAt100Delta,
+			row.RecallAt100Ratio)
 	}
 	err = os.WriteFile(cfg.SummaryTSV, []byte(tsv), 0o644)
 	guard err == nil else return err
