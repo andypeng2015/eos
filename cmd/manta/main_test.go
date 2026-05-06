@@ -1304,10 +1304,10 @@ func TestRunTrainEmbedFitsTextPairwisePackage(t *testing.T) {
 	trainPath := filepath.Join(t.TempDir(), "train-pairs.jsonl")
 	evalPath := filepath.Join(t.TempDir(), "eval-pairs.jsonl")
 	trainData := "" +
-		"{\"query\":\"ab\",\"document\":\"ab\",\"label\":1}\n" +
-		"{\"query\":\"ab\",\"document\":\"cd\",\"label\":-1}\n" +
-		"{\"query\":\"cd\",\"document\":\"cd\",\"label\":1}\n" +
-		"{\"query\":\"cd\",\"document\":\"ab\",\"label\":-1}\n"
+		"{\"source\":\"scifact\",\"query\":\"ab\",\"document\":\"ab\",\"label\":1}\n" +
+		"{\"source\":\"scifact\",\"query\":\"ab\",\"document\":\"cd\",\"label\":-1}\n" +
+		"{\"source\":\"nfcorpus\",\"query\":\"cd\",\"document\":\"cd\",\"label\":1}\n" +
+		"{\"source\":\"nfcorpus\",\"query\":\"cd\",\"document\":\"ab\",\"label\":-1}\n"
 	evalData := "" +
 		"{\"query\":\"ab\",\"document\":\"ab\",\"label\":1}\n" +
 		"{\"left\":\"ab\",\"right\":\"cd\",\"label\":0}\n"
@@ -1362,7 +1362,7 @@ func TestRunTrainEmbedFitsTextHardNegativePackage(t *testing.T) {
 		t.Fatalf("write eval text pairs: %v", err)
 	}
 
-	output := captureRunOutput(t, []string{"train-embed", "--hard-negative-train", "--hard-negatives-per-query", "1", "--epochs", "2", "--batch-size", "2", path, trainPath, evalPath})
+	output := captureRunOutput(t, []string{"train-embed", "--hard-negative-train", "--hard-negatives-per-query", "1", "--hard-negative-source-weights", "scifact=1,nfcorpus=2", "--epochs", "2", "--batch-size", "2", path, trainPath, evalPath})
 	for _, want := range []string{
 		"trained package",
 		"train=2 hard_negative_contrastive examples",

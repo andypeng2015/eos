@@ -44,6 +44,7 @@ func (b *Backend) Capabilities() []string {
 		mantaartifact.CapabilityImageOps,
 		mantaartifact.CapabilityTrainingLosses,
 		mantaartifact.CapabilityTurboQuant,
+		mantaartifact.CapabilitySparseAttention,
 	}
 }
 

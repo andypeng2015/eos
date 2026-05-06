@@ -6,31 +6,34 @@ import (
 	"math/rand"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
 // EmbeddingTrainRunConfig controls dataset-level native training.
 type EmbeddingTrainRunConfig struct {
-	Epochs                int
-	BatchSize             int
-	Shuffle               bool
-	Seed                  int64
-	EvalEveryEpoch        int
-	EvalEverySteps        int
-	EarlyStoppingPatience int
-	SelectMetric          string
-	MinDelta              float32
-	RestoreBest           bool
-	EvalOnly              bool
-	PairwiseTrain         bool
-	HardNegativeTrain     bool
-	HardNegativesPerQuery int
-	LengthBucketBatches   bool
-	LearningRate          float32
-	ContrastiveLoss       string
-	Temperature           float32
-	ProgressEverySteps    int
-	Progress              EmbeddingTrainProgressFunc
+	Epochs                    int
+	BatchSize                 int
+	Shuffle                   bool
+	Seed                      int64
+	EvalEveryEpoch            int
+	EvalEverySteps            int
+	EarlyStoppingPatience     int
+	SelectMetric              string
+	MinDelta                  float32
+	RestoreBest               bool
+	EvalOnly                  bool
+	PairwiseTrain             bool
+	HardNegativeTrain         bool
+	HardNegativesPerQuery     int
+	HardNegativeSourceWeights map[string]int
+	LengthBucketBatches       bool
+	LearningRate              float32
+	ContrastiveLoss           string
+	Temperature               float32
+	GroupedLossWeight         float32
+	ProgressEverySteps        int
+	Progress                  EmbeddingTrainProgressFunc
 }
 
 // EmbeddingTrainProgressFunc receives incremental training progress updates.
@@ -149,6 +152,7 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 	if err := t.applyTrainRunOverrides(cfg); err != nil {
 		return EmbeddingTrainRunSummary{}, err
 	}
+	cfg = t.syncTrainRunObjectiveConfig(cfg)
 
 	runStart := time.Now()
 	startStep := t.step
@@ -341,6 +345,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 	if err := t.applyTrainRunOverrides(cfg); err != nil {
 		return EmbeddingTrainRunSummary{}, err
 	}
+	cfg = t.syncTrainRunObjectiveConfig(cfg)
 
 	runStart := time.Now()
 	startStep := t.step
@@ -562,6 +567,7 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 	if err := t.applyTrainRunOverrides(cfg); err != nil {
 		return EmbeddingTrainRunSummary{}, err
 	}
+	cfg = t.syncTrainRunObjectiveConfig(cfg)
 
 	runStart := time.Now()
 	startStep := t.step
@@ -643,7 +649,9 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 				indices[i], indices[j] = indices[j], indices[i]
 			})
 		}
-		if cfg.LengthBucketBatches {
+		if len(cfg.HardNegativeSourceWeights) > 0 {
+			indices = hardNegativeSourceWeightedOrder(trainSet, indices, cfg.BatchSize, cfg.HardNegativeSourceWeights, cfg.LengthBucketBatches)
+		} else if cfg.LengthBucketBatches {
 			bucketHardNegativeOrderByLength(trainSet, indices, cfg.BatchSize)
 		}
 		trainStart := time.Now()
@@ -815,7 +823,7 @@ func EstimateHardNegativeTrainWorkload(trainExamples, negativesPerExample, evalE
 	if negativesPerExample < 0 {
 		negativesPerExample = 0
 	}
-	batches, trainPairsPerEpoch := hardNegativeBatchWork(trainExamples, cfg.BatchSize, negativesPerExample)
+	batches, trainPairsPerEpoch := hardNegativeBatchWork(trainExamples, cfg.BatchSize, negativesPerExample, cfg.ContrastiveLoss)
 	evalPasses := plannedEvalPassCount(evalExamples, cfg.Epochs, cfg.EvalEveryEpoch)
 	if cfg.RestoreBest && evalExamples > 0 {
 		evalPasses++
@@ -832,7 +840,7 @@ func EstimateHardNegativeTrainWorkload(trainExamples, negativesPerExample, evalE
 	}
 	evalPairsPerPass := int64(evalExamples)
 	return EmbeddingTrainWorkload{
-		TrainMode:            "hard_negative_contrastive",
+		TrainMode:            hardNegativeTrainMode(cfg.ContrastiveLoss),
 		EvalMode:             workloadEvalMode(evalExamples, "pairwise"),
 		TrainExamples:        trainExamples,
 		EvalExamples:         evalExamples,
@@ -912,7 +920,7 @@ func contrastiveEvalPairs(total int) int64 {
 	return int64(total) * int64(total)
 }
 
-func hardNegativeBatchWork(total, batchSize, negativesPerExample int) (int, int64) {
+func hardNegativeBatchWork(total, batchSize, negativesPerExample int, loss string) (int, int64) {
 	if total <= 0 || batchSize <= 0 {
 		return 0, 0
 	}
@@ -932,13 +940,41 @@ func hardNegativeBatchWork(total, batchSize, negativesPerExample int) (int, int6
 			break
 		}
 		candidates := int64(n) * candidatesPerExample
-		if candidates < 2 {
-			break
+		if loss == "grouped_infonce" {
+			if candidatesPerExample < 2 {
+				break
+			}
+			batches++
+			pairs += int64(n) * candidatesPerExample
+		} else if loss == "hybrid_infonce" {
+			if candidates < 2 {
+				break
+			}
+			batches++
+			pairs += int64(n) * candidates
+			if candidatesPerExample >= 2 {
+				pairs += int64(n) * candidatesPerExample
+			}
+		} else {
+			if candidates < 2 {
+				break
+			}
+			batches++
+			pairs += int64(n) * candidates
 		}
-		batches++
-		pairs += int64(n) * candidates
 	}
 	return batches, pairs
+}
+
+func hardNegativeTrainMode(loss string) string {
+	switch loss {
+	case "grouped_infonce":
+		return "hard_negative_grouped_infonce"
+	case "hybrid_infonce":
+		return "hard_negative_hybrid_infonce"
+	default:
+		return "hard_negative_contrastive"
+	}
 }
 
 func hardNegativeBatchPairCount(batch []EmbeddingHardNegativeExample) int64 {
@@ -998,6 +1034,134 @@ func spreadHardNegativeOrderByQuery(trainSet []EmbeddingHardNegativeExample, ord
 	}
 	if len(out) != len(order) {
 		return order
+	}
+	return out
+}
+
+func hardNegativeSourceWeightedOrder(trainSet []EmbeddingHardNegativeExample, order []int, batchSize int, weights map[string]int, lengthBucket bool) []int {
+	weights = normalizeHardNegativeSourceWeights(weights)
+	if len(trainSet) == 0 || len(order) < 2 || batchSize <= 0 || len(weights) == 0 {
+		return order
+	}
+	type sourceQueue struct {
+		indexes []int
+		next    int
+		weight  int
+	}
+	groups := []sourceQueue{}
+	groupByKey := map[string]int{}
+	for _, idx := range order {
+		if idx < 0 || idx >= len(trainSet) {
+			return order
+		}
+		key := hardNegativeSourceGroupKey(weights, trainSet[idx].Source)
+		groupIndex, ok := groupByKey[key]
+		if !ok {
+			groupIndex = len(groups)
+			groupByKey[key] = groupIndex
+			groups = append(groups, sourceQueue{
+				weight: hardNegativeSourceWeight(weights, trainSet[idx].Source),
+			})
+		}
+		groups[groupIndex].indexes = append(groups[groupIndex].indexes, idx)
+	}
+	if len(groups) == 0 {
+		return order
+	}
+	for i := range groups {
+		if lengthBucket {
+			bucketHardNegativeOrderByLength(trainSet, groups[i].indexes, batchSize)
+		}
+		groups[i].indexes = spreadHardNegativeOrderByQuery(trainSet, groups[i].indexes)
+	}
+	out := make([]int, 0, len(order))
+	remaining := len(order)
+	for remaining > 0 {
+		batchStart := len(out)
+		for len(out)-batchStart < batchSize && remaining > 0 {
+			progressed := false
+			for i := range groups {
+				group := &groups[i]
+				for repeat := 0; repeat < group.weight && len(out)-batchStart < batchSize; repeat++ {
+					if group.next >= len(group.indexes) {
+						break
+					}
+					out = append(out, group.indexes[group.next])
+					group.next++
+					remaining--
+					progressed = true
+				}
+			}
+			if !progressed {
+				break
+			}
+		}
+		if len(out) == batchStart {
+			break
+		}
+	}
+	if len(out) != len(order) {
+		return order
+	}
+	return out
+}
+
+func hardNegativeSourceGroupKey(weights map[string]int, source string) string {
+	exact := normalizedHardNegativeSource(source)
+	if _, ok := weights[exact]; ok {
+		return exact
+	}
+	return hardNegativeSourceFamily(source)
+}
+
+func hardNegativeSourceWeight(weights map[string]int, source string) int {
+	if len(weights) == 0 {
+		return 1
+	}
+	exact := normalizedHardNegativeSource(source)
+	if weight := weights[exact]; weight > 0 {
+		return weight
+	}
+	family := hardNegativeSourceFamily(source)
+	if weight := weights[family]; weight > 0 {
+		return weight
+	}
+	if weight := weights["*"]; weight > 0 {
+		return weight
+	}
+	return 1
+}
+
+func hardNegativeSourceFamily(source string) string {
+	source = normalizedHardNegativeSource(source)
+	if idx := strings.IndexByte(source, ':'); idx > 0 {
+		return source[:idx]
+	}
+	return source
+}
+
+func normalizedHardNegativeSource(source string) string {
+	source = strings.ToLower(strings.TrimSpace(source))
+	if source == "" {
+		return "unknown"
+	}
+	return source
+}
+
+func normalizeHardNegativeSourceWeights(weights map[string]int) map[string]int {
+	if len(weights) == 0 {
+		return nil
+	}
+	out := map[string]int{}
+	for source, weight := range weights {
+		key := normalizedHardNegativeSource(source)
+		if weight <= 0 {
+			continue
+		}
+		out[key] = weight
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -1139,8 +1303,10 @@ func (t *EmbeddingTrainer) runHardNegativeEpoch(trainSet []EmbeddingHardNegative
 	totalTrainExamples := 0
 	var totalPairs int64
 	batchIndex := 0
-	order = spreadHardNegativeOrderByQuery(trainSet, order)
-	totalBatches, plannedEpochPairs := hardNegativeBatchWork(len(order), batchSize, cfg.HardNegativesPerQuery)
+	if len(cfg.HardNegativeSourceWeights) == 0 {
+		order = spreadHardNegativeOrderByQuery(trainSet, order)
+	}
+	totalBatches, plannedEpochPairs := hardNegativeBatchWork(len(order), batchSize, cfg.HardNegativesPerQuery, cfg.ContrastiveLoss)
 	for start := 0; start < len(order); start += batchSize {
 		end := start + batchSize
 		if end > len(order) {
@@ -1299,6 +1465,7 @@ func expandContrastiveExamples(examples []EmbeddingContrastiveExample) []Embeddi
 	out := make([]EmbeddingPairExample, 0, len(examples)*len(examples))
 	for i, example := range examples {
 		out = append(out, EmbeddingPairExample{
+			Source:      example.Source,
 			LeftTokens:  append([]int32(nil), example.QueryTokens...),
 			RightTokens: append([]int32(nil), example.PositiveTokens...),
 			LeftMask:    append([]int32(nil), example.QueryMask...),
@@ -1310,6 +1477,7 @@ func expandContrastiveExamples(examples []EmbeddingContrastiveExample) []Embeddi
 				continue
 			}
 			out = append(out, EmbeddingPairExample{
+				Source:      example.Source,
 				LeftTokens:  append([]int32(nil), example.QueryTokens...),
 				RightTokens: append([]int32(nil), negative.PositiveTokens...),
 				LeftMask:    append([]int32(nil), example.QueryMask...),
@@ -1342,6 +1510,8 @@ func normalizedTrainRunConfig(cfg EmbeddingTrainRunConfig) EmbeddingTrainRunConf
 	if cfg.HardNegativesPerQuery == 0 {
 		cfg.HardNegativesPerQuery = 1
 	}
+	cfg.GroupedLossWeight = effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
+	cfg.HardNegativeSourceWeights = normalizeHardNegativeSourceWeights(cfg.HardNegativeSourceWeights)
 	return cfg
 }
 
@@ -1363,6 +1533,10 @@ func (t *EmbeddingTrainer) applyTrainRunOverrides(cfg EmbeddingTrainRunConfig) e
 		next.Temperature = cfg.Temperature
 		changed = true
 	}
+	if cfg.GroupedLossWeight > 0 {
+		next.GroupedLossWeight = cfg.GroupedLossWeight
+		changed = true
+	}
 	if !changed {
 		return nil
 	}
@@ -1372,6 +1546,20 @@ func (t *EmbeddingTrainer) applyTrainRunOverrides(cfg EmbeddingTrainRunConfig) e
 	}
 	t.config = next
 	return nil
+}
+
+func (t *EmbeddingTrainer) syncTrainRunObjectiveConfig(cfg EmbeddingTrainRunConfig) EmbeddingTrainRunConfig {
+	if t == nil {
+		return cfg
+	}
+	if cfg.ContrastiveLoss == "" {
+		cfg.ContrastiveLoss = t.config.ContrastiveLoss
+	}
+	if cfg.GroupedLossWeight == 0 {
+		cfg.GroupedLossWeight = t.config.GroupedLossWeight
+	}
+	cfg.GroupedLossWeight = effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
+	return cfg
 }
 
 func validTrainSelectionMetric(metric string) bool {

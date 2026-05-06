@@ -1,0 +1,613 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+type scoreboardConfig struct {
+	Root              string
+	RunID             string
+	RunRoot           string
+	RunDir            string
+	LogDir            string
+	MantaBin          string
+	Artifact          string
+	PairwiseArtifact  string
+	Tokenizer         string
+	NoTokenizer       string
+	PairwiseEvalJSONL string
+	HardEvalJSONL     string
+	RetrievalRoot     string
+	RetrievalDatasets []string
+	LongRoot          string
+	LongDatasets      []string
+	Split             string
+	BatchSize         string
+	TopK              string
+	MaxDocs           string
+	MaxQueries        string
+	BM25Baseline      string
+	ScoreboardTSV     string
+	ScoreboardJSON    string
+}
+
+type evalMetrics struct {
+	Loss                 float64 `json:"loss"`
+	Top1Accuracy         float64 `json:"top1_accuracy"`
+	MeanReciprocalRank   float64 `json:"mean_reciprocal_rank"`
+	ROCAUC               float64 `json:"roc_auc"`
+	ScoreMargin          float64 `json:"score_margin"`
+	PairCount            int     `json:"pair_count"`
+}
+
+type trainMetrics struct {
+	FinalEval *evalMetrics `json:"final_eval"`
+	Throughput struct {
+		ElapsedSeconds     float64 `json:"elapsed_seconds"`
+		EvalPairsPerSecond float64 `json:"eval_pairs_per_second"`
+	} `json:"throughput"`
+	Accelerators struct {
+		Forward string `json:"forward"`
+	} `json:"accelerators"`
+	ProfileDelta struct {
+		OptimizerUpdates int64 `json:"optimizer_updates"`
+	} `json:"profile_delta"`
+}
+
+type retrievalMetrics struct {
+	Dataset string `json:"dataset"`
+	Backend string `json:"backend"`
+	Inputs struct {
+		Documents     int   `json:"documents"`
+		Queries       int   `json:"queries"`
+		RelevantPairs int   `json:"relevant_pairs"`
+		ScoredPairs   int64 `json:"scored_pairs"`
+	} `json:"inputs"`
+	Quality struct {
+		NDCGAt10   float64 `json:"ndcg_at_10"`
+		MRRAt10    float64 `json:"mrr_at_10"`
+		RecallAt10 float64 `json:"recall_at_10"`
+		RecallAt100 float64 `json:"recall_at_100"`
+	} `json:"quality"`
+	Throughput struct {
+		ElapsedSeconds    float64 `json:"elapsed_seconds"`
+		DocumentsPerSecond float64 `json:"documents_per_second"`
+		QueriesPerSecond   float64 `json:"queries_per_second"`
+		ScoresPerSecond    float64 `json:"scores_per_second"`
+	} `json:"throughput"`
+}
+
+type scoreboardRow struct {
+	Category             string  `json:"category"`
+	Dataset              string  `json:"dataset"`
+	Baseline             string  `json:"baseline"`
+	Status               string  `json:"status"`
+	MetricsPath          string  `json:"metrics_path"`
+	NDCGAt10             float64 `json:"ndcg_at_10,omitempty"`
+	MRRAt10              float64 `json:"mrr_at_10,omitempty"`
+	RecallAt10           float64 `json:"recall_at_10,omitempty"`
+	RecallAt100          float64 `json:"recall_at_100,omitempty"`
+	Top1Accuracy         float64 `json:"top1_accuracy,omitempty"`
+	MeanReciprocalRank   float64 `json:"mean_reciprocal_rank,omitempty"`
+	ROCAUC               float64 `json:"roc_auc,omitempty"`
+	ScoreMargin          float64 `json:"score_margin,omitempty"`
+	Loss                 float64 `json:"loss,omitempty"`
+	PairCount            int     `json:"pair_count,omitempty"`
+	Documents            int     `json:"documents,omitempty"`
+	Queries              int     `json:"queries,omitempty"`
+	ElapsedSeconds       float64 `json:"elapsed_seconds,omitempty"`
+	EvalPairsPerSecond   float64 `json:"eval_pairs_per_second,omitempty"`
+	DocumentsPerSecond   float64 `json:"documents_per_second,omitempty"`
+	QueriesPerSecond     float64 `json:"queries_per_second,omitempty"`
+	ScoresPerSecond      float64 `json:"scores_per_second,omitempty"`
+	OptimizerUpdates     int64   `json:"optimizer_updates,omitempty"`
+	ForwardBackend       string  `json:"forward_backend,omitempty"`
+}
+
+type scoreboardManifest struct {
+	Schema           string          `json:"schema"`
+	RunID            string          `json:"run_id"`
+	RunDir           string          `json:"run_dir"`
+	Artifact         string          `json:"artifact"`
+	PairwiseArtifact string          `json:"pairwise_artifact,omitempty"`
+	GeneratedAt      string          `json:"generated_at"`
+	Rows             []scoreboardRow `json:"rows"`
+}
+
+func usage() {
+	fmt.Println(`Build a baseline scoreboard for the Manta long-context embedder wedge.
+
+Required:
+  MANTA_SCOREBOARD_ARTIFACT=/path/to/manta-embed-v1.sealed.mll
+
+Run:
+  MANTA_REPO_ROOT=$PWD ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
+
+Optional pairwise eval:
+  MANTA_SCOREBOARD_PAIRWISE_JSONL=/path/to/eval.jsonl
+  MANTA_SCOREBOARD_HARD_JSONL=/path/to/hard-eval.jsonl
+  MANTA_SCOREBOARD_PAIRWISE_ARTIFACT=/path/to/manta-embed-v1.mll
+  MANTA_SCOREBOARD_TOKENIZER=/path/to/tokenizer.mll
+  MANTA_SCOREBOARD_NO_TOKENIZER=1
+
+Optional retrieval eval:
+  MANTA_SCOREBOARD_RETRIEVAL_ROOT=/data/manta/datasets/manta-embed-v1
+  MANTA_SCOREBOARD_RETRIEVAL_DATASETS=scifact,nfcorpus,fiqa
+  MANTA_SCOREBOARD_LONG_ROOT=/data/manta/datasets/longembed
+  MANTA_SCOREBOARD_LONG_DATASETS=passkey,needle
+  MANTA_SCOREBOARD_BM25_BASELINE=1
+  MANTA_SCOREBOARD_SPLIT=test
+  MANTA_SCOREBOARD_BATCH_SIZE=512
+  MANTA_SCOREBOARD_TOP_K=100
+  MANTA_SCOREBOARD_MAX_DOCS=0
+  MANTA_SCOREBOARD_MAX_QUERIES=0`)
+}
+
+func getenv(name string, fallback string) string {
+	value := os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func step(label string) {
+	fmt.Println(f"\n== {label} ==")
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
+func findRoot() (string, error) {
+	explicit := os.Getenv("MANTA_REPO_ROOT")
+	if hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	pwd := os.Getenv("PWD")
+	if hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	guard err == nil else return "", err
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func renderCommand(name string, args []string) string {
+	parts := []string{shellQuote(name)}
+	for arg in args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func runCmd(cfg scoreboardConfig, label string, logName string, name string, args []string) error {
+	step(label)
+	logPath := filepath.Join(cfg.LogDir, logName)
+	rendered := renderCommand(name, args)
+	fmt.Println(f"+ {rendered}")
+	err := os.WriteFile(logPath+".cmd", []byte(rendered+"\n"), 0o644)
+	guard err == nil else return err
+	logFile, err := os.Create(logPath)
+	guard err == nil else return err
+	defer logFile.Close()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = cfg.Root
+	cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
+	cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
+	err = cmd.Run()
+	guard err == nil else return fmt.Errorf("%s failed; see %s: %w", label, logPath, err)
+	return nil
+}
+
+func splitList(value string) []string {
+	out := []string{}
+	for _, raw := range strings.Split(value, ",") {
+		item := strings.TrimSpace(raw)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func absIfSet(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	return filepath.Abs(value)
+}
+
+func requireExistingFile(label string, path string) error {
+	if path == "" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	guard err == nil else return fmt.Errorf("%s does not exist: %s", label, path)
+	guard !info.IsDir() else return fmt.Errorf("%s must be a file: %s", label, path)
+	return nil
+}
+
+func trainPackageSidecar(path string) string {
+	if strings.HasSuffix(path, ".mll") {
+		return strings.TrimSuffix(path, ".mll") + ".train.mll"
+	}
+	return path + ".train.mll"
+}
+
+func inferPairwiseArtifact(artifact string) string {
+	if !strings.HasSuffix(artifact, ".sealed.mll") {
+		return artifact
+	}
+	candidate := strings.TrimSuffix(artifact, ".sealed.mll") + ".mll"
+	if _, err := os.Stat(trainPackageSidecar(candidate)); err == nil {
+		return candidate
+	}
+	return artifact
+}
+
+func prepareConfig(root string) (scoreboardConfig, error) {
+	artifact, err := absIfSet(os.Getenv("MANTA_SCOREBOARD_ARTIFACT"))
+	guard err == nil else return scoreboardConfig{}, err
+	guard artifact != "" else return scoreboardConfig{}, fmt.Errorf("MANTA_SCOREBOARD_ARTIFACT is required")
+	err = requireExistingFile("MANTA_SCOREBOARD_ARTIFACT", artifact)
+	guard err == nil else return scoreboardConfig{}, err
+
+	pairwiseArtifact, err := absIfSet(os.Getenv("MANTA_SCOREBOARD_PAIRWISE_ARTIFACT"))
+	guard err == nil else return scoreboardConfig{}, err
+	if pairwiseArtifact == "" {
+		pairwiseArtifact = inferPairwiseArtifact(artifact)
+	}
+	err = requireExistingFile("MANTA_SCOREBOARD_PAIRWISE_ARTIFACT", pairwiseArtifact)
+	guard err == nil else return scoreboardConfig{}, err
+
+	tokenizer, err := absIfSet(os.Getenv("MANTA_SCOREBOARD_TOKENIZER"))
+	guard err == nil else return scoreboardConfig{}, err
+	err = requireExistingFile("MANTA_SCOREBOARD_TOKENIZER", tokenizer)
+	guard err == nil else return scoreboardConfig{}, err
+
+	pairwise, err := absIfSet(os.Getenv("MANTA_SCOREBOARD_PAIRWISE_JSONL"))
+	guard err == nil else return scoreboardConfig{}, err
+	err = requireExistingFile("MANTA_SCOREBOARD_PAIRWISE_JSONL", pairwise)
+	guard err == nil else return scoreboardConfig{}, err
+
+	hard, err := absIfSet(os.Getenv("MANTA_SCOREBOARD_HARD_JSONL"))
+	guard err == nil else return scoreboardConfig{}, err
+	err = requireExistingFile("MANTA_SCOREBOARD_HARD_JSONL", hard)
+	guard err == nil else return scoreboardConfig{}, err
+
+	runID := getenv("MANTA_SCOREBOARD_RUN_ID", "manta-embed-v1-scoreboard-"+time.Now().UTC().Format("20060102T150405Z"))
+	runRoot, err := filepath.Abs(getenv("MANTA_SCOREBOARD_RUN_ROOT", filepath.Join(root, "runs")))
+	guard err == nil else return scoreboardConfig{}, err
+	runDir := filepath.Join(runRoot, runID)
+	if entries, err := os.ReadDir(runDir); err == nil && len(entries) > 0 {
+		return scoreboardConfig{}, fmt.Errorf("run directory already exists and is not empty: %s", runDir)
+	}
+	err = os.MkdirAll(filepath.Join(runDir, "bin"), 0o755)
+	guard err == nil else return scoreboardConfig{}, err
+	err = os.MkdirAll(filepath.Join(runDir, "logs"), 0o755)
+	guard err == nil else return scoreboardConfig{}, err
+
+	retrievalDatasets := splitList(os.Getenv("MANTA_SCOREBOARD_RETRIEVAL_DATASETS"))
+	longDatasets := splitList(os.Getenv("MANTA_SCOREBOARD_LONG_DATASETS"))
+	guard pairwise != "" || hard != "" || len(retrievalDatasets) > 0 || len(longDatasets) > 0 else {
+		return scoreboardConfig{}, fmt.Errorf("provide at least one eval source: pairwise JSONL, hard JSONL, retrieval datasets, or long datasets")
+	}
+
+	retrievalRoot, err := filepath.Abs(getenv("MANTA_SCOREBOARD_RETRIEVAL_ROOT", filepath.Join(root, "datasets", "manta-embed-v1")))
+	guard err == nil else return scoreboardConfig{}, err
+	longRoot, err := filepath.Abs(getenv("MANTA_SCOREBOARD_LONG_ROOT", filepath.Join(root, "datasets", "longembed")))
+	guard err == nil else return scoreboardConfig{}, err
+
+	return scoreboardConfig{
+		Root:              root,
+		RunID:             runID,
+		RunRoot:           runRoot,
+		RunDir:            runDir,
+		LogDir:            filepath.Join(runDir, "logs"),
+		MantaBin:          filepath.Join(runDir, "bin", "manta"),
+		Artifact:          artifact,
+		PairwiseArtifact:  pairwiseArtifact,
+		Tokenizer:         tokenizer,
+		NoTokenizer:       getenv("MANTA_SCOREBOARD_NO_TOKENIZER", "0"),
+		PairwiseEvalJSONL: pairwise,
+		HardEvalJSONL:     hard,
+		RetrievalRoot:     retrievalRoot,
+		RetrievalDatasets: retrievalDatasets,
+		LongRoot:          longRoot,
+		LongDatasets:      longDatasets,
+		Split:             getenv("MANTA_SCOREBOARD_SPLIT", "test"),
+		BatchSize:         getenv("MANTA_SCOREBOARD_BATCH_SIZE", "512"),
+		TopK:              getenv("MANTA_SCOREBOARD_TOP_K", "100"),
+		MaxDocs:           getenv("MANTA_SCOREBOARD_MAX_DOCS", "0"),
+		MaxQueries:        getenv("MANTA_SCOREBOARD_MAX_QUERIES", "0"),
+		BM25Baseline:      getenv("MANTA_SCOREBOARD_BM25_BASELINE", "1"),
+		ScoreboardTSV:     filepath.Join(runDir, "scoreboard.tsv"),
+		ScoreboardJSON:    filepath.Join(runDir, "scoreboard.json"),
+	}, nil
+}
+
+func metricsFileName(category string, dataset string, baseline string) string {
+	name := strings.ReplaceAll(category+"."+dataset+"."+baseline, "/", "_")
+	name = strings.ReplaceAll(name, " ", "_")
+	name = strings.ReplaceAll(name, ",", "_")
+	return name + ".metrics.json"
+}
+
+func readTrainMetrics(path string) (trainMetrics, error) {
+	data, err := os.ReadFile(path)
+	guard err == nil else return trainMetrics{}, err
+	var metrics trainMetrics
+	err = json.Unmarshal(data, &metrics)
+	guard err == nil else return trainMetrics{}, err
+	return metrics, nil
+}
+
+func readRetrievalMetrics(path string) (retrievalMetrics, error) {
+	data, err := os.ReadFile(path)
+	guard err == nil else return retrievalMetrics{}, err
+	var metrics retrievalMetrics
+	err = json.Unmarshal(data, &metrics)
+	guard err == nil else return retrievalMetrics{}, err
+	return metrics, nil
+}
+
+func rowFromTrainMetrics(category string, dataset string, baseline string, metricsPath string, metrics trainMetrics) scoreboardRow {
+	row := scoreboardRow{
+		Category:           category,
+		Dataset:            dataset,
+		Baseline:           baseline,
+		Status:             "pass",
+		MetricsPath:        metricsPath,
+		ElapsedSeconds:     metrics.Throughput.ElapsedSeconds,
+		EvalPairsPerSecond: metrics.Throughput.EvalPairsPerSecond,
+		OptimizerUpdates:   metrics.ProfileDelta.OptimizerUpdates,
+		ForwardBackend:     metrics.Accelerators.Forward,
+	}
+	if metrics.FinalEval != nil {
+		row.Top1Accuracy = metrics.FinalEval.Top1Accuracy
+		row.MeanReciprocalRank = metrics.FinalEval.MeanReciprocalRank
+		row.ROCAUC = metrics.FinalEval.ROCAUC
+		row.ScoreMargin = metrics.FinalEval.ScoreMargin
+		row.Loss = metrics.FinalEval.Loss
+		row.PairCount = metrics.FinalEval.PairCount
+	}
+	return row
+}
+
+func rowFromRetrievalMetrics(category string, baseline string, metricsPath string, metrics retrievalMetrics) scoreboardRow {
+	return scoreboardRow{
+		Category:           category,
+		Dataset:            metrics.Dataset,
+		Baseline:           baseline,
+		Status:             "pass",
+		MetricsPath:        metricsPath,
+		NDCGAt10:           metrics.Quality.NDCGAt10,
+		MRRAt10:            metrics.Quality.MRRAt10,
+		RecallAt10:         metrics.Quality.RecallAt10,
+		RecallAt100:        metrics.Quality.RecallAt100,
+		Documents:          metrics.Inputs.Documents,
+		Queries:            metrics.Inputs.Queries,
+		ElapsedSeconds:     metrics.Throughput.ElapsedSeconds,
+		DocumentsPerSecond: metrics.Throughput.DocumentsPerSecond,
+		QueriesPerSecond:   metrics.Throughput.QueriesPerSecond,
+		ScoresPerSecond:    metrics.Throughput.ScoresPerSecond,
+		ForwardBackend:     metrics.Backend,
+	}
+}
+
+func tsvHeader() string {
+	return "category\tdataset\tbaseline\tstatus\tmetrics_path\tndcg_at_10\tmrr_at_10\trecall_at_10\trecall_at_100\ttop1_accuracy\tmean_reciprocal_rank\troc_auc\tscore_margin\tloss\tpair_count\tdocuments\tqueries\telapsed_seconds\teval_pairs_per_second\tdocuments_per_second\tqueries_per_second\tscores_per_second\toptimizer_updates\tforward_backend\n"
+}
+
+func formatRow(row scoreboardRow) string {
+	return fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%.3f\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%s\n",
+		row.Category,
+		row.Dataset,
+		row.Baseline,
+		row.Status,
+		row.MetricsPath,
+		row.NDCGAt10,
+		row.MRRAt10,
+		row.RecallAt10,
+		row.RecallAt100,
+		row.Top1Accuracy,
+		row.MeanReciprocalRank,
+		row.ROCAUC,
+		row.ScoreMargin,
+		row.Loss,
+		row.PairCount,
+		row.Documents,
+		row.Queries,
+		row.ElapsedSeconds,
+		row.EvalPairsPerSecond,
+		row.DocumentsPerSecond,
+		row.QueriesPerSecond,
+		row.ScoresPerSecond,
+		row.OptimizerUpdates,
+		row.ForwardBackend)
+}
+
+func appendScoreboardRow(path string, row scoreboardRow) error {
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	guard err == nil else return err
+	defer file.Close()
+	_, err = file.WriteString(formatRow(row))
+	return err
+}
+
+func runPairwiseEval(cfg scoreboardConfig, dataset string, inputPath string, rows []scoreboardRow) ([]scoreboardRow, error) {
+	if inputPath == "" {
+		return rows, nil
+	}
+	metricsPath := filepath.Join(cfg.RunDir, metricsFileName("pairwise", dataset, "manta"))
+	args := []string{"train-embed", "--eval-only", "--metrics-json", metricsPath}
+	if cfg.Tokenizer != "" {
+		args = append(args, "--tokenizer", cfg.Tokenizer)
+	}
+	if cfg.NoTokenizer != "0" {
+		args = append(args, "--no-tokenizer")
+	}
+	args = append(args, cfg.PairwiseArtifact, inputPath)
+	err := runCmd(cfg, "Evaluate pairwise "+dataset, "pairwise-"+dataset+".log", cfg.MantaBin, args)
+	guard err == nil else return rows, err
+	metrics, err := readTrainMetrics(metricsPath)
+	guard err == nil else return rows, err
+	row := rowFromTrainMetrics("pairwise", dataset, "manta", metricsPath, metrics)
+	err = appendScoreboardRow(cfg.ScoreboardTSV, row)
+	guard err == nil else return rows, err
+	return append(rows, row), nil
+}
+
+func retrievalDatasetDir(root string, dataset string) string {
+	candidate := filepath.Join(root, "raw", dataset, dataset)
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate
+	}
+	return filepath.Join(root, dataset)
+}
+
+func retrievalArgs(cfg scoreboardConfig, command string, dataset string, metricsPath string, dir string) []string {
+	args := []string{
+		command,
+		"--dataset", dataset,
+		"--split", cfg.Split,
+		"--top-k", cfg.TopK,
+		"--metrics-json", metricsPath,
+	}
+	if command == "eval-retrieval" {
+		args = append(args, "--batch-size", cfg.BatchSize)
+	}
+	if cfg.MaxDocs != "" && cfg.MaxDocs != "0" {
+		args = append(args, "--max-docs", cfg.MaxDocs)
+	}
+	if cfg.MaxQueries != "" && cfg.MaxQueries != "0" {
+		args = append(args, "--max-queries", cfg.MaxQueries)
+	}
+	if command == "eval-retrieval" {
+		args = append(args, cfg.Artifact)
+	}
+	return append(args, dir)
+}
+
+func runRetrievalGroup(cfg scoreboardConfig, category string, root string, datasets []string, rows []scoreboardRow) ([]scoreboardRow, error) {
+	for dataset in datasets {
+		dir := retrievalDatasetDir(root, dataset)
+		info, err := os.Stat(dir)
+		guard err == nil && info.IsDir() else return rows, fmt.Errorf("%s dataset directory missing for %s: %s", category, dataset, dir)
+		if cfg.BM25Baseline != "0" {
+			bm25MetricsPath := filepath.Join(cfg.RunDir, metricsFileName(category, dataset, "bm25"))
+			bm25Args := retrievalArgs(cfg, "eval-retrieval-bm25", dataset, bm25MetricsPath, dir)
+			err = runCmd(cfg, "Evaluate "+category+" BM25 "+dataset, category+"-"+dataset+"-bm25.log", cfg.MantaBin, bm25Args)
+			guard err == nil else return rows, err
+			bm25Metrics, err := readRetrievalMetrics(bm25MetricsPath)
+			guard err == nil else return rows, err
+			row := rowFromRetrievalMetrics(category, "bm25", bm25MetricsPath, bm25Metrics)
+			err = appendScoreboardRow(cfg.ScoreboardTSV, row)
+			guard err == nil else return rows, err
+			rows = append(rows, row)
+		}
+		metricsPath := filepath.Join(cfg.RunDir, metricsFileName(category, dataset, "manta"))
+		args := retrievalArgs(cfg, "eval-retrieval", dataset, metricsPath, dir)
+		err = runCmd(cfg, "Evaluate "+category+" "+dataset, category+"-"+dataset+".log", cfg.MantaBin, args)
+		guard err == nil else return rows, err
+		metrics, err := readRetrievalMetrics(metricsPath)
+		guard err == nil else return rows, err
+		row := rowFromRetrievalMetrics(category, "manta", metricsPath, metrics)
+		err = appendScoreboardRow(cfg.ScoreboardTSV, row)
+		guard err == nil else return rows, err
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
+func writeManifest(cfg scoreboardConfig, rows []scoreboardRow) error {
+	manifest := scoreboardManifest{
+		Schema:      "manta.embedder_scoreboard.v1",
+		RunID:       cfg.RunID,
+		RunDir:      cfg.RunDir,
+		Artifact:    cfg.Artifact,
+		PairwiseArtifact: cfg.PairwiseArtifact,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Rows:        rows,
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	guard err == nil else return err
+	data = append(data, '\n')
+	return os.WriteFile(cfg.ScoreboardJSON, data, 0o644)
+}
+
+func runScoreboard(cfg scoreboardConfig) error {
+	err := runCmd(cfg, "Build manta CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.MantaBin, "./cmd/manta"})
+	guard err == nil else return err
+	err = os.WriteFile(cfg.ScoreboardTSV, []byte(tsvHeader()), 0o644)
+	guard err == nil else return err
+	rows := []scoreboardRow{}
+	rows, err = runPairwiseEval(cfg, "eval", cfg.PairwiseEvalJSONL, rows)
+	guard err == nil else return err
+	rows, err = runPairwiseEval(cfg, "hard", cfg.HardEvalJSONL, rows)
+	guard err == nil else return err
+	rows, err = runRetrievalGroup(cfg, "short_retrieval", cfg.RetrievalRoot, cfg.RetrievalDatasets, rows)
+	guard err == nil else return err
+	rows, err = runRetrievalGroup(cfg, "long_retrieval", cfg.LongRoot, cfg.LongDatasets, rows)
+	guard err == nil else return err
+	err = writeManifest(cfg, rows)
+	guard err == nil else return err
+	step("Embedder scoreboard")
+	data, err := os.ReadFile(cfg.ScoreboardTSV)
+	guard err == nil else return err
+	fmt.Print(string(data))
+	fmt.Println(f"run_dir={cfg.RunDir}")
+	fmt.Println(f"scoreboard_tsv={cfg.ScoreboardTSV}")
+	fmt.Println(f"scoreboard_json={cfg.ScoreboardJSON}")
+	return nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	cfg, err := prepareConfig(root)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	if err := runScoreboard(cfg); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+}

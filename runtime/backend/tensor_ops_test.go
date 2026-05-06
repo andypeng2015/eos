@@ -758,6 +758,102 @@ func TestGatherTensorRank3Q4WithRank2Indices(t *testing.T) {
 	})
 }
 
+func TestSparseAttentionReferenceSelectsTopKValues(t *testing.T) {
+	query := NewTensorF16([]int{2, 2}, []float32{
+		1, 0,
+		0, 1,
+	})
+	key := NewTensorF16([]int{3, 2}, []float32{
+		1, 0,
+		0, 1,
+		-1, 0,
+	})
+	value := NewTensorF16([]int{3, 2}, []float32{
+		10, 0,
+		0, 20,
+		-10, 0,
+	})
+	out, err := SparseAttentionReference(query, key, value, map[string]string{"top_k": "1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTensorClose(t, out, []int{2, 2}, []float32{
+		10, 0,
+		0, 20,
+	})
+}
+
+func TestSparseAttentionReferenceRoutesThroughSelectedBlocks(t *testing.T) {
+	query := NewTensorF16([]int{1, 2}, []float32{1, 0})
+	key := NewTensorF16([]int{6, 2}, []float32{
+		0, 10,
+		0, 0,
+		3, 0,
+		2, 0,
+		10, 0,
+		0, 0,
+	})
+	value := NewTensorF16([]int{6, 1}, []float32{10, 20, 30, 40, 50, 60})
+	out, err := SparseAttentionReference(query, key, value, map[string]string{
+		"top_k":            "1",
+		"route_block_size": "2",
+		"route_top_blocks": "1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTensorClose(t, out, []int{1, 1}, []float32{30})
+}
+
+func TestTurboSparseAttentionReferenceMatchesDecodedSparseAttention(t *testing.T) {
+	query := NewTensorF16([]int{2, 2}, []float32{
+		1, 0,
+		0, 1,
+	})
+	keyNCHW := NewTensorF16([]int{1, 2, 3, 1}, []float32{
+		1, 0, -1,
+		0, 1, 0,
+	})
+	valueNCHW := NewTensorF16([]int{1, 2, 3, 1}, []float32{
+		10, 0, -10,
+		0, 20, 0,
+	})
+	attrs := map[string]string{"bits": "4", "top_k": "1"}
+	keyCoords, keyNorms, err := TurboQuantEncodeReference(keyNCHW, attrs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valueCoords, valueNorms, err := TurboQuantEncodeReference(valueNCHW, attrs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := TurboSparseAttentionReference(query, keyCoords, keyNorms, valueCoords, valueNorms, attrs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedKey, err := TurboQuantDecodeReference(keyCoords, keyNorms, attrs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedValue, err := TurboQuantDecodeReference(valueCoords, valueNorms, attrs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keySeq, err := nchwToAttentionSequence(decodedKey, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valueSeq, err := nchwToAttentionSequence(decodedValue, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := SparseAttentionReference(query, keySeq, valueSeq, attrs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTensorClose(t, out, want.Shape, want.F32)
+}
+
 func assertTensorClose(t *testing.T, tensor *Tensor, wantShape []int, want []float32) {
 	t.Helper()
 	if tensor == nil {

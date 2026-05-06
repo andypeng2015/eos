@@ -10,6 +10,7 @@ import (
 
 // EmbeddingContrastiveExample is one query-positive training example.
 type EmbeddingContrastiveExample struct {
+	Source         string
 	QueryTokens    []int32
 	PositiveTokens []int32
 	QueryMask      []int32
@@ -17,6 +18,7 @@ type EmbeddingContrastiveExample struct {
 }
 
 type embeddingContrastiveRecord struct {
+	Source         string  `json:"source,omitempty"`
 	QueryTokens    []int32 `json:"query_tokens"`
 	PositiveTokens []int32 `json:"positive_tokens"`
 	QueryMask      []int32 `json:"query_mask,omitempty"`
@@ -97,6 +99,7 @@ func newEmbeddingContrastiveRecord(example EmbeddingContrastiveExample) (embeddi
 		return embeddingContrastiveRecord{}, fmt.Errorf("positive_mask length %d does not match positive_tokens length %d", len(example.PositiveMask), len(example.PositiveTokens))
 	}
 	return embeddingContrastiveRecord{
+		Source:         example.Source,
 		QueryTokens:    append([]int32(nil), example.QueryTokens...),
 		PositiveTokens: append([]int32(nil), example.PositiveTokens...),
 		QueryMask:      append([]int32(nil), example.QueryMask...),
@@ -106,6 +109,7 @@ func newEmbeddingContrastiveRecord(example EmbeddingContrastiveExample) (embeddi
 
 func (r embeddingContrastiveRecord) example() (EmbeddingContrastiveExample, error) {
 	_, err := newEmbeddingContrastiveRecord(EmbeddingContrastiveExample{
+		Source:         r.Source,
 		QueryTokens:    r.QueryTokens,
 		PositiveTokens: r.PositiveTokens,
 		QueryMask:      r.QueryMask,
@@ -115,6 +119,7 @@ func (r embeddingContrastiveRecord) example() (EmbeddingContrastiveExample, erro
 		return EmbeddingContrastiveExample{}, err
 	}
 	return EmbeddingContrastiveExample{
+		Source:         r.Source,
 		QueryTokens:    append([]int32(nil), r.QueryTokens...),
 		PositiveTokens: append([]int32(nil), r.PositiveTokens...),
 		QueryMask:      append([]int32(nil), r.QueryMask...),

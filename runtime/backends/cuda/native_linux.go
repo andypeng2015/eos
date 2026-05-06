@@ -466,6 +466,16 @@ static int mantaCudaLaunchTurboQDecode(MantaCudaRuntime* rt, MantaCudaKernel* ke
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
+static int mantaCudaLaunchSparseAttention(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr key, CUdeviceptr value, CUdeviceptr out0, int rank, int kvLayout, int batches, int queryLen, int keyLen, int queryDim, int valueDim, int topK, char** err) {
+	void* args[] = {&query, &key, &value, &out0, &rank, &kvLayout, &batches, &queryLen, &keyLen, &queryDim, &valueDim, &topK};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
+static int mantaCudaLaunchTurboSparseAttention(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr keyCoords, CUdeviceptr keyNorms, CUdeviceptr valueCoords, CUdeviceptr valueNorms, CUdeviceptr out0, CUdeviceptr keyScratchWork, CUdeviceptr keyScratchDecoded, CUdeviceptr valueScratchWork, CUdeviceptr valueScratchDecoded, CUdeviceptr keyPerm, CUdeviceptr keySigns1, CUdeviceptr keySigns2, CUdeviceptr keyCentroids, CUdeviceptr valuePerm, CUdeviceptr valueSigns1, CUdeviceptr valueSigns2, CUdeviceptr valueCentroids, int rank, int batches, int queryLen, int keyLen, int queryDim, int valueDim, int topK, int keyLevels, int valueLevels, int routeBlockSize, int routeTopBlocks, char** err) {
+	void* args[] = {&query, &keyCoords, &keyNorms, &valueCoords, &valueNorms, &out0, &keyScratchWork, &keyScratchDecoded, &valueScratchWork, &valueScratchDecoded, &keyPerm, &keySigns1, &keySigns2, &keyCentroids, &valuePerm, &valueSigns1, &valueSigns2, &valueCentroids, &rank, &batches, &queryLen, &keyLen, &queryDim, &valueDim, &topK, &keyLevels, &valueLevels, &routeBlockSize, &routeTopBlocks};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
 static int mantaCudaLaunchMSEPartials(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr partials, int elements, char** err) {
 	void* args[] = {&lhs, &rhs, &partials, &elements};
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
@@ -1017,6 +1027,342 @@ extern "C" __global__ void manta_turboq_decode(
 }
 `
 
+const sparseAttentionKernelSource = `
+#define MANTA_SPARSE_ATTENTION_MAX_TOPK 128
+
+static __device__ float manta_sparse_attention_score(
+    const float* query,
+    const float* key,
+    int rank,
+    int kvLayout,
+    int queryRow,
+    int batch,
+    int keyIndex,
+    int queryLen,
+    int keyLen,
+    int queryDim
+) {
+    float sum = 0.0f;
+    int queryBase = rank == 3 ? ((batch * queryLen + queryRow) * queryDim) : (queryRow * queryDim);
+    for (int d = 0; d < queryDim; ++d) {
+        int keyIndexFlat = 0;
+        if (kvLayout == 1) {
+            keyIndexFlat = ((batch * queryDim + d) * keyLen) + keyIndex;
+        } else {
+            keyIndexFlat = rank == 3 ? ((batch * keyLen + keyIndex) * queryDim + d) : (keyIndex * queryDim + d);
+        }
+        sum += query[queryBase + d] * key[keyIndexFlat];
+    }
+    return sum;
+}
+
+static __device__ bool manta_sparse_attention_selected(const int* selected, int selectedCount, int candidate) {
+    for (int i = 0; i < selectedCount; ++i) {
+        if (selected[i] == candidate) {
+            return true;
+        }
+    }
+    return false;
+}
+
+extern "C" __global__ void manta_sparse_attention_forward(
+    const float* query,
+    const float* key,
+    const float* value,
+    float* out,
+    int rank,
+    int kvLayout,
+    int batches,
+    int queryLen,
+    int keyLen,
+    int queryDim,
+    int valueDim,
+    int topK
+) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    int totalRows = batches * queryLen;
+    if (row >= totalRows) {
+        return;
+    }
+    if (topK > MANTA_SPARSE_ATTENTION_MAX_TOPK) {
+        return;
+    }
+    int batch = rank == 3 ? row / queryLen : 0;
+    int queryRow = rank == 3 ? row - batch * queryLen : row;
+    int selected[MANTA_SPARSE_ATTENTION_MAX_TOPK];
+    float selectedScores[MANTA_SPARSE_ATTENTION_MAX_TOPK];
+    int selectedCount = 0;
+    for (int pick = 0; pick < topK; ++pick) {
+        int bestIndex = -1;
+        float bestScore = -3.4028234663852886e38f;
+        for (int k = 0; k < keyLen; ++k) {
+            if (manta_sparse_attention_selected(selected, selectedCount, k)) {
+                continue;
+            }
+            float score = manta_sparse_attention_score(query, key, rank, kvLayout, queryRow, batch, k, queryLen, keyLen, queryDim);
+            if (score > bestScore || (score == bestScore && (bestIndex < 0 || k < bestIndex))) {
+                bestScore = score;
+                bestIndex = k;
+            }
+        }
+        if (bestIndex < 0) {
+            break;
+        }
+        selected[selectedCount] = bestIndex;
+        selectedScores[selectedCount] = bestScore;
+        ++selectedCount;
+    }
+    if (selectedCount == 0) {
+        return;
+    }
+    float maxScore = selectedScores[0];
+    for (int i = 1; i < selectedCount; ++i) {
+        if (selectedScores[i] > maxScore) {
+            maxScore = selectedScores[i];
+        }
+    }
+    float denom = 0.0f;
+    for (int i = 0; i < selectedCount; ++i) {
+        denom += expf(selectedScores[i] - maxScore);
+    }
+    if (denom == 0.0f || isnan(denom)) {
+        return;
+    }
+    int outBase = rank == 3 ? ((batch * queryLen + queryRow) * valueDim) : (queryRow * valueDim);
+    for (int vd = 0; vd < valueDim; ++vd) {
+        float sum = 0.0f;
+        for (int i = 0; i < selectedCount; ++i) {
+            float weight = expf(selectedScores[i] - maxScore) / denom;
+            int valueIndex = 0;
+            if (kvLayout == 1) {
+                valueIndex = ((batch * valueDim + vd) * keyLen) + selected[i];
+            } else {
+                valueIndex = rank == 3 ? ((batch * keyLen + selected[i]) * valueDim + vd) : (selected[i] * valueDim + vd);
+            }
+            sum += weight * value[valueIndex];
+        }
+        out[outBase + vd] = sum;
+    }
+}
+`
+
+const turboSparseAttentionKernelSource = turboQKernelSource + `
+#define MANTA_TURBO_SPARSE_ATTENTION_MAX_TOPK 128
+#define MANTA_TURBO_SPARSE_ATTENTION_MAX_ROUTE_BLOCKS 128
+
+static __device__ bool manta_turbo_sparse_attention_better(float lhsScore, int lhsIndex, float rhsScore, int rhsIndex) {
+    if (lhsScore > rhsScore) {
+        return true;
+    }
+    if (lhsScore < rhsScore) {
+        return false;
+    }
+    return lhsIndex < rhsIndex;
+}
+
+static __device__ void manta_turbo_sparse_attention_insert(
+    int* selected,
+    float* selectedScores,
+    int* selectedCount,
+    int topK,
+    int keyIndex,
+    float score
+) {
+    int pos = *selectedCount;
+    if (*selectedCount < topK) {
+        *selectedCount = *selectedCount + 1;
+    } else {
+        pos = topK - 1;
+        if (!manta_turbo_sparse_attention_better(score, keyIndex, selectedScores[pos], selected[pos])) {
+            return;
+        }
+    }
+    while (pos > 0 && manta_turbo_sparse_attention_better(score, keyIndex, selectedScores[pos - 1], selected[pos - 1])) {
+        selected[pos] = selected[pos - 1];
+        selectedScores[pos] = selectedScores[pos - 1];
+        --pos;
+    }
+    selected[pos] = keyIndex;
+    selectedScores[pos] = score;
+}
+
+static __device__ void manta_turbo_sparse_decode_vector(
+    const float* coords,
+    const float* norms,
+    float* work,
+    float* decoded,
+    const float* perm,
+    const float* signs1,
+    const float* signs2,
+    const float* centroids,
+    int batch,
+    int vectorIndex,
+    int channels,
+    int vectors,
+    int levels
+) {
+    int normOffset = batch * vectors + vectorIndex;
+    for (int c = 0; c < channels; ++c) {
+        int idx = (int)roundf(coords[manta_tq_nchw_offset(batch, c, vectorIndex, 0, channels, vectors, 1)]);
+        if (idx < 0) {
+            idx = 0;
+        }
+        if (idx >= levels) {
+            idx = levels - 1;
+        }
+        decoded[c] = centroids[idx];
+    }
+    for (int i = 0; i < channels; ++i) {
+        int p = (int)(perm[i] + 0.5f);
+        work[i] = decoded[p] * signs2[i];
+    }
+    manta_tq_apply_blocks(work, channels);
+    int normCode = (int)roundf(norms[normOffset]);
+    float norm = manta_tq_dequantize_norm(normCode);
+    for (int i = 0; i < channels; ++i) {
+        int p = (int)(perm[i] + 0.5f);
+        decoded[p] = work[i] * signs1[i] * norm;
+    }
+}
+
+extern "C" __global__ void manta_turbo_sparse_attention_forward(
+    const float* query,
+    const float* keyCoords,
+    const float* keyNorms,
+    const float* valueCoords,
+    const float* valueNorms,
+    float* out,
+    float* keyScratchWork,
+    float* keyScratchDecoded,
+    float* valueScratchWork,
+    float* valueScratchDecoded,
+    const float* keyPerm,
+    const float* keySigns1,
+    const float* keySigns2,
+    const float* keyCentroids,
+    const float* valuePerm,
+    const float* valueSigns1,
+    const float* valueSigns2,
+    const float* valueCentroids,
+    int rank,
+    int batches,
+    int queryLen,
+    int keyLen,
+    int queryDim,
+    int valueDim,
+    int topK,
+    int keyLevels,
+    int valueLevels,
+    int routeBlockSize,
+    int routeTopBlocks
+) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    int totalRows = batches * queryLen;
+    if (row >= totalRows) {
+        return;
+    }
+    if (topK <= 0 || topK > MANTA_TURBO_SPARSE_ATTENTION_MAX_TOPK) {
+        return;
+    }
+    int batch = rank == 3 ? row / queryLen : 0;
+    int queryRow = rank == 3 ? row - batch * queryLen : row;
+    int queryBase = rank == 3 ? ((batch * queryLen + queryRow) * queryDim) : (queryRow * queryDim);
+    int routed = routeBlockSize > 0 && routeTopBlocks > 0;
+    int blockCount = 0;
+    if (routed) {
+        if (routeBlockSize > keyLen) {
+            routeBlockSize = keyLen;
+        }
+        blockCount = (keyLen + routeBlockSize - 1) / routeBlockSize;
+        if (routeTopBlocks > blockCount) {
+            routeTopBlocks = blockCount;
+        }
+        if (routeTopBlocks <= 0 || routeTopBlocks > MANTA_TURBO_SPARSE_ATTENTION_MAX_ROUTE_BLOCKS) {
+            return;
+        }
+    }
+    float* keyWork = keyScratchWork + row * queryDim;
+    float* decodedKey = keyScratchDecoded + row * queryDim;
+
+    int selected[MANTA_TURBO_SPARSE_ATTENTION_MAX_TOPK];
+    float selectedScores[MANTA_TURBO_SPARSE_ATTENTION_MAX_TOPK];
+    int selectedCount = 0;
+    if (routed) {
+        int selectedBlocks[MANTA_TURBO_SPARSE_ATTENTION_MAX_ROUTE_BLOCKS];
+        float selectedBlockScores[MANTA_TURBO_SPARSE_ATTENTION_MAX_ROUTE_BLOCKS];
+        int selectedBlockCount = 0;
+        for (int block = 0; block < blockCount; ++block) {
+            int start = block * routeBlockSize;
+            int end = start + routeBlockSize;
+            if (end > keyLen) {
+                end = keyLen;
+            }
+            int anchor = start + ((end - start) >> 1);
+            manta_turbo_sparse_decode_vector(keyCoords, keyNorms, keyWork, decodedKey, keyPerm, keySigns1, keySigns2, keyCentroids, batch, anchor, queryDim, keyLen, keyLevels);
+            float score = 0.0f;
+            for (int d = 0; d < queryDim; ++d) {
+                score += query[queryBase + d] * decodedKey[d];
+            }
+            manta_turbo_sparse_attention_insert(selectedBlocks, selectedBlockScores, &selectedBlockCount, routeTopBlocks, block, score);
+        }
+        for (int bi = 0; bi < selectedBlockCount; ++bi) {
+            int start = selectedBlocks[bi] * routeBlockSize;
+            int end = start + routeBlockSize;
+            if (end > keyLen) {
+                end = keyLen;
+            }
+            for (int k = start; k < end; ++k) {
+                manta_turbo_sparse_decode_vector(keyCoords, keyNorms, keyWork, decodedKey, keyPerm, keySigns1, keySigns2, keyCentroids, batch, k, queryDim, keyLen, keyLevels);
+                float score = 0.0f;
+                for (int d = 0; d < queryDim; ++d) {
+                    score += query[queryBase + d] * decodedKey[d];
+                }
+                manta_turbo_sparse_attention_insert(selected, selectedScores, &selectedCount, topK, k, score);
+            }
+        }
+    } else {
+        for (int k = 0; k < keyLen; ++k) {
+            manta_turbo_sparse_decode_vector(keyCoords, keyNorms, keyWork, decodedKey, keyPerm, keySigns1, keySigns2, keyCentroids, batch, k, queryDim, keyLen, keyLevels);
+            float score = 0.0f;
+            for (int d = 0; d < queryDim; ++d) {
+                score += query[queryBase + d] * decodedKey[d];
+            }
+            manta_turbo_sparse_attention_insert(selected, selectedScores, &selectedCount, topK, k, score);
+        }
+    }
+    if (selectedCount == 0) {
+        return;
+    }
+    float maxScore = selectedScores[0];
+    for (int i = 1; i < selectedCount; ++i) {
+        if (selectedScores[i] > maxScore) {
+            maxScore = selectedScores[i];
+        }
+    }
+    float denom = 0.0f;
+    for (int i = 0; i < selectedCount; ++i) {
+        denom += expf(selectedScores[i] - maxScore);
+    }
+    if (denom == 0.0f || isnan(denom)) {
+        return;
+    }
+
+    int outBase = rank == 3 ? ((batch * queryLen + queryRow) * valueDim) : (queryRow * valueDim);
+    for (int vd = 0; vd < valueDim; ++vd) {
+        out[outBase + vd] = 0.0f;
+    }
+    float* valueWork = valueScratchWork + row * valueDim;
+    float* decodedValue = valueScratchDecoded + row * valueDim;
+    for (int i = 0; i < selectedCount; ++i) {
+        float weight = expf(selectedScores[i] - maxScore) / denom;
+        manta_turbo_sparse_decode_vector(valueCoords, valueNorms, valueWork, decodedValue, valuePerm, valueSigns1, valueSigns2, valueCentroids, batch, selected[i], valueDim, keyLen, valueLevels);
+        for (int vd = 0; vd < valueDim; ++vd) {
+            out[outBase + vd] += weight * decodedValue[vd];
+        }
+    }
+}
+`
+
 const mseLossKernelSource = `
 extern "C" __global__ void manta_mse_partials(
     const float* lhs,
@@ -1385,6 +1731,8 @@ type deviceRuntime struct {
 	conv2DTransKernel  *auxKernel
 	turboQEncodeKernel *auxKernel
 	turboQDecodeKernel *auxKernel
+	sparseAttnKernel   *auxKernel
+	turboSparseKernel  *auxKernel
 	mseLossKernel      *auxKernel
 	msssimLossKernel   *auxKernel
 	scalarAddKernel    *auxKernel
@@ -1457,6 +1805,10 @@ func (rt *deviceRuntime) close() {
 	rt.turboQEncodeKernel = nil
 	rt.destroyAuxKernel(rt.turboQDecodeKernel)
 	rt.turboQDecodeKernel = nil
+	rt.destroyAuxKernel(rt.sparseAttnKernel)
+	rt.sparseAttnKernel = nil
+	rt.destroyAuxKernel(rt.turboSparseKernel)
+	rt.turboSparseKernel = nil
 	rt.destroyAuxKernel(rt.mseLossKernel)
 	rt.mseLossKernel = nil
 	rt.destroyAuxKernel(rt.msssimLossKernel)
@@ -1961,6 +2313,36 @@ func (rt *deviceRuntime) ensureTurboQDecodeKernel() (*auxKernel, error) {
 	return kernel, nil
 }
 
+func (rt *deviceRuntime) ensureSparseAttentionKernel() (*auxKernel, error) {
+	if rt == nil {
+		return nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if rt.sparseAttnKernel != nil {
+		return rt.sparseAttnKernel, nil
+	}
+	kernel, err := rt.compileAuxKernel(sparseAttentionKernelSource, "manta_sparse_attention_forward")
+	if err != nil {
+		return nil, err
+	}
+	rt.sparseAttnKernel = kernel
+	return kernel, nil
+}
+
+func (rt *deviceRuntime) ensureTurboSparseAttentionKernel() (*auxKernel, error) {
+	if rt == nil {
+		return nil, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if rt.turboSparseKernel != nil {
+		return rt.turboSparseKernel, nil
+	}
+	kernel, err := rt.compileAuxKernel(turboSparseAttentionKernelSource, "manta_turbo_sparse_attention_forward")
+	if err != nil {
+		return nil, err
+	}
+	rt.turboSparseKernel = kernel
+	return kernel, nil
+}
+
 func (rt *deviceRuntime) ensureMSELossKernel() (*auxKernel, error) {
 	if rt == nil {
 		return nil, fmt.Errorf("cuda runtime is not initialized")
@@ -2333,6 +2715,147 @@ func (rt *deviceRuntime) runTurboQDecodeStep(inputs []*backend.Tensor, outputTyp
 		return backend.StepDispatchResult{}, err
 	}
 	return turboQDecodeStepResult(outputType, cfg, outShape, outHost), nil
+}
+
+func (rt *deviceRuntime) runSparseAttentionStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaSparseAttentionConfig) (backend.StepDispatchResult, error) {
+	if rt == nil || rt.ptr == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if len(inputs) != 3 || inputs[0] == nil || inputs[1] == nil || inputs[2] == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda sparse_attention expects query, key, and value")
+	}
+	kernel, err := rt.ensureSparseAttentionKernel()
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	outShape := sparseAttentionOutputShape(cfg)
+	if cfg.outputLen == 0 {
+		return sparseAttentionStepResult(outputType, cfg, outShape, nil), nil
+	}
+	queryBuf, err := rt.uploadFloat32(inputs[0].F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(queryBuf)
+	keyBuf, err := rt.uploadFloat32(inputs[1].F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(keyBuf)
+	valueBuf, err := rt.uploadFloat32(inputs[2].F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(valueBuf)
+	outBuf, err := rt.allocFloat32(cfg.outputLen)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(outBuf)
+	block := uint(128)
+	rows := cfg.batches * cfg.queryLen
+	grid := uint((rows + int(block) - 1) / int(block))
+	if err := rt.launchSparseAttention(kernel, grid, block, queryBuf, keyBuf, valueBuf, outBuf, cfg); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	outHost := make([]float32, cfg.outputLen)
+	if err := rt.downloadFloat32(outHost, outBuf); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	return sparseAttentionStepResult(outputType, cfg, outShape, outHost), nil
+}
+
+func (rt *deviceRuntime) runTurboSparseAttentionStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaTurboSparseAttentionConfig) (backend.StepDispatchResult, error) {
+	if rt == nil || rt.ptr == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
+	}
+	if len(inputs) != 5 || inputs[0] == nil || inputs[1] == nil || inputs[2] == nil || inputs[3] == nil || inputs[4] == nil {
+		return backend.StepDispatchResult{}, fmt.Errorf("cuda turbo_sparse_attention expects query, key coords/norms, and value coords/norms")
+	}
+	kernel, err := rt.ensureTurboSparseAttentionKernel()
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	keySpec, err := rt.uploadTurboQSpec(cfg.key)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer keySpec.free(rt)
+	valueSpec, err := rt.uploadTurboQSpec(cfg.value)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer valueSpec.free(rt)
+	outShape := sparseAttentionOutputShape(cfg.sparse)
+	if cfg.sparse.outputLen == 0 {
+		return turboSparseAttentionStepResult(outputType, cfg, outShape, nil), nil
+	}
+	queryBuf, err := rt.uploadFloat32(inputs[0].F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(queryBuf)
+
+	keyCoordsBuf, err := rt.uploadFloat32(inputs[1].F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(keyCoordsBuf)
+	keyNormsBuf, err := rt.uploadFloat32(inputs[2].F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(keyNormsBuf)
+	valueCoordsBuf, err := rt.uploadFloat32(inputs[3].F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(valueCoordsBuf)
+	valueNormsBuf, err := rt.uploadFloat32(inputs[4].F32)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(valueNormsBuf)
+
+	rows := cfg.sparse.batches * cfg.sparse.queryLen
+	keyScratchElements := rows * cfg.sparse.queryDim
+	valueScratchElements := rows * cfg.sparse.valueDim
+	keyScratchWork, err := rt.allocFloat32(keyScratchElements)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(keyScratchWork)
+	keyScratchDecoded, err := rt.allocFloat32(keyScratchElements)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(keyScratchDecoded)
+	valueScratchWork, err := rt.allocFloat32(valueScratchElements)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(valueScratchWork)
+	valueScratchDecoded, err := rt.allocFloat32(valueScratchElements)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(valueScratchDecoded)
+
+	block := uint(128)
+	outBuf, err := rt.allocFloat32(cfg.sparse.outputLen)
+	if err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	defer rt.freeBuffer(outBuf)
+	grid := uint((rows + int(block) - 1) / int(block))
+	if err := rt.launchTurboSparseAttention(kernel, grid, block, queryBuf, keyCoordsBuf, keyNormsBuf, valueCoordsBuf, valueNormsBuf, outBuf, keyScratchWork, keyScratchDecoded, valueScratchWork, valueScratchDecoded, keySpec, valueSpec, cfg); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	outHost := make([]float32, cfg.sparse.outputLen)
+	if err := rt.downloadFloat32(outHost, outBuf); err != nil {
+		return backend.StepDispatchResult{}, err
+	}
+	return turboSparseAttentionStepResult(outputType, cfg, outShape, outHost), nil
 }
 
 func (rt *deviceRuntime) runMSELossStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
@@ -2825,6 +3348,84 @@ func (rt *deviceRuntime) launchTurboQDecode(kernel *auxKernel, grid, block uint,
 		C.int(cfg.height),
 		C.int(cfg.width),
 		C.int(1<<uint(cfg.bits)),
+		&errStr,
+	) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (rt *deviceRuntime) launchSparseAttention(kernel *auxKernel, grid, block uint, query, key, value, out0 C.CUdeviceptr, cfg cudaSparseAttentionConfig) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda sparse_attention kernel is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchSparseAttention(
+		rt.ptr,
+		kernel.ptr,
+		C.uint(grid),
+		C.uint(block),
+		query,
+		key,
+		value,
+		out0,
+		C.int(cfg.rank),
+		C.int(cfg.kvLayout),
+		C.int(cfg.batches),
+		C.int(cfg.queryLen),
+		C.int(cfg.keyLen),
+		C.int(cfg.queryDim),
+		C.int(cfg.valueDim),
+		C.int(cfg.topK),
+		&errStr,
+	) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (rt *deviceRuntime) launchTurboSparseAttention(kernel *auxKernel, grid, block uint, query, keyCoords, keyNorms, valueCoords, valueNorms, out0, keyScratchWork, keyScratchDecoded, valueScratchWork, valueScratchDecoded C.CUdeviceptr, keySpec, valueSpec *turboQDeviceSpec, cfg cudaTurboSparseAttentionConfig) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda turbo_sparse_attention kernel is not initialized")
+	}
+	if keySpec == nil || valueSpec == nil {
+		return fmt.Errorf("cuda turbo_sparse_attention specs are not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchTurboSparseAttention(
+		rt.ptr,
+		kernel.ptr,
+		C.uint(grid),
+		C.uint(block),
+		query,
+		keyCoords,
+		keyNorms,
+		valueCoords,
+		valueNorms,
+		out0,
+		keyScratchWork,
+		keyScratchDecoded,
+		valueScratchWork,
+		valueScratchDecoded,
+		keySpec.perm,
+		keySpec.signs1,
+		keySpec.signs2,
+		keySpec.centroids,
+		valueSpec.perm,
+		valueSpec.signs1,
+		valueSpec.signs2,
+		valueSpec.centroids,
+		C.int(cfg.sparse.rank),
+		C.int(cfg.sparse.batches),
+		C.int(cfg.sparse.queryLen),
+		C.int(cfg.sparse.keyLen),
+		C.int(cfg.sparse.queryDim),
+		C.int(cfg.sparse.valueDim),
+		C.int(cfg.sparse.topK),
+		C.int(1<<uint(cfg.key.bits)),
+		C.int(1<<uint(cfg.value.bits)),
+		C.int(cfg.routeBlockSize),
+		C.int(cfg.routeTopBlocks),
 		&errStr,
 	) != 0 {
 		return cStringError(errStr)
@@ -4085,6 +4686,55 @@ func turboQStepMetadata(op string, cfg cudaTurboQConfig) map[string]any {
 		"seed":             cfg.seed,
 		"rotation_kind":    "hadamard",
 	}
+}
+
+func sparseAttentionOutputShape(cfg cudaSparseAttentionConfig) []int {
+	if cfg.rank == 3 {
+		return []int{cfg.batches, cfg.queryLen, cfg.valueDim}
+	}
+	return []int{cfg.queryLen, cfg.valueDim}
+}
+
+func sparseAttentionStepResult(outputType mantaartifact.ValueType, cfg cudaSparseAttentionConfig, shape []int, data []float32) backend.StepDispatchResult {
+	return backend.StepDispatchResult{
+		Outputs:      []*backend.Tensor{newStepOutputTensor(outputType, shape, data)},
+		VariantEntry: "__builtin_cuda_sparse_attention",
+		Metadata: map[string]any{
+			"dispatch_mode":    "backend_step",
+			"device_execution": true,
+			"execution_mode":   "cuda_device",
+			"launch_api":       "cuda_driver",
+			"launch_compiler":  "nvrtc",
+			"op":               "sparse_attention",
+			"top_k":            cfg.topK,
+			"query_len":        cfg.queryLen,
+			"key_len":          cfg.keyLen,
+			"query_dim":        cfg.queryDim,
+			"value_dim":        cfg.valueDim,
+		},
+	}
+}
+
+func turboSparseAttentionStepResult(outputType mantaartifact.ValueType, cfg cudaTurboSparseAttentionConfig, shape []int, data []float32) backend.StepDispatchResult {
+	result := sparseAttentionStepResult(outputType, cfg.sparse, shape, data)
+	result.VariantEntry = "__builtin_cuda_turbo_sparse_attention"
+	result.Metadata["op"] = "turbo_sparse_attention"
+	result.Metadata["bits"] = cfg.key.bits
+	result.Metadata["seed"] = cfg.key.seed
+	result.Metadata["rotation_kind"] = "hadamard"
+	result.Metadata["kv_decode"] = "cuda_turboquant_inline"
+	result.Metadata["dense_kv_materialized"] = false
+	result.Metadata["fused"] = true
+	result.Metadata["scratch_scope"] = "query_row"
+	if cfg.routeBlockSize > 0 && cfg.routeTopBlocks > 0 {
+		result.Metadata["routing"] = "block_anchor"
+		result.Metadata["route_block_size"] = cfg.routeBlockSize
+		result.Metadata["route_top_blocks"] = cfg.routeTopBlocks
+		result.Metadata["candidate_key_budget"] = cfg.routeBlockSize * cfg.routeTopBlocks
+	} else {
+		result.Metadata["routing"] = "exact"
+	}
+	return result
 }
 
 func cudaConvStepResult(outputType mantaartifact.ValueType, variant, op string, shape []int, data []float32, extra map[string]any) backend.StepDispatchResult {

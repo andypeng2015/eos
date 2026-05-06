@@ -380,6 +380,93 @@ pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16
 	}
 }
 
+func TestBuildSparseAttentionStep(t *testing.T) {
+	src := []byte(`
+pipeline attend(q: f16[Q, D], k: f16[T, D], v: f16[T, V]) -> f16[Q, V] {
+    return sparse_attention(q, k, v, 2)
+}
+`)
+
+	bundle, err := Build(src, Options{ModuleName: "sparse_attention"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	found := false
+	for _, step := range bundle.Artifact.Steps {
+		if step.Kind == mantaartifact.StepSparseAttention {
+			found = true
+			if got := step.Attributes["top_k"]; got != "2" {
+				t.Fatalf("sparse top_k = %q, want 2", got)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected sparse_attention step")
+	}
+	if !containsString(bundle.Artifact.Requirements.Capabilities, mantaartifact.CapabilitySparseAttention) {
+		t.Fatalf("capabilities = %v, want sparse_attention", bundle.Artifact.Requirements.Capabilities)
+	}
+}
+
+func TestBuildTurboSparseAttentionStep(t *testing.T) {
+	src := []byte(`
+pipeline attend(q: f16[B, Q, D], kc: q4[B, D, T, 1], kn: q_norm[B, T, 1], vc: q4[B, V, T, 1], vn: q_norm[B, T, 1]) -> f16[B, Q, V] {
+    return turbo_sparse_attention(q, kc, kn, vc, vn, 3)
+}
+`)
+
+	bundle, err := Build(src, Options{ModuleName: "turbo_sparse_attention"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	found := false
+	for _, step := range bundle.Artifact.Steps {
+		if step.Kind == mantaartifact.StepTurboSparseAttention {
+			found = true
+			if got := step.Attributes["top_k"]; got != "3" {
+				t.Fatalf("turbo sparse top_k = %q, want 3", got)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected turbo_sparse_attention step")
+	}
+	if !containsString(bundle.Artifact.Requirements.Capabilities, mantaartifact.CapabilitySparseAttention) {
+		t.Fatalf("capabilities = %v, want sparse_attention", bundle.Artifact.Requirements.Capabilities)
+	}
+	if !containsString(bundle.Artifact.Requirements.Capabilities, mantaartifact.CapabilityTurboQuant) {
+		t.Fatalf("capabilities = %v, want turboquant", bundle.Artifact.Requirements.Capabilities)
+	}
+}
+
+func TestBuildRoutedTurboSparseAttentionStep(t *testing.T) {
+	src := []byte(`
+pipeline attend(q: f16[B, Q, D], kc: q4[B, D, T, 1], kn: q_norm[B, T, 1], vc: q4[B, V, T, 1], vn: q_norm[B, T, 1]) -> f16[B, Q, V] {
+    return turbo_sparse_attention(q, kc, kn, vc, vn, 3, 16, 4)
+}
+`)
+
+	bundle, err := Build(src, Options{ModuleName: "routed_turbo_sparse_attention"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	for _, step := range bundle.Artifact.Steps {
+		if step.Kind == mantaartifact.StepTurboSparseAttention {
+			if got := step.Attributes["top_k"]; got != "3" {
+				t.Fatalf("turbo sparse top_k = %q, want 3", got)
+			}
+			if got := step.Attributes["route_block_size"]; got != "16" {
+				t.Fatalf("route_block_size = %q, want 16", got)
+			}
+			if got := step.Attributes["route_top_blocks"]; got != "4" {
+				t.Fatalf("route_top_blocks = %q, want 4", got)
+			}
+			return
+		}
+	}
+	t.Fatal("expected turbo_sparse_attention step")
+}
+
 func TestBuildTinyDecodeSource(t *testing.T) {
 	src := []byte(sourceForPreset(PresetTinyDecode))
 
@@ -1000,6 +1087,15 @@ func assertAllKernelVariantSources(t *testing.T, kernel mantaartifact.Kernel) {
 			t.Fatalf("source for backend %q is empty in %+v", variant.Backend, kernel.Variants)
 		}
 	}
+}
+
+func containsString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestBuildRejectsScoreShapeMismatch(t *testing.T) {

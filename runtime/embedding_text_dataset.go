@@ -9,17 +9,20 @@ import (
 )
 
 type EmbeddingTextContrastiveExample struct {
+	Source   string
 	Query    string
 	Positive string
 }
 
 type EmbeddingTextPairExample struct {
+	Source string
 	Query  string
 	Right  string
 	Target float32
 }
 
 type embeddingTextContrastiveRecord struct {
+	Source   string   `json:"source,omitempty"`
 	Query    string   `json:"query"`
 	Positive string   `json:"positive"`
 	Document string   `json:"document"`
@@ -39,6 +42,7 @@ func ReadEmbeddingTextContrastiveExamplesFile(path string) ([]EmbeddingTextContr
 			continue
 		}
 		out = append(out, EmbeddingTextContrastiveExample{
+			Source:   pair.Source,
 			Query:    pair.Query,
 			Positive: pair.Right,
 		})
@@ -163,6 +167,7 @@ func tokenizeEmbeddingTextPairExamples(examples []EmbeddingTextPairExample, toke
 			right = cloneTokenizedText(right)
 		}
 		out = append(out, EmbeddingPairExample{
+			Source:      example.Source,
 			LeftTokens:  query.tokens,
 			RightTokens: right.tokens,
 			LeftMask:    query.mask,
@@ -202,6 +207,7 @@ func tokenizeEmbeddingTextContrastiveExamples(examples []EmbeddingTextContrastiv
 			positive = cloneTokenizedText(positive)
 		}
 		out = append(out, EmbeddingContrastiveExample{
+			Source:         example.Source,
 			QueryTokens:    query.tokens,
 			PositiveTokens: positive.tokens,
 			QueryMask:      query.mask,
@@ -219,6 +225,7 @@ func newEmbeddingTextContrastiveRecord(example EmbeddingTextContrastiveExample) 
 		return embeddingTextContrastiveRecord{}, fmt.Errorf("positive is empty")
 	}
 	return embeddingTextContrastiveRecord{
+		Source:   example.Source,
 		Query:    example.Query,
 		Positive: example.Positive,
 	}, nil
@@ -232,6 +239,7 @@ func (r embeddingTextContrastiveRecord) pairExample() (EmbeddingTextPairExample,
 		target = float32(*r.Label)
 	}
 	record, err := newEmbeddingTextContrastiveRecord(EmbeddingTextContrastiveExample{
+		Source:   r.Source,
 		Query:    query,
 		Positive: right,
 	})
@@ -239,6 +247,7 @@ func (r embeddingTextContrastiveRecord) pairExample() (EmbeddingTextPairExample,
 		return EmbeddingTextPairExample{}, err
 	}
 	return EmbeddingTextPairExample{
+		Source: record.Source,
 		Query:  record.Query,
 		Right:  record.Positive,
 		Target: target,
@@ -254,6 +263,7 @@ func (r embeddingTextContrastiveRecord) example() (EmbeddingTextContrastiveExamp
 		return EmbeddingTextContrastiveExample{}, fmt.Errorf("positive is empty")
 	}
 	return EmbeddingTextContrastiveExample{
+		Source:   pair.Source,
 		Query:    pair.Query,
 		Positive: pair.Right,
 	}, nil

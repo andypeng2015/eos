@@ -10,6 +10,7 @@ import (
 
 // EmbeddingHardNegativeExample is one query-positive example with explicit hard negatives.
 type EmbeddingHardNegativeExample struct {
+	Source         string
 	QueryTokens    []int32
 	PositiveTokens []int32
 	NegativeTokens [][]int32
@@ -19,12 +20,14 @@ type EmbeddingHardNegativeExample struct {
 }
 
 type EmbeddingTextHardNegativeExample struct {
+	Source    string
 	Query     string
 	Positive  string
 	Negatives []string
 }
 
 type embeddingHardNegativeRecord struct {
+	Source         string    `json:"source,omitempty"`
 	QueryTokens    []int32   `json:"query_tokens"`
 	PositiveTokens []int32   `json:"positive_tokens"`
 	NegativeTokens [][]int32 `json:"negative_tokens,omitempty"`
@@ -34,6 +37,7 @@ type embeddingHardNegativeRecord struct {
 }
 
 type embeddingTextHardNegativeRecord struct {
+	Source    string   `json:"source,omitempty"`
 	Query     string   `json:"query"`
 	Positive  string   `json:"positive"`
 	Document  string   `json:"document,omitempty"`
@@ -106,6 +110,7 @@ func BuildEmbeddingHardNegativeExamplesFromPairs(pairs []EmbeddingPairExample, m
 		return nil, fmt.Errorf("pair dataset is empty")
 	}
 	type queryGroup struct {
+		source      string
 		queryTokens []int32
 		queryMask   []int32
 		positives   []embeddingTokenizedText
@@ -118,11 +123,14 @@ func BuildEmbeddingHardNegativeExamplesFromPairs(pairs []EmbeddingPairExample, m
 		group := groups[key]
 		if group == nil {
 			group = &queryGroup{
+				source:      pair.Source,
 				queryTokens: append([]int32(nil), pair.LeftTokens...),
 				queryMask:   append([]int32(nil), pair.LeftMask...),
 			}
 			groups[key] = group
 			order = append(order, key)
+		} else if group.source == "" {
+			group.source = pair.Source
 		}
 		item := embeddingTokenizedText{
 			tokens: append([]int32(nil), pair.RightTokens...),
@@ -153,6 +161,7 @@ func BuildEmbeddingHardNegativeExamplesFromPairs(pairs []EmbeddingPairExample, m
 				negativeMasks = append(negativeMasks, append([]int32(nil), negative.mask...))
 			}
 			out = append(out, EmbeddingHardNegativeExample{
+				Source:         group.source,
 				QueryTokens:    append([]int32(nil), group.queryTokens...),
 				PositiveTokens: append([]int32(nil), positive.tokens...),
 				NegativeTokens: negatives,
@@ -232,6 +241,7 @@ func BuildEmbeddingTextHardNegativeExamplesFromPairs(pairs []EmbeddingTextPairEx
 		return nil, fmt.Errorf("text pair dataset is empty")
 	}
 	type queryGroup struct {
+		source    string
 		positives []string
 		negatives []string
 	}
@@ -241,9 +251,11 @@ func BuildEmbeddingTextHardNegativeExamplesFromPairs(pairs []EmbeddingTextPairEx
 		key := pair.Query
 		group := groups[key]
 		if group == nil {
-			group = &queryGroup{}
+			group = &queryGroup{source: pair.Source}
 			groups[key] = group
 			order = append(order, key)
+		} else if group.source == "" {
+			group.source = pair.Source
 		}
 		if pair.Target > 0 {
 			group.positives = append(group.positives, pair.Right)
@@ -267,6 +279,7 @@ func BuildEmbeddingTextHardNegativeExamplesFromPairs(pairs []EmbeddingTextPairEx
 				negatives = append(negatives, group.negatives[(i+j)%len(group.negatives)])
 			}
 			out = append(out, EmbeddingTextHardNegativeExample{
+				Source:    group.source,
 				Query:     query,
 				Positive:  positive,
 				Negatives: negatives,
@@ -321,6 +334,7 @@ func tokenizeEmbeddingTextHardNegativeExamples(examples []EmbeddingTextHardNegat
 			positive = cloneTokenizedText(positive)
 		}
 		out = append(out, EmbeddingHardNegativeExample{
+			Source:         example.Source,
 			QueryTokens:    query.tokens,
 			PositiveTokens: positive.tokens,
 			NegativeTokens: negatives,
@@ -377,6 +391,7 @@ func newEmbeddingHardNegativeRecord(example EmbeddingHardNegativeExample) (embed
 		}
 	}
 	return embeddingHardNegativeRecord{
+		Source:         example.Source,
 		QueryTokens:    append([]int32(nil), example.QueryTokens...),
 		PositiveTokens: append([]int32(nil), example.PositiveTokens...),
 		NegativeTokens: cloneInt32Matrix(example.NegativeTokens),
@@ -388,6 +403,7 @@ func newEmbeddingHardNegativeRecord(example EmbeddingHardNegativeExample) (embed
 
 func (r embeddingHardNegativeRecord) example() (EmbeddingHardNegativeExample, error) {
 	record, err := newEmbeddingHardNegativeRecord(EmbeddingHardNegativeExample{
+		Source:         r.Source,
 		QueryTokens:    r.QueryTokens,
 		PositiveTokens: r.PositiveTokens,
 		NegativeTokens: r.NegativeTokens,
@@ -399,6 +415,7 @@ func (r embeddingHardNegativeRecord) example() (EmbeddingHardNegativeExample, er
 		return EmbeddingHardNegativeExample{}, err
 	}
 	return EmbeddingHardNegativeExample{
+		Source:         record.Source,
 		QueryTokens:    record.QueryTokens,
 		PositiveTokens: record.PositiveTokens,
 		NegativeTokens: record.NegativeTokens,
@@ -424,6 +441,7 @@ func newEmbeddingTextHardNegativeRecord(example EmbeddingTextHardNegativeExample
 		}
 	}
 	return embeddingTextHardNegativeRecord{
+		Source:    example.Source,
 		Query:     example.Query,
 		Positive:  example.Positive,
 		Negatives: append([]string(nil), example.Negatives...),
@@ -433,6 +451,7 @@ func newEmbeddingTextHardNegativeRecord(example EmbeddingTextHardNegativeExample
 func (r embeddingTextHardNegativeRecord) example() (EmbeddingTextHardNegativeExample, error) {
 	positive := firstNonEmpty(r.Positive, r.Document)
 	record, err := newEmbeddingTextHardNegativeRecord(EmbeddingTextHardNegativeExample{
+		Source:    r.Source,
 		Query:     r.Query,
 		Positive:  positive,
 		Negatives: r.Negatives,
@@ -441,6 +460,7 @@ func (r embeddingTextHardNegativeRecord) example() (EmbeddingTextHardNegativeExa
 		return EmbeddingTextHardNegativeExample{}, err
 	}
 	return EmbeddingTextHardNegativeExample{
+		Source:    record.Source,
 		Query:     record.Query,
 		Positive:  record.Positive,
 		Negatives: record.Negatives,

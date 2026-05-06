@@ -56,6 +56,14 @@ func (rt *deviceRuntime) runTurboQDecodeStep(inputs []*backend.Tensor, outputTyp
 	return backend.StepDispatchResult{}, nil
 }
 
+func (rt *deviceRuntime) runSparseAttentionStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaSparseAttentionConfig) (backend.StepDispatchResult, error) {
+	return backend.StepDispatchResult{}, nil
+}
+
+func (rt *deviceRuntime) runTurboSparseAttentionStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaTurboSparseAttentionConfig) (backend.StepDispatchResult, error) {
+	return backend.StepDispatchResult{}, nil
+}
+
 func (rt *deviceRuntime) runMSELossStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }

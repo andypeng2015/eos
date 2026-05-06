@@ -9,7 +9,7 @@ import (
 func TestReadEmbeddingTextPairExamplesFileAcceptsCommonSchemas(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pairs.jsonl")
 	data := "" +
-		"{\"query\":\"alpha\",\"positive\":\"beta\"}\n" +
+		"{\"source\":\"scifact\",\"query\":\"alpha\",\"positive\":\"beta\"}\n" +
 		"{\"query\":\"gamma\",\"document\":\"delta\",\"label\":1}\n" +
 		"{\"left\":\"epsilon\",\"right\":\"zeta\",\"label\":0}\n"
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
@@ -24,6 +24,9 @@ func TestReadEmbeddingTextPairExamplesFileAcceptsCommonSchemas(t *testing.T) {
 	}
 	if got[0].Query != "alpha" || got[0].Right != "beta" || got[0].Target != 1 {
 		t.Fatalf("pair[0] = %+v", got[0])
+	}
+	if got[0].Source != "scifact" {
+		t.Fatalf("pair[0] source = %q, want scifact", got[0].Source)
 	}
 	if got[1].Query != "gamma" || got[1].Right != "delta" || got[1].Target != 1 {
 		t.Fatalf("pair[1] = %+v", got[1])
@@ -56,7 +59,7 @@ func TestReadEmbeddingTextContrastiveExamplesFileSkipsNegativeLabels(t *testing.
 func TestTokenizeEmbeddingTextPairExamplesPreservesTargets(t *testing.T) {
 	tokenizer := newEmbeddingTextDatasetTestTokenizer(t)
 	out, err := TokenizeEmbeddingTextPairExamples([]EmbeddingTextPairExample{
-		{Query: "ab", Right: "ab", Target: 1},
+		{Source: "nfcorpus", Query: "ab", Right: "ab", Target: 1},
 		{Query: "cd", Right: "ab", Target: 0},
 	}, tokenizer)
 	if err != nil {
@@ -69,6 +72,9 @@ func TestTokenizeEmbeddingTextPairExamplesPreservesTargets(t *testing.T) {
 	assertInt32SliceEqual(t, out[0].RightTokens, []int32{2, 4, 5, 3})
 	if out[0].Target != 1 || out[1].Target != 0 {
 		t.Fatalf("targets = %v, %v; want 1, 0", out[0].Target, out[1].Target)
+	}
+	if out[0].Source != "nfcorpus" {
+		t.Fatalf("source = %q, want nfcorpus", out[0].Source)
 	}
 }
 

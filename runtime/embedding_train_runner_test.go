@@ -35,6 +35,40 @@ func TestEstimateContrastiveTrainWorkload(t *testing.T) {
 	}
 }
 
+func TestEstimateGroupedHardNegativeTrainWorkload(t *testing.T) {
+	workload := EstimateHardNegativeTrainWorkload(128, 1, 0, EmbeddingTrainRunConfig{
+		Epochs:          1,
+		BatchSize:       64,
+		ContrastiveLoss: "grouped_infonce",
+	})
+	if workload.TrainMode != "hard_negative_grouped_infonce" {
+		t.Fatalf("train mode = %q, want hard_negative_grouped_infonce", workload.TrainMode)
+	}
+	if workload.TrainBatchesPerEpoch != 2 {
+		t.Fatalf("train batches/epoch = %d, want 2", workload.TrainBatchesPerEpoch)
+	}
+	if workload.TrainPairsPerEpoch != 256 {
+		t.Fatalf("train pairs/epoch = %d, want 256", workload.TrainPairsPerEpoch)
+	}
+}
+
+func TestEstimateHybridHardNegativeTrainWorkload(t *testing.T) {
+	workload := EstimateHardNegativeTrainWorkload(128, 1, 0, EmbeddingTrainRunConfig{
+		Epochs:          1,
+		BatchSize:       64,
+		ContrastiveLoss: "hybrid_infonce",
+	})
+	if workload.TrainMode != "hard_negative_hybrid_infonce" {
+		t.Fatalf("train mode = %q, want hard_negative_hybrid_infonce", workload.TrainMode)
+	}
+	if workload.TrainBatchesPerEpoch != 2 {
+		t.Fatalf("train batches/epoch = %d, want 2", workload.TrainBatchesPerEpoch)
+	}
+	if workload.TrainPairsPerEpoch != 16640 {
+		t.Fatalf("train pairs/epoch = %d, want 16640", workload.TrainPairsPerEpoch)
+	}
+}
+
 func TestEmbeddingTrainerFitImprovesEvalAndTracksBest(t *testing.T) {
 	trainer := newTinyTrainableEmbeddingTrainer(t, 0.05)
 	trainSet := tinyEmbeddingPairDataset()
@@ -713,8 +747,59 @@ func TestEmbeddingTrainerTrainHardNegativeContrastiveStep(t *testing.T) {
 	if metrics.BatchSize != 8 {
 		t.Fatalf("batch size = %d, want 8 rectangular query-candidate scores", metrics.BatchSize)
 	}
-	if metrics.Loss <= 0 {
-		t.Fatalf("loss = %f, want positive", metrics.Loss)
+	if metrics.Loss < 0 {
+		t.Fatalf("loss = %f, want non-negative", metrics.Loss)
+	}
+	if trainer.step != 1 {
+		t.Fatalf("step = %d, want 1", trainer.step)
+	}
+}
+
+func TestEmbeddingTrainerTrainGroupedHardNegativeContrastiveStep(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.005)
+	trainer.config.ContrastiveLoss = "grouped_infonce"
+	trainer.config.Temperature = 0.05
+	accel := &countingContrastiveAccelerator{}
+	trainer.contrastiveAccel = accel
+
+	metrics, err := trainer.TrainHardNegativeContrastiveStep(tinyEmbeddingHardNegativeDataset())
+	if err != nil {
+		t.Fatalf("train grouped hard-negative step: %v", err)
+	}
+	if metrics.BatchSize != 4 {
+		t.Fatalf("batch size = %d, want 4 grouped query-candidate scores", metrics.BatchSize)
+	}
+	if metrics.Loss < 0 {
+		t.Fatalf("loss = %f, want non-negative", metrics.Loss)
+	}
+	if accel.rectCalls != 0 || accel.squareCalls != 0 {
+		t.Fatalf("accelerator calls square=%d rect=%d, want host grouped path", accel.squareCalls, accel.rectCalls)
+	}
+	if trainer.step != 1 {
+		t.Fatalf("step = %d, want 1", trainer.step)
+	}
+}
+
+func TestEmbeddingTrainerTrainHybridHardNegativeContrastiveStep(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.005)
+	trainer.config.ContrastiveLoss = "hybrid_infonce"
+	trainer.config.Temperature = 0.05
+	trainer.config.GroupedLossWeight = 0.25
+	accel := &countingContrastiveAccelerator{}
+	trainer.contrastiveAccel = accel
+
+	metrics, err := trainer.TrainHardNegativeContrastiveStep(tinyEmbeddingHardNegativeDataset())
+	if err != nil {
+		t.Fatalf("train hybrid hard-negative step: %v", err)
+	}
+	if metrics.BatchSize != 12 {
+		t.Fatalf("batch size = %d, want 12 hybrid query-candidate scores", metrics.BatchSize)
+	}
+	if metrics.Loss < 0 {
+		t.Fatalf("loss = %f, want non-negative", metrics.Loss)
+	}
+	if accel.rectCalls != 1 || accel.squareCalls != 0 {
+		t.Fatalf("accelerator calls square=%d rect=%d, want one rectangular global InfoNCE call", accel.squareCalls, accel.rectCalls)
 	}
 	if trainer.step != 1 {
 		t.Fatalf("step = %d, want 1", trainer.step)
@@ -779,6 +864,47 @@ func TestSpreadHardNegativeOrderByQuerySeparatesRepeatedQueries(t *testing.T) {
 			}
 			seenQueries[key] = true
 		}
+	}
+}
+
+func TestHardNegativeSourceWeightedOrderBuildsBalancedBatches(t *testing.T) {
+	trainSet := []EmbeddingHardNegativeExample{
+		{Source: "scifact", QueryTokens: []int32{0}, PositiveTokens: []int32{10}, NegativeTokens: [][]int32{{90}}, QueryMask: []int32{1}},
+		{Source: "nfcorpus", QueryTokens: []int32{1}, PositiveTokens: []int32{11}, NegativeTokens: [][]int32{{91}}, QueryMask: []int32{1}},
+		{Source: "nfcorpus", QueryTokens: []int32{2}, PositiveTokens: []int32{12}, NegativeTokens: [][]int32{{92}}, QueryMask: []int32{1}},
+		{Source: "fiqa:model", QueryTokens: []int32{3}, PositiveTokens: []int32{13}, NegativeTokens: [][]int32{{93}}, QueryMask: []int32{1}},
+		{Source: "fiqa", QueryTokens: []int32{4}, PositiveTokens: []int32{14}, NegativeTokens: [][]int32{{94}}, QueryMask: []int32{1}},
+		{Source: "scifact", QueryTokens: []int32{5}, PositiveTokens: []int32{15}, NegativeTokens: [][]int32{{95}}, QueryMask: []int32{1}},
+	}
+	got := hardNegativeSourceWeightedOrder(trainSet, []int{0, 1, 2, 3, 4, 5}, 4, map[string]int{
+		"scifact":  1,
+		"nfcorpus": 2,
+		"fiqa":     1,
+	}, false)
+	want := []int{0, 1, 2, 3, 5, 4}
+	if len(got) != len(want) {
+		t.Fatalf("weighted order length = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("weighted order = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestHardNegativeSourceWeightUsesFamilyUnlessExactWeightExists(t *testing.T) {
+	weights := normalizeHardNegativeSourceWeights(map[string]int{
+		"fiqa":       2,
+		"fiqa:model": 4,
+	})
+	if got := hardNegativeSourceWeight(weights, "fiqa:bm25"); got != 2 {
+		t.Fatalf("fiqa:bm25 weight = %d, want 2", got)
+	}
+	if got := hardNegativeSourceWeight(weights, "fiqa:model"); got != 4 {
+		t.Fatalf("fiqa:model weight = %d, want 4", got)
+	}
+	if got := hardNegativeSourceGroupKey(weights, "fiqa:model"); got != "fiqa:model" {
+		t.Fatalf("fiqa:model group key = %q, want fiqa:model", got)
 	}
 }
 

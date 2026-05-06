@@ -13,6 +13,7 @@ import (
 
 // EmbeddingPairExample is one supervised pairwise training example.
 type EmbeddingPairExample struct {
+	Source      string
 	LeftTokens  []int32
 	RightTokens []int32
 	LeftMask    []int32
@@ -22,15 +23,16 @@ type EmbeddingPairExample struct {
 
 // EmbeddingTrainConfig controls the narrow pooled-embedder trainer.
 type EmbeddingTrainConfig struct {
-	LearningRate    float32
-	WeightDecay     float32
-	WeightBits      int
-	Optimizer       string
-	Beta1           float32
-	Beta2           float32
-	Epsilon         float32
-	ContrastiveLoss string
-	Temperature     float32
+	LearningRate      float32
+	WeightDecay       float32
+	WeightBits        int
+	Optimizer         string
+	Beta1             float32
+	Beta2             float32
+	Epsilon           float32
+	ContrastiveLoss   string
+	Temperature       float32
+	GroupedLossWeight float32
 }
 
 // EmbeddingTrainMetrics summarizes one training/eval batch.
@@ -1008,7 +1010,7 @@ func (t *EmbeddingTrainer) TrainContrastiveStep(batch []EmbeddingContrastiveExam
 	pairCount := len(batch) * len(batch)
 	batchScale := float32(1) / float32(pairCount)
 	lossScale := batchScale
-	if t.config.ContrastiveLoss == "infonce" {
+	if embeddingUsesInfoNCELoss(t.config.ContrastiveLoss) {
 		var ok bool
 		totalLoss, totalScore, ok = t.tryInfoNCEContrastiveAccelerator(queries, positives, queryGrads, positiveGrads)
 		if !ok {
@@ -1075,6 +1077,7 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 	queryInputs := make([]embeddingSequenceInput, len(batch))
 	candidateInputs := make([]embeddingSequenceInput, 0, len(batch)*2)
 	targetIndexes := make([]int, len(batch))
+	candidateSpans := make([]embeddingCandidateSpan, len(batch))
 	for i, example := range batch {
 		queryInputs[i] = embeddingSequenceInput{
 			tokens: example.QueryTokens,
@@ -1082,6 +1085,7 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 			label:  fmt.Sprintf("batch %d query", i),
 		}
 		targetIndexes[i] = len(candidateInputs)
+		candidateSpans[i].Start = len(candidateInputs)
 		candidateInputs = append(candidateInputs, embeddingSequenceInput{
 			tokens: example.PositiveTokens,
 			mask:   example.PositiveMask,
@@ -1098,6 +1102,7 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 				label:  fmt.Sprintf("batch %d negative %d", i, j),
 			})
 		}
+		candidateSpans[i].End = len(candidateInputs)
 	}
 	if len(candidateInputs) < 2 {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("hard-negative training batch needs at least two candidate documents")
@@ -1137,9 +1142,34 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 		candidateGrads[i] = make([]float32, len(candidates[i].pooled))
 	}
 
-	totalLoss, totalScore, ok := t.tryInfoNCEHardNegativeAccelerator(queries, candidates, targetIndexes, queryGrads, candidateGrads)
-	if !ok {
-		totalLoss, totalScore = accumulateInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, t.config.Temperature, queryGrads, candidateGrads)
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	if t.config.ContrastiveLoss == "grouped_infonce" {
+		totalLoss, totalScore = accumulateGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, t.config.Temperature, queryGrads, candidateGrads)
+	} else if t.config.ContrastiveLoss == "hybrid_infonce" {
+		var ok bool
+		globalLoss, globalScore, ok := t.tryInfoNCEHardNegativeAccelerator(queries, candidates, targetIndexes, queryGrads, candidateGrads)
+		if !ok {
+			globalLoss, globalScore = accumulateInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, t.config.Temperature, queryGrads, candidateGrads)
+		}
+		groupedQueryGrads := newEmbeddingPooledGradBuffers(queries)
+		groupedCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
+		groupedLoss, groupedScore := accumulateGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, t.config.Temperature, groupedQueryGrads, groupedCandidateGrads)
+		groupedWeight := effectiveGroupedLossWeight(t.config.ContrastiveLoss, t.config.GroupedLossWeight)
+		globalScale := float32(1) / (1 + groupedWeight)
+		groupedScale := groupedWeight / (1 + groupedWeight)
+		scaleEmbeddingGradBuffers(queryGrads, globalScale)
+		scaleEmbeddingGradBuffers(candidateGrads, globalScale)
+		addScaledEmbeddingGradBuffers(queryGrads, groupedQueryGrads, groupedScale)
+		addScaledEmbeddingGradBuffers(candidateGrads, groupedCandidateGrads, groupedScale)
+		totalLoss = globalLoss*globalScale + groupedLoss*groupedScale
+		totalScore = globalScore + groupedScore
+	} else {
+		var ok bool
+		totalLoss, totalScore, ok = t.tryInfoNCEHardNegativeAccelerator(queries, candidates, targetIndexes, queryGrads, candidateGrads)
+		if !ok {
+			totalLoss, totalScore = accumulateInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, t.config.Temperature, queryGrads, candidateGrads)
+		}
 	}
 	if !t.tryBackpropContrastiveBatch(
 		queries,
@@ -1170,7 +1200,7 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 		}
 	}
 
-	pairCount := len(queries) * len(candidates)
+	pairCount := hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, t.config.ContrastiveLoss)
 	batchScale := float32(1) / float32(len(queries))
 	t.step++
 	t.applyOptimizerUpdate(t.tokenParam.Name, t.tokenEmbed, t.tokenMom1, t.tokenMom2, gradToken, batchScale)
@@ -2553,7 +2583,7 @@ func evaluateContrastiveEncodings(queries, positives []*embeddingEncodedSequence
 			scores = append(scores, embeddingEvalScore{Score: score, Positive: target > 0})
 			rowScores[j] = score
 			scale := score - target
-			if cfg.ContrastiveLoss != "infonce" {
+			if !embeddingUsesInfoNCELoss(cfg.ContrastiveLoss) {
 				metrics.Loss += 0.5 * scale * scale
 			}
 			metrics.AverageScore += score
@@ -2597,7 +2627,7 @@ func evaluateContrastiveEncodings(queries, positives []*embeddingEncodedSequence
 			metrics.MeanReciprocalRank += 1 / float32(rank)
 			metrics.MeanPositiveRank += float32(rank)
 		}
-		if cfg.ContrastiveLoss == "infonce" {
+		if embeddingUsesInfoNCELoss(cfg.ContrastiveLoss) {
 			infoNCELoss += infoNCERowProbsAndLossInto(rowScores, i, cfg.Temperature, rowProbs)
 		}
 	}
@@ -2605,7 +2635,7 @@ func evaluateContrastiveEncodings(queries, positives []*embeddingEncodedSequence
 		return metrics
 	}
 	invPairs := float32(1) / float32(metrics.PairCount)
-	if cfg.ContrastiveLoss == "infonce" && len(queries) > 0 {
+	if embeddingUsesInfoNCELoss(cfg.ContrastiveLoss) && len(queries) > 0 {
 		metrics.Loss = infoNCELoss / float32(len(queries))
 	} else {
 		metrics.Loss *= invPairs
@@ -2781,6 +2811,124 @@ func accumulateInfoNCEHardNegativeGrads(queries, candidates []*embeddingEncodedS
 		}
 	}
 	return totalLoss, totalScore
+}
+
+type embeddingCandidateSpan struct {
+	Start int
+	End   int
+}
+
+func accumulateGroupedInfoNCEHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, temperature float32, queryGrads, candidateGrads [][]float32) (float32, float32) {
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	if temperature <= 0 {
+		temperature = 0.05
+	}
+	queryMatrix := newContrastivePooledMatrix(queries)
+	candidateMatrix := newContrastivePooledMatrix(candidates)
+	maxCandidates := 0
+	for i := range queries {
+		span := groupedCandidateSpan(candidateSpans, i, len(candidates))
+		if n := span.End - span.Start; n > maxCandidates {
+			maxCandidates = n
+		}
+	}
+	rowScores := make([]float32, maxCandidates)
+	rowProbs := make([]float32, maxCandidates)
+	for i := range queries {
+		span := groupedCandidateSpan(candidateSpans, i, len(candidates))
+		if span.End-span.Start < 2 {
+			continue
+		}
+		query := queryMatrix.row(i)
+		queryNorm := queryMatrix.norms[i]
+		scores := rowScores[:span.End-span.Start]
+		probs := rowProbs[:span.End-span.Start]
+		for j := span.Start; j < span.End; j++ {
+			local := j - span.Start
+			score := cosineScoreWithNorms(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j])
+			scores[local] = score
+			totalScore += score
+		}
+		rowLoss := infoNCERowProbsAndLossInto(scores, 0, temperature, probs)
+		totalLoss += rowLoss
+		for local, prob := range probs {
+			target := float32(0)
+			if local == 0 {
+				target = 1
+			}
+			j := span.Start + local
+			scale := (prob - target) / temperature
+			accumulateCosineGradFromScore(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j], scores[local], scale, queryGrads[i], candidateGrads[j])
+		}
+	}
+	return totalLoss, totalScore
+}
+
+func groupedCandidateSpan(spans []embeddingCandidateSpan, index int, candidateCount int) embeddingCandidateSpan {
+	if index >= 0 && index < len(spans) {
+		span := spans[index]
+		if span.Start >= 0 && span.Start < span.End && span.End <= candidateCount {
+			return span
+		}
+	}
+	return embeddingCandidateSpan{Start: 0, End: candidateCount}
+}
+
+func hardNegativeCandidatePairCount(queryCount, candidateCount int, spans []embeddingCandidateSpan, loss string) int {
+	if queryCount <= 0 || candidateCount <= 0 {
+		return 0
+	}
+	if loss != "grouped_infonce" && loss != "hybrid_infonce" {
+		return queryCount * candidateCount
+	}
+	groupedTotal := 0
+	for i := 0; i < queryCount; i++ {
+		span := groupedCandidateSpan(spans, i, candidateCount)
+		if span.End-span.Start >= 2 {
+			groupedTotal += span.End - span.Start
+		}
+	}
+	if loss == "hybrid_infonce" {
+		return queryCount*candidateCount + groupedTotal
+	}
+	return groupedTotal
+}
+
+func newEmbeddingPooledGradBuffers(seqs []*embeddingEncodedSequence) [][]float32 {
+	grads := make([][]float32, len(seqs))
+	for i := range seqs {
+		grads[i] = make([]float32, len(seqs[i].pooled))
+	}
+	return grads
+}
+
+func scaleEmbeddingGradBuffers(grads [][]float32, scale float32) {
+	if scale == 1 {
+		return
+	}
+	for _, row := range grads {
+		for i := range row {
+			row[i] *= scale
+		}
+	}
+}
+
+func addScaledEmbeddingGradBuffers(dst, src [][]float32, scale float32) {
+	if scale == 0 {
+		return
+	}
+	for i := range dst {
+		if i >= len(src) {
+			return
+		}
+		for j := range dst[i] {
+			if j >= len(src[i]) {
+				break
+			}
+			dst[i][j] += src[i][j] * scale
+		}
+	}
 }
 
 func infoNCERowLoss(scores []float32, targetIndex int, temperature float32) float32 {
@@ -3581,19 +3729,44 @@ func normalizedTrainConfig(cfg EmbeddingTrainConfig, params ...mantaartifact.Par
 	if cfg.Temperature == 0 {
 		cfg.Temperature = 0.05
 	}
+	cfg.GroupedLossWeight = effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
 	return cfg
 }
 
 func validateTrainConfig(cfg EmbeddingTrainConfig) error {
 	switch cfg.ContrastiveLoss {
-	case "pair_mse", "infonce":
+	case "pair_mse", "infonce", "grouped_infonce", "hybrid_infonce":
 	default:
 		return fmt.Errorf("unsupported contrastive_loss %q", cfg.ContrastiveLoss)
 	}
 	if cfg.Temperature <= 0 {
 		return fmt.Errorf("temperature must be positive")
 	}
+	if cfg.GroupedLossWeight < 0 {
+		return fmt.Errorf("grouped_loss_weight must be non-negative")
+	}
 	return nil
+}
+
+func embeddingUsesInfoNCELoss(loss string) bool {
+	return loss == "infonce" || loss == "grouped_infonce" || loss == "hybrid_infonce"
+}
+
+func effectiveGroupedLossWeight(loss string, weight float32) float32 {
+	switch loss {
+	case "hybrid_infonce":
+		if weight <= 0 {
+			return 0.25
+		}
+		return weight
+	case "grouped_infonce":
+		if weight <= 0 {
+			return 1
+		}
+		return weight
+	default:
+		return 0
+	}
 }
 
 func paramQuantBits(param mantaartifact.Param) int {

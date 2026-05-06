@@ -9,6 +9,7 @@ import (
 )
 
 type embeddingPairRecord struct {
+	Source      string   `json:"source,omitempty"`
 	LeftTokens  []int32  `json:"left_tokens"`
 	RightTokens []int32  `json:"right_tokens"`
 	LeftMask    []int32  `json:"left_mask,omitempty"`
@@ -90,6 +91,7 @@ func newEmbeddingPairRecord(example EmbeddingPairExample) (embeddingPairRecord, 
 	}
 	target := float64(example.Target)
 	return embeddingPairRecord{
+		Source:      example.Source,
 		LeftTokens:  append([]int32(nil), example.LeftTokens...),
 		RightTokens: append([]int32(nil), example.RightTokens...),
 		LeftMask:    append([]int32(nil), example.LeftMask...),
@@ -106,6 +108,7 @@ func (r embeddingPairRecord) example() (EmbeddingPairExample, error) {
 		target = float32(*r.Label)
 	}
 	_, err := newEmbeddingPairRecord(EmbeddingPairExample{
+		Source:      r.Source,
 		LeftTokens:  r.LeftTokens,
 		RightTokens: r.RightTokens,
 		LeftMask:    r.LeftMask,
@@ -116,6 +119,7 @@ func (r embeddingPairRecord) example() (EmbeddingPairExample, error) {
 		return EmbeddingPairExample{}, err
 	}
 	return EmbeddingPairExample{
+		Source:      r.Source,
 		LeftTokens:  append([]int32(nil), r.LeftTokens...),
 		RightTokens: append([]int32(nil), r.RightTokens...),
 		LeftMask:    append([]int32(nil), r.LeftMask...),

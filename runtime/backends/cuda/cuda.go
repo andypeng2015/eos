@@ -47,6 +47,7 @@ func (b *Backend) Capabilities() []string {
 		mantaartifact.CapabilityImageOps,
 		mantaartifact.CapabilityTrainingLosses,
 		mantaartifact.CapabilityTurboQuant,
+		mantaartifact.CapabilitySparseAttention,
 	}
 }
 
@@ -349,6 +350,32 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 			return backend.StepDispatchResult{}, false, err
 		}
 		return result, true, nil
+	case mantaartifact.StepSparseAttention:
+		if e.device == nil {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		cfg, ok := planBuiltinSparseAttention(step, inputs)
+		if !ok {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		result, err := e.device.runSparseAttentionStep(inputs, outputType, cfg)
+		if err != nil {
+			return backend.StepDispatchResult{}, false, err
+		}
+		return result, true, nil
+	case mantaartifact.StepTurboSparseAttention:
+		if e.device == nil {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		cfg, ok := planBuiltinTurboSparseAttention(step, inputs)
+		if !ok {
+			return backend.StepDispatchResult{}, false, nil
+		}
+		result, err := e.device.runTurboSparseAttentionStep(inputs, outputType, cfg)
+		if err != nil {
+			return backend.StepDispatchResult{}, false, err
+		}
+		return result, true, nil
 	case mantaartifact.StepGDN, mantaartifact.StepIGDN:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
@@ -642,6 +669,31 @@ type cudaTurboQConfig struct {
 	width    int
 }
 
+const (
+	cudaSparseAttentionMaxTopK                = 128
+	cudaTurboSparseAttentionMaxRouteTopBlocks = 128
+)
+
+type cudaSparseAttentionConfig struct {
+	rank      int
+	kvLayout  int
+	batches   int
+	queryLen  int
+	keyLen    int
+	queryDim  int
+	valueDim  int
+	topK      int
+	outputLen int
+}
+
+type cudaTurboSparseAttentionConfig struct {
+	sparse         cudaSparseAttentionConfig
+	key            cudaTurboQConfig
+	value          cudaTurboQConfig
+	routeBlockSize int
+	routeTopBlocks int
+}
+
 func planBuiltinTurboQEncode(step mantaartifact.Step, inputs []*backend.Tensor) (cudaTurboQConfig, bool) {
 	if len(inputs) != 1 || inputs[0] == nil {
 		return cudaTurboQConfig{}, false
@@ -693,6 +745,198 @@ func planBuiltinTurboQDecode(step mantaartifact.Step, inputs []*backend.Tensor) 
 		height:   coords.Shape[2],
 		width:    coords.Shape[3],
 	}, true
+}
+
+func planBuiltinSparseAttention(step mantaartifact.Step, inputs []*backend.Tensor) (cudaSparseAttentionConfig, bool) {
+	if len(inputs) != 3 || inputs[0] == nil || inputs[1] == nil || inputs[2] == nil {
+		return cudaSparseAttentionConfig{}, false
+	}
+	query, key, value := inputs[0], inputs[1], inputs[2]
+	for _, tensor := range []*backend.Tensor{query, key, value} {
+		if len(tensor.F32) != tensor.Elements() {
+			return cudaSparseAttentionConfig{}, false
+		}
+	}
+	if len(query.Shape) == 2 && len(key.Shape) == 2 && len(value.Shape) == 2 {
+		qLen, queryDim := query.Shape[0], query.Shape[1]
+		keyLen, keyDim := key.Shape[0], key.Shape[1]
+		valueLen, valueDim := value.Shape[0], value.Shape[1]
+		if qLen < 0 || keyLen <= 0 || queryDim <= 0 || queryDim != keyDim || keyLen != valueLen || valueDim <= 0 {
+			return cudaSparseAttentionConfig{}, false
+		}
+		topK := sparseAttentionTopKForCUDA(step.Attributes, keyLen)
+		if topK <= 0 || topK > cudaSparseAttentionMaxTopK {
+			return cudaSparseAttentionConfig{}, false
+		}
+		return cudaSparseAttentionConfig{
+			rank:      2,
+			kvLayout:  0,
+			batches:   1,
+			queryLen:  qLen,
+			keyLen:    keyLen,
+			queryDim:  queryDim,
+			valueDim:  valueDim,
+			topK:      topK,
+			outputLen: qLen * valueDim,
+		}, true
+	}
+	if len(query.Shape) == 3 && len(key.Shape) == 3 && len(value.Shape) == 3 {
+		batches, qLen, queryDim := query.Shape[0], query.Shape[1], query.Shape[2]
+		keyBatches, keyLen, keyDim := key.Shape[0], key.Shape[1], key.Shape[2]
+		valueBatches, valueLen, valueDim := value.Shape[0], value.Shape[1], value.Shape[2]
+		if batches <= 0 || batches != keyBatches || batches != valueBatches || qLen < 0 || keyLen <= 0 || queryDim <= 0 || queryDim != keyDim || keyLen != valueLen || valueDim <= 0 {
+			return cudaSparseAttentionConfig{}, false
+		}
+		topK := sparseAttentionTopKForCUDA(step.Attributes, keyLen)
+		if topK <= 0 || topK > cudaSparseAttentionMaxTopK {
+			return cudaSparseAttentionConfig{}, false
+		}
+		return cudaSparseAttentionConfig{
+			rank:      3,
+			kvLayout:  0,
+			batches:   batches,
+			queryLen:  qLen,
+			keyLen:    keyLen,
+			queryDim:  queryDim,
+			valueDim:  valueDim,
+			topK:      topK,
+			outputLen: batches * qLen * valueDim,
+		}, true
+	}
+	return cudaSparseAttentionConfig{}, false
+}
+
+func planBuiltinTurboSparseAttention(step mantaartifact.Step, inputs []*backend.Tensor) (cudaTurboSparseAttentionConfig, bool) {
+	if len(inputs) != 5 || inputs[0] == nil || inputs[1] == nil || inputs[2] == nil || inputs[3] == nil || inputs[4] == nil {
+		return cudaTurboSparseAttentionConfig{}, false
+	}
+	query, keyCoords, keyNorms, valueCoords, valueNorms := inputs[0], inputs[1], inputs[2], inputs[3], inputs[4]
+	for _, tensor := range []*backend.Tensor{query, keyCoords, keyNorms, valueCoords, valueNorms} {
+		if len(tensor.F32) != tensor.Elements() {
+			return cudaTurboSparseAttentionConfig{}, false
+		}
+	}
+	if len(keyCoords.Shape) != 4 || len(valueCoords.Shape) != 4 || len(keyNorms.Shape) != 3 || len(valueNorms.Shape) != 3 {
+		return cudaTurboSparseAttentionConfig{}, false
+	}
+	if keyCoords.Shape[3] != 1 || valueCoords.Shape[3] != 1 {
+		return cudaTurboSparseAttentionConfig{}, false
+	}
+	if keyNorms.Shape[0] != keyCoords.Shape[0] || keyNorms.Shape[1] != keyCoords.Shape[2] || keyNorms.Shape[2] != keyCoords.Shape[3] {
+		return cudaTurboSparseAttentionConfig{}, false
+	}
+	if valueNorms.Shape[0] != valueCoords.Shape[0] || valueNorms.Shape[1] != valueCoords.Shape[2] || valueNorms.Shape[2] != valueCoords.Shape[3] {
+		return cudaTurboSparseAttentionConfig{}, false
+	}
+	if keyCoords.Shape[0] != valueCoords.Shape[0] || keyCoords.Shape[2] != valueCoords.Shape[2] {
+		return cudaTurboSparseAttentionConfig{}, false
+	}
+	bits := stepAttrInt(step.Attributes, "bits", cudaBitsForQTensor(keyCoords))
+	if bits != 2 && bits != 4 && bits != 8 {
+		return cudaTurboSparseAttentionConfig{}, false
+	}
+	if cudaBitsForQTensor(keyCoords) != bits {
+		return cudaTurboSparseAttentionConfig{}, false
+	}
+	if cudaBitsForQTensor(valueCoords) != bits {
+		return cudaTurboSparseAttentionConfig{}, false
+	}
+	batches, queryDim, keyLen, valueDim := keyCoords.Shape[0], keyCoords.Shape[1], keyCoords.Shape[2], valueCoords.Shape[1]
+	if batches <= 0 || queryDim <= 0 || keyLen <= 0 || valueDim <= 0 {
+		return cudaTurboSparseAttentionConfig{}, false
+	}
+	var rank, queryLen int
+	switch len(query.Shape) {
+	case 2:
+		rank = 2
+		queryLen = query.Shape[0]
+		if batches != 1 || query.Shape[1] != queryDim {
+			return cudaTurboSparseAttentionConfig{}, false
+		}
+	case 3:
+		rank = 3
+		queryLen = query.Shape[1]
+		if query.Shape[0] != batches || query.Shape[2] != queryDim {
+			return cudaTurboSparseAttentionConfig{}, false
+		}
+	default:
+		return cudaTurboSparseAttentionConfig{}, false
+	}
+	if queryLen < 0 {
+		return cudaTurboSparseAttentionConfig{}, false
+	}
+	topK := sparseAttentionTopKForCUDA(step.Attributes, keyLen)
+	if topK <= 0 || topK > cudaSparseAttentionMaxTopK {
+		return cudaTurboSparseAttentionConfig{}, false
+	}
+	routeBlockSize := stepAttrInt(step.Attributes, "route_block_size", 0)
+	routeTopBlocks := stepAttrInt(step.Attributes, "route_top_blocks", 0)
+	if (routeBlockSize > 0) != (routeTopBlocks > 0) {
+		return cudaTurboSparseAttentionConfig{}, false
+	}
+	if routeBlockSize > 0 {
+		if routeBlockSize > keyLen {
+			routeBlockSize = keyLen
+		}
+		blockCount := (keyLen + routeBlockSize - 1) / routeBlockSize
+		if routeTopBlocks > blockCount {
+			routeTopBlocks = blockCount
+		}
+		if routeTopBlocks <= 0 || routeTopBlocks > cudaTurboSparseAttentionMaxRouteTopBlocks {
+			return cudaTurboSparseAttentionConfig{}, false
+		}
+	}
+	seed := stepAttrInt64(step.Attributes, "seed", 0x4d697261)
+	keyCfg := cudaTurboQConfig{
+		bits:     bits,
+		seed:     seed,
+		batches:  batches,
+		channels: queryDim,
+		height:   keyLen,
+		width:    1,
+	}
+	valueCfg := cudaTurboQConfig{
+		bits:     bits,
+		seed:     seed,
+		batches:  batches,
+		channels: valueDim,
+		height:   keyLen,
+		width:    1,
+	}
+	return cudaTurboSparseAttentionConfig{
+		sparse: cudaSparseAttentionConfig{
+			rank:      rank,
+			kvLayout:  1,
+			batches:   batches,
+			queryLen:  queryLen,
+			keyLen:    keyLen,
+			queryDim:  queryDim,
+			valueDim:  valueDim,
+			topK:      topK,
+			outputLen: batches * queryLen * valueDim,
+		},
+		key:            keyCfg,
+		value:          valueCfg,
+		routeBlockSize: routeBlockSize,
+		routeTopBlocks: routeTopBlocks,
+	}, true
+}
+
+func sparseAttentionTopKForCUDA(attrs map[string]string, keyLen int) int {
+	if keyLen <= 0 {
+		return 0
+	}
+	topK := stepAttrInt(attrs, "top_k", 0)
+	if topK <= 0 {
+		topK = int(math.Ceil(math.Sqrt(float64(keyLen))))
+	}
+	if topK < 1 {
+		topK = 1
+	}
+	if topK > keyLen {
+		topK = keyLen
+	}
+	return topK
 }
 
 func supportsBuiltinMSELoss(inputs []*backend.Tensor) bool {

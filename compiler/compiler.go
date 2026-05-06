@@ -307,6 +307,11 @@ func inferModuleCapabilities(mod *mantaartifact.Module) []string {
 			add(mantaartifact.CapabilityImageOps)
 		case mantaartifact.StepTurboQEncode, mantaartifact.StepTurboQDecode:
 			add(mantaartifact.CapabilityTurboQuant)
+		case mantaartifact.StepSparseAttention:
+			add(mantaartifact.CapabilitySparseAttention)
+		case mantaartifact.StepTurboSparseAttention:
+			add(mantaartifact.CapabilitySparseAttention)
+			add(mantaartifact.CapabilityTurboQuant)
 		case mantaartifact.StepCrossEntropy, mantaartifact.StepMSELoss, mantaartifact.StepMSSSIMLoss:
 			add(mantaartifact.CapabilityTrainingLosses)
 		}
@@ -319,6 +324,11 @@ func addCapabilitiesFromOp(add func(string), op string) {
 	case "conv2d", "conv2d_transpose", "gdn", "igdn":
 		add(mantaartifact.CapabilityImageOps)
 	case "turboquant_encode", "turboquant_decode":
+		add(mantaartifact.CapabilityTurboQuant)
+	case "sparse_attention":
+		add(mantaartifact.CapabilitySparseAttention)
+	case "turbo_sparse_attention":
+		add(mantaartifact.CapabilitySparseAttention)
 		add(mantaartifact.CapabilityTurboQuant)
 	case "cross_entropy_factorized", "mse_loss", "ms_ssim_loss":
 		add(mantaartifact.CapabilityTrainingLosses)
@@ -1450,6 +1460,10 @@ func lowerOpKind(call *syntax.CallExpr, kernels map[string]bool) mir.OpKind {
 		return mir.OpKVWrite
 	case "dot", "cosine", "l2_distance":
 		return mir.OpScore
+	case "sparse_attention":
+		return mir.OpSparseAttention
+	case "turbo_sparse_attention":
+		return mir.OpTurboSparseAttention
 	case "rmsnorm", "normalize", "layernorm", "gelu":
 		return mir.OpPointwise
 	default:
@@ -1659,6 +1673,12 @@ func inferCallPlan(call *syntax.CallExpr, output string, env map[string]hir.Type
 		buffers = appendOutputBuffer(buffers, output, out)
 		return out, steps, buffers, newKernels, nil
 	}
+	if !call.Intrinsic && call.Callee == "sparse_attention" {
+		return inferSparseAttentionCallPlan(call, output, env, kernels)
+	}
+	if !call.Intrinsic && call.Callee == "turbo_sparse_attention" {
+		return inferTurboSparseAttentionCallPlan(call, output, env, kernels)
+	}
 
 	inputs := make([]string, 0, len(call.Args))
 	argTypes := make([]hir.Type, 0, len(call.Args))
@@ -1818,6 +1838,205 @@ func inferCallPlan(call *syntax.CallExpr, output string, env map[string]hir.Type
 	}
 }
 
+func inferSparseAttentionCallPlan(call *syntax.CallExpr, output string, env map[string]hir.Type, kernels map[string]bool) (hir.Type, []mantaartifact.Step, []lir.Buffer, []lir.Kernel, error) {
+	if len(call.Args) != 3 && len(call.Args) != 4 {
+		return hir.Type{}, nil, nil, nil, fmt.Errorf("sparse_attention expects query, key, value, and optional top_k literal")
+	}
+	attrs, err := sparseAttentionAttrs(call.Args, 3, call.Callee)
+	if err != nil {
+		return hir.Type{}, nil, nil, nil, err
+	}
+	argTypes, inputs, steps, buffers, newKernels, err := materializeTensorArgs(call.Args[:3], output, call.Callee, env, kernels)
+	if err != nil {
+		return hir.Type{}, nil, nil, nil, err
+	}
+	out, err := sparseAttentionOutputType(argTypes)
+	if err != nil {
+		return hir.Type{}, nil, nil, nil, err
+	}
+	steps = append(steps, mantaartifact.Step{
+		Kind:       mantaartifact.StepSparseAttention,
+		Name:       call.Callee,
+		Inputs:     inputs,
+		Outputs:    maybeOutput(output),
+		Attributes: attrs,
+	})
+	buffers = appendOutputBuffer(buffers, output, out)
+	return out, steps, buffers, newKernels, nil
+}
+
+func inferTurboSparseAttentionCallPlan(call *syntax.CallExpr, output string, env map[string]hir.Type, kernels map[string]bool) (hir.Type, []mantaartifact.Step, []lir.Buffer, []lir.Kernel, error) {
+	if len(call.Args) != 5 && len(call.Args) != 6 && len(call.Args) != 8 {
+		return hir.Type{}, nil, nil, nil, fmt.Errorf("turbo_sparse_attention expects query, key coords, key norms, value coords, value norms, optional top_k literal, and optional route_block_size/route_top_blocks literals")
+	}
+	attrs, err := turboSparseAttentionAttrs(call.Args, call.Callee)
+	if err != nil {
+		return hir.Type{}, nil, nil, nil, err
+	}
+	argTypes, inputs, steps, buffers, newKernels, err := materializeTensorArgs(call.Args[:5], output, call.Callee, env, kernels)
+	if err != nil {
+		return hir.Type{}, nil, nil, nil, err
+	}
+	out, err := turboSparseAttentionOutputType(argTypes)
+	if err != nil {
+		return hir.Type{}, nil, nil, nil, err
+	}
+	steps = append(steps, mantaartifact.Step{
+		Kind:       mantaartifact.StepTurboSparseAttention,
+		Name:       call.Callee,
+		Inputs:     inputs,
+		Outputs:    maybeOutput(output),
+		Attributes: attrs,
+	})
+	buffers = appendOutputBuffer(buffers, output, out)
+	return out, steps, buffers, newKernels, nil
+}
+
+func sparseAttentionAttrs(args []syntax.Expr, tensorArgCount int, callee string) (map[string]string, error) {
+	if len(args) == tensorArgCount {
+		return nil, nil
+	}
+	k, ok := topKLiteralExpr(args[tensorArgCount])
+	if !ok {
+		return nil, fmt.Errorf("%s top_k must be a positive integer literal", callee)
+	}
+	return map[string]string{"top_k": fmt.Sprintf("%d", k)}, nil
+}
+
+func turboSparseAttentionAttrs(args []syntax.Expr, callee string) (map[string]string, error) {
+	switch len(args) {
+	case 5:
+		return nil, nil
+	case 6, 8:
+		k, ok := topKLiteralExpr(args[5])
+		if !ok {
+			return nil, fmt.Errorf("%s top_k must be a positive integer literal", callee)
+		}
+		attrs := map[string]string{"top_k": fmt.Sprintf("%d", k)}
+		if len(args) == 8 {
+			blockSize, ok := topKLiteralExpr(args[6])
+			if !ok {
+				return nil, fmt.Errorf("%s route_block_size must be a positive integer literal", callee)
+			}
+			topBlocks, ok := topKLiteralExpr(args[7])
+			if !ok {
+				return nil, fmt.Errorf("%s route_top_blocks must be a positive integer literal", callee)
+			}
+			attrs["route_block_size"] = fmt.Sprintf("%d", blockSize)
+			attrs["route_top_blocks"] = fmt.Sprintf("%d", topBlocks)
+		}
+		return attrs, nil
+	default:
+		return nil, fmt.Errorf("%s expects 5, 6, or 8 arguments", callee)
+	}
+}
+
+func materializeTensorArgs(args []syntax.Expr, output, callee string, env map[string]hir.Type, kernels map[string]bool) ([]hir.Type, []string, []mantaartifact.Step, []lir.Buffer, []lir.Kernel, error) {
+	argTypes := make([]hir.Type, 0, len(args))
+	inputs := make([]string, 0, len(args))
+	steps := []mantaartifact.Step{}
+	buffers := []lir.Buffer{}
+	newKernels := []lir.Kernel{}
+	for _, arg := range args {
+		typ, err := inferExprType(arg, env)
+		if err != nil {
+			return nil, nil, nil, nil, nil, err
+		}
+		argTypes = append(argTypes, typ)
+	}
+	for i, arg := range args {
+		_, name, argSteps, argBuffers, argKernels, err := materializeCallArg(arg, output, callee, i, env, kernels)
+		if err != nil {
+			return nil, nil, nil, nil, nil, err
+		}
+		steps = append(steps, argSteps...)
+		for _, buf := range argBuffers {
+			buffers = appendIfMissingBuffer(buffers, buf)
+		}
+		newKernels = appendKernelsIfMissing(newKernels, argKernels...)
+		inputs = append(inputs, name)
+	}
+	return argTypes, inputs, steps, buffers, newKernels, nil
+}
+
+func inferSparseAttentionExprType(call *syntax.CallExpr, env map[string]hir.Type) (hir.Type, error) {
+	if len(call.Args) != 3 && len(call.Args) != 4 {
+		return hir.Type{}, fmt.Errorf("sparse_attention expects query, key, value, and optional top_k literal")
+	}
+	if _, err := sparseAttentionAttrs(call.Args, 3, call.Callee); err != nil {
+		return hir.Type{}, err
+	}
+	argTypes := make([]hir.Type, 0, 3)
+	for _, arg := range call.Args[:3] {
+		typ, err := inferExprType(arg, env)
+		if err != nil {
+			return hir.Type{}, err
+		}
+		argTypes = append(argTypes, typ)
+	}
+	return sparseAttentionOutputType(argTypes)
+}
+
+func inferTurboSparseAttentionExprType(call *syntax.CallExpr, env map[string]hir.Type) (hir.Type, error) {
+	if len(call.Args) != 5 && len(call.Args) != 6 && len(call.Args) != 8 {
+		return hir.Type{}, fmt.Errorf("turbo_sparse_attention expects query, key coords, key norms, value coords, value norms, optional top_k literal, and optional route_block_size/route_top_blocks literals")
+	}
+	if _, err := turboSparseAttentionAttrs(call.Args, call.Callee); err != nil {
+		return hir.Type{}, err
+	}
+	argTypes := make([]hir.Type, 0, 5)
+	for _, arg := range call.Args[:5] {
+		typ, err := inferExprType(arg, env)
+		if err != nil {
+			return hir.Type{}, err
+		}
+		argTypes = append(argTypes, typ)
+	}
+	return turboSparseAttentionOutputType(argTypes)
+}
+
+func sparseAttentionOutputType(argTypes []hir.Type) (hir.Type, error) {
+	if len(argTypes) != 3 {
+		return hir.Type{}, fmt.Errorf("sparse_attention expects 3 tensor arguments")
+	}
+	if isRank2HIRTensor(argTypes[0]) && isRank2HIRTensor(argTypes[1]) && isRank2HIRTensor(argTypes[2]) {
+		return hir.Type{Kind: hir.TypeTensor, Tensor: &hir.TensorType{
+			DType: argTypes[2].Tensor.DType,
+			Shape: []hir.DimExpr{{Name: argTypes[0].Tensor.Shape[0].Name}, {Name: argTypes[2].Tensor.Shape[1].Name}},
+		}}, nil
+	}
+	if isRank3HIRTensor(argTypes[0]) && isRank3HIRTensor(argTypes[1]) && isRank3HIRTensor(argTypes[2]) {
+		return hir.Type{Kind: hir.TypeTensor, Tensor: &hir.TensorType{
+			DType: argTypes[2].Tensor.DType,
+			Shape: []hir.DimExpr{{Name: argTypes[0].Tensor.Shape[0].Name}, {Name: argTypes[0].Tensor.Shape[1].Name}, {Name: argTypes[2].Tensor.Shape[2].Name}},
+		}}, nil
+	}
+	return hir.Type{}, fmt.Errorf("sparse_attention expects rank-2 Q/K/V or rank-3 batched Q/K/V tensors")
+}
+
+func turboSparseAttentionOutputType(argTypes []hir.Type) (hir.Type, error) {
+	if len(argTypes) != 5 {
+		return hir.Type{}, fmt.Errorf("turbo_sparse_attention expects 5 tensor arguments")
+	}
+	query, valueCoords := argTypes[0], argTypes[3]
+	if !isRank4HIRTensor(valueCoords) {
+		return hir.Type{}, fmt.Errorf("turbo_sparse_attention value coords must be q*[B, D, T, 1]")
+	}
+	if isRank2HIRTensor(query) {
+		return hir.Type{Kind: hir.TypeTensor, Tensor: &hir.TensorType{
+			DType: "f16",
+			Shape: []hir.DimExpr{{Name: query.Tensor.Shape[0].Name}, {Name: valueCoords.Tensor.Shape[1].Name}},
+		}}, nil
+	}
+	if isRank3HIRTensor(query) {
+		return hir.Type{Kind: hir.TypeTensor, Tensor: &hir.TensorType{
+			DType: "f16",
+			Shape: []hir.DimExpr{{Name: query.Tensor.Shape[0].Name}, {Name: query.Tensor.Shape[1].Name}, {Name: valueCoords.Tensor.Shape[1].Name}},
+		}}, nil
+	}
+	return hir.Type{}, fmt.Errorf("turbo_sparse_attention query must be f*[Q, D] or f*[B, Q, D]")
+}
+
 func inferExprType(expr syntax.Expr, env map[string]hir.Type) (hir.Type, error) {
 	switch e := expr.(type) {
 	case *syntax.IdentExpr:
@@ -1864,6 +2083,12 @@ func inferExprType(expr syntax.Expr, env map[string]hir.Type) (hir.Type, error) 
 			default:
 				return hir.Type{}, fmt.Errorf("topk expects rank-1 or rank-2 score input")
 			}
+		}
+		if !e.Intrinsic && e.Callee == "sparse_attention" {
+			return inferSparseAttentionExprType(e, env)
+		}
+		if !e.Intrinsic && e.Callee == "turbo_sparse_attention" {
+			return inferTurboSparseAttentionExprType(e, env)
 		}
 		argTypes := make([]hir.Type, 0, len(e.Args))
 		for _, arg := range e.Args {
@@ -2425,4 +2650,8 @@ func isRank2HIRTensor(typ hir.Type) bool {
 
 func isRank3HIRTensor(typ hir.Type) bool {
 	return typ.Kind == hir.TypeTensor && typ.Tensor != nil && len(typ.Tensor.Shape) == 3
+}
+
+func isRank4HIRTensor(typ hir.Type) bool {
+	return typ.Kind == hir.TypeTensor && typ.Tensor != nil && len(typ.Tensor.Shape) == 4
 }

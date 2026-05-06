@@ -16,19 +16,20 @@ const DefaultEmbeddingModelName = "manta-embed-v1"
 // DefaultEmbeddingPackageConfig controls Manta's built-in default
 // embedding-model package initialization.
 type DefaultEmbeddingPackageConfig struct {
-	Name            string
-	VocabSize       int
-	MaxSequence     int
-	EmbeddingDim    int
-	HiddenDim       int
-	EncoderRepeats  int
-	Seed            int64
-	LearningRate    float32
-	WeightDecay     float32
-	WeightBits      int
-	Optimizer       string
-	ContrastiveLoss string
-	Temperature     float32
+	Name              string
+	VocabSize         int
+	MaxSequence       int
+	EmbeddingDim      int
+	HiddenDim         int
+	EncoderRepeats    int
+	Seed              int64
+	LearningRate      float32
+	WeightDecay       float32
+	WeightBits        int
+	Optimizer         string
+	ContrastiveLoss   string
+	Temperature       float32
+	GroupedLossWeight float32
 }
 
 // InitDefaultEmbeddingPackage compiles Manta's default trainable embedding
@@ -167,17 +168,21 @@ func (cfg DefaultEmbeddingPackageConfig) validate() error {
 	if cfg.Temperature <= 0 {
 		return fmt.Errorf("temperature must be positive")
 	}
+	if cfg.GroupedLossWeight < 0 {
+		return fmt.Errorf("grouped loss weight must be non-negative")
+	}
 	return nil
 }
 
 func (cfg DefaultEmbeddingPackageConfig) trainConfig() mantaruntime.EmbeddingTrainConfig {
 	return mantaruntime.EmbeddingTrainConfig{
-		LearningRate:    cfg.LearningRate,
-		WeightDecay:     cfg.WeightDecay,
-		WeightBits:      cfg.WeightBits,
-		Optimizer:       cfg.Optimizer,
-		ContrastiveLoss: cfg.ContrastiveLoss,
-		Temperature:     cfg.Temperature,
+		LearningRate:      cfg.LearningRate,
+		WeightDecay:       cfg.WeightDecay,
+		WeightBits:        cfg.WeightBits,
+		Optimizer:         cfg.Optimizer,
+		ContrastiveLoss:   cfg.ContrastiveLoss,
+		Temperature:       cfg.Temperature,
+		GroupedLossWeight: cfg.GroupedLossWeight,
 	}
 }
 

@@ -1,9 +1,10 @@
 # Benchmarks
 
-Manta has two benchmark layers:
+Manta has three benchmark layers:
 
 - Go microbenchmarks for isolated runtime kernels and trainer math.
 - End-to-end training smokes for the native default embedding-model path.
+- Embedder scoreboards for retrieval quality and serving efficiency claims.
 
 Run the default microbenchmarks with Ferrous Wheel:
 
@@ -34,6 +35,37 @@ go run ./cmd/manta train-embed --eval-only /path/to/manta-embed-v1.mll /path/to/
 When the package has a sibling `.tokenizer.mll`, text eval JSONL is tokenized automatically. Pass `--tokenizer /path/to/tokenizer.mll` to use an explicit tokenizer.
 
 For a production candidate run with acquired BEIR-format datasets, provenance, metric gates, sealed export, and SHA256 manifests, use `scripts/acquire_manta_embed_v1_datasets.fw` followed by `scripts/train_manta_embed_v1_candidate.fw`. See `docs/production-embedding.md`.
+
+Build the long-context embedder wedge scoreboard from an existing sealed candidate:
+
+```bash
+MANTA_REPO_ROOT=$PWD \
+MANTA_SCOREBOARD_ARTIFACT=/path/to/manta-embed-v1.sealed.mll \
+MANTA_SCOREBOARD_PAIRWISE_JSONL=/data/manta/datasets/manta-embed-v1/processed/eval.jsonl \
+MANTA_SCOREBOARD_HARD_JSONL=/data/manta/datasets/manta-embed-v1/processed/hard-eval.jsonl \
+MANTA_SCOREBOARD_RETRIEVAL_ROOT=/data/manta/datasets/manta-embed-v1 \
+MANTA_SCOREBOARD_RETRIEVAL_DATASETS=scifact,nfcorpus,fiqa \
+ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
+```
+
+The scoreboard run writes `scoreboard.tsv`, `scoreboard.json`, per-task metrics JSON, command logs, and a run-local `manta` binary under `runs/<run-id>/`. Pairwise rows use `MANTA_SCOREBOARD_PAIRWISE_ARTIFACT` when set, or infer the sibling trainable package from a sealed artifact path. Add `MANTA_SCOREBOARD_LONG_ROOT` and `MANTA_SCOREBOARD_LONG_DATASETS` when long-document retrieval datasets are prepared.
+
+Run a full retrieval-alignment round from an existing candidate when retrieval is behind the BM25 or open-model baselines:
+
+```bash
+MANTA_REPO_ROOT=$PWD \
+MANTA_ALIGN_INITIAL_ARTIFACT=/path/to/manta-embed-v1.sealed.mll \
+MANTA_ALIGN_DATASETS=scifact,nfcorpus,fiqa \
+ferrous-wheel run scripts/run_manta_embed_v1_retrieval_alignment_round.fw
+```
+
+The alignment harness writes a baseline scoreboard, run-local model-hard negatives, a retrained candidate package, a candidate scoreboard, and `retrieval-alignment-summary.tsv/json` with per-dataset nDCG@10 and recall@100 deltas.
+Candidate training defaults to batch `64` and one explicit hard negative per query. This keeps full mined rounds bounded; larger batches or more explicit negatives should be treated as throughput experiments because pair work grows quickly.
+Set `MANTA_ALIGN_MODEL_HARD_DATASET_WEIGHTS=dataset=weight,...` to allocate more mined examples to weak datasets in the next mixed round.
+Set `MANTA_ALIGN_CANDIDATE_SOURCE_WEIGHTS=source=weight,...` to source-balance hard-negative batches when the train JSONL has `source` fields. Family keys such as `fiqa` also apply to mined sources such as `fiqa:model` unless an exact key is present.
+Set `MANTA_ALIGN_GATE_CANDIDATE=1` for promotion-style rounds. The gate records the summary, then fails when macro nDCG@10 is below `MANTA_ALIGN_MIN_MACRO_NDCG_DELTA` or any dataset regresses beyond `MANTA_ALIGN_MAX_DATASET_NDCG_REGRESSION`; `MANTA_ALIGN_MIN_DATASET_NDCG_RATIO` can enforce an additional per-dataset ratio floor.
+Set `MANTA_ALIGN_CANDIDATE_CONTRASTIVE_LOSS=grouped_infonce` to test the query-grouped hard-negative objective. This counts only each query's own positive/negative candidate set in the training loss, which is useful as a retrieval-ranking ablation when corpus ranking regresses. The first grouped-only gated run rejected the candidate, so keep this flag as an experiment rather than a promotion path.
+Set `MANTA_ALIGN_CANDIDATE_CONTRASTIVE_LOSS=hybrid_infonce` to keep the global hard-negative InfoNCE matrix and add a weighted grouped term. The first weight-`0.25` gated run improved FiQA but regressed SciFact/NFCorpus. The first strict pass used `MANTA_ALIGN_CANDIDATE_GROUPED_LOSS_WEIGHT=0.10`, `MANTA_ALIGN_CANDIDATE_LR=0.000025`, and `MANTA_ALIGN_CANDIDATE_SOURCE_WEIGHTS=scifact=1,nfcorpus=2,fiqa=1`.
 
 If you want a binary runner instead of `run` mode:
 

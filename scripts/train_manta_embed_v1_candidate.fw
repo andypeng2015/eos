@@ -38,6 +38,7 @@ type candidateConfig struct {
 	PairwiseTrain       string
 	HardNegativeTrain   string
 	HardNegativesPerQuery string
+	HardNegativeSourceWeights string
 	VocabSize           string
 	MaxSeq              string
 	EmbeddingDim        string
@@ -49,6 +50,7 @@ type candidateConfig struct {
 	BatchSize           string
 	LR                  string
 	ContrastiveLoss     string
+	GroupedLossWeight   string
 	Temperature         string
 	EvalEvery           string
 	EvalEverySteps      string
@@ -99,6 +101,8 @@ Common knobs:
   MANTA_EPOCHS=3
   MANTA_BATCH_SIZE=1024
   MANTA_LR=0.005
+  MANTA_CONTRASTIVE_LOSS=infonce
+  MANTA_GROUPED_LOSS_WEIGHT=0.25
   MANTA_TEMPERATURE=0.05
   MANTA_SELECT_METRIC=mrr
   MANTA_EVAL_EVERY_STEPS=0
@@ -109,6 +113,7 @@ Common knobs:
   MANTA_PAIRWISE_TRAIN=1
   MANTA_HARD_NEGATIVE_TRAIN=1
   MANTA_HARD_NEGATIVES_PER_QUERY=1
+  MANTA_HARD_NEGATIVE_SOURCE_WEIGHTS=scifact=1,nfcorpus=2,fiqa=2
   MANTA_TRAIN_ENABLE_FAST_GELU=1
   MANTA_QUALITY_TARGET=retrieval
   MANTA_GATE_BM25_BASELINE=1
@@ -482,10 +487,12 @@ func writeManifest(cfg candidateConfig, status string) error {
     "pairwise_train": %s,
     "hard_negative_train": %s,
     "hard_negatives_per_query": %s,
+    "hard_negative_source_weights": %s,
     "epochs": %s,
     "batch_size": %s,
     "learning_rate": %s,
     "contrastive_loss": %s,
+    "grouped_loss_weight": %s,
     "temperature": %s,
     "select_metric": %s,
     "quality_target": %s,
@@ -535,10 +542,12 @@ func writeManifest(cfg candidateConfig, status string) error {
 		jsonBool(envEnabled("MANTA_PAIRWISE_TRAIN") || cfg.PairwiseTrain == "1" || strings.ToLower(cfg.PairwiseTrain) == "true"),
 		jsonBool(hardNegativeTrainEnabled(cfg)),
 		cfg.HardNegativesPerQuery,
+		jsonString(cfg.HardNegativeSourceWeights),
 		cfg.Epochs,
 		cfg.BatchSize,
 		cfg.LR,
 		jsonString(cfg.ContrastiveLoss),
+		cfg.GroupedLossWeight,
 		cfg.Temperature,
 		jsonString(cfg.SelectMetric),
 		jsonString(cfg.QualityTarget),
@@ -657,6 +666,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		BatchSize:           getenv("MANTA_BATCH_SIZE", "1024"),
 		LR:                  getenv("MANTA_LR", "0.005"),
 		ContrastiveLoss:     getenv("MANTA_CONTRASTIVE_LOSS", "infonce"),
+		GroupedLossWeight:   getenv("MANTA_GROUPED_LOSS_WEIGHT", "0"),
 		Temperature:         getenv("MANTA_TEMPERATURE", "0.05"),
 		EvalEvery:           getenv("MANTA_EVAL_EVERY", "1"),
 		EvalEverySteps:      getenv("MANTA_EVAL_EVERY_STEPS", "0"),
@@ -667,6 +677,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		PairwiseTrain:       getenv("MANTA_PAIRWISE_TRAIN", "0"),
 		HardNegativeTrain:   getenv("MANTA_HARD_NEGATIVE_TRAIN", "0"),
 		HardNegativesPerQuery: getenv("MANTA_HARD_NEGATIVES_PER_QUERY", "1"),
+		HardNegativeSourceWeights: getenv("MANTA_HARD_NEGATIVE_SOURCE_WEIGHTS", ""),
 		MinFreq:             getenv("MANTA_MIN_FREQ", "1"),
 		MinChars:            getenv("MANTA_MIN_CHARS", "20"),
 		MaxPairs:            getenv("MANTA_MAX_PAIRS", "0"),
@@ -787,6 +798,7 @@ func trainCommonArgs(cfg candidateConfig) []string {
 		"--batch-size", cfg.BatchSize,
 		"--lr", cfg.LR,
 		"--contrastive-loss", cfg.ContrastiveLoss,
+		"--grouped-loss-weight", cfg.GroupedLossWeight,
 		"--temperature", cfg.Temperature,
 		"--eval-every", cfg.EvalEvery,
 		"--eval-every-steps", cfg.EvalEverySteps,
@@ -980,6 +992,9 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 			args = append(args, "--pairwise-train")
 		} else if hardNegativeTrainEnabled(cfg) {
 			args = append(args, "--hard-negative-train", "--hard-negatives-per-query", cfg.HardNegativesPerQuery)
+			if cfg.HardNegativeSourceWeights != "" {
+				args = append(args, "--hard-negative-source-weights", cfg.HardNegativeSourceWeights)
+			}
 		}
 		if trainTokenizer != "" {
 			args = append(args, "--tokenizer", trainTokenizer)
@@ -992,6 +1007,9 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 			planArgs = append(planArgs, "--pairwise-train")
 		} else if hardNegativeTrainEnabled(cfg) {
 			planArgs = append(planArgs, "--hard-negative-train", "--hard-negatives-per-query", cfg.HardNegativesPerQuery)
+			if cfg.HardNegativeSourceWeights != "" {
+				planArgs = append(planArgs, "--hard-negative-source-weights", cfg.HardNegativeSourceWeights)
+			}
 		}
 		if trainTokenizer != "" {
 			planArgs = append(planArgs, "--tokenizer", trainTokenizer)

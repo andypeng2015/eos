@@ -30,6 +30,7 @@ type mineConfig struct {
 	Artifact         string
 	DatasetRoot      string
 	Datasets         []string
+	DatasetWeights   map[string]int
 	Split            string
 	OutputPath       string
 	BlendOutputPath  string
@@ -57,11 +58,15 @@ Run:
 Defaults:
   MANTA_DATASET_ROOT=$PWD/datasets/manta-embed-v1
   MANTA_MODEL_HARD_NEGATIVE_DATASETS=scifact,nfcorpus,fiqa
+  MANTA_MODEL_HARD_NEGATIVE_DATASET_WEIGHTS=
   MANTA_MODEL_HARD_NEGATIVE_SPLIT=train
   MANTA_MODEL_HARD_NEGATIVE_MAX_EXAMPLES=6000
   MANTA_MODEL_HARD_NEGATIVE_CANDIDATE_TOP_K=100
   MANTA_MODEL_HARD_NEGATIVE_BATCH_SIZE=512
-  MANTA_MODEL_HARD_NEGATIVE_BLEND_BM25=1`)
+  MANTA_MODEL_HARD_NEGATIVE_BLEND_BM25=1
+  MANTA_MODEL_HARD_NEGATIVE_OUTPUT_JSONL=$DATASET_ROOT/processed/train-model-hard-negatives.jsonl
+  MANTA_MODEL_HARD_NEGATIVE_BLEND_JSONL=$DATASET_ROOT/processed/train-hard-negatives-plus-model.jsonl
+  MANTA_MODEL_HARD_NEGATIVE_BM25_JSONL=$DATASET_ROOT/processed/train-hard-negatives.jsonl`)
 }
 
 func getenv(name string, fallback string) string {
@@ -151,6 +156,28 @@ func splitList(value string) []string {
 	return out
 }
 
+func parseDatasetWeights(value string) (map[string]int, error) {
+	weights := map[string]int{}
+	if strings.TrimSpace(value) == "" {
+		return weights, nil
+	}
+	for _, raw := range strings.Split(value, ",") {
+		item := strings.TrimSpace(raw)
+		if item == "" {
+			continue
+		}
+		dataset, weightRaw, ok := strings.Cut(item, "=")
+		guard ok else return nil, fmt.Errorf("dataset weight must be dataset=positive-int: %s", item)
+		dataset = strings.TrimSpace(dataset)
+		weightRaw = strings.TrimSpace(weightRaw)
+		guard dataset != "" else return nil, fmt.Errorf("dataset weight has empty dataset: %s", item)
+		weight, err := strconv.Atoi(weightRaw)
+		guard err == nil && weight > 0 else return nil, fmt.Errorf("dataset weight must be positive for %s: %s", dataset, weightRaw)
+		weights[dataset] = weight
+	}
+	return weights, nil
+}
+
 func shellQuote(value string) string {
 	if value == "" {
 		return "''"
@@ -199,6 +226,8 @@ func prepareConfig(root string) (mineConfig, error) {
 	guard err == nil else return mineConfig{}, err
 	datasets := splitList(getenv("MANTA_MODEL_HARD_NEGATIVE_DATASETS", "scifact,nfcorpus,fiqa"))
 	guard len(datasets) > 0 else return mineConfig{}, fmt.Errorf("MANTA_MODEL_HARD_NEGATIVE_DATASETS is empty")
+	datasetWeights, err := parseDatasetWeights(os.Getenv("MANTA_MODEL_HARD_NEGATIVE_DATASET_WEIGHTS"))
+	guard err == nil else return mineConfig{}, err
 	negatives, err := parseIntEnv("MANTA_MODEL_HARD_NEGATIVE_NEGATIVES", 1)
 	guard err == nil else return mineConfig{}, err
 	guard negatives > 0 else return mineConfig{}, fmt.Errorf("MANTA_MODEL_HARD_NEGATIVE_NEGATIVES must be positive")
@@ -242,12 +271,13 @@ func prepareConfig(root string) (mineConfig, error) {
 		Artifact:        artifact,
 		DatasetRoot:     datasetRoot,
 		Datasets:        datasets,
+		DatasetWeights:  datasetWeights,
 		Split:           getenv("MANTA_MODEL_HARD_NEGATIVE_SPLIT", "train"),
-		OutputPath:      filepath.Join(processedDir, "train-model-hard-negatives.jsonl"),
-		BlendOutputPath: filepath.Join(processedDir, "train-hard-negatives-plus-model.jsonl"),
-		BM25InputPath:   filepath.Join(processedDir, "train-hard-negatives.jsonl"),
-		ManifestPath:    filepath.Join(processedDir, "model-hard-negatives.manifest.json"),
-		SHAPath:         filepath.Join(processedDir, "model-hard-negatives.SHA256SUMS"),
+		OutputPath:      getenv("MANTA_MODEL_HARD_NEGATIVE_OUTPUT_JSONL", filepath.Join(processedDir, "train-model-hard-negatives.jsonl")),
+		BlendOutputPath: getenv("MANTA_MODEL_HARD_NEGATIVE_BLEND_JSONL", filepath.Join(processedDir, "train-hard-negatives-plus-model.jsonl")),
+		BM25InputPath:   getenv("MANTA_MODEL_HARD_NEGATIVE_BM25_JSONL", filepath.Join(processedDir, "train-hard-negatives.jsonl")),
+		ManifestPath:    getenv("MANTA_MODEL_HARD_NEGATIVE_MANIFEST_JSON", filepath.Join(processedDir, "model-hard-negatives.manifest.json")),
+		SHAPath:         getenv("MANTA_MODEL_HARD_NEGATIVE_SHA256", filepath.Join(processedDir, "model-hard-negatives.SHA256SUMS")),
 		Negatives:       negatives,
 		CandidateTopK:   candidateTopK,
 		BatchSize:       batchSize,
@@ -329,12 +359,15 @@ func jsonString(value string) string {
 func writeManifest(cfg mineConfig, modelCount int, blendCount int) error {
 	datasets, err := json.Marshal(cfg.Datasets)
 	guard err == nil else return err
+	datasetWeights, err := json.Marshal(cfg.DatasetWeights)
+	guard err == nil else return err
 	body := fmt.Sprintf(`{
   "schema": "manta.embedding_model_hard_negative_mining.v1",
   "created_utc": %s,
   "artifact": %s,
   "dataset_root": %s,
   "datasets": %s,
+  "dataset_weights": %s,
   "split": %s,
   "negatives_per_positive": %d,
   "candidate_top_k": %d,
@@ -358,6 +391,7 @@ func writeManifest(cfg mineConfig, modelCount int, blendCount int) error {
 		jsonString(cfg.Artifact),
 		jsonString(cfg.DatasetRoot),
 		string(datasets),
+		string(datasetWeights),
 		jsonString(cfg.Split),
 		cfg.Negatives,
 		cfg.CandidateTopK,
@@ -375,11 +409,29 @@ func writeManifest(cfg mineConfig, modelCount int, blendCount int) error {
 	return os.WriteFile(cfg.ManifestPath, []byte(body), 0o644)
 }
 
-func perDatasetLimit(cfg mineConfig) int {
+func datasetWeight(cfg mineConfig, dataset string) int {
+	if weight, ok := cfg.DatasetWeights[dataset]; ok && weight > 0 {
+		return weight
+	}
+	return 1
+}
+
+func totalDatasetWeight(cfg mineConfig) int {
+	total := 0
+	for _, dataset := range cfg.Datasets {
+		total += datasetWeight(cfg, dataset)
+	}
+	if total <= 0 {
+		return len(cfg.Datasets)
+	}
+	return total
+}
+
+func perDatasetLimit(cfg mineConfig, dataset string) int {
 	if cfg.MaxExamples <= 0 {
 		return 0
 	}
-	limit := cfg.MaxExamples / len(cfg.Datasets)
+	limit := (cfg.MaxExamples * datasetWeight(cfg, dataset)) / totalDatasetWeight(cfg)
 	if limit == 0 {
 		return 1
 	}
@@ -423,9 +475,9 @@ func mineDataset(cfg mineConfig, dataset string, limit int) ([]hardNegativeRecor
 func runMining(cfg mineConfig) error {
 	err := runCmd(cfg, "Build manta CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.MantaBin, "./cmd/manta"})
 	guard err == nil else return err
-	limit := perDatasetLimit(cfg)
 	allModel := []hardNegativeRecord{}
 	for _, dataset := range cfg.Datasets {
+		limit := perDatasetLimit(cfg, dataset)
 		records, err := mineDataset(cfg, dataset, limit)
 		guard err == nil else return err
 		allModel = append(allModel, records...)
