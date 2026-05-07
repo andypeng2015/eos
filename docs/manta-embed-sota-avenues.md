@@ -43,6 +43,12 @@ Compared with the previous fresh-mined hybrid best:
 
 This passes the current gate criteria: macro nDCG delta `>= 0.0005`, per-dataset nDCG regression no worse than `0.001`, per-dataset nDCG ratio `>= 0.98`, recall@100 regression no worse than `0.004`, and recall@100 ratio `>= 0.96`.
 
+Rejected nearby probe:
+
+| Probe | Macro | Reason |
+| --- | ---: | --- |
+| `teacher_loss_weight=0.10`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.147626 | NFCorpus nDCG@10 delta `-0.001534`, outside the `-0.001000` floor |
+
 ## Ready-To-Run Lanes
 
 These require no new model code.
@@ -227,7 +233,7 @@ Milestones:
 
 Priority order:
 
-1. Run Lane A around the current best using the existing teacher-scored JSONL. Start with `teacher_loss_weight=0.10`, `0.20`, `0.35` at temperature `1.0`, LR `0.000010`, source weights `scifact=1,nfcorpus=3,fiqa=1`.
+1. Continue Lane A around the current best using the existing teacher-scored JSONL. `teacher_loss_weight=0.10` is rejected under the NF3 source schedule, so the next pressure tests are `teacher_loss_weight=0.35` and temperature `0.75` or `1.5` at LR `0.000010`, source weights `scifact=1,nfcorpus=3,fiqa=1`.
 2. Run Lane B with `9000` mined examples, `5` mined negatives, `candidate_top_k=400`, and candidate hard negatives `2`.
 3. Start `embed-m` from scratch with the current best training recipe, then compare full retrieval and throughput.
 4. Implement Lane F so public teachers can write into the same `teacher_scores` path.
