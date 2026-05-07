@@ -60,6 +60,8 @@ Rejected nearby probe:
 | Lane B deep mine reuse, `hard_negatives_per_query=1`, `source_weights=scifact=1,nfcorpus=1,fiqa=1` | 0.144915 | Balanced source sampling reduced NFCorpus gains and did not recover SciFact/FiQA |
 | Lane B deep mine reuse, `hard_negatives_per_query=1`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000005` | 0.145809 | Smaller LR recovered FiQA versus LR10, but SciFact still failed the gate |
 | Lane B deep mine reuse, `hard_negatives_per_query=1`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000005`, `grouped_loss_weight=0.025` | 0.146429 | Best Lane B balance, but still below current best and fails SciFact/FiQA floors |
+| `embed-m` cached16k, max sequence `512`, dim `192`, hidden `384`, repeats `3`, w0.05 tw0.20 tt1.50 HN1 LR `0.000010` | 0.078073 | Mechanically trains and seals, but random-start fine-tune LR collapses retrieval |
+| `embed-m` cached16k scratch `infonce`, LR `0.002`, HN1, pairwise-only | - | Rejected before retrieval: validation AUC `0.495137`, hard AUC `0.498731` |
 
 ## Ready-To-Run Lanes
 
@@ -141,6 +143,12 @@ Gate:
 - larger model must improve retrieval, not just pairwise AUC
 - docs/s and train pairs/s remain inside C24 target budget
 - sealed artifact remains practical for local serving
+
+Status:
+
+- The true `32768`-vocab `embed-m` target initialized but spent more than fifteen minutes CPU-bound in tokenizer training before any optimizer step. Treat full-vocab `embed-m` as blocked on cached tokenizer artifacts or tokenizer trainer improvements.
+- The cached-tokenizer `embed-m` shape (`16384` vocab, max sequence `512`, dim `192`, hidden `384`, repeats `3`) trains and seals on the desktop GPU at batch `64`, but the current-best fine-tune recipe is invalid from random initialization: validation/hard AUC `0.595854` / `0.598887`, macro nDCG@10 `0.078073`, and `1460.78` train pairs/s.
+- A scratch `infonce` LR `0.002` pass also failed as a bootstrap: validation/hard AUC `0.495137` / `0.498731` with `1259.54` train pairs/s. The next `embed-m` attempt should use staged pretraining or dimension-compatible weight expansion, then apply the teacher-distilled recipe as a fine-tune.
 
 ### Lane E: TurboQuant And Weight Precision
 
@@ -246,7 +254,7 @@ Milestones:
 Priority order:
 
 1. Implement Lane F so public teachers can write into the same `teacher_scores` path; local source/LR/grouped reshuffling around the deep-mined file is now exhausted for balanced promotion.
-2. Start `embed-m` from scratch with the current best training recipe, then compare full retrieval and throughput.
+2. Add an `embed-m` bootstrap layer before more capacity runs: cache or accelerate the `32768` tokenizer path, then try dimension-compatible weight expansion or staged pretraining before teacher fine-tuning.
 3. Implement Lane H before increasing vector dimension aggressively.
 4. Implement Lane I and Lane J after single-vector dense gains flatten.
 5. Integrate Lane L once short retrieval is stable enough to justify long-context work.
