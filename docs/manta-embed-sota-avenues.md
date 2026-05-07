@@ -53,6 +53,7 @@ Rejected nearby probe:
 | `teacher_loss_weight=0.20`, `teacher_temperature=1.25`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.147645 | Gate pass, but lower macro than temperature `1.0` and `1.5` |
 | `teacher_loss_weight=0.20`, `teacher_temperature=2.0`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.148029 | Gate pass, but NFCorpus tradeoff keeps macro below temperature `1.5` |
 | `teacher_loss_weight=0.20`, `teacher_temperature=1.5`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000008` | 0.147625 | Gate pass and NFCorpus high-water mark, but SciFact regression keeps macro below LR `0.000010` |
+| `teacher_loss_weight=0.20`, `teacher_temperature=1.5`, `source_weights=scifact=1,nfcorpus=4,fiqa=1`, LR `0.000010` | 0.147560 | NFCorpus nDCG@10 delta `-0.001122`, outside the `-0.001000` floor |
 
 ## Ready-To-Run Lanes
 
@@ -238,7 +239,7 @@ Milestones:
 
 Priority order:
 
-1. Continue Lane A around the current best using the existing teacher-scored JSONL. `teacher_loss_weight=0.20` with `teacher_temperature=1.5` and LR `0.000010` is the current macro nDCG best. LR `0.000008` improved NFCorpus but lost macro, so next pressure tests should hold temperature `1.5`, LR `0.000010`, and try source weights `scifact=2,nfcorpus=3,fiqa=1` or `scifact=1,nfcorpus=4,fiqa=1`.
+1. Continue Lane A around the current best using the existing teacher-scored JSONL. `teacher_loss_weight=0.20` with `teacher_temperature=1.5` and LR `0.000010` is the current macro nDCG best. LR `0.000008` improved NFCorpus but lost macro, and `nfcorpus=4` failed the nDCG floor, so next pressure tests should hold temperature `1.5`, LR `0.000010`, and try source weights `scifact=2,nfcorpus=3,fiqa=1`.
 2. Run Lane B with `9000` mined examples, `5` mined negatives, `candidate_top_k=400`, and candidate hard negatives `2`.
 3. Start `embed-m` from scratch with the current best training recipe, then compare full retrieval and throughput.
 4. Implement Lane F so public teachers can write into the same `teacher_scores` path.
