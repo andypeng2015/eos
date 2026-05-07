@@ -287,6 +287,7 @@ The credible wedge is improving the in-repo embedder on selected BEIR-style retr
 | Teacher hybrid w0.05 tw0.20 tt1.50 deepmine9k k400 hn1 LR10 | 0.324630 | 0.087300 | 0.025679 | 0.145870 | rejected; NFCorpus high-water mark |
 | Teacher hybrid w0.05 tw0.20 tt1.50 deepmine9k k400 balanced hn1 LR10 | 0.322932 | 0.086364 | 0.025450 | 0.144915 | rejected; balanced source worsened |
 | Teacher hybrid w0.05 tw0.20 tt1.50 deepmine9k k400 hn1 LR5 | 0.323136 | 0.086784 | 0.027508 | 0.145809 | rejected; smaller LR recovers FiQA only |
+| Teacher hybrid w0.025 tw0.20 tt1.50 deepmine9k k400 hn1 LR5 | 0.325439 | 0.086645 | 0.027204 | 0.146429 | rejected; best Lane B balance |
 | Teacher hybrid w0.05 tw0.20 tt2.00 NF3train LR10 | 0.331232 | 0.083795 | 0.029060 | 0.148029 | gate pass, below current best |
 | Teacher hybrid w0.05 tw0.35 NF3train LR10 | 0.329387 | 0.083761 | 0.028540 | 0.147229 | gate pass, below current best |
 
@@ -307,6 +308,7 @@ Interpretation:
 - Reusing that Lane B mined JSONL with one candidate hard negative reduced the damage and set the NFCorpus high-water mark at `0.087300`, but still failed against the current best: macro `0.145870`, SciFact `-0.006508`, FiQA `-0.003288`, and pairwise AUC `0.802976` / `0.800840`. Because the mined file already carries `5400` NFCorpus model-hard examples, continuing to train it with `source_weights=scifact=1,nfcorpus=3,fiqa=1` over-allocates NF signal. The next isolation run should keep the same JSONL and HN1 shape but switch training source weights to `scifact=1,nfcorpus=1,fiqa=1`.
 - Balanced source weights on the same deep-mined HN1 JSONL did not recover the non-NF tasks. It landed at macro `0.144915`: SciFact `0.322932`, NFCorpus `0.086364`, FiQA `0.025450`, validation AUC `0.794627`, and hard AUC `0.794320`. This closes source-sampler rescue for the deep-mined file. If continuing Lane B locally, use the NF3 HN1 shape with a smaller update, such as LR `0.000005` or `grouped_loss_weight=0.025`; otherwise pivot to external teacher import or `embed-m`.
 - Lowering the HN1 NF3 reuse to LR `0.000005` improved FiQA relative to LR `0.000010` (`0.027508` versus `0.025679`) and preserved strong NFCorpus (`0.086784`), but SciFact remained too low at `0.323136` and macro stayed at `0.145809`. Pairwise guardrails stayed weak at validation AUC `0.803438` / hard AUC `0.800508`. A final local Lane B retry can reduce `grouped_loss_weight` to `0.025`; after that, close the deep-mined file for balanced promotion and move to external teacher import or `embed-m`.
+- Reducing the grouped term to `0.025` at LR `0.000005` produced the best Lane B balance but still failed promotion: macro `0.146429`, SciFact `0.325439`, NFCorpus `0.086645`, FiQA `0.027204`, validation AUC `0.804674`, hard AUC `0.801615`. This closes the current deep-mined file for balanced promotion. Keep it as evidence that deeper mining can specialize NFCorpus, but the next credible balanced path is external teacher import or a larger `embed-m` run, not more local source/LR/grouped reshuffling.
 
 Short retrieval metrics:
 

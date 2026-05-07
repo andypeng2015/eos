@@ -59,6 +59,7 @@ Rejected nearby probe:
 | Lane B deep mine reuse, `hard_negatives_per_query=1`, `source_weights=scifact=1,nfcorpus=3,fiqa=1` | 0.145870 | NFCorpus high-water mark, but SciFact and FiQA still fail current-best gate |
 | Lane B deep mine reuse, `hard_negatives_per_query=1`, `source_weights=scifact=1,nfcorpus=1,fiqa=1` | 0.144915 | Balanced source sampling reduced NFCorpus gains and did not recover SciFact/FiQA |
 | Lane B deep mine reuse, `hard_negatives_per_query=1`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000005` | 0.145809 | Smaller LR recovered FiQA versus LR10, but SciFact still failed the gate |
+| Lane B deep mine reuse, `hard_negatives_per_query=1`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000005`, `grouped_loss_weight=0.025` | 0.146429 | Best Lane B balance, but still below current best and fails SciFact/FiQA floors |
 
 ## Ready-To-Run Lanes
 
@@ -244,13 +245,11 @@ Milestones:
 
 Priority order:
 
-1. Run one final Lane B retry on the same deep-mined JSONL with HN1 NF3, LR `0.000005`, and `grouped_loss_weight=0.025`; this tests whether less grouped pressure can preserve the NFCorpus/FiQA gains without the SciFact collapse.
-2. If `grouped_loss_weight=0.025` still fails, close this deep-mined file for balanced promotion and pivot to external teacher import.
-3. Start `embed-m` from scratch with the current best training recipe, then compare full retrieval and throughput.
-4. Implement Lane F so public teachers can write into the same `teacher_scores` path.
-5. Implement Lane H before increasing vector dimension aggressively.
-6. Implement Lane I and Lane J after single-vector dense gains flatten.
-7. Integrate Lane L once short retrieval is stable enough to justify long-context work.
+1. Implement Lane F so public teachers can write into the same `teacher_scores` path; local source/LR/grouped reshuffling around the deep-mined file is now exhausted for balanced promotion.
+2. Start `embed-m` from scratch with the current best training recipe, then compare full retrieval and throughput.
+3. Implement Lane H before increasing vector dimension aggressively.
+4. Implement Lane I and Lane J after single-vector dense gains flatten.
+5. Integrate Lane L once short retrieval is stable enough to justify long-context work.
 
 ## Promotion Discipline
 
