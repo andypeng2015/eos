@@ -36,10 +36,10 @@ Compared with the previous fresh-mined hybrid best:
 
 | Dataset | Previous nDCG@10 | Candidate nDCG@10 | Delta | Previous recall@100 | Candidate recall@100 | Delta |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| SciFact | 0.324437 | 0.330614 | +0.006177 | 0.725222 | 0.725222 | +0.000000 |
-| NFCorpus | 0.084556 | 0.084433 | -0.000123 | 0.128650 | 0.128809 | +0.000159 |
-| FiQA | 0.027711 | 0.028539 | +0.000828 | 0.164380 | 0.166167 | +0.001787 |
-| Macro | 0.145568 | 0.147862 | +0.002294 | - | - | - |
+| SciFact | 0.324437 | 0.331139 | +0.006702 | 0.725222 | 0.724111 | -0.001111 |
+| NFCorpus | 0.084556 | 0.084325 | -0.000231 | 0.128650 | 0.129067 | +0.000417 |
+| FiQA | 0.027711 | 0.028967 | +0.001256 | 0.164380 | 0.164881 | +0.000501 |
+| Macro | 0.145568 | 0.148143 | +0.002575 | - | - | - |
 
 This passes the current gate criteria: macro nDCG delta `>= 0.0005`, per-dataset nDCG regression no worse than `0.001`, per-dataset nDCG ratio `>= 0.98`, recall@100 regression no worse than `0.004`, and recall@100 ratio `>= 0.96`.
 
@@ -48,7 +48,8 @@ Rejected nearby probe:
 | Probe | Macro | Reason |
 | --- | ---: | --- |
 | `teacher_loss_weight=0.10`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.147626 | NFCorpus nDCG@10 delta `-0.001534`, outside the `-0.001000` floor |
-| `teacher_loss_weight=0.35`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.147229 | Gate pass, but lower macro than the `0.20` current best |
+| `teacher_loss_weight=0.35`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.147229 | Gate pass, but lower macro than the current best |
+| `teacher_loss_weight=0.20`, `teacher_temperature=0.75`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.147738 | Gate pass, but lower macro than temperature `1.5` |
 
 ## Ready-To-Run Lanes
 
@@ -69,7 +70,7 @@ Sweep:
 
 Gate:
 
-- candidate macro nDCG@10 beats `0.147862`
+- candidate macro nDCG@10 beats `0.148143`
 - no dataset violates nDCG or recall floors
 - pairwise AUC does not fall below `0.818`
 
@@ -234,7 +235,7 @@ Milestones:
 
 Priority order:
 
-1. Continue Lane A around the current best using the existing teacher-scored JSONL. `teacher_loss_weight=0.10` is rejected and `0.35` is below the current best under the NF3 source schedule, so the next pressure tests should hold `teacher_loss_weight=0.20` and sweep teacher temperature `0.75` and `1.5` at LR `0.000010`, source weights `scifact=1,nfcorpus=3,fiqa=1`.
+1. Continue Lane A around the current best using the existing teacher-scored JSONL. `teacher_loss_weight=0.20` with `teacher_temperature=1.5` is the current macro nDCG best, while `0.75` passed but stayed below it. Next pressure tests should sweep `teacher_temperature=2.0` and `1.25`, then try LR `0.000008` around `1.5`, all with source weights `scifact=1,nfcorpus=3,fiqa=1`.
 2. Run Lane B with `9000` mined examples, `5` mined negatives, `candidate_top_k=400`, and candidate hard negatives `2`.
 3. Start `embed-m` from scratch with the current best training recipe, then compare full retrieval and throughput.
 4. Implement Lane F so public teachers can write into the same `teacher_scores` path.
