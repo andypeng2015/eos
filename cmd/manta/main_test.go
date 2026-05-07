@@ -500,6 +500,94 @@ func TestRunMineRetrievalModelHardNegativesWritesTextJSONL(t *testing.T) {
 	}
 }
 
+func TestRunImportTeacherScoresWritesVectorsAndManifest(t *testing.T) {
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "hard-negatives.jsonl")
+	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []mantaruntime.EmbeddingTextHardNegativeExample{
+		{Source: "scifact", Query: "alpha", Positive: "target", Negatives: []string{"distractor"}},
+	}); err != nil {
+		t.Fatalf("write hard negatives: %v", err)
+	}
+	scoresPath := filepath.Join(dir, "scores.jsonl")
+	if err := os.WriteFile(scoresPath, []byte(`{"source":"scifact","query":"alpha","scores":[0.9,0.1]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write scores: %v", err)
+	}
+	outputPath := filepath.Join(dir, "with-teacher.jsonl")
+	manifestPath := filepath.Join(dir, "teacher.manifest.json")
+
+	output := captureRunOutput(t, []string{
+		"import-teacher-scores",
+		"--teacher-model-id", "teacher-a",
+		"--teacher-revision", "rev1",
+		"--score-scale", "cosine",
+		"--manifest", manifestPath,
+		inputPath,
+		scoresPath,
+		outputPath,
+	})
+	for _, want := range []string{
+		"imported teacher scores: examples=1 updated=1",
+		"teacher: model_id=teacher-a revision=rev1 score_scale=cosine",
+		"output: " + outputPath,
+		"manifest: " + manifestPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("import-teacher-scores output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if len(examples) != 1 || len(examples[0].TeacherScores) != 2 || examples[0].TeacherScores[0] != 0.9 || examples[0].TeacherScores[1] != 0.1 {
+		t.Fatalf("teacher scores = %+v", examples)
+	}
+	var manifest teacherScoreImportSummary
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if manifest.Schema != "manta.teacher_score_import.v1" || manifest.TeacherModelID != "teacher-a" || manifest.Updated != 1 || manifest.ExampleRows != 1 {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+}
+
+func TestRunImportTeacherScoresMatchesCandidateRows(t *testing.T) {
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "hard-negatives.jsonl")
+	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []mantaruntime.EmbeddingTextHardNegativeExample{
+		{Source: "nfcorpus", Query: "vitamin c", Positive: "ascorbic acid", Negatives: []string{"calcium", "zinc"}},
+	}); err != nil {
+		t.Fatalf("write hard negatives: %v", err)
+	}
+	scoresPath := filepath.Join(dir, "scores.jsonl")
+	if err := os.WriteFile(scoresPath, []byte(
+		`{"query":"vitamin c","candidate":"ascorbic acid","score":0.8}`+"\n"+
+			`{"query":"vitamin c","candidate":"calcium","score":0.2}`+"\n"+
+			`{"query":"vitamin c","candidate":"zinc","score":0.1}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write scores: %v", err)
+	}
+	outputPath := filepath.Join(dir, "with-teacher.jsonl")
+
+	_ = captureRunOutput(t, []string{"import-teacher-scores", inputPath, scoresPath, outputPath})
+	examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if len(examples) != 1 || len(examples[0].TeacherScores) != 3 {
+		t.Fatalf("examples = %+v", examples)
+	}
+	want := []float32{0.8, 0.2, 0.1}
+	for i, score := range want {
+		if examples[0].TeacherScores[i] != score {
+			t.Fatalf("teacher score %d = %f, want %f", i, examples[0].TeacherScores[i], score)
+		}
+	}
+}
+
 func TestRunCompareRetrievalMetricsCanRequireBaselineWin(t *testing.T) {
 	dir := t.TempDir()
 	currentPath := filepath.Join(dir, "current.retrieval.metrics.json")

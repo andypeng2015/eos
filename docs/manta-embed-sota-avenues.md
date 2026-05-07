@@ -175,11 +175,25 @@ These are likely necessary for true best-in-class local performance.
 
 Add a tool that imports query/document/candidate teacher scores from Qwen3, BGE-M3, Jina, Voyage/OpenAI/Gemini APIs, or local TEI servers into the existing `teacher_scores` JSONL field.
 
+Status: the generic landing zone is implemented as `manta import-teacher-scores`. It accepts either one score vector per hard-negative example:
+
+```json
+{"source":"scifact","query":"...","scores":[0.91,0.22,0.13]}
+```
+
+or one row per query/candidate pair:
+
+```json
+{"query":"...","candidate":"document text","score":0.91}
+```
+
+The command writes validated text hard-negative JSONL plus a `manta.teacher_score_import.v1` provenance manifest. External scorers should now target this sidecar format first, then let the existing tokenizer and `teacher_loss_weight` path carry scores into training.
+
 Required outputs:
 
 - normalized scores over `positive + negatives`
 - teacher model id, revision, prompt/instruction, dimensionality, and score scale in a sidecar manifest
-- deterministic fallback when the teacher cannot score an item
+- deterministic fallback when the teacher cannot score an item; by default the importer fails incomplete examples, and `--allow-missing` can preserve unscored examples for smoke checks
 
 ### Lane G: Synthetic Query And Reasoning Data
 

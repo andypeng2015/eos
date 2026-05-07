@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -127,6 +129,8 @@ func run(args []string) error {
 		return runTokenizeEmbed(args[1:])
 	case "mine-text-pairs":
 		return runMineTextPairs(args[1:])
+	case "import-teacher-scores":
+		return runImportTeacherScores(args[1:])
 	case "train-embed":
 		return runTrainEmbed(args[1:])
 	case "train-corpus":
@@ -600,6 +604,284 @@ func runMineRetrievalModelHardNegatives(args []string) error {
 		summary.SkippedQueriesNoText, summary.SkippedPositiveDocs, summary.SkippedQueriesNoNegative)
 	fmt.Printf("output: %s\n", outputPath)
 	return nil
+}
+
+type teacherScoreImportRecord struct {
+	Source         string    `json:"source,omitempty"`
+	Query          string    `json:"query,omitempty"`
+	Positive       string    `json:"positive,omitempty"`
+	Document       string    `json:"document,omitempty"`
+	Candidate      string    `json:"candidate,omitempty"`
+	Text           string    `json:"text,omitempty"`
+	Score          *float64  `json:"score,omitempty"`
+	Scores         []float64 `json:"scores,omitempty"`
+	TeacherScores  []float64 `json:"teacher_scores,omitempty"`
+	PositiveScore  *float64  `json:"positive_score,omitempty"`
+	NegativeScores []float64 `json:"negative_scores,omitempty"`
+}
+
+type teacherScoreImportTable struct {
+	ExampleScores   map[string][]float32
+	CandidateScores map[string]float32
+	ExampleRows     int
+	CandidateRows   int
+}
+
+type teacherScoreImportSummary struct {
+	Schema          string `json:"schema"`
+	CreatedUTC      string `json:"created_utc"`
+	InputJSONL      string `json:"input_jsonl"`
+	ScoresJSONL     string `json:"scores_jsonl"`
+	OutputJSONL     string `json:"output_jsonl"`
+	TeacherModelID  string `json:"teacher_model_id,omitempty"`
+	TeacherRevision string `json:"teacher_revision,omitempty"`
+	Prompt          string `json:"prompt,omitempty"`
+	ScoreScale      string `json:"score_scale,omitempty"`
+	Examples        int    `json:"examples"`
+	Updated         int    `json:"updated"`
+	SkippedExisting int    `json:"skipped_existing"`
+	SkippedMissing  int    `json:"skipped_missing"`
+	ExampleRows     int    `json:"example_rows"`
+	CandidateRows   int    `json:"candidate_rows"`
+}
+
+func runImportTeacherScores(args []string) error {
+	fs := flag.NewFlagSet("import-teacher-scores", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	overwrite := fs.Bool("overwrite", false, "replace existing teacher_scores")
+	allowMissing := fs.Bool("allow-missing", false, "keep examples without complete teacher scores instead of failing")
+	manifestPath := fs.String("manifest", "", "provenance manifest path; default is <output>.teacher-scores.manifest.json")
+	teacherModelID := fs.String("teacher-model-id", "", "external teacher model id")
+	teacherRevision := fs.String("teacher-revision", "", "external teacher model revision")
+	prompt := fs.String("prompt", "", "teacher prompt or instruction provenance")
+	scoreScale := fs.String("score-scale", "", "teacher score scale, such as cosine, logit, or probability")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 3 || fs.Arg(0) == "" || fs.Arg(1) == "" || fs.Arg(2) == "" {
+		return fmt.Errorf("usage: manta import-teacher-scores [flags] <hard-negatives.jsonl> <scores.jsonl> <output.jsonl>")
+	}
+	inputPath := fs.Arg(0)
+	scoresPath := fs.Arg(1)
+	outputPath := fs.Arg(2)
+	if *manifestPath == "" {
+		*manifestPath = outputPath + ".teacher-scores.manifest.json"
+	}
+	examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(inputPath)
+	if err != nil {
+		return err
+	}
+	table, err := readTeacherScoreImportTable(scoresPath)
+	if err != nil {
+		return err
+	}
+	summary := teacherScoreImportSummary{
+		Schema:          "manta.teacher_score_import.v1",
+		CreatedUTC:      time.Now().UTC().Format(time.RFC3339),
+		InputJSONL:      inputPath,
+		ScoresJSONL:     scoresPath,
+		OutputJSONL:     outputPath,
+		TeacherModelID:  *teacherModelID,
+		TeacherRevision: *teacherRevision,
+		Prompt:          *prompt,
+		ScoreScale:      *scoreScale,
+		Examples:        len(examples),
+		ExampleRows:     table.ExampleRows,
+		CandidateRows:   table.CandidateRows,
+	}
+	for i := range examples {
+		example := &examples[i]
+		if len(example.TeacherScores) > 0 && !*overwrite {
+			summary.SkippedExisting++
+			continue
+		}
+		scores, ok := teacherScoresForExample(*example, table)
+		if !ok {
+			summary.SkippedMissing++
+			if *allowMissing {
+				continue
+			}
+			return fmt.Errorf("missing complete teacher scores for example %d source=%q query=%q", i, example.Source, example.Query)
+		}
+		example.TeacherScores = scores
+		summary.Updated++
+	}
+	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(outputPath, examples); err != nil {
+		return err
+	}
+	if err := writeTeacherScoreImportManifest(*manifestPath, summary); err != nil {
+		return err
+	}
+	fmt.Printf("imported teacher scores: examples=%d updated=%d skipped_existing=%d skipped_missing=%d example_rows=%d candidate_rows=%d\n",
+		summary.Examples, summary.Updated, summary.SkippedExisting, summary.SkippedMissing, summary.ExampleRows, summary.CandidateRows)
+	if summary.TeacherModelID != "" || summary.TeacherRevision != "" || summary.ScoreScale != "" {
+		fmt.Printf("teacher: model_id=%s revision=%s score_scale=%s\n", summary.TeacherModelID, summary.TeacherRevision, summary.ScoreScale)
+	}
+	fmt.Printf("output: %s\n", outputPath)
+	fmt.Printf("manifest: %s\n", *manifestPath)
+	return nil
+}
+
+func readTeacherScoreImportTable(path string) (teacherScoreImportTable, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return teacherScoreImportTable{}, err
+	}
+	defer f.Close()
+	table := teacherScoreImportTable{
+		ExampleScores:   map[string][]float32{},
+		CandidateScores: map[string]float32{},
+	}
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var record teacherScoreImportRecord
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			return teacherScoreImportTable{}, fmt.Errorf("%s:%d: %w", path, lineNo, err)
+		}
+		if scores, ok, err := record.teacherScoreVector(); err != nil {
+			return teacherScoreImportTable{}, fmt.Errorf("%s:%d: %w", path, lineNo, err)
+		} else if ok {
+			if strings.TrimSpace(record.Query) == "" {
+				return teacherScoreImportTable{}, fmt.Errorf("%s:%d: query is required for score vectors", path, lineNo)
+			}
+			key := teacherScoreExampleKey(record.Source, record.Query)
+			if _, exists := table.ExampleScores[key]; exists {
+				return teacherScoreImportTable{}, fmt.Errorf("%s:%d: duplicate score vector for source=%q query=%q", path, lineNo, record.Source, record.Query)
+			}
+			table.ExampleScores[key] = scores
+			table.ExampleRows++
+			continue
+		}
+		if record.Score == nil {
+			return teacherScoreImportTable{}, fmt.Errorf("%s:%d: expected score, scores, teacher_scores, or positive_score/negative_scores", path, lineNo)
+		}
+		score, err := finiteFloat32(*record.Score, "score")
+		if err != nil {
+			return teacherScoreImportTable{}, fmt.Errorf("%s:%d: %w", path, lineNo, err)
+		}
+		candidate := firstNonEmptyString(record.Candidate, record.Document, record.Text, record.Positive)
+		if strings.TrimSpace(record.Query) == "" || strings.TrimSpace(candidate) == "" {
+			return teacherScoreImportTable{}, fmt.Errorf("%s:%d: query and candidate/document/text are required for candidate score rows", path, lineNo)
+		}
+		key := teacherScoreCandidateKey(record.Source, record.Query, candidate)
+		if _, exists := table.CandidateScores[key]; exists {
+			return teacherScoreImportTable{}, fmt.Errorf("%s:%d: duplicate candidate score for source=%q query=%q candidate=%q", path, lineNo, record.Source, record.Query, candidate)
+		}
+		table.CandidateScores[key] = score
+		table.CandidateRows++
+	}
+	if err := scanner.Err(); err != nil {
+		return teacherScoreImportTable{}, err
+	}
+	if table.ExampleRows == 0 && table.CandidateRows == 0 {
+		return teacherScoreImportTable{}, fmt.Errorf("teacher score file is empty: %s", path)
+	}
+	return table, nil
+}
+
+func (r teacherScoreImportRecord) teacherScoreVector() ([]float32, bool, error) {
+	values := r.TeacherScores
+	if len(values) == 0 {
+		values = r.Scores
+	}
+	if len(values) == 0 && r.PositiveScore != nil {
+		values = append([]float64{*r.PositiveScore}, r.NegativeScores...)
+	}
+	if len(values) == 0 {
+		return nil, false, nil
+	}
+	out := make([]float32, len(values))
+	for i, value := range values {
+		score, err := finiteFloat32(value, fmt.Sprintf("score[%d]", i))
+		if err != nil {
+			return nil, true, err
+		}
+		out[i] = score
+	}
+	return out, true, nil
+}
+
+func teacherScoresForExample(example mantaruntime.EmbeddingTextHardNegativeExample, table teacherScoreImportTable) ([]float32, bool) {
+	if scores, ok := lookupTeacherScoreVector(table, example.Source, example.Query); ok {
+		if len(scores) != 1+len(example.Negatives) {
+			return nil, false
+		}
+		return append([]float32(nil), scores...), true
+	}
+	candidates := append([]string{example.Positive}, example.Negatives...)
+	out := make([]float32, len(candidates))
+	for i, candidate := range candidates {
+		score, ok := lookupTeacherCandidateScore(table, example.Source, example.Query, candidate)
+		if !ok {
+			return nil, false
+		}
+		out[i] = score
+	}
+	return out, true
+}
+
+func lookupTeacherScoreVector(table teacherScoreImportTable, source, query string) ([]float32, bool) {
+	if scores, ok := table.ExampleScores[teacherScoreExampleKey(source, query)]; ok {
+		return scores, true
+	}
+	if strings.TrimSpace(source) != "" {
+		if scores, ok := table.ExampleScores[teacherScoreExampleKey("", query)]; ok {
+			return scores, true
+		}
+	}
+	return nil, false
+}
+
+func lookupTeacherCandidateScore(table teacherScoreImportTable, source, query, candidate string) (float32, bool) {
+	if score, ok := table.CandidateScores[teacherScoreCandidateKey(source, query, candidate)]; ok {
+		return score, true
+	}
+	if strings.TrimSpace(source) != "" {
+		if score, ok := table.CandidateScores[teacherScoreCandidateKey("", query, candidate)]; ok {
+			return score, true
+		}
+	}
+	return 0, false
+}
+
+func teacherScoreExampleKey(source, query string) string {
+	return strings.TrimSpace(source) + "\x00" + strings.TrimSpace(query)
+}
+
+func teacherScoreCandidateKey(source, query, candidate string) string {
+	return teacherScoreExampleKey(source, query) + "\x00" + strings.TrimSpace(candidate)
+}
+
+func finiteFloat32(value float64, label string) (float32, error) {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, fmt.Errorf("%s must be finite", label)
+	}
+	return float32(value), nil
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func writeTeacherScoreImportManifest(path string, summary teacherScoreImportSummary) error {
+	data, err := json.MarshalIndent(summary, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o644)
 }
 
 func runInspect(args []string) error {
@@ -2921,6 +3203,7 @@ func printUsage() {
 	fmt.Println("  manta eval-retrieval-bm25 [flags] <beir-dataset-dir>")
 	fmt.Println("  manta mine-retrieval-hard-negatives [flags] <beir-dataset-dir> <output.jsonl>")
 	fmt.Println("  manta mine-retrieval-model-hard-negatives [flags] <artifact.mll> <beir-dataset-dir> <output.jsonl>")
+	fmt.Println("  manta import-teacher-scores [flags] <hard-negatives.jsonl> <scores.jsonl> <output.jsonl>")
 	fmt.Println("  manta init-model [flags] <artifact.mll>")
 	fmt.Println("  manta init-mirage [flags] <artifact.mll>")
 	fmt.Println("  manta init-train [flags] <artifact.mll>")
@@ -2945,6 +3228,7 @@ func printUsage() {
 	fmt.Println("eval-retrieval-bm25 scores the same BEIR files with an in-repo BM25 lexical baseline.")
 	fmt.Println("mine-retrieval-hard-negatives creates text hard-negative training JSONL from BEIR qrels using the BM25 baseline.")
 	fmt.Println("mine-retrieval-model-hard-negatives creates text hard-negative training JSONL from BEIR qrels using a Manta embedding model's own misses.")
+	fmt.Println("import-teacher-scores merges external teacher score JSONL into text hard-negative JSONL and writes a provenance manifest.")
 	fmt.Println("init-model creates the Manta-owned default quantized embedding training package.")
 	fmt.Println("init-mirage creates the Manta-owned Mirage Image v1 host-reference artifact.")
 	fmt.Println("init-train creates a native training package next to an artifact.")
