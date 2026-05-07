@@ -805,6 +805,62 @@ func TestSparseAttentionReferenceRoutesThroughSelectedBlocks(t *testing.T) {
 	assertTensorClose(t, out, []int{1, 1}, []float32{30})
 }
 
+func TestSparseAttentionPlanTracksRoutedBudget(t *testing.T) {
+	plan := PlanSparseAttention(SparseAttentionPlanInput{
+		QueryLen:       8,
+		KeyLen:         64,
+		QueryDim:       16,
+		ValueDim:       32,
+		TopK:           4,
+		RouteBlockSize: 8,
+		RouteTopBlocks: 2,
+	})
+	if plan.Routing != "block_anchor" || plan.RouteBlockCount != 8 || plan.SelectedRouteBlocks != 2 {
+		t.Fatalf("routing plan = %+v", plan)
+	}
+	if plan.SelectedKeyCount != 4 || plan.CandidateKeyBudget != 16 || plan.EstimatedScoreCountPerQuery != 24 {
+		t.Fatalf("budget plan = %+v", plan)
+	}
+	if math.Abs(plan.CandidateKeyFraction-0.25) > 0.000001 || math.Abs(plan.ScoreCountFraction-0.375) > 0.000001 {
+		t.Fatalf("budget fractions = %+v", plan)
+	}
+	if !plan.SubquadraticScorePlan {
+		t.Fatalf("subquadratic flag = false for %+v", plan)
+	}
+	clamped := PlanSparseAttention(SparseAttentionPlanInput{
+		QueryLen:       1,
+		KeyLen:         64,
+		QueryDim:       16,
+		ValueDim:       16,
+		TopK:           32,
+		RouteBlockSize: 8,
+		RouteTopBlocks: 2,
+	})
+	if clamped.SelectedKeyCount != 16 {
+		t.Fatalf("selected key count = %d, want route candidate budget clamp", clamped.SelectedKeyCount)
+	}
+}
+
+func TestTurboSparseAttentionHostMetadataTracksBudget(t *testing.T) {
+	query := NewTensorF16([]int{1, 16}, make([]float32, 16))
+	keyCoords := NewTensorQ4([]int{1, 16, 64, 1}, make([]float32, 1*16*64))
+	valueCoords := NewTensorQ4([]int{1, 32, 64, 1}, make([]float32, 1*32*64))
+	meta := turboSparseAttentionMetadata("turbo_sparse_attention", query, keyCoords, valueCoords, map[string]string{
+		"top_k":            "4",
+		"route_block_size": "8",
+		"route_top_blocks": "2",
+	})
+	if meta["kv_decode"] != "host_reference_decode" || meta["dense_kv_materialized"] != true {
+		t.Fatalf("turbo sparse host metadata = %+v", meta)
+	}
+	if meta["routing"] != "block_anchor" || meta["candidate_key_budget"] != 16 || meta["selected_key_count"] != 4 {
+		t.Fatalf("budget metadata = %+v", meta)
+	}
+	if meta["route_block_count"] != 8 || meta["estimated_score_count_per_query"] != 24 || meta["subquadratic_score_plan"] != true {
+		t.Fatalf("routing metadata = %+v", meta)
+	}
+}
+
 func TestTurboSparseAttentionReferenceMatchesDecodedSparseAttention(t *testing.T) {
 	query := NewTensorF16([]int{2, 2}, []float32{
 		1, 0,

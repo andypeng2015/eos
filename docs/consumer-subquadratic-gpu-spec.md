@@ -197,6 +197,7 @@ Current routed implementation:
 - selects top route blocks
 - scores only keys in selected blocks
 - keeps exact top-k semantics inside the selected candidate set
+- shares one attention-plan metadata path across host reference, CUDA sparse attention, and fused CUDA TurboQuant sparse attention, including selected keys, route blocks, candidate key budget, estimated per-query score work, and score-work fraction versus dense scoring
 
 This proves the kernel path but not yet the full training/inference success claim.
 

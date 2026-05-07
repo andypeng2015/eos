@@ -4696,41 +4696,66 @@ func sparseAttentionOutputShape(cfg cudaSparseAttentionConfig) []int {
 }
 
 func sparseAttentionStepResult(outputType mantaartifact.ValueType, cfg cudaSparseAttentionConfig, shape []int, data []float32) backend.StepDispatchResult {
+	plan := backend.PlanSparseAttention(backend.SparseAttentionPlanInput{
+		QueryLen: cfg.queryLen,
+		KeyLen:   cfg.keyLen,
+		QueryDim: cfg.queryDim,
+		ValueDim: cfg.valueDim,
+		TopK:     cfg.topK,
+	})
+	metadata := map[string]any{
+		"dispatch_mode":    "backend_step",
+		"device_execution": true,
+		"execution_mode":   "cuda_device",
+		"launch_api":       "cuda_driver",
+		"launch_compiler":  "nvrtc",
+		"op":               "sparse_attention",
+	}
+	for key, value := range plan.Metadata() {
+		metadata[key] = value
+	}
 	return backend.StepDispatchResult{
 		Outputs:      []*backend.Tensor{newStepOutputTensor(outputType, shape, data)},
 		VariantEntry: "__builtin_cuda_sparse_attention",
-		Metadata: map[string]any{
-			"dispatch_mode":    "backend_step",
-			"device_execution": true,
-			"execution_mode":   "cuda_device",
-			"launch_api":       "cuda_driver",
-			"launch_compiler":  "nvrtc",
-			"op":               "sparse_attention",
-			"top_k":            cfg.topK,
-			"query_len":        cfg.queryLen,
-			"key_len":          cfg.keyLen,
-			"query_dim":        cfg.queryDim,
-			"value_dim":        cfg.valueDim,
-		},
+		Metadata:     metadata,
 	}
 }
 
 func turboSparseAttentionStepResult(outputType mantaartifact.ValueType, cfg cudaTurboSparseAttentionConfig, shape []int, data []float32) backend.StepDispatchResult {
-	result := sparseAttentionStepResult(outputType, cfg.sparse, shape, data)
-	result.VariantEntry = "__builtin_cuda_turbo_sparse_attention"
-	result.Metadata["op"] = "turbo_sparse_attention"
-	result.Metadata["bits"] = cfg.key.bits
-	result.Metadata["seed"] = cfg.key.seed
-	result.Metadata["rotation_kind"] = "hadamard"
-	result.Metadata["kv_decode"] = "cuda_turboquant_inline"
-	result.Metadata["dense_kv_materialized"] = false
-	result.Metadata["fused"] = true
-	result.Metadata["scratch_scope"] = "query_row"
+	plan := backend.PlanSparseAttention(backend.SparseAttentionPlanInput{
+		QueryLen:       cfg.sparse.queryLen,
+		KeyLen:         cfg.sparse.keyLen,
+		QueryDim:       cfg.sparse.queryDim,
+		ValueDim:       cfg.sparse.valueDim,
+		TopK:           cfg.sparse.topK,
+		RouteBlockSize: cfg.routeBlockSize,
+		RouteTopBlocks: cfg.routeTopBlocks,
+	})
+	metadata := map[string]any{
+		"dispatch_mode":         "backend_step",
+		"device_execution":      true,
+		"execution_mode":        "cuda_device",
+		"launch_api":            "cuda_driver",
+		"launch_compiler":       "nvrtc",
+		"op":                    "turbo_sparse_attention",
+		"bits":                  cfg.key.bits,
+		"seed":                  cfg.key.seed,
+		"rotation_kind":         "hadamard",
+		"kv_decode":             "cuda_turboquant_inline",
+		"dense_kv_materialized": false,
+		"fused":                 true,
+		"scratch_scope":         "query_row",
+	}
+	for key, value := range plan.Metadata() {
+		metadata[key] = value
+	}
+	result := backend.StepDispatchResult{
+		Outputs:      []*backend.Tensor{newStepOutputTensor(outputType, shape, data)},
+		VariantEntry: "__builtin_cuda_turbo_sparse_attention",
+		Metadata:     metadata,
+	}
 	if cfg.routeBlockSize > 0 && cfg.routeTopBlocks > 0 {
 		result.Metadata["routing"] = "block_anchor"
-		result.Metadata["route_block_size"] = cfg.routeBlockSize
-		result.Metadata["route_top_blocks"] = cfg.routeTopBlocks
-		result.Metadata["candidate_key_budget"] = cfg.routeBlockSize * cfg.routeTopBlocks
 	} else {
 		result.Metadata["routing"] = "exact"
 	}

@@ -52,6 +52,9 @@ func TestCUDASparseAttentionStepMatchesReference(t *testing.T) {
 	if got.Metadata["device_execution"] != true {
 		t.Fatalf("device_execution = %v, want true", got.Metadata["device_execution"])
 	}
+	if got.Metadata["selected_key_count"] != 1 || got.Metadata["candidate_key_budget"] != 3 {
+		t.Fatalf("sparse attention budget metadata = %+v", got.Metadata)
+	}
 	want, err := backend.SparseAttentionReference(query, key, value, step.Attributes)
 	if err != nil {
 		t.Fatalf("reference sparse_attention: %v", err)
@@ -112,6 +115,9 @@ func TestCUDATurboSparseAttentionStepMatchesReference(t *testing.T) {
 	}
 	if got.Metadata["kv_decode"] != "cuda_turboquant_inline" {
 		t.Fatalf("kv_decode = %v, want cuda_turboquant_inline", got.Metadata["kv_decode"])
+	}
+	if got.Metadata["selected_key_count"] != 1 || got.Metadata["candidate_key_budget"] != 3 || got.Metadata["score_count_fraction"] != 1.0 {
+		t.Fatalf("turbo sparse attention budget metadata = %+v", got.Metadata)
 	}
 	want, err := backend.TurboSparseAttentionReference(query, keyCoords, keyNorms, valueCoords, valueNorms, attrs)
 	if err != nil {
@@ -229,6 +235,12 @@ func TestCUDATurboSparseAttentionRoutedStepMatchesReference(t *testing.T) {
 	}
 	if got.Metadata["candidate_key_budget"] != 2 {
 		t.Fatalf("candidate_key_budget = %v, want 2", got.Metadata["candidate_key_budget"])
+	}
+	if got.Metadata["route_block_count"] != 3 || got.Metadata["selected_route_blocks"] != 1 || got.Metadata["estimated_score_count_per_query"] != 5 {
+		t.Fatalf("routed budget metadata = %+v", got.Metadata)
+	}
+	if got.Metadata["subquadratic_score_plan"] != true {
+		t.Fatalf("subquadratic_score_plan = %v, want true", got.Metadata["subquadratic_score_plan"])
 	}
 	want, err := backend.TurboSparseAttentionReference(query, keyCoords, keyNorms, valueCoords, valueNorms, attrs)
 	if err != nil {

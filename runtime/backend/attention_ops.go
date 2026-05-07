@@ -11,6 +11,130 @@ type sparseAttentionCandidate struct {
 	score float32
 }
 
+// SparseAttentionPlan describes the per-query work budget for exact or routed
+// sparse attention. It is used for host/CUDA metadata, not for kernel dispatch.
+type SparseAttentionPlan struct {
+	QueryLen                    int
+	KeyLen                      int
+	QueryDim                    int
+	ValueDim                    int
+	TopK                        int
+	Routing                     string
+	RouteBlockSize              int
+	RouteTopBlocks              int
+	RouteBlockCount             int
+	SelectedRouteBlocks         int
+	SelectedKeyCount            int
+	CandidateKeyBudget          int
+	DenseScoreCountPerQuery     int
+	RoutedAnchorScoresPerQuery  int
+	EstimatedScoreCountPerQuery int
+	CandidateKeyFraction        float64
+	ScoreCountFraction          float64
+	SubquadraticScorePlan       bool
+}
+
+// SparseAttentionPlanInput is the shape/config input to PlanSparseAttention.
+type SparseAttentionPlanInput struct {
+	QueryLen       int
+	KeyLen         int
+	QueryDim       int
+	ValueDim       int
+	TopK           int
+	RouteBlockSize int
+	RouteTopBlocks int
+}
+
+// PlanSparseAttention normalizes sparse attention routing knobs and derives
+// auditable budget metadata for one query row.
+func PlanSparseAttention(in SparseAttentionPlanInput) SparseAttentionPlan {
+	topK := in.TopK
+	if in.KeyLen > 0 {
+		if topK <= 0 {
+			topK = int(math.Ceil(math.Sqrt(float64(in.KeyLen))))
+		}
+		if topK < 1 {
+			topK = 1
+		}
+		if topK > in.KeyLen {
+			topK = in.KeyLen
+		}
+	}
+	plan := SparseAttentionPlan{
+		QueryLen:                    in.QueryLen,
+		KeyLen:                      in.KeyLen,
+		QueryDim:                    in.QueryDim,
+		ValueDim:                    in.ValueDim,
+		TopK:                        topK,
+		Routing:                     "exact",
+		SelectedKeyCount:            topK,
+		CandidateKeyBudget:          in.KeyLen,
+		DenseScoreCountPerQuery:     in.KeyLen,
+		EstimatedScoreCountPerQuery: in.KeyLen,
+		CandidateKeyFraction:        1,
+		ScoreCountFraction:          1,
+	}
+	if in.KeyLen <= 0 {
+		plan.CandidateKeyBudget = 0
+		plan.DenseScoreCountPerQuery = 0
+		plan.EstimatedScoreCountPerQuery = 0
+		plan.CandidateKeyFraction = 0
+		plan.ScoreCountFraction = 0
+		return plan
+	}
+	blockSize, topBlocks := normalizeSparseAttentionRoute(in.KeyLen, in.RouteBlockSize, in.RouteTopBlocks)
+	if blockSize <= 0 || topBlocks <= 0 {
+		return plan
+	}
+	blockCount := (in.KeyLen + blockSize - 1) / blockSize
+	candidateBudget := topBlocks * blockSize
+	if candidateBudget > in.KeyLen {
+		candidateBudget = in.KeyLen
+	}
+	estimatedScores := blockCount + candidateBudget
+	plan.Routing = "block_anchor"
+	plan.RouteBlockSize = blockSize
+	plan.RouteTopBlocks = topBlocks
+	plan.RouteBlockCount = blockCount
+	plan.SelectedRouteBlocks = topBlocks
+	plan.SelectedKeyCount = topK
+	if plan.SelectedKeyCount > candidateBudget {
+		plan.SelectedKeyCount = candidateBudget
+	}
+	plan.CandidateKeyBudget = candidateBudget
+	plan.RoutedAnchorScoresPerQuery = blockCount
+	plan.EstimatedScoreCountPerQuery = estimatedScores
+	plan.CandidateKeyFraction = float64(candidateBudget) / float64(in.KeyLen)
+	plan.ScoreCountFraction = float64(estimatedScores) / float64(in.KeyLen)
+	plan.SubquadraticScorePlan = estimatedScores < in.KeyLen
+	return plan
+}
+
+// Metadata returns stable, machine-readable budget fields for traces and
+// manifests.
+func (p SparseAttentionPlan) Metadata() map[string]any {
+	return map[string]any{
+		"query_len":                       p.QueryLen,
+		"key_len":                         p.KeyLen,
+		"query_dim":                       p.QueryDim,
+		"value_dim":                       p.ValueDim,
+		"top_k":                           p.TopK,
+		"routing":                         p.Routing,
+		"route_block_size":                p.RouteBlockSize,
+		"route_top_blocks":                p.RouteTopBlocks,
+		"route_block_count":               p.RouteBlockCount,
+		"selected_route_blocks":           p.SelectedRouteBlocks,
+		"selected_key_count":              p.SelectedKeyCount,
+		"candidate_key_budget":            p.CandidateKeyBudget,
+		"dense_score_count_per_query":     p.DenseScoreCountPerQuery,
+		"routed_anchor_scores_per_query":  p.RoutedAnchorScoresPerQuery,
+		"estimated_score_count_per_query": p.EstimatedScoreCountPerQuery,
+		"candidate_key_fraction":          p.CandidateKeyFraction,
+		"score_count_fraction":            p.ScoreCountFraction,
+		"subquadratic_score_plan":         p.SubquadraticScorePlan,
+	}
+}
+
 func sparseAttentionTensor(query, key, value *Tensor, attrs map[string]string) (*Tensor, error) {
 	if query == nil || key == nil || value == nil {
 		return nil, fmt.Errorf("sparse_attention expects query, key, and value")
@@ -109,6 +233,82 @@ func TurboSparseAttentionReference(query, keyCoords, keyNorms, valueCoords, valu
 	return turboSparseAttentionTensor(query, keyCoords, keyNorms, valueCoords, valueNorms, attrs)
 }
 
+func sparseAttentionMetadata(op string, query, key, value *Tensor, attrs map[string]string) map[string]any {
+	meta := hostReferenceMetadata(op)
+	if plan, ok := sparseAttentionPlanFromDenseTensors(query, key, value, attrs); ok {
+		for key, value := range plan.Metadata() {
+			meta[key] = value
+		}
+	}
+	return meta
+}
+
+func turboSparseAttentionMetadata(op string, query, keyCoords, valueCoords *Tensor, attrs map[string]string) map[string]any {
+	meta := hostReferenceMetadata(op)
+	if plan, ok := sparseAttentionPlanFromCompressedTensors(query, keyCoords, valueCoords, attrs); ok {
+		for key, value := range plan.Metadata() {
+			meta[key] = value
+		}
+	}
+	meta["kv_decode"] = "host_reference_decode"
+	meta["dense_kv_materialized"] = true
+	return meta
+}
+
+func sparseAttentionPlanFromDenseTensors(query, key, value *Tensor, attrs map[string]string) (SparseAttentionPlan, bool) {
+	if query == nil || key == nil || value == nil {
+		return SparseAttentionPlan{}, false
+	}
+	var queryLen, keyLen, queryDim, valueDim int
+	if len(query.Shape) == 2 && len(key.Shape) == 2 && len(value.Shape) == 2 {
+		queryLen, queryDim = query.Shape[0], query.Shape[1]
+		keyLen = key.Shape[0]
+		valueDim = value.Shape[1]
+	} else if len(query.Shape) == 3 && len(key.Shape) == 3 && len(value.Shape) == 3 {
+		queryLen, queryDim = query.Shape[1], query.Shape[2]
+		keyLen = key.Shape[1]
+		valueDim = value.Shape[2]
+	} else {
+		return SparseAttentionPlan{}, false
+	}
+	return PlanSparseAttention(SparseAttentionPlanInput{
+		QueryLen:       queryLen,
+		KeyLen:         keyLen,
+		QueryDim:       queryDim,
+		ValueDim:       valueDim,
+		TopK:           attrInt(attrs, "top_k", 0),
+		RouteBlockSize: attrInt(attrs, "route_block_size", 0),
+		RouteTopBlocks: attrInt(attrs, "route_top_blocks", 0),
+	}), true
+}
+
+func sparseAttentionPlanFromCompressedTensors(query, keyCoords, valueCoords *Tensor, attrs map[string]string) (SparseAttentionPlan, bool) {
+	if query == nil || keyCoords == nil || valueCoords == nil || len(keyCoords.Shape) != 4 || len(valueCoords.Shape) != 4 {
+		return SparseAttentionPlan{}, false
+	}
+	keyLen := keyCoords.Shape[2]
+	queryDim := keyCoords.Shape[1]
+	valueDim := valueCoords.Shape[1]
+	var queryLen int
+	switch len(query.Shape) {
+	case 2:
+		queryLen = query.Shape[0]
+	case 3:
+		queryLen = query.Shape[1]
+	default:
+		return SparseAttentionPlan{}, false
+	}
+	return PlanSparseAttention(SparseAttentionPlanInput{
+		QueryLen:       queryLen,
+		KeyLen:         keyLen,
+		QueryDim:       queryDim,
+		ValueDim:       valueDim,
+		TopK:           attrInt(attrs, "top_k", 0),
+		RouteBlockSize: attrInt(attrs, "route_block_size", 0),
+		RouteTopBlocks: attrInt(attrs, "route_top_blocks", 0),
+	}), true
+}
+
 func nchwToAttentionSequence(input *Tensor, queryRank int) (*Tensor, error) {
 	if input == nil {
 		return nil, fmt.Errorf("nil tensor")
@@ -204,12 +404,11 @@ func selectSparseAttentionKeysWithRouting(keyLen, budget int, attrs map[string]s
 }
 
 func sparseAttentionRouteConfig(attrs map[string]string, keyLen int) (int, int) {
-	if keyLen <= 0 {
-		return 0, 0
-	}
-	blockSize := attrInt(attrs, "route_block_size", 0)
-	topBlocks := attrInt(attrs, "route_top_blocks", 0)
-	if blockSize <= 0 || topBlocks <= 0 {
+	return normalizeSparseAttentionRoute(keyLen, attrInt(attrs, "route_block_size", 0), attrInt(attrs, "route_top_blocks", 0))
+}
+
+func normalizeSparseAttentionRoute(keyLen, blockSize, topBlocks int) (int, int) {
+	if keyLen <= 0 || blockSize <= 0 || topBlocks <= 0 {
 		return 0, 0
 	}
 	if blockSize > keyLen {

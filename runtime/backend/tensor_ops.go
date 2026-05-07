@@ -326,7 +326,7 @@ func executeStep(ctx context.Context, mod *mantaartifact.Module, entry mantaarti
 		if err != nil {
 			return nil, "", err
 		}
-		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", hostReferenceMetadata("sparse_attention"))}, "", nil
+		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", sparseAttentionMetadata("sparse_attention", query, key, value, step.Attributes))}, "", nil
 	case mantaartifact.StepTurboSparseAttention:
 		if len(step.Inputs) != 5 || len(step.Outputs) != 1 {
 			return nil, "", fmt.Errorf("turbo_sparse_attention step %q expects 5 inputs and 1 output", step.Name)
@@ -365,7 +365,7 @@ func executeStep(ctx context.Context, mod *mantaartifact.Module, entry mantaarti
 		if err != nil {
 			return nil, "", err
 		}
-		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", hostReferenceMetadata("turbo_sparse_attention"))}, "", nil
+		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", turboSparseAttentionMetadata("turbo_sparse_attention", query, keyCoords, valueCoords, step.Attributes))}, "", nil
 	case mantaartifact.StepCrossEntropy:
 		if len(step.Inputs) < 1 || len(step.Outputs) != 1 {
 			return nil, "", fmt.Errorf("cross_entropy_factorized step %q expects at least 1 input and 1 output", step.Name)
