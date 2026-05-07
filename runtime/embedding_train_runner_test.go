@@ -1,6 +1,7 @@
 package mantaruntime
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -950,6 +951,53 @@ func TestHardNegativeTeacherTemperatureUsesFamilyUnlessExactExists(t *testing.T)
 	}
 	if got := hardNegativeTeacherTemperature(nil, "scifact", 3); got != 3 {
 		t.Fatalf("fallback temperature = %f, want fallback", got)
+	}
+}
+
+func TestNormalizeHardNegativeTeacherScoresForRunSourceZScore(t *testing.T) {
+	trainSet := []EmbeddingHardNegativeExample{
+		{Source: "scifact", TeacherScores: []float32{10, 20}},
+		{Source: "scifact", TeacherScores: []float32{30, 40}},
+		{Source: "fiqa:model", TeacherScores: []float32{0.1, 0.3}},
+		{Source: "fiqa", TeacherScores: []float32{100, 300}},
+		{Source: "missing"},
+	}
+	got, err := normalizeHardNegativeTeacherScoresForRun(trainSet, "source-zscore")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(trainSet) {
+		t.Fatalf("normalized examples = %d, want %d", len(got), len(trainSet))
+	}
+	wantFirst := []float32{-1.3416408, -0.4472136}
+	for i, want := range wantFirst {
+		if math.Abs(float64(got[0].TeacherScores[i]-want)) > 1e-5 {
+			t.Fatalf("scifact score %d = %f, want %f", i, got[0].TeacherScores[i], want)
+		}
+	}
+	if got[2].TeacherScores[0] >= got[2].TeacherScores[1] {
+		t.Fatalf("fiqa:model ordering not preserved: %v", got[2].TeacherScores)
+	}
+	if len(got[4].TeacherScores) != 0 {
+		t.Fatalf("missing teacher scores = %v, want empty", got[4].TeacherScores)
+	}
+	if trainSet[0].TeacherScores[0] != 10 {
+		t.Fatalf("input teacher scores mutated: %v", trainSet[0].TeacherScores)
+	}
+}
+
+func TestNormalizeHardNegativeTeacherScoresForRunExampleZScore(t *testing.T) {
+	got, err := normalizeHardNegativeTeacherScoresForRun([]EmbeddingHardNegativeExample{
+		{Source: "scifact", TeacherScores: []float32{2, 4, 6}},
+	}, "example_zscore")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []float32{-1.2247449, 0, 1.2247449}
+	for i := range want {
+		if math.Abs(float64(got[0].TeacherScores[i]-want[i])) > 1e-5 {
+			t.Fatalf("example zscore %d = %f, want %f", i, got[0].TeacherScores[i], want[i])
+		}
 	}
 }
 

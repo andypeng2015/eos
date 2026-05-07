@@ -55,6 +55,7 @@ type candidateConfig struct {
 	TeacherLossWeight   string
 	TeacherTemperature  string
 	TeacherSourceTemperatures string
+	TeacherScoreNormalization string
 	EvalEvery           string
 	EvalEverySteps      string
 	Patience            string
@@ -500,6 +501,7 @@ func writeManifest(cfg candidateConfig, status string) error {
     "teacher_loss_weight": %s,
     "teacher_temperature": %s,
     "teacher_source_temperatures": %s,
+    "teacher_score_normalization": %s,
     "select_metric": %s,
     "quality_target": %s,
     "eval_every": %s,
@@ -558,6 +560,7 @@ func writeManifest(cfg candidateConfig, status string) error {
 		cfg.TeacherLossWeight,
 		cfg.TeacherTemperature,
 		jsonString(cfg.TeacherSourceTemperatures),
+		jsonString(cfg.TeacherScoreNormalization),
 		jsonString(cfg.SelectMetric),
 		jsonString(cfg.QualityTarget),
 		cfg.EvalEvery,
@@ -680,6 +683,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		TeacherLossWeight:   getenv("MANTA_TEACHER_LOSS_WEIGHT", "0"),
 		TeacherTemperature:  getenv("MANTA_TEACHER_TEMPERATURE", "1"),
 		TeacherSourceTemperatures: getenv("MANTA_TEACHER_SOURCE_TEMPERATURES", ""),
+		TeacherScoreNormalization: getenv("MANTA_TEACHER_SCORE_NORMALIZATION", ""),
 		EvalEvery:           getenv("MANTA_EVAL_EVERY", "1"),
 		EvalEverySteps:      getenv("MANTA_EVAL_EVERY_STEPS", "0"),
 		Patience:            getenv("MANTA_PATIENCE", "3"),
@@ -827,6 +831,9 @@ func trainCommonArgs(cfg candidateConfig) []string {
 	}
 	if cfg.TeacherSourceTemperatures != "" {
 		args = append(args, "--teacher-source-temperatures", cfg.TeacherSourceTemperatures)
+	}
+	if cfg.TeacherScoreNormalization != "" {
+		args = append(args, "--teacher-score-normalization", cfg.TeacherScoreNormalization)
 	}
 	return args
 }

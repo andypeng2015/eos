@@ -2094,6 +2094,7 @@ func runTrainEmbed(args []string) error {
 	var teacherLossWeight float64
 	var teacherTemperature float64
 	var teacherSourceTemperatures string
+	var teacherScoreNormalization string
 	fs.IntVar(&epochs, "epochs", 10, "number of epochs")
 	fs.IntVar(&batchSize, "batch-size", 8, "batch size")
 	fs.BoolVar(&shuffle, "shuffle", true, "shuffle training set each epoch")
@@ -2122,6 +2123,7 @@ func runTrainEmbed(args []string) error {
 	fs.Float64Var(&teacherLossWeight, "teacher-loss-weight", 0, "teacher score distillation weight for hard-negative training")
 	fs.Float64Var(&teacherTemperature, "teacher-temperature", 0, "teacher score softmax temperature for hard-negative distillation")
 	fs.StringVar(&teacherSourceTemperatures, "teacher-source-temperatures", "", "comma-separated source=temperature overrides for teacher distillation, for example scifact=10,nfcorpus:model=1.5")
+	fs.StringVar(&teacherScoreNormalization, "teacher-score-normalization", "", "normalize hard-negative teacher_scores before distillation: none, source_zscore, family_zscore, or example_zscore")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2169,6 +2171,9 @@ func runTrainEmbed(args []string) error {
 	if len(parsedTeacherSourceTemperatures) > 0 && !hardNegativeTrain {
 		return fmt.Errorf("--teacher-source-temperatures requires --hard-negative-train")
 	}
+	if strings.TrimSpace(teacherScoreNormalization) != "" && !hardNegativeTrain {
+		return fmt.Errorf("--teacher-score-normalization requires --hard-negative-train")
+	}
 	path := fs.Arg(0)
 	trainPath := fs.Arg(1)
 	evalPath := ""
@@ -2207,6 +2212,7 @@ func runTrainEmbed(args []string) error {
 		TeacherLossWeight:         float32(teacherLossWeight),
 		TeacherTemperature:        float32(teacherTemperature),
 		TeacherSourceTemperatures: parsedTeacherSourceTemperatures,
+		TeacherScoreNormalization: teacherScoreNormalization,
 		ProgressEverySteps:        progressEvery,
 		EvalOnly:                  evalOnly,
 		PairwiseTrain:             pairwiseTrain,
@@ -2818,6 +2824,7 @@ type trainRunConfigJSON struct {
 	TeacherLossWeight         float32            `json:"teacher_loss_weight,omitempty"`
 	TeacherTemperature        float32            `json:"teacher_temperature,omitempty"`
 	TeacherSourceTemperatures map[string]float32 `json:"teacher_source_temperatures,omitempty"`
+	TeacherScoreNormalization string             `json:"teacher_score_normalization,omitempty"`
 	ProgressEverySteps        int                `json:"progress_every_steps"`
 	EvalOnly                  bool               `json:"eval_only"`
 	PairwiseTrain             bool               `json:"pairwise_train"`
@@ -2984,6 +2991,7 @@ func trainRunConfigPayload(cfg mantaruntime.EmbeddingTrainRunConfig) trainRunCon
 		TeacherLossWeight:         cfg.TeacherLossWeight,
 		TeacherTemperature:        cfg.TeacherTemperature,
 		TeacherSourceTemperatures: cfg.TeacherSourceTemperatures,
+		TeacherScoreNormalization: cfg.TeacherScoreNormalization,
 		ProgressEverySteps:        cfg.ProgressEverySteps,
 		EvalOnly:                  cfg.EvalOnly,
 		PairwiseTrain:             cfg.PairwiseTrain,

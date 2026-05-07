@@ -35,6 +35,7 @@ type EmbeddingTrainRunConfig struct {
 	TeacherLossWeight         float32
 	TeacherTemperature        float32
 	TeacherSourceTemperatures map[string]float32
+	TeacherScoreNormalization string
 	ProgressEverySteps        int
 	Progress                  EmbeddingTrainProgressFunc
 }
@@ -566,6 +567,13 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 	}
 	if !validTrainSelectionMetric(cfg.SelectMetric) {
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("unsupported select_metric %q", cfg.SelectMetric)
+	}
+	if !cfg.EvalOnly {
+		var err error
+		trainSet, err = normalizeHardNegativeTeacherScoresForRun(trainSet, cfg.TeacherScoreNormalization)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, err
+		}
 	}
 	if err := t.applyTrainRunOverrides(cfg); err != nil {
 		return EmbeddingTrainRunSummary{}, err
@@ -1211,6 +1219,145 @@ func normalizeHardNegativeTeacherTemperatures(temperatures map[string]float32) m
 	return out
 }
 
+func normalizeTeacherScoreNormalization(mode string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	mode = strings.ReplaceAll(mode, "-", "_")
+	if mode == "" {
+		return "none"
+	}
+	switch mode {
+	case "off", "disabled":
+		return "none"
+	case "source", "source_z", "source_zscore":
+		return "source_zscore"
+	case "family", "family_z", "source_family_zscore":
+		return "family_zscore"
+	case "example", "example_z", "query_zscore":
+		return "example_zscore"
+	default:
+		return mode
+	}
+}
+
+func validTeacherScoreNormalization(mode string) bool {
+	switch normalizeTeacherScoreNormalization(mode) {
+	case "none", "source_zscore", "family_zscore", "example_zscore":
+		return true
+	default:
+		return false
+	}
+}
+
+type hardNegativeTeacherScoreMoments struct {
+	Count int
+	Sum   float64
+	SumSq float64
+}
+
+func (m *hardNegativeTeacherScoreMoments) Add(score float32) {
+	if m == nil {
+		return
+	}
+	value := float64(score)
+	m.Count++
+	m.Sum += value
+	m.SumSq += value * value
+}
+
+func (m hardNegativeTeacherScoreMoments) MeanStd() (float32, float32) {
+	if m.Count <= 0 {
+		return 0, 1
+	}
+	mean := m.Sum / float64(m.Count)
+	variance := m.SumSq/float64(m.Count) - mean*mean
+	if variance < 1e-12 {
+		return float32(mean), 1
+	}
+	return float32(mean), float32(math.Sqrt(variance))
+}
+
+func normalizeHardNegativeTeacherScoresForRun(examples []EmbeddingHardNegativeExample, mode string) ([]EmbeddingHardNegativeExample, error) {
+	mode = normalizeTeacherScoreNormalization(mode)
+	switch mode {
+	case "none":
+		return examples, nil
+	case "source_zscore", "family_zscore", "example_zscore":
+	default:
+		return nil, fmt.Errorf("unsupported teacher_score_normalization %q", mode)
+	}
+	if len(examples) == 0 {
+		return examples, nil
+	}
+	out := append([]EmbeddingHardNegativeExample(nil), examples...)
+	if mode == "example_zscore" {
+		for i := range out {
+			out[i].TeacherScores = zscoreTeacherScoreSlice(out[i].TeacherScores)
+		}
+		return out, nil
+	}
+	moments := map[string]*hardNegativeTeacherScoreMoments{}
+	for _, example := range out {
+		if len(example.TeacherScores) == 0 {
+			continue
+		}
+		key := normalizedHardNegativeSource(example.Source)
+		if mode == "family_zscore" {
+			key = hardNegativeSourceFamily(example.Source)
+		}
+		stats := moments[key]
+		if stats == nil {
+			stats = &hardNegativeTeacherScoreMoments{}
+			moments[key] = stats
+		}
+		for _, score := range example.TeacherScores {
+			stats.Add(score)
+		}
+	}
+	sourceScale := make(map[string][2]float32, len(moments))
+	for source, stats := range moments {
+		mean, std := stats.MeanStd()
+		sourceScale[source] = [2]float32{mean, std}
+	}
+	for i := range out {
+		if len(out[i].TeacherScores) == 0 {
+			continue
+		}
+		key := normalizedHardNegativeSource(out[i].Source)
+		if mode == "family_zscore" {
+			key = hardNegativeSourceFamily(out[i].Source)
+		}
+		scale := sourceScale[key]
+		out[i].TeacherScores = normalizeTeacherScoreSlice(out[i].TeacherScores, scale[0], scale[1])
+	}
+	return out, nil
+}
+
+func zscoreTeacherScoreSlice(scores []float32) []float32 {
+	if len(scores) == 0 {
+		return nil
+	}
+	moments := hardNegativeTeacherScoreMoments{}
+	for _, score := range scores {
+		moments.Add(score)
+	}
+	mean, std := moments.MeanStd()
+	return normalizeTeacherScoreSlice(scores, mean, std)
+}
+
+func normalizeTeacherScoreSlice(scores []float32, mean, std float32) []float32 {
+	if len(scores) == 0 {
+		return nil
+	}
+	if std <= 1e-6 || math.IsNaN(float64(std)) || math.IsInf(float64(std), 0) {
+		std = 1
+	}
+	out := make([]float32, len(scores))
+	for i, score := range scores {
+		out[i] = (score - mean) / std
+	}
+	return out
+}
+
 func plannedEvalPassCount(evalExamples, epochs, evalEvery int) int {
 	if evalExamples <= 0 || epochs <= 0 {
 		return 0
@@ -1558,6 +1705,7 @@ func normalizedTrainRunConfig(cfg EmbeddingTrainRunConfig) EmbeddingTrainRunConf
 	cfg.GroupedLossWeight = effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
 	cfg.HardNegativeSourceWeights = normalizeHardNegativeSourceWeights(cfg.HardNegativeSourceWeights)
 	cfg.TeacherSourceTemperatures = normalizeHardNegativeTeacherTemperatures(cfg.TeacherSourceTemperatures)
+	cfg.TeacherScoreNormalization = normalizeTeacherScoreNormalization(cfg.TeacherScoreNormalization)
 	return cfg
 }
 
@@ -1627,6 +1775,7 @@ func (t *EmbeddingTrainer) syncTrainRunObjectiveConfig(cfg EmbeddingTrainRunConf
 	}
 	cfg.GroupedLossWeight = effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
 	cfg.TeacherSourceTemperatures = normalizeHardNegativeTeacherTemperatures(cfg.TeacherSourceTemperatures)
+	cfg.TeacherScoreNormalization = normalizeTeacherScoreNormalization(cfg.TeacherScoreNormalization)
 	return cfg
 }
 
