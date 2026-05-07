@@ -1,9 +1,10 @@
 # Benchmarks
 
-Manta has two benchmark layers:
+Manta has three benchmark layers:
 
 - Go microbenchmarks for isolated runtime kernels and trainer math.
 - End-to-end training smokes for the native default embedding-model path.
+- Embedder scoreboards for retrieval quality and serving efficiency claims.
 
 Run the default microbenchmarks with Ferrous Wheel:
 
@@ -34,6 +35,57 @@ go run ./cmd/manta train-embed --eval-only /path/to/manta-embed-v1.mll /path/to/
 When the package has a sibling `.tokenizer.mll`, text eval JSONL is tokenized automatically. Pass `--tokenizer /path/to/tokenizer.mll` to use an explicit tokenizer.
 
 For a production candidate run with acquired BEIR-format datasets, provenance, metric gates, sealed export, and SHA256 manifests, use `scripts/acquire_manta_embed_v1_datasets.fw` followed by `scripts/train_manta_embed_v1_candidate.fw`. See `docs/production-embedding.md`.
+
+Build the long-context embedder wedge scoreboard from an existing sealed candidate:
+
+```bash
+MANTA_REPO_ROOT=$PWD \
+MANTA_SCOREBOARD_ARTIFACT=/path/to/manta-embed-v1.sealed.mll \
+MANTA_SCOREBOARD_PAIRWISE_JSONL=/data/manta/datasets/manta-embed-v1/processed/eval.jsonl \
+MANTA_SCOREBOARD_HARD_JSONL=/data/manta/datasets/manta-embed-v1/processed/hard-eval.jsonl \
+MANTA_SCOREBOARD_RETRIEVAL_ROOT=/data/manta/datasets/manta-embed-v1 \
+MANTA_SCOREBOARD_RETRIEVAL_DATASETS=scifact,nfcorpus,fiqa \
+ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
+```
+
+The scoreboard run writes `scoreboard.tsv`, `scoreboard.json`, per-task metrics JSON, command logs, and a run-local `manta` binary under `runs/<run-id>/`. Pairwise rows use `MANTA_SCOREBOARD_PAIRWISE_ARTIFACT` when set, or infer the sibling trainable package from a sealed artifact path. Add `MANTA_SCOREBOARD_LONG_ROOT` and `MANTA_SCOREBOARD_LONG_DATASETS` when long-document retrieval datasets are prepared.
+
+Run a full retrieval-alignment round from an existing candidate when retrieval is behind the BM25 or open-model baselines:
+
+```bash
+MANTA_REPO_ROOT=$PWD \
+MANTA_ALIGN_INITIAL_ARTIFACT=/path/to/manta-embed-v1.sealed.mll \
+MANTA_ALIGN_DATASETS=scifact,nfcorpus,fiqa \
+ferrous-wheel run scripts/run_manta_embed_v1_retrieval_alignment_round.fw
+```
+
+The alignment harness writes a baseline scoreboard, run-local model-hard negatives, a retrained candidate package, a candidate scoreboard, and `retrieval-alignment-summary.tsv/json` with per-dataset nDCG@10 and recall@100 deltas.
+Candidate training defaults to batch `64` and one explicit hard negative per query. This keeps full mined rounds bounded; larger batches or more explicit negatives should be treated as throughput experiments because pair work grows quickly.
+Set `MANTA_ALIGN_MODEL_HARD_DATASET_WEIGHTS=dataset=weight,...` to allocate more mined examples to weak datasets in the next mixed round.
+Set `MANTA_ALIGN_CANDIDATE_SOURCE_WEIGHTS=source=weight,...` to source-balance hard-negative batches when the train JSONL has `source` fields. Family keys such as `fiqa` also apply to mined sources such as `fiqa:model` unless an exact key is present.
+Set `MANTA_ALIGN_GATE_CANDIDATE=1` for promotion-style rounds. The gate records the summary, then fails when macro nDCG@10 is below `MANTA_ALIGN_MIN_MACRO_NDCG_DELTA` or any dataset regresses beyond `MANTA_ALIGN_MAX_DATASET_NDCG_REGRESSION`; `MANTA_ALIGN_MIN_DATASET_NDCG_RATIO` can enforce an additional per-dataset nDCG ratio floor. Use `MANTA_ALIGN_MAX_DATASET_RECALL_AT_100_REGRESSION` and `MANTA_ALIGN_MIN_DATASET_RECALL_AT_100_RATIO` to also guard recall@100.
+Set `MANTA_ALIGN_CANDIDATE_CONTRASTIVE_LOSS=grouped_infonce` to test the query-grouped hard-negative objective. This counts only each query's own positive/negative candidate set in the training loss, which is useful as a retrieval-ranking ablation when corpus ranking regresses. The first grouped-only gated run rejected the candidate, so keep this flag as an experiment rather than a promotion path.
+Set `MANTA_ALIGN_CANDIDATE_CONTRASTIVE_LOSS=hybrid_infonce` to keep the global hard-negative InfoNCE matrix and add a weighted grouped term. The first weight-`0.25` gated run improved FiQA but regressed SciFact/NFCorpus. The first strict pass used `MANTA_ALIGN_CANDIDATE_GROUPED_LOSS_WEIGHT=0.10`, `MANTA_ALIGN_CANDIDATE_LR=0.000025`, and `MANTA_ALIGN_CANDIDATE_SOURCE_WEIGHTS=scifact=1,nfcorpus=2,fiqa=1`.
+Model-hard and BM25 mining can now emit `teacher_scores` for each query's positive plus explicit negatives. Set `MANTA_ALIGN_CANDIDATE_TEACHER_LOSS_WEIGHT` above zero to blend a soft teacher-distribution cross-entropy into hard-negative training, and tune `MANTA_ALIGN_CANDIDATE_TEACHER_TEMPERATURE` when the teacher ranking is too sharp or too flat.
+A lower-LR ratchet from that strict-pass checkpoint with `MANTA_ALIGN_CANDIDATE_GROUPED_LOSS_WEIGHT=0.05`, `MANTA_ALIGN_CANDIDATE_LR=0.0000125`, and `MANTA_ALIGN_CANDIDATE_SOURCE_WEIGHTS=scifact=1,nfcorpus=3,fiqa=1` improved pairwise AUC but failed the retrieval gate. Do not treat repeated ratchets on the same mined blend as the default next step; remine model-hard negatives from the promoted artifact or add teacher-score distillation.
+A fresh-mining round from the strict-pass checkpoint with `MANTA_ALIGN_MODEL_HARD_DATASET_WEIGHTS=scifact=1,nfcorpus=3,fiqa=1`, `MANTA_ALIGN_CANDIDATE_GROUPED_LOSS_WEIGHT=0.05`, `MANTA_ALIGN_CANDIDATE_LR=0.0000125`, and `MANTA_ALIGN_CANDIDATE_SOURCE_WEIGHTS=scifact=1,nfcorpus=2,fiqa=1` passed the retrieval gate: macro nDCG@10 improved from `0.138397` to `0.145568`. Because recall@100 dipped, future promotion-style rounds should set an explicit recall floor when using this recipe.
+A teacher-distilled follow-up from that checkpoint used fresh model-hard examples with `teacher_scores`, `MANTA_ALIGN_CANDIDATE_TEACHER_LOSS_WEIGHT=0.20`, `MANTA_ALIGN_CANDIDATE_LR=0.000010`, and recall floors. The first full gated run with `MANTA_ALIGN_CANDIDATE_SOURCE_WEIGHTS=scifact=1,nfcorpus=2,fiqa=1` improved macro nDCG@10 to `0.146301` but failed the NFCorpus nDCG floor. Reusing the same teacher-scored JSONL with `scifact=1,nfcorpus=3,fiqa=1` fixed that failure and raised macro nDCG@10 to `0.147862` while recall@100 stayed flat or improved on all three retrieval sets. Holding that recipe and softening `MANTA_ALIGN_CANDIDATE_TEACHER_TEMPERATURE` to `1.5` raised macro nDCG@10 again to `0.148143`; the retrieval comparison gate passed with SciFact `0.331139`, NFCorpus `0.084325`, and FiQA `0.028967`. Temperature `1.25` and `2.0` also passed the gate but landed lower at macro `0.147645` and `0.148029`, respectively. LR `0.000008` at temperature `1.5` passed at macro `0.147625` and improved NFCorpus to `0.084927`, but lost enough SciFact to keep LR `0.000010` as the current best. Source weights `scifact=1,nfcorpus=4,fiqa=1` raised SciFact to `0.331362` but failed the NFCorpus nDCG floor and regressed FiQA. Source weights `scifact=2,nfcorpus=3,fiqa=1` passed the older fresh-baseline comparison at macro `0.146288`, but pairwise guardrails fell to validation AUC `0.815529` / hard AUC `0.808770` and macro stayed below the current best, so the local source-weight sweep is closed.
+A deeper Lane B mining round from the temperature-`1.5` best requested `9000` model-hard examples with `MANTA_ALIGN_MODEL_HARD_NEGATIVES=5`, `MANTA_ALIGN_MODEL_HARD_CANDIDATE_TOP_K=400`, and `MANTA_ALIGN_CANDIDATE_HARD_NEGATIVES=2`. The run trained `13,038` blended hard-negative examples at `4262` train pairs/s with CUDA-backed forward/optimizer/activation/contrastive, but failed the promotion gate: macro nDCG@10 fell from `0.148144` to `0.143866`, SciFact fell to `0.320576`, and FiQA fell to `0.026453`. NFCorpus rose slightly to `0.084568`, so the next isolation run should reuse the same mined JSONL with one candidate hard negative.
+The one-hard-negative reuse trained the same deep-mined JSONL at `5056` train pairs/s and improved NFCorpus to a new high-water mark of `0.087300`, but it still failed against the current best: SciFact `0.324630`, FiQA `0.025679`, macro `0.145870`, validation AUC `0.802976`, and hard AUC `0.800840`. Since the deep-mined JSONL already contains `5400` NFCorpus model-hard examples, the next reuse should drop the NF3 training source schedule and try balanced source weights.
+Balanced source weights on that same deep-mined HN1 JSONL regressed further to macro `0.144915`: SciFact `0.322932`, NFCorpus `0.086364`, FiQA `0.025450`, validation AUC `0.794627`, and hard AUC `0.794320`. Do not continue source-sampler rescue on this file; the next local isolation should keep the NF3 HN1 shape but lower LR to test a smaller update.
+Lowering the HN1 NF3 reuse to LR `0.000005` improved FiQA to `0.027508` and kept NFCorpus high at `0.086784`, but SciFact remained low at `0.323136`, macro landed at `0.145809`, validation AUC was `0.803438`, and hard AUC was `0.800508`. The remaining local check is reduced grouped pressure; otherwise move this lane to external-teacher work.
+Reducing grouped pressure to `MANTA_ALIGN_CANDIDATE_GROUPED_LOSS_WEIGHT=0.025` at LR `0.000005` gave the best Lane B deep-mined balance but still failed promotion: SciFact `0.325439`, NFCorpus `0.086645`, FiQA `0.027204`, macro `0.146429`, validation AUC `0.804674`, and hard AUC `0.801615`. Close this deep-mined file for balanced promotion and move the next improvement path to external teacher import or a larger `embed-m` run.
+The first `embed-m` capacity probes separated mechanical viability from quality. The full target shape (`32768` vocab, max sequence `512`, dim `192`, hidden `384`, `3` repeats) initialized, but full-corpus tokenizer training stayed CPU-bound for more than fifteen minutes before any optimizer step, so true `32768`-vocab iteration needs a cached tokenizer artifact or faster trainer first. A cached-tokenizer probe (`16384` vocab, max sequence `512`) trained and sealed at batch `64`, processing `1.393M` actual train pairs in `19m20s` with CUDA forward/optimizer/activation/contrastive and `1460.78` train pairs/s, but rejected hard: validation AUC `0.595854`, hard AUC `0.598887`, SciFact `0.160753`, NFCorpus `0.060778`, FiQA `0.012688`, macro `0.078073`. A scratch-style cached-tokenizer run with pure `infonce`, LR `0.002`, and one epoch rejected even earlier with validation AUC `0.495137` and hard AUC `0.498731`. Do not continue blind random-start `embed-m`; the next larger-model proof needs dimension-compatible bootstrapping, staged pretraining, or imported external teacher scores.
+
+Compare a retrieval-only candidate scoreboard against a prior alignment summary without rerunning the full alignment harness:
+
+```bash
+MANTA_COMPARE_BASELINE_SUMMARY_JSON=/path/to/retrieval-alignment-summary.json \
+MANTA_COMPARE_CANDIDATE_SCOREBOARD_JSON=/path/to/candidate-scoreboard/scoreboard.json \
+ferrous-wheel run scripts/compare_manta_embed_v1_retrieval_candidate.fw
+```
+
+The comparison writes `retrieval-comparison-summary.tsv/json` beside the candidate scoreboard and applies the same macro nDCG@10, per-dataset nDCG, and recall@100 floors by default.
 
 If you want a binary runner instead of `run` mode:
 

@@ -23,15 +23,17 @@ const (
 	OpKVWrite   OpKind = "kv_write"
 	OpKernel    OpKind = "kernel_call"
 
-	OpConv2D       OpKind = "conv2d"
-	OpConv2DTrans  OpKind = "conv2d_transpose"
-	OpGDN          OpKind = "gdn"
-	OpIGDN         OpKind = "igdn"
-	OpTurboQEncode OpKind = "turboquant_encode"
-	OpTurboQDecode OpKind = "turboquant_decode"
-	OpCrossEntropy OpKind = "cross_entropy_factorized"
-	OpMSELoss      OpKind = "mse_loss"
-	OpMSSSIMLoss   OpKind = "ms_ssim_loss"
+	OpConv2D               OpKind = "conv2d"
+	OpConv2DTrans          OpKind = "conv2d_transpose"
+	OpGDN                  OpKind = "gdn"
+	OpIGDN                 OpKind = "igdn"
+	OpTurboQEncode         OpKind = "turboquant_encode"
+	OpTurboQDecode         OpKind = "turboquant_decode"
+	OpSparseAttention      OpKind = "sparse_attention"
+	OpTurboSparseAttention OpKind = "turbo_sparse_attention"
+	OpCrossEntropy         OpKind = "cross_entropy_factorized"
+	OpMSELoss              OpKind = "mse_loss"
+	OpMSSSIMLoss           OpKind = "ms_ssim_loss"
 )
 
 // Op is a backend-neutral tensor operation.

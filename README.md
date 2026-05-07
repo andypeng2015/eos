@@ -17,9 +17,13 @@ Manta is an inference-first GPU language and runtime stack. It compiles `.manta`
 
 The near-term target is an inference-first product surface for embedding, reranking, retrieval-time scoring, decode, and CorkScrewDB integration. Manta also owns the native training path needed to produce those default artifacts, so model authors do not need to train in Python, export through another format, and deploy through a separate runtime.
 
+The credible long-context wedge is the best local long-context embedder: consumer-GPU trainable, compressed for local serving, sealed as `.mll`, and strong on long-document retrieval. The target and scorecard are tracked in [docs/local-long-context-embedder-wedge.md](docs/local-long-context-embedder-wedge.md), with lower-level sparse attention success criteria in [docs/consumer-subquadratic-gpu-spec.md](docs/consumer-subquadratic-gpu-spec.md).
+
 ## Agent Skill
 
 Agents working with Manta should use the [using-manta](https://github.com/odvcencio/m31labs-skills/blob/main/skills/using-manta/SKILL.md) skill.
+
+Current embedder work is focused on retrieval-aligned training, not pairwise-only wins. The alignment harness now supports source-aware hard-negative scheduling, promotion gates over full retrieval scoreboards, recall@100 guardrails, grouped hard-negative InfoNCE, hybrid InfoNCE, and teacher-score distillation over mined candidate groups. The current nDCG best is the teacher-distilled hybrid follow-up with grouped weight `0.05`, teacher weight `0.20`, LR `0.000010`, NF-biased model-hard mining, and `nfcorpus=3` source bias during training; macro nDCG@10 improves from `0.145568` to `0.147862` against the previous best while staying inside the nDCG and recall@100 floors.
 
 That means the language and runtime should bias toward:
 
@@ -29,6 +33,18 @@ That means the language and runtime should bias toward:
 - inference kernels that can consume TurboQuant-native layouts directly
 - portable `.mll` artifacts that CorkScrewDB can load without rewriting host code
 - sealed MLL package exports that carry model definition, weights, tokenizer, memory plan, and metadata together
+
+## Training A CorkScrew Embedding
+
+The default CorkScrew embedding model is intended to be born from this repository's own pipeline: local BEIR data, Manta-native training, Manta retrieval evaluation, sealed `.mll` export, and optional CorkScrew asset installation.
+
+```bash
+MANTA_REPO_ROOT=$PWD \
+MANTA_INSTALL_CORKSCREW=1 \
+ferrous-wheel run scripts/train_manta_embed_v1_shipping_pipeline.fw
+```
+
+The shipping pipeline trains a mixed pretraining + BEIR Stage A model, mines model-hard negatives from that candidate, builds a FiQA-weighted BEIR fine-tune set, trains Stage B from the Stage A trainable package, and gates the final sealed artifact on SciFact, NfCorpus, and FiQA retrieval `ndcg@10`.
 
 ## Install
 
@@ -111,6 +127,7 @@ pipeline decode_step(x: f16[T, D], cache: kv_cache) -> f16[T, D] {
 | `i32[D1, ...]` | Integer tensor |
 | `q4[D1, D2, ...]` | 4-bit quantized tensor/value buffer |
 | `q8[D1, D2, ...]` | 8-bit quantized tensor/value buffer |
+| `q_norm[D1, D2, ...]` | Log-quantized norm sidecar for TurboQuant blocks |
 | `kv_cache` | Mutable key-value cache for autoregressive decoding |
 
 Dimensions are symbolic (`T`, `D`, `V`, `E`) and resolved at load time.
@@ -139,6 +156,8 @@ Quantized inference dtypes such as `q4[...]` and `q8[...]` are part of the activ
 | `cosine(query, docs)` | Row-wise cosine scoring |
 | `l2_distance(query, docs)` | Row-wise distance scoring |
 | `topk(scores, k)` | Return top-`k` indices from a score vector |
+| `sparse_attention(q, k, v, top_k)` | Top-`k` sparse attention over dense Q/K/V tensors |
+| `turbo_sparse_attention(q, kc, kn, vc, vn, top_k[, route_block_size, route_top_blocks])` | Sparse attention over TurboQuant-compressed K/V tensors, optionally routed through top-scoring key blocks |
 | `kv_read(cache)` | Read from KV cache |
 | `kv_write(cache, value)` | Write to KV cache |
 
@@ -319,6 +338,8 @@ manta tokenize-embed <artifact.mll> <text> <tokens> Convert text JSONL to reusab
 manta train-embed [flags] <artifact.mll> <train>    Fit an initialized package on token or text JSONL
 manta train-embed --eval-only <artifact.mll> <eval> Evaluate a package without optimizer steps
 manta train-embed --no-tokenizer <artifact.mll> <tokens> Force token JSONL beside a tokenizer
+manta eval-retrieval [flags] <artifact.mll> <beir>  Score BEIR-style retrieval with Manta embeddings
+manta eval-retrieval-bm25 [flags] <beir>            Score the same retrieval files with BM25
 manta compare-train-metrics <current> [baseline]    Summarize training metrics JSON and deltas
 manta diagnose-train-metrics <metrics.json>        Explain backend use and transfer pressure
 manta gate-train-metrics [flags] <metrics.json>    Enforce quality and efficiency thresholds
@@ -332,6 +353,8 @@ manta version                                      Print version
 Before a candidate run, use `ferrous-wheel run scripts/verify_manta_production.fw` to preflight the local `.mll` training, eval-only, sealed export, and inspect path.
 
 For production-grade `manta-embed-v1` candidate training, use `scripts/acquire_manta_embed_v1_datasets.fw` followed by `scripts/train_manta_embed_v1_candidate.fw`; they record dataset hashes, repo provenance, eval-only gates, sealed export, and artifact hashes. See `docs/production-embedding.md`.
+
+For the local long-context embedder wedge scoreboard, run `scripts/score_manta_embed_v1_baselines.fw` against a sealed candidate plus pairwise, hard, retrieval, and optional long-document eval sets. It writes `scoreboard.tsv` and `scoreboard.json` under `runs/<run-id>/`. See `docs/benchmarks.md` and `docs/local-long-context-embedder-wedge.md`.
 
 ## Design Constraints
 

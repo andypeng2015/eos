@@ -1,0 +1,405 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type compareConfig struct {
+	BaselineSummaryJSON    string
+	CandidateScoreboardJSON string
+	Datasets               []string
+	SummaryTSV             string
+	SummaryJSON            string
+	GateCandidate          bool
+	FailOnGate             bool
+	MinMacroNDCGDelta      float64
+	MaxDatasetNDCGRegression float64
+	MinDatasetNDCGRatio    float64
+	MaxDatasetRecallRegression float64
+	MinDatasetRecallRatio  float64
+}
+
+type baselineSummary struct {
+	Schema string `json:"schema"`
+	RunID  string `json:"run_id"`
+	RunDir string `json:"run_dir"`
+	Rows   []baselineRow `json:"rows"`
+}
+
+type baselineRow struct {
+	Dataset              string  `json:"dataset"`
+	CandidateNDCGAt10    float64 `json:"candidate_ndcg_at_10"`
+	CandidateRecallAt100 float64 `json:"candidate_recall_at_100"`
+}
+
+type scoreboardManifest struct {
+	Schema string          `json:"schema"`
+	RunID  string          `json:"run_id"`
+	RunDir string          `json:"run_dir"`
+	Rows   []scoreboardRow `json:"rows"`
+}
+
+type scoreboardRow struct {
+	Category    string  `json:"category"`
+	Dataset     string  `json:"dataset"`
+	Baseline    string  `json:"baseline"`
+	NDCGAt10    float64 `json:"ndcg_at_10,omitempty"`
+	RecallAt100 float64 `json:"recall_at_100,omitempty"`
+}
+
+type summaryRow struct {
+	Dataset              string  `json:"dataset"`
+	BaselineNDCGAt10     float64 `json:"baseline_ndcg_at_10"`
+	CandidateNDCGAt10    float64 `json:"candidate_ndcg_at_10"`
+	NDCGAt10Delta        float64 `json:"ndcg_at_10_delta"`
+	NDCGAt10Ratio        float64 `json:"ndcg_at_10_ratio,omitempty"`
+	BaselineRecallAt100  float64 `json:"baseline_recall_at_100"`
+	CandidateRecallAt100 float64 `json:"candidate_recall_at_100"`
+	RecallAt100Delta     float64 `json:"recall_at_100_delta"`
+	RecallAt100Ratio     float64 `json:"recall_at_100_ratio,omitempty"`
+}
+
+type comparisonGate struct {
+	Enabled                         bool     `json:"enabled"`
+	Passed                          bool     `json:"passed"`
+	MinMacroNDCGAt10Delta           float64  `json:"min_macro_ndcg_at_10_delta"`
+	MaxDatasetNDCGAt10Regression    float64  `json:"max_dataset_ndcg_at_10_regression"`
+	MinDatasetNDCGAt10Ratio         float64  `json:"min_dataset_ndcg_at_10_ratio,omitempty"`
+	MaxDatasetRecallAt100Regression float64  `json:"max_dataset_recall_at_100_regression,omitempty"`
+	MinDatasetRecallAt100Ratio      float64  `json:"min_dataset_recall_at_100_ratio,omitempty"`
+	BaselineMacroNDCGAt10           float64  `json:"baseline_macro_ndcg_at_10"`
+	CandidateMacroNDCGAt10          float64  `json:"candidate_macro_ndcg_at_10"`
+	MacroNDCGAt10Delta              float64  `json:"macro_ndcg_at_10_delta"`
+	Failures                        []string `json:"failures,omitempty"`
+}
+
+type comparisonManifest struct {
+	Schema                  string         `json:"schema"`
+	GeneratedAt             string         `json:"generated_at"`
+	BaselineSummaryJSON      string         `json:"baseline_summary_json"`
+	CandidateScoreboardJSON  string         `json:"candidate_scoreboard_json"`
+	Rows                    []summaryRow   `json:"rows"`
+	Gate                    comparisonGate `json:"gate"`
+}
+
+func usage() {
+	fmt.Println(`Compare a Manta retrieval scoreboard against a baseline alignment summary.
+
+Required:
+  MANTA_COMPARE_BASELINE_SUMMARY_JSON=/path/to/retrieval-alignment-summary.json
+  MANTA_COMPARE_CANDIDATE_SCOREBOARD_JSON=/path/to/scoreboard.json
+
+Optional:
+  MANTA_COMPARE_DATASETS=scifact,nfcorpus,fiqa
+  MANTA_COMPARE_SUMMARY_TSV=/path/to/retrieval-comparison-summary.tsv
+  MANTA_COMPARE_SUMMARY_JSON=/path/to/retrieval-comparison-summary.json
+  MANTA_COMPARE_GATE_CANDIDATE=1
+  MANTA_COMPARE_FAIL_ON_GATE=0
+  MANTA_COMPARE_MIN_MACRO_NDCG_DELTA=0.0005
+  MANTA_COMPARE_MAX_DATASET_NDCG_REGRESSION=0.001
+  MANTA_COMPARE_MIN_DATASET_NDCG_RATIO=0.98
+  MANTA_COMPARE_MAX_DATASET_RECALL_AT_100_REGRESSION=0.004
+  MANTA_COMPARE_MIN_DATASET_RECALL_AT_100_RATIO=0.96`)
+}
+
+func getenv(name string, fallback string) string {
+	value := os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envEnabledDefault(name string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	if value == "" {
+		return fallback
+	}
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func getenvFloat(name string, fallback float64) (float64, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a float: %s", name, raw)
+	}
+	return value, nil
+}
+
+func splitList(value string) []string {
+	out := []string{}
+	for _, raw := range strings.Split(value, ",") {
+		item := strings.TrimSpace(raw)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func requireFile(path string, label string) (string, error) {
+	path = strings.TrimSpace(path)
+	guard path != "" else return "", fmt.Errorf("%s is required", label)
+	abs, err := filepath.Abs(path)
+	guard err == nil else return "", err
+	info, err := os.Stat(abs)
+	guard err == nil else return "", fmt.Errorf("%s does not exist: %s", label, abs)
+	guard !info.IsDir() else return "", fmt.Errorf("%s must be a file: %s", label, abs)
+	return abs, nil
+}
+
+func prepareConfig() (compareConfig, error) {
+	baseline, err := requireFile(os.Getenv("MANTA_COMPARE_BASELINE_SUMMARY_JSON"), "MANTA_COMPARE_BASELINE_SUMMARY_JSON")
+	guard err == nil else return compareConfig{}, err
+	candidate, err := requireFile(os.Getenv("MANTA_COMPARE_CANDIDATE_SCOREBOARD_JSON"), "MANTA_COMPARE_CANDIDATE_SCOREBOARD_JSON")
+	guard err == nil else return compareConfig{}, err
+	minMacro, err := getenvFloat("MANTA_COMPARE_MIN_MACRO_NDCG_DELTA", 0.0005)
+	guard err == nil else return compareConfig{}, err
+	maxRegression, err := getenvFloat("MANTA_COMPARE_MAX_DATASET_NDCG_REGRESSION", 0.001)
+	guard err == nil else return compareConfig{}, err
+	minRatio, err := getenvFloat("MANTA_COMPARE_MIN_DATASET_NDCG_RATIO", 0.98)
+	guard err == nil else return compareConfig{}, err
+	maxRecallRegression, err := getenvFloat("MANTA_COMPARE_MAX_DATASET_RECALL_AT_100_REGRESSION", 0.004)
+	guard err == nil else return compareConfig{}, err
+	minRecallRatio, err := getenvFloat("MANTA_COMPARE_MIN_DATASET_RECALL_AT_100_RATIO", 0.96)
+	guard err == nil else return compareConfig{}, err
+	defaultDir := filepath.Dir(candidate)
+	return compareConfig{
+		BaselineSummaryJSON:          baseline,
+		CandidateScoreboardJSON:      candidate,
+		Datasets:                     splitList(os.Getenv("MANTA_COMPARE_DATASETS")),
+		SummaryTSV:                   getenv("MANTA_COMPARE_SUMMARY_TSV", filepath.Join(defaultDir, "retrieval-comparison-summary.tsv")),
+		SummaryJSON:                  getenv("MANTA_COMPARE_SUMMARY_JSON", filepath.Join(defaultDir, "retrieval-comparison-summary.json")),
+		GateCandidate:                envEnabledDefault("MANTA_COMPARE_GATE_CANDIDATE", true),
+		FailOnGate:                   envEnabledDefault("MANTA_COMPARE_FAIL_ON_GATE", false),
+		MinMacroNDCGDelta:            minMacro,
+		MaxDatasetNDCGRegression:     maxRegression,
+		MinDatasetNDCGRatio:          minRatio,
+		MaxDatasetRecallRegression:   maxRecallRegression,
+		MinDatasetRecallRatio:        minRecallRatio,
+	}, nil
+}
+
+func readBaselineSummary(path string) (baselineSummary, error) {
+	data, err := os.ReadFile(path)
+	guard err == nil else return baselineSummary{}, err
+	var out baselineSummary
+	err = json.Unmarshal(data, &out)
+	guard err == nil else return baselineSummary{}, err
+	return out, nil
+}
+
+func readScoreboardManifest(path string) (scoreboardManifest, error) {
+	data, err := os.ReadFile(path)
+	guard err == nil else return scoreboardManifest{}, err
+	var out scoreboardManifest
+	err = json.Unmarshal(data, &out)
+	guard err == nil else return scoreboardManifest{}, err
+	return out, nil
+}
+
+func baselineRowsByDataset(summary baselineSummary) (map[string]baselineRow, []string) {
+	out := map[string]baselineRow{}
+	order := []string{}
+	for _, row := range summary.Rows {
+		if row.Dataset == "" {
+			continue
+		}
+		if _, ok := out[row.Dataset]; !ok {
+			order = append(order, row.Dataset)
+		}
+		out[row.Dataset] = row
+	}
+	return out, order
+}
+
+func candidateRowsByDataset(scoreboard scoreboardManifest) map[string]scoreboardRow {
+	out := map[string]scoreboardRow{}
+	for _, row := range scoreboard.Rows {
+		if row.Category != "short_retrieval" || row.Baseline != "manta" || row.Dataset == "" {
+			continue
+		}
+		out[row.Dataset] = row
+	}
+	return out
+}
+
+func comparisonRows(datasets []string, baseline map[string]baselineRow, candidates map[string]scoreboardRow) []summaryRow {
+	rows := []summaryRow{}
+	for _, dataset := range datasets {
+		base, okBase := baseline[dataset]
+		candidate, okCandidate := candidates[dataset]
+		if !okBase || !okCandidate {
+			continue
+		}
+		ndcgRatio := 0.0
+		if base.CandidateNDCGAt10 != 0 {
+			ndcgRatio = candidate.NDCGAt10 / base.CandidateNDCGAt10
+		}
+		recallRatio := 0.0
+		if base.CandidateRecallAt100 != 0 {
+			recallRatio = candidate.RecallAt100 / base.CandidateRecallAt100
+		}
+		rows = append(rows, summaryRow{
+			Dataset:              dataset,
+			BaselineNDCGAt10:     base.CandidateNDCGAt10,
+			CandidateNDCGAt10:    candidate.NDCGAt10,
+			NDCGAt10Delta:        candidate.NDCGAt10 - base.CandidateNDCGAt10,
+			NDCGAt10Ratio:        ndcgRatio,
+			BaselineRecallAt100:  base.CandidateRecallAt100,
+			CandidateRecallAt100: candidate.RecallAt100,
+			RecallAt100Delta:     candidate.RecallAt100 - base.CandidateRecallAt100,
+			RecallAt100Ratio:     recallRatio,
+		})
+	}
+	return rows
+}
+
+func evaluateGate(cfg compareConfig, rows []summaryRow) comparisonGate {
+	gate := comparisonGate{
+		Enabled:                         cfg.GateCandidate,
+		Passed:                          true,
+		MinMacroNDCGAt10Delta:           cfg.MinMacroNDCGDelta,
+		MaxDatasetNDCGAt10Regression:    cfg.MaxDatasetNDCGRegression,
+		MinDatasetNDCGAt10Ratio:         cfg.MinDatasetNDCGRatio,
+		MaxDatasetRecallAt100Regression: cfg.MaxDatasetRecallRegression,
+		MinDatasetRecallAt100Ratio:      cfg.MinDatasetRecallRatio,
+	}
+	if len(rows) == 0 {
+		gate.Passed = false
+		gate.Failures = append(gate.Failures, "no comparable retrieval rows")
+		return gate
+	}
+	for _, row := range rows {
+		gate.BaselineMacroNDCGAt10 += row.BaselineNDCGAt10
+		gate.CandidateMacroNDCGAt10 += row.CandidateNDCGAt10
+		if cfg.GateCandidate && row.NDCGAt10Delta < -cfg.MaxDatasetNDCGRegression {
+			gate.Failures = append(gate.Failures, fmt.Sprintf("%s ndcg@10 delta %.6f below allowed regression -%.6f", row.Dataset, row.NDCGAt10Delta, cfg.MaxDatasetNDCGRegression))
+		}
+		if cfg.GateCandidate && cfg.MinDatasetNDCGRatio > 0 && row.NDCGAt10Ratio < cfg.MinDatasetNDCGRatio {
+			gate.Failures = append(gate.Failures, fmt.Sprintf("%s ndcg@10 ratio %.3f below %.3f", row.Dataset, row.NDCGAt10Ratio, cfg.MinDatasetNDCGRatio))
+		}
+		if cfg.GateCandidate && cfg.MaxDatasetRecallRegression > 0 && row.RecallAt100Delta < -cfg.MaxDatasetRecallRegression {
+			gate.Failures = append(gate.Failures, fmt.Sprintf("%s recall@100 delta %.6f below allowed regression -%.6f", row.Dataset, row.RecallAt100Delta, cfg.MaxDatasetRecallRegression))
+		}
+		if cfg.GateCandidate && cfg.MinDatasetRecallRatio > 0 && row.RecallAt100Ratio < cfg.MinDatasetRecallRatio {
+			gate.Failures = append(gate.Failures, fmt.Sprintf("%s recall@100 ratio %.3f below %.3f", row.Dataset, row.RecallAt100Ratio, cfg.MinDatasetRecallRatio))
+		}
+	}
+	scale := 1.0 / float64(len(rows))
+	gate.BaselineMacroNDCGAt10 *= scale
+	gate.CandidateMacroNDCGAt10 *= scale
+	gate.MacroNDCGAt10Delta = gate.CandidateMacroNDCGAt10 - gate.BaselineMacroNDCGAt10
+	if cfg.GateCandidate && gate.MacroNDCGAt10Delta < cfg.MinMacroNDCGDelta {
+		gate.Failures = append(gate.Failures, fmt.Sprintf("macro ndcg@10 delta %.6f below %.6f", gate.MacroNDCGAt10Delta, cfg.MinMacroNDCGDelta))
+	}
+	if len(gate.Failures) > 0 {
+		gate.Passed = false
+	}
+	return gate
+}
+
+func summaryTSV(rows []summaryRow) string {
+	var b strings.Builder
+	b.WriteString("dataset\tbaseline_ndcg_at_10\tcandidate_ndcg_at_10\tndcg_at_10_delta\tndcg_at_10_ratio\tbaseline_recall_at_100\tcandidate_recall_at_100\trecall_at_100_delta\trecall_at_100_ratio\n")
+	for _, row := range rows {
+		b.WriteString(fmt.Sprintf("%s\t%.6f\t%.6f\t%.6f\t%.3f\t%.6f\t%.6f\t%.6f\t%.3f\n",
+			row.Dataset,
+			row.BaselineNDCGAt10,
+			row.CandidateNDCGAt10,
+			row.NDCGAt10Delta,
+			row.NDCGAt10Ratio,
+			row.BaselineRecallAt100,
+			row.CandidateRecallAt100,
+			row.RecallAt100Delta,
+			row.RecallAt100Ratio))
+	}
+	return b.String()
+}
+
+func printGate(gate comparisonGate) {
+	status := "disabled"
+	if gate.Enabled {
+		status = "PASS"
+		if !gate.Passed {
+			status = "FAIL"
+		}
+	}
+	fmt.Printf("retrieval_compare_gate=%s macro_ndcg_at_10_delta=%.6f min_macro_delta=%.6f max_dataset_regression=%.6f min_dataset_ratio=%.3f max_recall_regression=%.6f min_recall_ratio=%.3f baseline_macro=%.6f candidate_macro=%.6f\n",
+		status,
+		gate.MacroNDCGAt10Delta,
+		gate.MinMacroNDCGAt10Delta,
+		gate.MaxDatasetNDCGAt10Regression,
+		gate.MinDatasetNDCGAt10Ratio,
+		gate.MaxDatasetRecallAt100Regression,
+		gate.MinDatasetRecallAt100Ratio,
+		gate.BaselineMacroNDCGAt10,
+		gate.CandidateMacroNDCGAt10)
+	for _, failure := range gate.Failures {
+		fmt.Println("retrieval_compare_gate_failure=" + failure)
+	}
+}
+
+func run(cfg compareConfig) error {
+	baseline, err := readBaselineSummary(cfg.BaselineSummaryJSON)
+	guard err == nil else return err
+	candidate, err := readScoreboardManifest(cfg.CandidateScoreboardJSON)
+	guard err == nil else return err
+	baseRows, defaultDatasets := baselineRowsByDataset(baseline)
+	datasets := cfg.Datasets
+	if len(datasets) == 0 {
+		datasets = defaultDatasets
+	}
+	rows := comparisonRows(datasets, baseRows, candidateRowsByDataset(candidate))
+	gate := evaluateGate(cfg, rows)
+	tsv := summaryTSV(rows)
+	err = os.WriteFile(cfg.SummaryTSV, []byte(tsv), 0o644)
+	guard err == nil else return err
+	manifest := comparisonManifest{
+		Schema:                 "manta.embedding_retrieval_scoreboard_comparison.v1",
+		GeneratedAt:            time.Now().UTC().Format(time.RFC3339),
+		BaselineSummaryJSON:     cfg.BaselineSummaryJSON,
+		CandidateScoreboardJSON: cfg.CandidateScoreboardJSON,
+		Rows:                   rows,
+		Gate:                   gate,
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	guard err == nil else return err
+	data = append(data, '\n')
+	err = os.WriteFile(cfg.SummaryJSON, data, 0o644)
+	guard err == nil else return err
+	fmt.Print(tsv)
+	printGate(gate)
+	fmt.Println(f"summary_tsv={cfg.SummaryTSV}")
+	fmt.Println(f"summary_json={cfg.SummaryJSON}")
+	if cfg.FailOnGate && gate.Enabled && !gate.Passed {
+		return fmt.Errorf("retrieval comparison gate failed")
+	}
+	return nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	cfg, err := prepareConfig()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	if err := run(cfg); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+}

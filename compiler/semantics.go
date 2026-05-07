@@ -175,6 +175,12 @@ func inferSemanticCallType(call *syntax.CallExpr, callable *syntax.CallableDecl,
 	if !call.Intrinsic && call.Callee == "topk" {
 		return inferSemanticTopKCallType(call, callable, locals, env)
 	}
+	if !call.Intrinsic && call.Callee == "sparse_attention" {
+		return inferSemanticSparseAttentionCallType(call, callable, locals, env)
+	}
+	if !call.Intrinsic && call.Callee == "turbo_sparse_attention" {
+		return inferSemanticTurboSparseAttentionCallType(call, callable, locals, env)
+	}
 
 	diags := []syntax.Diagnostic{}
 	args := make([]hir.Type, 0, len(call.Args))
@@ -565,6 +571,157 @@ func exprHasEffect(expr syntax.Expr) bool {
 	return call.Callee == "kv_write"
 }
 
+func inferSemanticSparseAttentionCallType(call *syntax.CallExpr, callable *syntax.CallableDecl, locals map[string]hir.Type, env moduleTypeEnv) (hir.Type, []syntax.Diagnostic) {
+	diags := []syntax.Diagnostic{}
+	if callable.Kind == syntax.CallableKernel {
+		diags = append(diags, diagnosticError(call.Span, "sparse_attention is only supported in pipeline bodies"))
+	}
+	if len(call.Args) != 3 && len(call.Args) != 4 {
+		diags = append(diags, diagnosticError(call.Span, "sparse_attention expects query, key, value, and optional top_k literal"))
+		return hir.Type{}, diags
+	}
+	if len(call.Args) == 4 {
+		if _, ok := topKLiteral(call.Args[3]); !ok {
+			diags = append(diags, diagnosticError(call.Args[3].ExprSpan(), "sparse_attention top_k must be a positive integer literal"))
+		}
+	}
+	args := make([]hir.Type, 0, 3)
+	for _, arg := range call.Args[:3] {
+		typ, argDiags := inferSemanticExprType(arg, callable, locals, env)
+		diags = append(diags, argDiags...)
+		args = append(args, typ)
+	}
+	return inferSparseAttentionType(call, args, "sparse_attention", diags)
+}
+
+func inferSemanticTurboSparseAttentionCallType(call *syntax.CallExpr, callable *syntax.CallableDecl, locals map[string]hir.Type, env moduleTypeEnv) (hir.Type, []syntax.Diagnostic) {
+	diags := []syntax.Diagnostic{}
+	if callable.Kind == syntax.CallableKernel {
+		diags = append(diags, diagnosticError(call.Span, "turbo_sparse_attention is only supported in pipeline bodies"))
+	}
+	if len(call.Args) != 5 && len(call.Args) != 6 && len(call.Args) != 8 {
+		diags = append(diags, diagnosticError(call.Span, "turbo_sparse_attention expects query, key coords, key norms, value coords, value norms, optional top_k literal, and optional route_block_size/route_top_blocks literals"))
+		return hir.Type{}, diags
+	}
+	if len(call.Args) == 6 || len(call.Args) == 8 {
+		if _, ok := topKLiteral(call.Args[5]); !ok {
+			diags = append(diags, diagnosticError(call.Args[5].ExprSpan(), "turbo_sparse_attention top_k must be a positive integer literal"))
+		}
+	}
+	if len(call.Args) == 8 {
+		if _, ok := topKLiteral(call.Args[6]); !ok {
+			diags = append(diags, diagnosticError(call.Args[6].ExprSpan(), "turbo_sparse_attention route_block_size must be a positive integer literal"))
+		}
+		if _, ok := topKLiteral(call.Args[7]); !ok {
+			diags = append(diags, diagnosticError(call.Args[7].ExprSpan(), "turbo_sparse_attention route_top_blocks must be a positive integer literal"))
+		}
+	}
+	args := make([]hir.Type, 0, 5)
+	for _, arg := range call.Args[:5] {
+		typ, argDiags := inferSemanticExprType(arg, callable, locals, env)
+		diags = append(diags, argDiags...)
+		args = append(args, typ)
+	}
+	return inferTurboSparseAttentionType(call, args, diags)
+}
+
+func inferSparseAttentionType(call *syntax.CallExpr, args []hir.Type, name string, diags []syntax.Diagnostic) (hir.Type, []syntax.Diagnostic) {
+	if len(args) != 3 {
+		return hir.Type{}, diags
+	}
+	if isRank2Tensor(args[0]) && isRank2Tensor(args[1]) && isRank2Tensor(args[2]) {
+		query, key, value := args[0].Tensor, args[1].Tensor, args[2].Tensor
+		if query.Shape[1].Name != key.Shape[1].Name {
+			diags = append(diags, diagnosticError(call.Span, "%s query/key feature dimension mismatch: %s vs %s", name, query.Shape[1].Name, key.Shape[1].Name))
+		}
+		if key.Shape[0].Name != value.Shape[0].Name {
+			diags = append(diags, diagnosticError(call.Span, "%s key/value sequence dimension mismatch: %s vs %s", name, key.Shape[0].Name, value.Shape[0].Name))
+		}
+		return hir.Type{Kind: hir.TypeTensor, Tensor: &hir.TensorType{
+			DType: value.DType,
+			Shape: []hir.DimExpr{{Name: query.Shape[0].Name}, {Name: value.Shape[1].Name}},
+		}}, diags
+	}
+	if isRank3Tensor(args[0]) && isRank3Tensor(args[1]) && isRank3Tensor(args[2]) {
+		query, key, value := args[0].Tensor, args[1].Tensor, args[2].Tensor
+		if query.Shape[0].Name != key.Shape[0].Name || query.Shape[0].Name != value.Shape[0].Name {
+			diags = append(diags, diagnosticError(call.Span, "%s batch dimensions must match", name))
+		}
+		if query.Shape[2].Name != key.Shape[2].Name {
+			diags = append(diags, diagnosticError(call.Span, "%s query/key feature dimension mismatch: %s vs %s", name, query.Shape[2].Name, key.Shape[2].Name))
+		}
+		if key.Shape[1].Name != value.Shape[1].Name {
+			diags = append(diags, diagnosticError(call.Span, "%s key/value sequence dimension mismatch: %s vs %s", name, key.Shape[1].Name, value.Shape[1].Name))
+		}
+		return hir.Type{Kind: hir.TypeTensor, Tensor: &hir.TensorType{
+			DType: value.DType,
+			Shape: []hir.DimExpr{{Name: query.Shape[0].Name}, {Name: query.Shape[1].Name}, {Name: value.Shape[2].Name}},
+		}}, diags
+	}
+	diags = append(diags, diagnosticError(call.Span, "%s expects rank-2 Q/K/V or rank-3 batched Q/K/V tensors", name))
+	return hir.Type{}, diags
+}
+
+func inferTurboSparseAttentionType(call *syntax.CallExpr, args []hir.Type, diags []syntax.Diagnostic) (hir.Type, []syntax.Diagnostic) {
+	if len(args) != 5 {
+		return hir.Type{}, diags
+	}
+	query, keyCoords, keyNorms, valueCoords, valueNorms := args[0], args[1], args[2], args[3], args[4]
+	if !isRank2Tensor(query) && !isRank3Tensor(query) {
+		diags = append(diags, diagnosticError(call.Span, "turbo_sparse_attention query must be f*[Q, D] or f*[B, Q, D]"))
+		return hir.Type{}, diags
+	}
+	if !isRank4Tensor(keyCoords) || !isRank4Tensor(valueCoords) || !isRank3Tensor(keyNorms) || !isRank3Tensor(valueNorms) {
+		diags = append(diags, diagnosticError(call.Span, "turbo_sparse_attention expects coords as q*[B, D, T, 1] and norms as q_norm[B, T, 1]"))
+		return hir.Type{}, diags
+	}
+	if !isQTensorDType(keyCoords.Tensor.DType) || !isQTensorDType(valueCoords.Tensor.DType) {
+		diags = append(diags, diagnosticError(call.Span, "turbo_sparse_attention coords must be q2, q4, or q8 tensors"))
+	}
+	if keyNorms.Tensor.DType != "q_norm" || valueNorms.Tensor.DType != "q_norm" {
+		diags = append(diags, diagnosticError(call.Span, "turbo_sparse_attention norms must be q_norm tensors"))
+	}
+	keyShape := keyCoords.Tensor.Shape
+	valueShape := valueCoords.Tensor.Shape
+	if keyShape[0].Name != valueShape[0].Name {
+		diags = append(diags, diagnosticError(call.Span, "turbo_sparse_attention key/value batch dimensions must match"))
+	}
+	if keyShape[2].Name != valueShape[2].Name {
+		diags = append(diags, diagnosticError(call.Span, "turbo_sparse_attention key/value sequence dimensions must match"))
+	}
+	if keyShape[3].Name != "1" || valueShape[3].Name != "1" {
+		diags = append(diags, diagnosticError(call.Span, "turbo_sparse_attention compressed coords must use width dimension 1"))
+	}
+	if !sameDimShape(keyNorms.Tensor.Shape, []hir.DimExpr{{Name: keyShape[0].Name}, {Name: keyShape[2].Name}, {Name: keyShape[3].Name}}) {
+		diags = append(diags, diagnosticError(call.Span, "turbo_sparse_attention key norms must have shape [%s, %s, %s]", keyShape[0].Name, keyShape[2].Name, keyShape[3].Name))
+	}
+	if !sameDimShape(valueNorms.Tensor.Shape, []hir.DimExpr{{Name: valueShape[0].Name}, {Name: valueShape[2].Name}, {Name: valueShape[3].Name}}) {
+		diags = append(diags, diagnosticError(call.Span, "turbo_sparse_attention value norms must have shape [%s, %s, %s]", valueShape[0].Name, valueShape[2].Name, valueShape[3].Name))
+	}
+	if isRank2Tensor(query) {
+		if keyShape[0].Name != "1" {
+			diags = append(diags, diagnosticError(call.Span, "turbo_sparse_attention rank-2 query expects compressed batch dimension 1"))
+		}
+		if query.Tensor.Shape[1].Name != keyShape[1].Name {
+			diags = append(diags, diagnosticError(call.Span, "turbo_sparse_attention query/key feature dimension mismatch: %s vs %s", query.Tensor.Shape[1].Name, keyShape[1].Name))
+		}
+		return hir.Type{Kind: hir.TypeTensor, Tensor: &hir.TensorType{
+			DType: "f16",
+			Shape: []hir.DimExpr{{Name: query.Tensor.Shape[0].Name}, {Name: valueShape[1].Name}},
+		}}, diags
+	}
+	if query.Tensor.Shape[0].Name != keyShape[0].Name {
+		diags = append(diags, diagnosticError(call.Span, "turbo_sparse_attention query/key batch dimension mismatch: %s vs %s", query.Tensor.Shape[0].Name, keyShape[0].Name))
+	}
+	if query.Tensor.Shape[2].Name != keyShape[1].Name {
+		diags = append(diags, diagnosticError(call.Span, "turbo_sparse_attention query/key feature dimension mismatch: %s vs %s", query.Tensor.Shape[2].Name, keyShape[1].Name))
+	}
+	return hir.Type{Kind: hir.TypeTensor, Tensor: &hir.TensorType{
+		DType: "f16",
+		Shape: []hir.DimExpr{{Name: query.Tensor.Shape[0].Name}, {Name: query.Tensor.Shape[1].Name}, {Name: valueShape[1].Name}},
+	}}, diags
+}
+
 func inferSemanticTopKCallType(call *syntax.CallExpr, callable *syntax.CallableDecl, locals map[string]hir.Type, env moduleTypeEnv) (hir.Type, []syntax.Diagnostic) {
 	diags := []syntax.Diagnostic{}
 	if callable.Kind == syntax.CallableKernel {
@@ -668,6 +825,14 @@ func isRank2Tensor(t hir.Type) bool {
 
 func isRank3Tensor(t hir.Type) bool {
 	return t.Kind == hir.TypeTensor && t.Tensor != nil && len(t.Tensor.Shape) == 3
+}
+
+func isRank4Tensor(t hir.Type) bool {
+	return t.Kind == hir.TypeTensor && t.Tensor != nil && len(t.Tensor.Shape) == 4
+}
+
+func isQTensorDType(dtype string) bool {
+	return dtype == "q2" || dtype == "q4" || dtype == "q8"
 }
 
 func topKLiteral(expr syntax.Expr) (int, bool) {

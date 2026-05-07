@@ -296,6 +296,76 @@ func executeStep(ctx context.Context, mod *mantaartifact.Module, entry mantaarti
 			return nil, "", err
 		}
 		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", hostReferenceMetadata("turboquant_decode"))}, "", nil
+	case mantaartifact.StepSparseAttention:
+		if len(step.Inputs) != 3 || len(step.Outputs) != 1 {
+			return nil, "", fmt.Errorf("sparse_attention step %q expects 3 inputs and 1 output", step.Name)
+		}
+		query, err := requireTensor(env[step.Inputs[0]], step.Inputs[0])
+		if err != nil {
+			return nil, "", err
+		}
+		key, err := requireTensor(env[step.Inputs[1]], step.Inputs[1])
+		if err != nil {
+			return nil, "", err
+		}
+		value, err := requireTensor(env[step.Inputs[2]], step.Inputs[2])
+		if err != nil {
+			return nil, "", err
+		}
+		outputType := resolveStepOutputType(mod, entry, step, 0, env)
+		if dispatchStep != nil {
+			result, handled, err := dispatchStep(ctx, step, outputType, []*Tensor{query, key, value})
+			if err != nil {
+				return nil, "", err
+			}
+			if handled {
+				return tensorValuesFromDispatch(mod, entry, step, result, bindings, kind), result.VariantEntry, nil
+			}
+		}
+		out, err := sparseAttentionTensor(query, key, value, step.Attributes)
+		if err != nil {
+			return nil, "", err
+		}
+		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", hostReferenceMetadata("sparse_attention"))}, "", nil
+	case mantaartifact.StepTurboSparseAttention:
+		if len(step.Inputs) != 5 || len(step.Outputs) != 1 {
+			return nil, "", fmt.Errorf("turbo_sparse_attention step %q expects 5 inputs and 1 output", step.Name)
+		}
+		query, err := requireTensor(env[step.Inputs[0]], step.Inputs[0])
+		if err != nil {
+			return nil, "", err
+		}
+		keyCoords, err := requireTensor(env[step.Inputs[1]], step.Inputs[1])
+		if err != nil {
+			return nil, "", err
+		}
+		keyNorms, err := requireTensor(env[step.Inputs[2]], step.Inputs[2])
+		if err != nil {
+			return nil, "", err
+		}
+		valueCoords, err := requireTensor(env[step.Inputs[3]], step.Inputs[3])
+		if err != nil {
+			return nil, "", err
+		}
+		valueNorms, err := requireTensor(env[step.Inputs[4]], step.Inputs[4])
+		if err != nil {
+			return nil, "", err
+		}
+		outputType := resolveStepOutputType(mod, entry, step, 0, env)
+		if dispatchStep != nil {
+			result, handled, err := dispatchStep(ctx, step, outputType, []*Tensor{query, keyCoords, keyNorms, valueCoords, valueNorms})
+			if err != nil {
+				return nil, "", err
+			}
+			if handled {
+				return tensorValuesFromDispatch(mod, entry, step, result, bindings, kind), result.VariantEntry, nil
+			}
+		}
+		out, err := turboSparseAttentionTensor(query, keyCoords, keyNorms, valueCoords, valueNorms, step.Attributes)
+		if err != nil {
+			return nil, "", err
+		}
+		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", hostReferenceMetadata("turbo_sparse_attention"))}, "", nil
 	case mantaartifact.StepCrossEntropy:
 		if len(step.Inputs) < 1 || len(step.Outputs) != 1 {
 			return nil, "", fmt.Errorf("cross_entropy_factorized step %q expects at least 1 input and 1 output", step.Name)

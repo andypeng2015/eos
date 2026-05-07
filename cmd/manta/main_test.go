@@ -127,6 +127,28 @@ func TestRunInitModelCreatesDefaultEmbeddingTrainingPackage(t *testing.T) {
 	}
 }
 
+func TestRunInitModelHonorsEncoderRepeats(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manta-embed-v1.mll")
+	if err := run([]string{
+		"init-model",
+		"--vocab-size", "16",
+		"--max-seq", "8",
+		"--embedding-dim", "4",
+		"--hidden-dim", "8",
+		"--encoder-repeats", "3",
+		path,
+	}); err != nil {
+		t.Fatalf("run init-model: %v", err)
+	}
+	manifest, err := mantaruntime.ReadEmbeddingManifestFile(mantaruntime.DefaultEmbeddingManifestPath(path))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if manifest.EncoderRepeats != 3 {
+		t.Fatalf("encoder repeats = %d, want 3", manifest.EncoderRepeats)
+	}
+}
+
 func TestRunInitMirageCreatesArtifact(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "mirage-v1.mll")
 	output := captureRunOutput(t, []string{
@@ -405,6 +427,9 @@ func TestRunMineRetrievalHardNegativesWritesTextJSONL(t *testing.T) {
 	if len(examples) != 1 || examples[0].Query != "alpha" || examples[0].Positive != "alpha target" || len(examples[0].Negatives) != 1 || examples[0].Negatives[0] != "alpha distractor" {
 		t.Fatalf("examples = %+v", examples)
 	}
+	if len(examples[0].TeacherScores) != 2 {
+		t.Fatalf("teacher scores = %+v, want positive plus one negative", examples[0].TeacherScores)
+	}
 }
 
 func TestRunMineRetrievalModelHardNegativesWritesTextJSONL(t *testing.T) {
@@ -469,6 +494,9 @@ func TestRunMineRetrievalModelHardNegativesWritesTextJSONL(t *testing.T) {
 	}
 	if len(examples) != 1 || examples[0].Query != "alpha" || examples[0].Positive != "alpha target" || len(examples[0].Negatives) != 1 || examples[0].Negatives[0] == "alpha target" {
 		t.Fatalf("examples = %+v", examples)
+	}
+	if len(examples[0].TeacherScores) != 2 {
+		t.Fatalf("teacher scores = %+v, want positive plus one negative", examples[0].TeacherScores)
 	}
 }
 
@@ -1282,10 +1310,10 @@ func TestRunTrainEmbedFitsTextPairwisePackage(t *testing.T) {
 	trainPath := filepath.Join(t.TempDir(), "train-pairs.jsonl")
 	evalPath := filepath.Join(t.TempDir(), "eval-pairs.jsonl")
 	trainData := "" +
-		"{\"query\":\"ab\",\"document\":\"ab\",\"label\":1}\n" +
-		"{\"query\":\"ab\",\"document\":\"cd\",\"label\":-1}\n" +
-		"{\"query\":\"cd\",\"document\":\"cd\",\"label\":1}\n" +
-		"{\"query\":\"cd\",\"document\":\"ab\",\"label\":-1}\n"
+		"{\"source\":\"scifact\",\"query\":\"ab\",\"document\":\"ab\",\"label\":1}\n" +
+		"{\"source\":\"scifact\",\"query\":\"ab\",\"document\":\"cd\",\"label\":-1}\n" +
+		"{\"source\":\"nfcorpus\",\"query\":\"cd\",\"document\":\"cd\",\"label\":1}\n" +
+		"{\"source\":\"nfcorpus\",\"query\":\"cd\",\"document\":\"ab\",\"label\":-1}\n"
 	evalData := "" +
 		"{\"query\":\"ab\",\"document\":\"ab\",\"label\":1}\n" +
 		"{\"left\":\"ab\",\"right\":\"cd\",\"label\":0}\n"
@@ -1340,7 +1368,7 @@ func TestRunTrainEmbedFitsTextHardNegativePackage(t *testing.T) {
 		t.Fatalf("write eval text pairs: %v", err)
 	}
 
-	output := captureRunOutput(t, []string{"train-embed", "--hard-negative-train", "--hard-negatives-per-query", "1", "--epochs", "2", "--batch-size", "2", path, trainPath, evalPath})
+	output := captureRunOutput(t, []string{"train-embed", "--hard-negative-train", "--hard-negatives-per-query", "1", "--hard-negative-source-weights", "scifact=1,nfcorpus=2", "--epochs", "2", "--batch-size", "2", path, trainPath, evalPath})
 	for _, want := range []string{
 		"trained package",
 		"train=2 hard_negative_contrastive examples",
