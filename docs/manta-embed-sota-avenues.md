@@ -56,6 +56,7 @@ Rejected nearby probe:
 | `teacher_loss_weight=0.20`, `teacher_temperature=1.5`, `source_weights=scifact=1,nfcorpus=4,fiqa=1`, LR `0.000010` | 0.147560 | NFCorpus nDCG@10 delta `-0.001122`, outside the `-0.001000` floor |
 | `teacher_loss_weight=0.20`, `teacher_temperature=1.5`, `source_weights=scifact=2,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.146288 | Baseline gate pass, but current-best macro and pairwise AUC both regressed |
 | `teacher_loss_weight=0.20`, `teacher_temperature=1.5`, `source_weights=scifact=1,nfcorpus=3,fiqa=2`, LR `0.000010` | 0.147516 | Baseline gate pass, but extra FiQA sampling missed the current best by `0.000628` macro and did not improve FiQA |
+| Full BM25-scored blend, `teacher_loss_weight=0.05`, `teacher_temperature=10`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.147151 | Full teacher-score coverage improved pairwise AUC, but failed the stale-baseline NFCorpus floor and missed the current best by `0.000993` macro |
 | Lane B deep mine, `9000` requested examples, `5` mined negatives, `candidate_top_k=400`, `hard_negatives_per_query=2` | 0.143866 | Promotion gate failed; NFCorpus rose slightly, but SciFact and FiQA regressed hard |
 | Lane B deep mine reuse, `hard_negatives_per_query=1`, `source_weights=scifact=1,nfcorpus=3,fiqa=1` | 0.145870 | NFCorpus high-water mark, but SciFact and FiQA still fail current-best gate |
 | Lane B deep mine reuse, `hard_negatives_per_query=1`, `source_weights=scifact=1,nfcorpus=1,fiqa=1` | 0.144915 | Balanced source sampling reduced NFCorpus gains and did not recover SciFact/FiQA |
@@ -195,6 +196,8 @@ The command writes validated text hard-negative JSONL plus a `manta.teacher_scor
 Local Manta teachers can bypass the sidecar step with `manta score-teacher-hard-negatives <teacher.mll> <hard-negatives.jsonl> <output.jsonl>`. That command embeds each query and its `positive + negatives`, writes cosine-style `teacher_scores`, and emits a `manta.teacher_hard_negative_score.v1` manifest with artifact, backend, batch size, and teacher provenance.
 
 Before spending a training run on a new teacher, run `manta audit-teacher-scores <hard-negatives.jsonl> <summary.json>`. It reports score coverage, positive top-1 rate, mean positive rank, positive-vs-best-negative margin, and teacher-distribution entropy overall and by source, giving a cheap reject path for teachers that misorder positives or produce unusably flat/sharp targets.
+
+Status: BM25 and model-hard mining can both emit `teacher_scores`, and dataset acquisition now preserves those scores when it rewrites source-tagged hard-negative JSONL. A full BM25-scored blend gave complete score coverage but rejected at macro `0.147151`; BM25 scores were on a much larger scale than model cosine scores, so the next full-coverage attempt should normalize or source-temperature teacher scores before training instead of mixing raw score scales.
 
 Required outputs:
 
