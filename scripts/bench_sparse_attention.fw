@@ -1,0 +1,234 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+func getenv(name string, fallback string) string {
+	let value = os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
+func findRoot() (string, error) {
+	let explicit = os.Getenv("MANTA_REPO_ROOT")
+	if hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	let pwd = os.Getenv("PWD")
+	if hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	guard err == nil else return "", err
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+}
+
+func step(label string) {
+	fmt.Println(f"\n== {label} ==")
+}
+
+func shellCapture(dir string, outPath string, name string, args []string) error {
+	out, err := os.Create(outPath)
+	guard err == nil else return err
+	defer out.Close()
+
+	let cmd = exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Stdout = out
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func writeManifest(path string, lines []string) error {
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+}
+
+func writeBenchSummary(benchTextPath string, summaryPath string) error {
+	data, err := os.ReadFile(benchTextPath)
+	guard err == nil else return err
+
+	columns := []string{
+		"name",
+		"iterations",
+		"ns_per_op",
+		"selected_keys",
+		"candidate_keys",
+		"scores_per_query",
+		"score_fraction",
+		"subq_plan",
+		"turbo_kv_mib",
+		"kv_compression",
+		"bytes_per_op",
+		"allocs_per_op",
+	}
+	rows := []string{strings.Join(columns, "\t")}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "Benchmark") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		metrics := map[string]string{}
+		for i := 4; i+1 < len(fields); i += 2 {
+			metrics[fields[i+1]] = fields[i]
+		}
+		row := []string{
+			fields[0],
+			fields[1],
+			fields[2],
+			metrics["selected_keys"],
+			metrics["candidate_keys"],
+			metrics["scores_per_query"],
+			metrics["score_fraction"],
+			metrics["subq_plan"],
+			metrics["turbo_kv_mib"],
+			metrics["kv_compression"],
+			metrics["B/op"],
+			metrics["allocs/op"],
+		}
+		rows = append(rows, strings.Join(row, "\t"))
+	}
+	return os.WriteFile(summaryPath, []byte(strings.Join(rows, "\n")+"\n"), 0o644)
+}
+
+func main() {
+	root, err := findRoot()
+	guard err == nil else {
+		fmt.Println(f"failed to resolve repo root: {err}")
+		os.Exit(1)
+	}
+
+	runID := getenv("MANTA_SPARSE_BENCH_RUN_ID", "sparse-attention-"+time.Now().UTC().Format("20060102T150405Z"))
+	runRoot := getenv("MANTA_SPARSE_BENCH_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir, err := filepath.Abs(getenv("MANTA_SPARSE_BENCH_RUN_DIR", filepath.Join(runRoot, runID)))
+	guard err == nil else {
+		fmt.Println(f"failed to resolve run dir: {err}")
+		os.Exit(1)
+	}
+	if entries, err := os.ReadDir(runDir); err == nil && len(entries) > 0 {
+		fmt.Println(f"run directory already exists and is not empty: {runDir}")
+		os.Exit(1)
+	}
+	err = os.MkdirAll(runDir, 0o755)
+	guard err == nil else {
+		fmt.Println(f"failed to create run dir: {err}")
+		os.Exit(1)
+	}
+
+	keyLens := getenv("MANTA_SPARSE_BENCH_KEY_LENS", "4096,8192,16384,32768,65536")
+	queryDim := getenv("MANTA_SPARSE_BENCH_QUERY_DIM", "64")
+	valueDim := getenv("MANTA_SPARSE_BENCH_VALUE_DIM", "64")
+	topK := getenv("MANTA_SPARSE_BENCH_TOP_K", "64")
+	routeTopBlocks := getenv("MANTA_SPARSE_BENCH_ROUTE_TOP_BLOCKS", "2")
+	bits := getenv("MANTA_SPARSE_BENCH_BITS", "4")
+	maxScoreFraction := getenv("MANTA_SPARSE_BENCH_MAX_SCORE_FRACTION", "0.25")
+	maxTurboKVMiB := getenv("MANTA_SPARSE_BENCH_MAX_TURBO_KV_MIB", "512")
+	benchRegex := getenv("MANTA_SPARSE_BENCH_REGEX", "BenchmarkCUDASparseAttentionSweep|BenchmarkCUDATurboSparseAttentionSweep")
+	benchTime := getenv("MANTA_SPARSE_BENCH_TIME", "200ms")
+	benchCount := getenv("MANTA_SPARSE_BENCH_COUNT", "3")
+
+	planTSV := filepath.Join(runDir, "sparse-attention-plan.tsv")
+	planJSON := filepath.Join(runDir, "sparse-attention-plan.json")
+	benchJSONL := filepath.Join(runDir, "sparse-attention-bench.jsonl")
+	benchText := filepath.Join(runDir, "sparse-attention-bench.txt")
+	benchSummary := filepath.Join(runDir, "sparse-attention-bench-summary.tsv")
+
+	step("Sparse attention preflight")
+	err = shellCapture(root, planTSV, "go", []string{
+		"run", "./cmd/manta", "plan-sparse-attention",
+		"--key-lens", keyLens,
+		"--query-dim", queryDim,
+		"--value-dim", valueDim,
+		"--top-k", topK,
+		"--route-top-blocks", routeTopBlocks,
+		"--bits", bits,
+		"--require-subquadratic",
+		"--max-score-fraction", maxScoreFraction,
+		"--max-turbo-kv-mib", maxTurboKVMiB,
+		"--json", planJSON,
+	})
+	guard err == nil else {
+		fmt.Println(f"sparse attention preflight failed: {err}")
+		os.Exit(1)
+	}
+
+	step("CUDA sparse attention benchmarks")
+	benchArgs := []string{
+		"test", "./runtime/backends/cuda",
+		"-run", "^$",
+		"-bench", benchRegex,
+		"-benchmem",
+		"-benchtime", benchTime,
+		"-count", benchCount,
+	}
+	jsonArgs := append(append([]string{}, benchArgs...), "-json")
+	err = shellCapture(root, benchJSONL, "go", jsonArgs)
+	guard err == nil else {
+		fmt.Println(f"CUDA sparse attention benchmark JSON run failed: {err}")
+		os.Exit(1)
+	}
+	err = shellCapture(root, benchText, "go", benchArgs)
+	guard err == nil else {
+		fmt.Println(f"CUDA sparse attention benchmark text run failed: {err}")
+		os.Exit(1)
+	}
+	err = writeBenchSummary(benchText, benchSummary)
+	guard err == nil else {
+		fmt.Println(f"failed to write CUDA sparse attention benchmark summary: {err}")
+		os.Exit(1)
+	}
+
+	err = writeManifest(filepath.Join(runDir, "manifest.txt"), []string{
+		"schema=manta.sparse_attention_bench.v1",
+		"created_utc=" + time.Now().UTC().Format(time.RFC3339),
+		"repo_root=" + root,
+		"run_dir=" + runDir,
+		"key_lens=" + keyLens,
+		"query_dim=" + queryDim,
+		"value_dim=" + valueDim,
+		"top_k=" + topK,
+		"route_top_blocks=" + routeTopBlocks,
+		"bits=" + bits,
+		"max_score_fraction=" + maxScoreFraction,
+		"max_turbo_kv_mib=" + maxTurboKVMiB,
+		"bench_regex=" + benchRegex,
+		"bench_time=" + benchTime,
+		"bench_count=" + benchCount,
+	})
+	guard err == nil else {
+		fmt.Println(f"failed to write manifest: {err}")
+		os.Exit(1)
+	}
+
+	fmt.Println(f"\nrun_dir: {runDir}")
+	fmt.Println(f"plan_tsv: {planTSV}")
+	fmt.Println(f"plan_json: {planJSON}")
+	fmt.Println(f"bench_jsonl: {benchJSONL}")
+	fmt.Println(f"bench_text: {benchText}")
+	fmt.Println(f"bench_summary: {benchSummary}")
+}

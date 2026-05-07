@@ -18,6 +18,14 @@ Run CUDA microbenchmarks:
 MANTA_BENCH_ROOT=$PWD MANTA_BENCH_CUDA=1 ferrous-wheel run scripts/bench.fw
 ```
 
+Run the sparse-attention x TurboQuant measurement layer:
+
+```bash
+MANTA_REPO_ROOT=$PWD ferrous-wheel run scripts/bench_sparse_attention.fw
+```
+
+The sparse-attention harness first writes a routed preflight plan as `sparse-attention-plan.tsv` and `sparse-attention-plan.json`, then records CUDA benchmark output as `sparse-attention-bench.jsonl`, `sparse-attention-bench.txt`, and `sparse-attention-bench-summary.tsv` under `runs/<run-id>/`. The Go benchmark lines and summary table include selected-key count, candidate-key budget, estimated scores per query, score fraction, subquadratic-plan flag, TurboQuant K/V MiB, and logical K/V compression ratio.
+
 Run the default-model training smoke from a local asset package:
 
 ```bash
