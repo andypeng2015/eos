@@ -45,6 +45,36 @@ type SparseAttentionPlanInput struct {
 	RouteTopBlocks int
 }
 
+// TurboQuantKVMemoryPlanInput describes logical dense-vs-TurboQuant KV-cache
+// storage for one attention layer.
+type TurboQuantKVMemoryPlanInput struct {
+	Batches            int
+	KeyLen             int
+	KeyDim             int
+	ValueDim           int
+	Bits               int
+	DenseBytesPerValue int
+	NormBytesPerVector int
+}
+
+// TurboQuantKVMemoryPlan is a logical memory estimate. Runtime tensors may use
+// host-friendly layouts; this reports the compact K/V target budget.
+type TurboQuantKVMemoryPlan struct {
+	Batches            int
+	KeyLen             int
+	KeyDim             int
+	ValueDim           int
+	Bits               int
+	DenseBytesPerValue int
+	NormBytesPerVector int
+	DenseKVBytes       int64
+	TurboQuantKVBytes  int64
+	KeyCoordBytes      int64
+	ValueCoordBytes    int64
+	NormBytes          int64
+	CompressionRatio   float64
+}
+
 // PlanSparseAttention normalizes sparse attention routing knobs and derives
 // auditable budget metadata for one query row.
 func PlanSparseAttention(in SparseAttentionPlanInput) SparseAttentionPlan {
@@ -108,6 +138,56 @@ func PlanSparseAttention(in SparseAttentionPlanInput) SparseAttentionPlan {
 	plan.ScoreCountFraction = float64(estimatedScores) / float64(in.KeyLen)
 	plan.SubquadraticScorePlan = estimatedScores < in.KeyLen
 	return plan
+}
+
+// PlanTurboQuantKVMemory estimates logical dense and TurboQuant-compressed K/V
+// cache footprint.
+func PlanTurboQuantKVMemory(in TurboQuantKVMemoryPlanInput) TurboQuantKVMemoryPlan {
+	if in.Batches <= 0 {
+		in.Batches = 1
+	}
+	if in.Bits <= 0 {
+		in.Bits = 4
+	}
+	if in.DenseBytesPerValue <= 0 {
+		in.DenseBytesPerValue = 2
+	}
+	if in.NormBytesPerVector <= 0 {
+		in.NormBytesPerVector = 4
+	}
+	plan := TurboQuantKVMemoryPlan{
+		Batches:            in.Batches,
+		KeyLen:             in.KeyLen,
+		KeyDim:             in.KeyDim,
+		ValueDim:           in.ValueDim,
+		Bits:               in.Bits,
+		DenseBytesPerValue: in.DenseBytesPerValue,
+		NormBytesPerVector: in.NormBytesPerVector,
+	}
+	if in.KeyLen <= 0 || in.KeyDim <= 0 || in.ValueDim <= 0 {
+		return plan
+	}
+	batches := int64(in.Batches)
+	keyLen := int64(in.KeyLen)
+	keyDim := int64(in.KeyDim)
+	valueDim := int64(in.ValueDim)
+	bits := int64(in.Bits)
+	plan.DenseKVBytes = batches * keyLen * (keyDim + valueDim) * int64(in.DenseBytesPerValue)
+	plan.KeyCoordBytes = ceilDivInt64(batches*keyLen*keyDim*bits, 8)
+	plan.ValueCoordBytes = ceilDivInt64(batches*keyLen*valueDim*bits, 8)
+	plan.NormBytes = batches * keyLen * 2 * int64(in.NormBytesPerVector)
+	plan.TurboQuantKVBytes = plan.KeyCoordBytes + plan.ValueCoordBytes + plan.NormBytes
+	if plan.TurboQuantKVBytes > 0 {
+		plan.CompressionRatio = float64(plan.DenseKVBytes) / float64(plan.TurboQuantKVBytes)
+	}
+	return plan
+}
+
+func ceilDivInt64(n, d int64) int64 {
+	if n <= 0 || d <= 0 {
+		return 0
+	}
+	return (n + d - 1) / d
 }
 
 // Metadata returns stable, machine-readable budget fields for traces and

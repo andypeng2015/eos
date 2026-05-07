@@ -721,6 +721,73 @@ func TestRunAuditTeacherScoresWritesSummary(t *testing.T) {
 	}
 }
 
+func TestRunPlanSparseAttentionWritesBudgetReport(t *testing.T) {
+	dir := t.TempDir()
+	reportPath := filepath.Join(dir, "sparse-plan.json")
+	output := captureRunOutput(t, []string{
+		"plan-sparse-attention",
+		"--key-lens", "64,256",
+		"--query-dim", "16",
+		"--value-dim", "32",
+		"--top-k", "4",
+		"--route-top-blocks", "2",
+		"--bits", "4",
+		"--require-subquadratic",
+		"--max-score-fraction", "0.5",
+		"--json", reportPath,
+	})
+	for _, want := range []string{
+		"key_len\trouting",
+		"64\tblock_anchor\t8\t2\t4\t16\t24\t0.375000",
+		"256\tblock_anchor\t16\t2\t4\t32\t48\t0.187500",
+		"gate=pass",
+		"json: " + reportPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("plan-sparse-attention output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	var report sparseAttentionPlanReport
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("decode report: %v", err)
+	}
+	if report.Schema != "manta.sparse_attention_plan.v1" || !report.Gate.Passed || report.Gate.SubquadraticRows != 2 {
+		t.Fatalf("report gate = %+v schema=%q", report.Gate, report.Schema)
+	}
+	if len(report.Rows) != 2 {
+		t.Fatalf("rows = %d", len(report.Rows))
+	}
+	first := report.Rows[0]
+	if first.KeyLen != 64 || first.CandidateKeyBudget != 16 || first.EstimatedScoreCountPerQuery != 24 {
+		t.Fatalf("first row = %+v", first)
+	}
+	if first.TurboQuantKVBytes != 2048 || math.Abs(first.TurboQuantCompressionRatio-3) > 0.000001 {
+		t.Fatalf("first row TurboQuant memory = %+v", first)
+	}
+	if report.Gate.ScoreAlpha <= 0 || report.Gate.ScoreAlpha >= 1 {
+		t.Fatalf("score alpha = %f, want sublinear", report.Gate.ScoreAlpha)
+	}
+}
+
+func TestRunPlanSparseAttentionCanFailGate(t *testing.T) {
+	output, err := captureRunOutputAndError(t, []string{
+		"plan-sparse-attention",
+		"--key-lens", "64",
+		"--exact",
+		"--require-subquadratic",
+	})
+	if err == nil {
+		t.Fatalf("expected gate failure\noutput:\n%s", output)
+	}
+	if !strings.Contains(err.Error(), "not subquadratic") || !strings.Contains(output, "gate=fail") {
+		t.Fatalf("unexpected failure err=%v output:\n%s", err, output)
+	}
+}
+
 func TestRunCompareRetrievalMetricsCanRequireBaselineWin(t *testing.T) {
 	dir := t.TempDir()
 	currentPath := filepath.Join(dir, "current.retrieval.metrics.json")

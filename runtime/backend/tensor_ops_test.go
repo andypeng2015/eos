@@ -841,6 +841,28 @@ func TestSparseAttentionPlanTracksRoutedBudget(t *testing.T) {
 	}
 }
 
+func TestTurboQuantKVMemoryPlanEstimatesLogicalCompression(t *testing.T) {
+	plan := PlanTurboQuantKVMemory(TurboQuantKVMemoryPlanInput{
+		Batches:  1,
+		KeyLen:   64,
+		KeyDim:   16,
+		ValueDim: 32,
+		Bits:     4,
+	})
+	if plan.DenseKVBytes != 6144 {
+		t.Fatalf("dense KV bytes = %d, want 6144", plan.DenseKVBytes)
+	}
+	if plan.KeyCoordBytes != 512 || plan.ValueCoordBytes != 1024 || plan.NormBytes != 512 {
+		t.Fatalf("turboquant byte split = %+v", plan)
+	}
+	if plan.TurboQuantKVBytes != 2048 {
+		t.Fatalf("turboquant KV bytes = %d, want 2048", plan.TurboQuantKVBytes)
+	}
+	if math.Abs(plan.CompressionRatio-3) > 0.000001 {
+		t.Fatalf("compression ratio = %f, want 3", plan.CompressionRatio)
+	}
+}
+
 func TestTurboSparseAttentionHostMetadataTracksBudget(t *testing.T) {
 	query := NewTensorF16([]int{1, 16}, make([]float32, 16))
 	keyCoords := NewTensorQ4([]int{1, 16, 64, 1}, make([]float32, 1*16*64))

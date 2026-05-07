@@ -135,6 +135,8 @@ func run(args []string) error {
 		return runScoreTeacherHardNegatives(args[1:])
 	case "audit-teacher-scores":
 		return runAuditTeacherScores(args[1:])
+	case "plan-sparse-attention":
+		return runPlanSparseAttention(args[1:])
 	case "train-embed":
 		return runTrainEmbed(args[1:])
 	case "train-corpus":
@@ -707,6 +709,67 @@ type teacherScoreAuditCounters struct {
 	NormalizedEntropySum float64
 }
 
+type sparseAttentionPlanReport struct {
+	Schema     string                    `json:"schema"`
+	CreatedUTC string                    `json:"created_utc"`
+	Config     sparseAttentionPlanConfig `json:"config"`
+	Gate       sparseAttentionPlanGate   `json:"gate"`
+	Rows       []sparseAttentionPlanRow  `json:"rows"`
+}
+
+type sparseAttentionPlanConfig struct {
+	KeyLens          []int   `json:"key_lens"`
+	QueryLen         int     `json:"query_len"`
+	QueryDim         int     `json:"query_dim"`
+	ValueDim         int     `json:"value_dim"`
+	TopK             int     `json:"top_k"`
+	RouteBlockSize   int     `json:"route_block_size"`
+	RouteTopBlocks   int     `json:"route_top_blocks"`
+	Exact            bool    `json:"exact"`
+	Bits             int     `json:"bits"`
+	Batches          int     `json:"batches"`
+	MaxScoreFraction float64 `json:"max_score_fraction,omitempty"`
+	MaxTurboKVMiB    float64 `json:"max_turbo_kv_mib,omitempty"`
+	RequireSubq      bool    `json:"require_subquadratic,omitempty"`
+}
+
+type sparseAttentionPlanGate struct {
+	Passed                   bool     `json:"passed"`
+	FailureReasons           []string `json:"failure_reasons,omitempty"`
+	Rows                     int      `json:"rows"`
+	SubquadraticRows         int      `json:"subquadratic_rows"`
+	MaxScoreFractionObserved float64  `json:"max_score_fraction_observed"`
+	MaxTurboKVMiBObserved    float64  `json:"max_turbo_kv_mib_observed"`
+	ScoreAlpha               float64  `json:"score_alpha"`
+}
+
+type sparseAttentionPlanRow struct {
+	KeyLen                      int     `json:"key_len"`
+	QueryLen                    int     `json:"query_len"`
+	QueryDim                    int     `json:"query_dim"`
+	ValueDim                    int     `json:"value_dim"`
+	TopK                        int     `json:"top_k"`
+	Routing                     string  `json:"routing"`
+	RouteBlockSize              int     `json:"route_block_size"`
+	RouteTopBlocks              int     `json:"route_top_blocks"`
+	RouteBlockCount             int     `json:"route_block_count"`
+	SelectedRouteBlocks         int     `json:"selected_route_blocks"`
+	SelectedKeyCount            int     `json:"selected_key_count"`
+	CandidateKeyBudget          int     `json:"candidate_key_budget"`
+	DenseScoreCountPerQuery     int     `json:"dense_score_count_per_query"`
+	EstimatedScoreCountPerQuery int     `json:"estimated_score_count_per_query"`
+	ScoreCountFraction          float64 `json:"score_count_fraction"`
+	CandidateKeyFraction        float64 `json:"candidate_key_fraction"`
+	SubquadraticScorePlan       bool    `json:"subquadratic_score_plan"`
+	DenseTotalScoreCount        int64   `json:"dense_total_score_count"`
+	EstimatedTotalScoreCount    int64   `json:"estimated_total_score_count"`
+	Bits                        int     `json:"bits"`
+	DenseKVBytes                int64   `json:"dense_kv_bytes"`
+	TurboQuantKVBytes           int64   `json:"turboquant_kv_bytes"`
+	TurboQuantKVMiB             float64 `json:"turboquant_kv_mib"`
+	TurboQuantCompressionRatio  float64 `json:"turboquant_compression_ratio"`
+}
+
 func runImportTeacherScores(args []string) error {
 	fs := flag.NewFlagSet("import-teacher-scores", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -939,6 +1002,274 @@ func runAuditTeacherScores(args []string) error {
 		summary.Examples, summary.ScoredExamples, summary.MissingExamples, summary.PositiveTop1Rate, summary.PositiveMeanMargin, summary.MeanNormalizedEntropy)
 	fmt.Printf("summary: %s\n", summaryPath)
 	return nil
+}
+
+func runPlanSparseAttention(args []string) error {
+	fs := flag.NewFlagSet("plan-sparse-attention", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	keyLensCSV := fs.String("key-lens", "4096,8192,16384,32768,65536", "comma-separated key/context lengths to sweep")
+	queryLen := fs.Int("query-len", 1, "query rows per batch item")
+	queryDim := fs.Int("query-dim", 128, "query/key head dimension")
+	valueDim := fs.Int("value-dim", 128, "value head dimension")
+	topK := fs.Int("top-k", 64, "selected sparse keys per query; 0 uses ceil(sqrt(key_len))")
+	routeBlockSize := fs.Int("route-block-size", 0, "route block size; 0 uses ceil(sqrt(key_len)) when routing is enabled")
+	routeTopBlocks := fs.Int("route-top-blocks", 2, "route blocks selected per query; 0 disables routing")
+	exact := fs.Bool("exact", false, "disable routing and report exact sparse top-k scoring")
+	bits := fs.Int("bits", 4, "TurboQuant K/V bits: 2, 4, or 8")
+	batches := fs.Int("batches", 1, "batch items for total score and KV memory estimates")
+	denseBytesPerValue := fs.Int("dense-bytes-per-value", 2, "dense K/V bytes per value, usually 2 for f16")
+	jsonPath := fs.String("json", "", "write machine-readable plan JSON")
+	maxScoreFraction := fs.Float64("max-score-fraction", 1, "fail if any row exceeds this estimated score-work fraction versus dense")
+	maxTurboKVMiB := fs.Float64("max-turbo-kv-mib", 0, "fail if any row exceeds this TurboQuant K/V MiB budget; 0 disables")
+	requireSubq := fs.Bool("require-subquadratic", false, "fail if any row does not reduce score work versus dense scoring")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: manta plan-sparse-attention [flags]")
+	}
+	keyLens, err := parsePositiveIntCSV(*keyLensCSV, "key-lens")
+	if err != nil {
+		return err
+	}
+	if *queryLen <= 0 {
+		return fmt.Errorf("query-len must be positive")
+	}
+	if *queryDim <= 0 {
+		return fmt.Errorf("query-dim must be positive")
+	}
+	if *valueDim <= 0 {
+		return fmt.Errorf("value-dim must be positive")
+	}
+	if *topK < 0 {
+		return fmt.Errorf("top-k must be non-negative")
+	}
+	if *routeBlockSize < 0 {
+		return fmt.Errorf("route-block-size must be non-negative")
+	}
+	if *routeTopBlocks < 0 {
+		return fmt.Errorf("route-top-blocks must be non-negative")
+	}
+	if *bits != 2 && *bits != 4 && *bits != 8 {
+		return fmt.Errorf("bits must be 2, 4, or 8")
+	}
+	if *batches <= 0 {
+		return fmt.Errorf("batches must be positive")
+	}
+	if *denseBytesPerValue <= 0 {
+		return fmt.Errorf("dense-bytes-per-value must be positive")
+	}
+	if *maxScoreFraction <= 0 {
+		return fmt.Errorf("max-score-fraction must be positive")
+	}
+	if *maxTurboKVMiB < 0 {
+		return fmt.Errorf("max-turbo-kv-mib must be non-negative")
+	}
+	report := sparseAttentionPlanReport{
+		Schema:     "manta.sparse_attention_plan.v1",
+		CreatedUTC: time.Now().UTC().Format(time.RFC3339),
+		Config: sparseAttentionPlanConfig{
+			KeyLens:          keyLens,
+			QueryLen:         *queryLen,
+			QueryDim:         *queryDim,
+			ValueDim:         *valueDim,
+			TopK:             *topK,
+			RouteBlockSize:   *routeBlockSize,
+			RouteTopBlocks:   *routeTopBlocks,
+			Exact:            *exact,
+			Bits:             *bits,
+			Batches:          *batches,
+			MaxScoreFraction: *maxScoreFraction,
+			MaxTurboKVMiB:    *maxTurboKVMiB,
+			RequireSubq:      *requireSubq,
+		},
+	}
+	report.Rows = make([]sparseAttentionPlanRow, 0, len(keyLens))
+	for _, keyLen := range keyLens {
+		blockSize := *routeBlockSize
+		topBlocks := *routeTopBlocks
+		if *exact {
+			blockSize = 0
+			topBlocks = 0
+		} else if topBlocks > 0 && blockSize == 0 {
+			blockSize = int(math.Ceil(math.Sqrt(float64(keyLen))))
+		}
+		plan := backend.PlanSparseAttention(backend.SparseAttentionPlanInput{
+			QueryLen:       *queryLen,
+			KeyLen:         keyLen,
+			QueryDim:       *queryDim,
+			ValueDim:       *valueDim,
+			TopK:           *topK,
+			RouteBlockSize: blockSize,
+			RouteTopBlocks: topBlocks,
+		})
+		kv := backend.PlanTurboQuantKVMemory(backend.TurboQuantKVMemoryPlanInput{
+			Batches:            *batches,
+			KeyLen:             keyLen,
+			KeyDim:             *queryDim,
+			ValueDim:           *valueDim,
+			Bits:               *bits,
+			DenseBytesPerValue: *denseBytesPerValue,
+		})
+		row := sparseAttentionPlanRow{
+			KeyLen:                      keyLen,
+			QueryLen:                    plan.QueryLen,
+			QueryDim:                    plan.QueryDim,
+			ValueDim:                    plan.ValueDim,
+			TopK:                        plan.TopK,
+			Routing:                     plan.Routing,
+			RouteBlockSize:              plan.RouteBlockSize,
+			RouteTopBlocks:              plan.RouteTopBlocks,
+			RouteBlockCount:             plan.RouteBlockCount,
+			SelectedRouteBlocks:         plan.SelectedRouteBlocks,
+			SelectedKeyCount:            plan.SelectedKeyCount,
+			CandidateKeyBudget:          plan.CandidateKeyBudget,
+			DenseScoreCountPerQuery:     plan.DenseScoreCountPerQuery,
+			EstimatedScoreCountPerQuery: plan.EstimatedScoreCountPerQuery,
+			ScoreCountFraction:          plan.ScoreCountFraction,
+			CandidateKeyFraction:        plan.CandidateKeyFraction,
+			SubquadraticScorePlan:       plan.SubquadraticScorePlan,
+			DenseTotalScoreCount:        int64(*batches) * int64(plan.QueryLen) * int64(plan.DenseScoreCountPerQuery),
+			EstimatedTotalScoreCount:    int64(*batches) * int64(plan.QueryLen) * int64(plan.EstimatedScoreCountPerQuery),
+			Bits:                        kv.Bits,
+			DenseKVBytes:                kv.DenseKVBytes,
+			TurboQuantKVBytes:           kv.TurboQuantKVBytes,
+			TurboQuantKVMiB:             float64(kv.TurboQuantKVBytes) / (1024 * 1024),
+			TurboQuantCompressionRatio:  kv.CompressionRatio,
+		}
+		report.Rows = append(report.Rows, row)
+	}
+	report.Gate = evaluateSparseAttentionPlanGate(report.Rows, *maxScoreFraction, *maxTurboKVMiB, *requireSubq)
+	printSparseAttentionPlanTSV(report)
+	if *jsonPath != "" {
+		if err := writeSparseAttentionPlanReport(*jsonPath, report); err != nil {
+			return err
+		}
+		fmt.Printf("json: %s\n", *jsonPath)
+	}
+	fmt.Printf("summary: rows=%d subq_rows=%d score_alpha=%.3f max_score_fraction=%.6f max_turbo_kv_mib=%.3f gate=%s\n",
+		report.Gate.Rows, report.Gate.SubquadraticRows, report.Gate.ScoreAlpha, report.Gate.MaxScoreFractionObserved, report.Gate.MaxTurboKVMiBObserved, passFail(report.Gate.Passed))
+	if !report.Gate.Passed {
+		return fmt.Errorf("sparse attention plan gate failed: %s", strings.Join(report.Gate.FailureReasons, "; "))
+	}
+	return nil
+}
+
+func parsePositiveIntCSV(raw, label string) ([]int, error) {
+	parts := strings.Split(raw, ",")
+	out := make([]int, 0, len(parts))
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		value, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, fmt.Errorf("%s[%d] %q is not an integer", label, i, part)
+		}
+		if value <= 0 {
+			return nil, fmt.Errorf("%s[%d] must be positive", label, i)
+		}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%s must contain at least one positive integer", label)
+	}
+	return out, nil
+}
+
+func evaluateSparseAttentionPlanGate(rows []sparseAttentionPlanRow, maxScoreFraction, maxTurboKVMiB float64, requireSubq bool) sparseAttentionPlanGate {
+	gate := sparseAttentionPlanGate{
+		Passed:     true,
+		Rows:       len(rows),
+		ScoreAlpha: fitSparseAttentionPlanAlpha(rows),
+	}
+	for _, row := range rows {
+		if row.SubquadraticScorePlan {
+			gate.SubquadraticRows++
+		} else if requireSubq {
+			gate.Passed = false
+			gate.FailureReasons = append(gate.FailureReasons, fmt.Sprintf("key_len=%d is not subquadratic", row.KeyLen))
+		}
+		if row.ScoreCountFraction > gate.MaxScoreFractionObserved {
+			gate.MaxScoreFractionObserved = row.ScoreCountFraction
+		}
+		if row.TurboQuantKVMiB > gate.MaxTurboKVMiBObserved {
+			gate.MaxTurboKVMiBObserved = row.TurboQuantKVMiB
+		}
+		if maxScoreFraction > 0 && row.ScoreCountFraction > maxScoreFraction {
+			gate.Passed = false
+			gate.FailureReasons = append(gate.FailureReasons, fmt.Sprintf("key_len=%d score_fraction %.6f exceeds %.6f", row.KeyLen, row.ScoreCountFraction, maxScoreFraction))
+		}
+		if maxTurboKVMiB > 0 && row.TurboQuantKVMiB > maxTurboKVMiB {
+			gate.Passed = false
+			gate.FailureReasons = append(gate.FailureReasons, fmt.Sprintf("key_len=%d turbo_kv_mib %.3f exceeds %.3f", row.KeyLen, row.TurboQuantKVMiB, maxTurboKVMiB))
+		}
+	}
+	return gate
+}
+
+func fitSparseAttentionPlanAlpha(rows []sparseAttentionPlanRow) float64 {
+	if len(rows) < 2 {
+		return 0
+	}
+	var sumX, sumY, sumXX, sumXY float64
+	n := 0
+	for _, row := range rows {
+		if row.KeyLen <= 0 || row.EstimatedScoreCountPerQuery <= 0 {
+			continue
+		}
+		x := math.Log(float64(row.KeyLen))
+		y := math.Log(float64(row.EstimatedScoreCountPerQuery))
+		sumX += x
+		sumY += y
+		sumXX += x * x
+		sumXY += x * y
+		n++
+	}
+	if n < 2 {
+		return 0
+	}
+	denom := float64(n)*sumXX - sumX*sumX
+	if denom == 0 {
+		return 0
+	}
+	return (float64(n)*sumXY - sumX*sumY) / denom
+}
+
+func printSparseAttentionPlanTSV(report sparseAttentionPlanReport) {
+	fmt.Println("key_len\trouting\troute_block_size\troute_top_blocks\ttop_k\tcandidate_key_budget\testimated_scores_per_query\tscore_fraction\tturbo_kv_mib\tcompression_ratio\tsubquadratic")
+	for _, row := range report.Rows {
+		fmt.Printf("%d\t%s\t%d\t%d\t%d\t%d\t%d\t%.6f\t%.3f\t%.3f\t%t\n",
+			row.KeyLen,
+			row.Routing,
+			row.RouteBlockSize,
+			row.RouteTopBlocks,
+			row.TopK,
+			row.CandidateKeyBudget,
+			row.EstimatedScoreCountPerQuery,
+			row.ScoreCountFraction,
+			row.TurboQuantKVMiB,
+			row.TurboQuantCompressionRatio,
+			row.SubquadraticScorePlan,
+		)
+	}
+}
+
+func writeSparseAttentionPlanReport(path string, report sparseAttentionPlanReport) error {
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o644)
+}
+
+func passFail(pass bool) string {
+	if pass {
+		return "pass"
+	}
+	return "fail"
 }
 
 func scoreTeacherHardNegativeExample(ctx context.Context, model *mantaruntime.EmbeddingModel, example mantaruntime.EmbeddingTextHardNegativeExample, batchSize int) ([]float32, error) {
@@ -3649,6 +3980,7 @@ func printUsage() {
 	fmt.Println("  manta import-teacher-scores [flags] <hard-negatives.jsonl> <scores.jsonl> <output.jsonl>")
 	fmt.Println("  manta score-teacher-hard-negatives [flags] <teacher.mll> <hard-negatives.jsonl> <output.jsonl>")
 	fmt.Println("  manta audit-teacher-scores [flags] <hard-negatives.jsonl> [summary.json]")
+	fmt.Println("  manta plan-sparse-attention [flags]")
 	fmt.Println("  manta init-model [flags] <artifact.mll>")
 	fmt.Println("  manta init-mirage [flags] <artifact.mll>")
 	fmt.Println("  manta init-train [flags] <artifact.mll>")
@@ -3676,6 +4008,7 @@ func printUsage() {
 	fmt.Println("import-teacher-scores merges external teacher score JSONL into text hard-negative JSONL and writes a provenance manifest.")
 	fmt.Println("score-teacher-hard-negatives uses a Manta embedding teacher to score existing text hard-negative JSONL into teacher_scores.")
 	fmt.Println("audit-teacher-scores summarizes teacher score coverage, positive rank, margins, and entropy before distillation runs.")
+	fmt.Println("plan-sparse-attention preflights routed sparse attention plus logical TurboQuant K/V memory budgets before GPU runs.")
 	fmt.Println("init-model creates the Manta-owned default quantized embedding training package.")
 	fmt.Println("init-mirage creates the Manta-owned Mirage Image v1 host-reference artifact.")
 	fmt.Println("init-train creates a native training package next to an artifact.")

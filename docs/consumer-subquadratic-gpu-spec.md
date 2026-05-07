@@ -213,12 +213,14 @@ Implementation:
 - exact sparse top-k reference
 - exact fused TurboQuant sparse CUDA path
 - benchmark harness that records time, memory, selected keys, and metadata
+- `manta plan-sparse-attention` preflight that sweeps context lengths and reports routed score-work fraction, estimated score-work alpha, and logical TurboQuant K/V memory before a GPU run
 
 Pass:
 
 - exact CUDA output matches host reference
 - no hidden dense K/V materialization in the TurboQuant fused path
 - benchmarks produce machine-readable JSON/TSV
+- preflight plans fail when routed score work is not actually subquadratic or when the TurboQuant K/V budget exceeds the target device envelope
 
 ### Layer 1: Routed Block Sparse Attention
 
