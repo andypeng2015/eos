@@ -17,6 +17,10 @@ Manta is an inference-first GPU language and runtime stack. It compiles `.manta`
 
 The near-term target is an inference-first product surface for embedding, reranking, retrieval-time scoring, decode, and CorkScrewDB integration. Manta also owns the native training path needed to produce those default artifacts, so model authors do not need to train in Python, export through another format, and deploy through a separate runtime.
 
+## Agent Skill
+
+Agents working with Manta should use the [using-manta](https://github.com/odvcencio/m31labs-skills/blob/main/skills/using-manta/SKILL.md) skill.
+
 That means the language and runtime should bias toward:
 
 - quantized weights and quantized vectors as first-class runtime values
