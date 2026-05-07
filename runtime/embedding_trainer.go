@@ -23,18 +23,19 @@ type EmbeddingPairExample struct {
 
 // EmbeddingTrainConfig controls the narrow pooled-embedder trainer.
 type EmbeddingTrainConfig struct {
-	LearningRate       float32
-	WeightDecay        float32
-	WeightBits         int
-	Optimizer          string
-	Beta1              float32
-	Beta2              float32
-	Epsilon            float32
-	ContrastiveLoss    string
-	Temperature        float32
-	GroupedLossWeight  float32
-	TeacherLossWeight  float32
-	TeacherTemperature float32
+	LearningRate              float32
+	WeightDecay               float32
+	WeightBits                int
+	Optimizer                 string
+	Beta1                     float32
+	Beta2                     float32
+	Epsilon                   float32
+	ContrastiveLoss           string
+	Temperature               float32
+	GroupedLossWeight         float32
+	TeacherLossWeight         float32
+	TeacherTemperature        float32
+	TeacherSourceTemperatures map[string]float32
 }
 
 // EmbeddingTrainMetrics summarizes one training/eval batch.
@@ -1185,7 +1186,11 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 	if teacherWeight > 0 {
 		teacherQueryGrads := newEmbeddingPooledGradBuffers(queries)
 		teacherCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
-		teacherLoss, teacherScore, pairs := accumulateTeacherDistributionHardNegativeGrads(queries, candidates, candidateSpans, teacherScores, t.config.Temperature, t.config.TeacherTemperature, teacherQueryGrads, teacherCandidateGrads)
+		teacherTemperatures := make([]float32, len(batch))
+		for i, example := range batch {
+			teacherTemperatures[i] = hardNegativeTeacherTemperature(t.config.TeacherSourceTemperatures, example.Source, t.config.TeacherTemperature)
+		}
+		teacherLoss, teacherScore, pairs := accumulateTeacherDistributionHardNegativeGrads(queries, candidates, candidateSpans, teacherScores, teacherTemperatures, t.config.Temperature, t.config.TeacherTemperature, teacherQueryGrads, teacherCandidateGrads)
 		if pairs > 0 {
 			baseScale := float32(1) / (1 + teacherWeight)
 			teacherScale := teacherWeight / (1 + teacherWeight)
@@ -2892,7 +2897,7 @@ func accumulateGroupedInfoNCEHardNegativeGrads(queries, candidates []*embeddingE
 	return totalLoss, totalScore
 }
 
-func accumulateTeacherDistributionHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, teacherScores [][]float32, modelTemperature, teacherTemperature float32, queryGrads, candidateGrads [][]float32) (float32, float32, int) {
+func accumulateTeacherDistributionHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, teacherScores [][]float32, teacherTemperatures []float32, modelTemperature, teacherTemperature float32, queryGrads, candidateGrads [][]float32) (float32, float32, int) {
 	totalLoss := float32(0)
 	totalScore := float32(0)
 	pairCount := 0
@@ -2940,8 +2945,12 @@ func accumulateTeacherDistributionHardNegativeGrads(queries, candidates []*embed
 		}
 		model := modelProbs[:count]
 		teacher := teacherProbs[:count]
+		exampleTeacherTemperature := teacherTemperature
+		if i < len(teacherTemperatures) && teacherTemperatures[i] > 0 {
+			exampleTeacherTemperature = teacherTemperatures[i]
+		}
 		softmaxScoresInto(scores, modelTemperature, model)
-		softmaxScoresInto(teacherScores[i], teacherTemperature, teacher)
+		softmaxScoresInto(teacherScores[i], exampleTeacherTemperature, teacher)
 		for local, target := range teacher {
 			prob := model[local]
 			if prob < 1e-12 {
@@ -3860,6 +3869,7 @@ func normalizedTrainConfig(cfg EmbeddingTrainConfig, params ...mantaartifact.Par
 	if cfg.TeacherTemperature == 0 {
 		cfg.TeacherTemperature = 1
 	}
+	cfg.TeacherSourceTemperatures = normalizeHardNegativeTeacherTemperatures(cfg.TeacherSourceTemperatures)
 	cfg.GroupedLossWeight = effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
 	return cfg
 }
@@ -3881,6 +3891,14 @@ func validateTrainConfig(cfg EmbeddingTrainConfig) error {
 	}
 	if cfg.TeacherTemperature <= 0 {
 		return fmt.Errorf("teacher_temperature must be positive")
+	}
+	for source, temp := range cfg.TeacherSourceTemperatures {
+		if strings.TrimSpace(source) == "" {
+			return fmt.Errorf("teacher_source_temperatures has an empty source")
+		}
+		if temp <= 0 {
+			return fmt.Errorf("teacher_source_temperatures[%s] must be positive", source)
+		}
 	}
 	return nil
 }

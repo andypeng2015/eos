@@ -2093,6 +2093,7 @@ func runTrainEmbed(args []string) error {
 	var groupedLossWeight float64
 	var teacherLossWeight float64
 	var teacherTemperature float64
+	var teacherSourceTemperatures string
 	fs.IntVar(&epochs, "epochs", 10, "number of epochs")
 	fs.IntVar(&batchSize, "batch-size", 8, "batch size")
 	fs.BoolVar(&shuffle, "shuffle", true, "shuffle training set each epoch")
@@ -2120,6 +2121,7 @@ func runTrainEmbed(args []string) error {
 	fs.Float64Var(&groupedLossWeight, "grouped-loss-weight", 0, "grouped hard-negative loss weight for hybrid_infonce")
 	fs.Float64Var(&teacherLossWeight, "teacher-loss-weight", 0, "teacher score distillation weight for hard-negative training")
 	fs.Float64Var(&teacherTemperature, "teacher-temperature", 0, "teacher score softmax temperature for hard-negative distillation")
+	fs.StringVar(&teacherSourceTemperatures, "teacher-source-temperatures", "", "comma-separated source=temperature overrides for teacher distillation, for example scifact=10,nfcorpus:model=1.5")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2157,8 +2159,15 @@ func runTrainEmbed(args []string) error {
 	if parseErr != nil {
 		return fmt.Errorf("hard-negative-source-weights: %w", parseErr)
 	}
+	parsedTeacherSourceTemperatures, parseErr := parsePositiveFloatMap(teacherSourceTemperatures)
+	if parseErr != nil {
+		return fmt.Errorf("teacher-source-temperatures: %w", parseErr)
+	}
 	if len(parsedSourceWeights) > 0 && !hardNegativeTrain {
 		return fmt.Errorf("--hard-negative-source-weights requires --hard-negative-train")
+	}
+	if len(parsedTeacherSourceTemperatures) > 0 && !hardNegativeTrain {
+		return fmt.Errorf("--teacher-source-temperatures requires --hard-negative-train")
 	}
 	path := fs.Arg(0)
 	trainPath := fs.Arg(1)
@@ -2197,6 +2206,7 @@ func runTrainEmbed(args []string) error {
 		GroupedLossWeight:         float32(groupedLossWeight),
 		TeacherLossWeight:         float32(teacherLossWeight),
 		TeacherTemperature:        float32(teacherTemperature),
+		TeacherSourceTemperatures: parsedTeacherSourceTemperatures,
 		ProgressEverySteps:        progressEvery,
 		EvalOnly:                  evalOnly,
 		PairwiseTrain:             pairwiseTrain,
@@ -2299,6 +2309,37 @@ func parsePositiveIntWeightMap(raw string) (map[string]int, error) {
 			return nil, fmt.Errorf("entry %q must use a positive integer weight", item)
 		}
 		out[key] = weight
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+func parsePositiveFloatMap(raw string) (map[string]float32, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	out := map[string]float32{}
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(item, "=")
+		if !ok {
+			return nil, fmt.Errorf("entry %q must be source=value", item)
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" {
+			return nil, fmt.Errorf("entry %q has an empty source", item)
+		}
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 32)
+		if err != nil || parsed <= 0 {
+			return nil, fmt.Errorf("entry %q must use a positive float value", item)
+		}
+		out[key] = float32(parsed)
 	}
 	if len(out) == 0 {
 		return nil, nil
@@ -2759,29 +2800,30 @@ type trainRunSummaryJSON struct {
 }
 
 type trainRunConfigJSON struct {
-	Epochs                    int            `json:"epochs"`
-	BatchSize                 int            `json:"batch_size"`
-	Shuffle                   bool           `json:"shuffle"`
-	Seed                      int64          `json:"seed"`
-	EvalEveryEpoch            int            `json:"eval_every_epoch"`
-	EvalEverySteps            int            `json:"eval_every_steps"`
-	Patience                  int            `json:"patience"`
-	SelectMetric              string         `json:"select_metric"`
-	MinDelta                  float32        `json:"min_delta"`
-	RestoreBest               bool           `json:"restore_best"`
-	LengthBucketBatches       bool           `json:"length_bucket_batches"`
-	LearningRate              float32        `json:"learning_rate"`
-	ContrastiveLoss           string         `json:"contrastive_loss,omitempty"`
-	Temperature               float32        `json:"temperature"`
-	GroupedLossWeight         float32        `json:"grouped_loss_weight,omitempty"`
-	TeacherLossWeight         float32        `json:"teacher_loss_weight,omitempty"`
-	TeacherTemperature        float32        `json:"teacher_temperature,omitempty"`
-	ProgressEverySteps        int            `json:"progress_every_steps"`
-	EvalOnly                  bool           `json:"eval_only"`
-	PairwiseTrain             bool           `json:"pairwise_train"`
-	HardNegativeTrain         bool           `json:"hard_negative_train"`
-	HardNegativesPerQuery     int            `json:"hard_negatives_per_query"`
-	HardNegativeSourceWeights map[string]int `json:"hard_negative_source_weights,omitempty"`
+	Epochs                    int                `json:"epochs"`
+	BatchSize                 int                `json:"batch_size"`
+	Shuffle                   bool               `json:"shuffle"`
+	Seed                      int64              `json:"seed"`
+	EvalEveryEpoch            int                `json:"eval_every_epoch"`
+	EvalEverySteps            int                `json:"eval_every_steps"`
+	Patience                  int                `json:"patience"`
+	SelectMetric              string             `json:"select_metric"`
+	MinDelta                  float32            `json:"min_delta"`
+	RestoreBest               bool               `json:"restore_best"`
+	LengthBucketBatches       bool               `json:"length_bucket_batches"`
+	LearningRate              float32            `json:"learning_rate"`
+	ContrastiveLoss           string             `json:"contrastive_loss,omitempty"`
+	Temperature               float32            `json:"temperature"`
+	GroupedLossWeight         float32            `json:"grouped_loss_weight,omitempty"`
+	TeacherLossWeight         float32            `json:"teacher_loss_weight,omitempty"`
+	TeacherTemperature        float32            `json:"teacher_temperature,omitempty"`
+	TeacherSourceTemperatures map[string]float32 `json:"teacher_source_temperatures,omitempty"`
+	ProgressEverySteps        int                `json:"progress_every_steps"`
+	EvalOnly                  bool               `json:"eval_only"`
+	PairwiseTrain             bool               `json:"pairwise_train"`
+	HardNegativeTrain         bool               `json:"hard_negative_train"`
+	HardNegativesPerQuery     int                `json:"hard_negatives_per_query"`
+	HardNegativeSourceWeights map[string]int     `json:"hard_negative_source_weights,omitempty"`
 }
 
 type trainBatchMetricsJSON struct {
@@ -2941,6 +2983,7 @@ func trainRunConfigPayload(cfg mantaruntime.EmbeddingTrainRunConfig) trainRunCon
 		GroupedLossWeight:         cfg.GroupedLossWeight,
 		TeacherLossWeight:         cfg.TeacherLossWeight,
 		TeacherTemperature:        cfg.TeacherTemperature,
+		TeacherSourceTemperatures: cfg.TeacherSourceTemperatures,
 		ProgressEverySteps:        cfg.ProgressEverySteps,
 		EvalOnly:                  cfg.EvalOnly,
 		PairwiseTrain:             cfg.PairwiseTrain,

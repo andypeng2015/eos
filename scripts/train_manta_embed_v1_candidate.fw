@@ -54,6 +54,7 @@ type candidateConfig struct {
 	Temperature         string
 	TeacherLossWeight   string
 	TeacherTemperature  string
+	TeacherSourceTemperatures string
 	EvalEvery           string
 	EvalEverySteps      string
 	Patience            string
@@ -496,6 +497,9 @@ func writeManifest(cfg candidateConfig, status string) error {
     "contrastive_loss": %s,
     "grouped_loss_weight": %s,
     "temperature": %s,
+    "teacher_loss_weight": %s,
+    "teacher_temperature": %s,
+    "teacher_source_temperatures": %s,
     "select_metric": %s,
     "quality_target": %s,
     "eval_every": %s,
@@ -551,6 +555,9 @@ func writeManifest(cfg candidateConfig, status string) error {
 		jsonString(cfg.ContrastiveLoss),
 		cfg.GroupedLossWeight,
 		cfg.Temperature,
+		cfg.TeacherLossWeight,
+		cfg.TeacherTemperature,
+		jsonString(cfg.TeacherSourceTemperatures),
 		jsonString(cfg.SelectMetric),
 		jsonString(cfg.QualityTarget),
 		cfg.EvalEvery,
@@ -672,6 +679,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		Temperature:         getenv("MANTA_TEMPERATURE", "0.05"),
 		TeacherLossWeight:   getenv("MANTA_TEACHER_LOSS_WEIGHT", "0"),
 		TeacherTemperature:  getenv("MANTA_TEACHER_TEMPERATURE", "1"),
+		TeacherSourceTemperatures: getenv("MANTA_TEACHER_SOURCE_TEMPERATURES", ""),
 		EvalEvery:           getenv("MANTA_EVAL_EVERY", "1"),
 		EvalEverySteps:      getenv("MANTA_EVAL_EVERY_STEPS", "0"),
 		Patience:            getenv("MANTA_PATIENCE", "3"),
@@ -816,6 +824,9 @@ func trainCommonArgs(cfg candidateConfig) []string {
 	}
 	if envEnabled("MANTA_LENGTH_BUCKET_BATCHES") || cfg.LengthBucketBatches == "1" || strings.ToLower(cfg.LengthBucketBatches) == "true" {
 		args = append(args, "--length-bucket-batches")
+	}
+	if cfg.TeacherSourceTemperatures != "" {
+		args = append(args, "--teacher-source-temperatures", cfg.TeacherSourceTemperatures)
 	}
 	return args
 }

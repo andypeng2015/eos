@@ -933,6 +933,26 @@ func TestHardNegativeSourceWeightUsesFamilyUnlessExactWeightExists(t *testing.T)
 	}
 }
 
+func TestHardNegativeTeacherTemperatureUsesFamilyUnlessExactExists(t *testing.T) {
+	temperatures := normalizeHardNegativeTeacherTemperatures(map[string]float32{
+		"fiqa":       20,
+		"fiqa:model": 1.5,
+		"*":          7,
+	})
+	if got := hardNegativeTeacherTemperature(temperatures, "fiqa:bm25", 3); got != 20 {
+		t.Fatalf("fiqa:bm25 temperature = %f, want 20", got)
+	}
+	if got := hardNegativeTeacherTemperature(temperatures, "fiqa:model", 3); got != 1.5 {
+		t.Fatalf("fiqa:model temperature = %f, want 1.5", got)
+	}
+	if got := hardNegativeTeacherTemperature(temperatures, "scifact", 3); got != 7 {
+		t.Fatalf("scifact temperature = %f, want wildcard temperature", got)
+	}
+	if got := hardNegativeTeacherTemperature(nil, "scifact", 3); got != 3 {
+		t.Fatalf("fallback temperature = %f, want fallback", got)
+	}
+}
+
 type countingContrastiveAccelerator struct {
 	squareCalls   int
 	rectCalls     int
