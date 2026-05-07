@@ -131,6 +131,8 @@ func run(args []string) error {
 		return runMineTextPairs(args[1:])
 	case "import-teacher-scores":
 		return runImportTeacherScores(args[1:])
+	case "score-teacher-hard-negatives":
+		return runScoreTeacherHardNegatives(args[1:])
 	case "train-embed":
 		return runTrainEmbed(args[1:])
 	case "train-corpus":
@@ -645,6 +647,23 @@ type teacherScoreImportSummary struct {
 	CandidateRows   int    `json:"candidate_rows"`
 }
 
+type teacherHardNegativeScoreSummary struct {
+	Schema          string `json:"schema"`
+	CreatedUTC      string `json:"created_utc"`
+	TeacherArtifact string `json:"teacher_artifact"`
+	InputJSONL      string `json:"input_jsonl"`
+	OutputJSONL     string `json:"output_jsonl"`
+	TeacherModelID  string `json:"teacher_model_id,omitempty"`
+	TeacherRevision string `json:"teacher_revision,omitempty"`
+	Prompt          string `json:"prompt,omitempty"`
+	ScoreScale      string `json:"score_scale"`
+	Backend         string `json:"backend,omitempty"`
+	BatchSize       int    `json:"batch_size"`
+	Examples        int    `json:"examples"`
+	Updated         int    `json:"updated"`
+	SkippedExisting int    `json:"skipped_existing"`
+}
+
 func runImportTeacherScores(args []string) error {
 	fs := flag.NewFlagSet("import-teacher-scores", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -720,6 +739,179 @@ func runImportTeacherScores(args []string) error {
 	fmt.Printf("output: %s\n", outputPath)
 	fmt.Printf("manifest: %s\n", *manifestPath)
 	return nil
+}
+
+func runScoreTeacherHardNegatives(args []string) error {
+	fs := flag.NewFlagSet("score-teacher-hard-negatives", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	batchSize := fs.Int("batch-size", 64, "embedding batch size for candidate texts")
+	overwrite := fs.Bool("overwrite", false, "replace existing teacher_scores")
+	manifestPath := fs.String("manifest", "", "provenance manifest path; default is <output>.teacher-scores.manifest.json")
+	teacherModelID := fs.String("teacher-model-id", "", "teacher model id; defaults to embedding manifest name")
+	teacherRevision := fs.String("teacher-revision", "", "teacher model revision")
+	prompt := fs.String("prompt", "", "teacher prompt or instruction provenance")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 3 || fs.Arg(0) == "" || fs.Arg(1) == "" || fs.Arg(2) == "" {
+		return fmt.Errorf("usage: manta score-teacher-hard-negatives [flags] <teacher.mll> <hard-negatives.jsonl> <output.jsonl>")
+	}
+	if *batchSize <= 0 {
+		return fmt.Errorf("batch-size must be positive")
+	}
+	artifactPath := fs.Arg(0)
+	inputPath := fs.Arg(1)
+	outputPath := fs.Arg(2)
+	if *manifestPath == "" {
+		*manifestPath = outputPath + ".teacher-scores.manifest.json"
+	}
+	examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(inputPath)
+	if err != nil {
+		return err
+	}
+	rt := mantaruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+	model, err := rt.LoadEmbeddingPackage(context.Background(), artifactPath)
+	if err != nil {
+		return err
+	}
+	manifest := model.Manifest()
+	if *teacherModelID == "" {
+		*teacherModelID = manifest.Name
+	}
+	summary := teacherHardNegativeScoreSummary{
+		Schema:          "manta.teacher_hard_negative_score.v1",
+		CreatedUTC:      time.Now().UTC().Format(time.RFC3339),
+		TeacherArtifact: artifactPath,
+		InputJSONL:      inputPath,
+		OutputJSONL:     outputPath,
+		TeacherModelID:  *teacherModelID,
+		TeacherRevision: *teacherRevision,
+		Prompt:          *prompt,
+		ScoreScale:      "cosine",
+		Backend:         string(model.Backend()),
+		BatchSize:       *batchSize,
+		Examples:        len(examples),
+	}
+	for i := range examples {
+		example := &examples[i]
+		if len(example.TeacherScores) > 0 && !*overwrite {
+			summary.SkippedExisting++
+			continue
+		}
+		scores, err := scoreTeacherHardNegativeExample(context.Background(), model, *example, *batchSize)
+		if err != nil {
+			return fmt.Errorf("example %d source=%q query=%q: %w", i, example.Source, example.Query, err)
+		}
+		example.TeacherScores = scores
+		summary.Updated++
+	}
+	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(outputPath, examples); err != nil {
+		return err
+	}
+	if err := writeTeacherHardNegativeScoreManifest(*manifestPath, summary); err != nil {
+		return err
+	}
+	fmt.Printf("scored teacher hard negatives: examples=%d updated=%d skipped_existing=%d backend=%s batch_size=%d\n",
+		summary.Examples, summary.Updated, summary.SkippedExisting, summary.Backend, summary.BatchSize)
+	fmt.Printf("teacher: model_id=%s revision=%s score_scale=%s\n", summary.TeacherModelID, summary.TeacherRevision, summary.ScoreScale)
+	fmt.Printf("output: %s\n", outputPath)
+	fmt.Printf("manifest: %s\n", *manifestPath)
+	return nil
+}
+
+func scoreTeacherHardNegativeExample(ctx context.Context, model *mantaruntime.EmbeddingModel, example mantaruntime.EmbeddingTextHardNegativeExample, batchSize int) ([]float32, error) {
+	queryVector, err := embedTeacherText(ctx, model, example.Query)
+	if err != nil {
+		return nil, fmt.Errorf("embed query: %w", err)
+	}
+	candidates := append([]string{example.Positive}, example.Negatives...)
+	scores := make([]float32, 0, len(candidates))
+	for start := 0; start < len(candidates); start += batchSize {
+		end := min(start+batchSize, len(candidates))
+		result, err := model.EmbedTextBatch(ctx, candidates[start:end])
+		if err != nil {
+			return nil, fmt.Errorf("embed candidates %d-%d: %w", start, end, err)
+		}
+		rows, err := teacherEmbeddingRows(result.Embeddings, end-start)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			scores = append(scores, dotTeacherVectors(queryVector, normalizeTeacherVector(row)))
+		}
+	}
+	return scores, nil
+}
+
+func embedTeacherText(ctx context.Context, model *mantaruntime.EmbeddingModel, text string) ([]float32, error) {
+	result, err := model.EmbedText(ctx, text)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := teacherEmbeddingRows(result.Embeddings, 1)
+	if err != nil {
+		return nil, err
+	}
+	return normalizeTeacherVector(rows[0]), nil
+}
+
+func teacherEmbeddingRows(t *backend.Tensor, wantRows int) ([][]float32, error) {
+	if t == nil {
+		return nil, fmt.Errorf("embedding tensor is nil")
+	}
+	if len(t.F32) == 0 {
+		return nil, fmt.Errorf("embedding tensor has no float data")
+	}
+	switch len(t.Shape) {
+	case 1:
+		if wantRows != 1 {
+			return nil, fmt.Errorf("embedding tensor shape %v cannot provide %d rows", t.Shape, wantRows)
+		}
+		return [][]float32{t.F32}, nil
+	case 2:
+		rows, cols := t.Shape[0], t.Shape[1]
+		if rows != wantRows {
+			return nil, fmt.Errorf("embedding tensor rows = %d, want %d", rows, wantRows)
+		}
+		if len(t.F32) < rows*cols {
+			return nil, fmt.Errorf("embedding tensor has %d values, want at least %d", len(t.F32), rows*cols)
+		}
+		out := make([][]float32, rows)
+		for i := 0; i < rows; i++ {
+			out[i] = t.F32[i*cols : (i+1)*cols]
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("embedding tensor shape %v is not rank 1 or 2", t.Shape)
+	}
+}
+
+func normalizeTeacherVector(in []float32) []float32 {
+	out := append([]float32(nil), in...)
+	var sum float64
+	for _, v := range out {
+		sum += float64(v) * float64(v)
+	}
+	if sum == 0 {
+		return out
+	}
+	scale := float32(1 / math.Sqrt(sum))
+	for i := range out {
+		out[i] *= scale
+	}
+	return out
+}
+
+func dotTeacherVectors(a, b []float32) float32 {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	var sum float32
+	for i := 0; i < n; i++ {
+		sum += a[i] * b[i]
+	}
+	return sum
 }
 
 func readTeacherScoreImportTable(path string) (teacherScoreImportTable, error) {
@@ -876,6 +1068,15 @@ func firstNonEmptyString(values ...string) string {
 }
 
 func writeTeacherScoreImportManifest(path string, summary teacherScoreImportSummary) error {
+	data, err := json.MarshalIndent(summary, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o644)
+}
+
+func writeTeacherHardNegativeScoreManifest(path string, summary teacherHardNegativeScoreSummary) error {
 	data, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {
 		return err
@@ -3204,6 +3405,7 @@ func printUsage() {
 	fmt.Println("  manta mine-retrieval-hard-negatives [flags] <beir-dataset-dir> <output.jsonl>")
 	fmt.Println("  manta mine-retrieval-model-hard-negatives [flags] <artifact.mll> <beir-dataset-dir> <output.jsonl>")
 	fmt.Println("  manta import-teacher-scores [flags] <hard-negatives.jsonl> <scores.jsonl> <output.jsonl>")
+	fmt.Println("  manta score-teacher-hard-negatives [flags] <teacher.mll> <hard-negatives.jsonl> <output.jsonl>")
 	fmt.Println("  manta init-model [flags] <artifact.mll>")
 	fmt.Println("  manta init-mirage [flags] <artifact.mll>")
 	fmt.Println("  manta init-train [flags] <artifact.mll>")
@@ -3229,6 +3431,7 @@ func printUsage() {
 	fmt.Println("mine-retrieval-hard-negatives creates text hard-negative training JSONL from BEIR qrels using the BM25 baseline.")
 	fmt.Println("mine-retrieval-model-hard-negatives creates text hard-negative training JSONL from BEIR qrels using a Manta embedding model's own misses.")
 	fmt.Println("import-teacher-scores merges external teacher score JSONL into text hard-negative JSONL and writes a provenance manifest.")
+	fmt.Println("score-teacher-hard-negatives uses a Manta embedding teacher to score existing text hard-negative JSONL into teacher_scores.")
 	fmt.Println("init-model creates the Manta-owned default quantized embedding training package.")
 	fmt.Println("init-mirage creates the Manta-owned Mirage Image v1 host-reference artifact.")
 	fmt.Println("init-train creates a native training package next to an artifact.")

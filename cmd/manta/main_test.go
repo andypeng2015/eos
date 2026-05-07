@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -585,6 +586,85 @@ func TestRunImportTeacherScoresMatchesCandidateRows(t *testing.T) {
 		if examples[0].TeacherScores[i] != score {
 			t.Fatalf("teacher score %d = %f, want %f", i, examples[0].TeacherScores[i], score)
 		}
+	}
+}
+
+func TestRunScoreTeacherHardNegativesWritesScoresAndManifest(t *testing.T) {
+	dir := t.TempDir()
+	artifactPath := filepath.Join(dir, "teacher.mll")
+	if err := run([]string{
+		"init-model",
+		"--name", "tiny-teacher",
+		"--vocab-size", "8",
+		"--max-seq", "8",
+		"--embedding-dim", "4",
+		"--hidden-dim", "8",
+		artifactPath,
+	}); err != nil {
+		t.Fatalf("run init-model: %v", err)
+	}
+	tokenizer := mantaruntime.TokenizerFile{
+		Version:      mantaruntime.TokenizerFileVersion,
+		Tokens:       []string{"[PAD]", "[UNK]", "a", "b", "c", "d", "e", "f"},
+		PadToken:     "[PAD]",
+		UnknownToken: "[UNK]",
+	}
+	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(artifactPath)); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	if _, _, err := mantaruntime.RebuildSiblingPackageManifest(artifactPath); err != nil {
+		t.Fatalf("rebuild package manifest: %v", err)
+	}
+	inputPath := filepath.Join(dir, "hard-negatives.jsonl")
+	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []mantaruntime.EmbeddingTextHardNegativeExample{
+		{Source: "scifact", Query: "abc", Positive: "abc", Negatives: []string{"def"}},
+	}); err != nil {
+		t.Fatalf("write hard negatives: %v", err)
+	}
+	outputPath := filepath.Join(dir, "scored.jsonl")
+	manifestPath := filepath.Join(dir, "teacher-score.manifest.json")
+
+	output := captureRunOutput(t, []string{
+		"score-teacher-hard-negatives",
+		"--batch-size", "2",
+		"--manifest", manifestPath,
+		"--teacher-revision", "local",
+		artifactPath,
+		inputPath,
+		outputPath,
+	})
+	for _, want := range []string{
+		"scored teacher hard negatives: examples=1 updated=1",
+		"teacher: model_id=tiny-teacher revision=local score_scale=cosine",
+		"output: " + outputPath,
+		"manifest: " + manifestPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("score-teacher-hard-negatives output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if len(examples) != 1 || len(examples[0].TeacherScores) != 2 {
+		t.Fatalf("teacher scores = %+v", examples)
+	}
+	for i, score := range examples[0].TeacherScores {
+		if math.IsNaN(float64(score)) || math.IsInf(float64(score), 0) {
+			t.Fatalf("teacher score %d is not finite: %f", i, score)
+		}
+	}
+	var manifest teacherHardNegativeScoreSummary
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if manifest.Schema != "manta.teacher_hard_negative_score.v1" || manifest.TeacherModelID != "tiny-teacher" || manifest.Updated != 1 || manifest.BatchSize != 2 {
+		t.Fatalf("manifest = %+v", manifest)
 	}
 }
 
