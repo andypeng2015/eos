@@ -398,3 +398,5 @@ The shortest path is:
 7. publish the best-local claim only on the scorecard we actually win
 
 This path does not require solving general long-context LLM training first. It uses the fact that embedding quality is trainable at smaller scale, long-context retrieval has open space, and Manta can own the deployment/runtime path end to end.
+
+The expanded SOTA experiment surface is tracked in [manta-embed-sota-avenues.md](manta-embed-sota-avenues.md). Treat that file as the queue for objective, data, architecture, retrieval-head, compression, and sparse-long-context lanes.

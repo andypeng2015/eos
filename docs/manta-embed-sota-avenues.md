@@ -1,0 +1,247 @@
+# Manta Embedder SOTA Avenue Map
+
+This is the working map for trying everything that can plausibly move `manta-embed-v1` toward a best-in-class local embedder. The objective is not one clever loss. SOTA embedding systems combine foundation-model backbones, staged data, synthetic data, hard negatives, distillation, task routing, multi-output retrieval modes, and compression-aware serving. Manta should turn each of those into a measured lane.
+
+## External Signals
+
+Current public systems point at these ingredients:
+
+- Qwen3 Embedding: multi-stage unsupervised pretraining, supervised fine-tuning, synthetic data from foundation models, model merging, 0.6B/4B/8B scales, and paired rerankers. The Qwen model card reports strong MTEB/MMTEB scores, including `Qwen3-Embedding-8B` at `70.58` mean task on MMTEB and `Qwen3-Embedding-0.6B` at `64.33`.
+- BGE-M3: dense retrieval, sparse retrieval, and multi-vector retrieval in one model, with self-knowledge distillation across retrieval functions and long inputs up to `8192` tokens.
+- Jina embeddings v3: task-specific LoRA adapters, long-context retrieval, and Matryoshka Representation Learning so output dimensions can shrink from `1024` down to small prefixes.
+- ReasonEmbed: reasoning-intensive synthetic retrieval data plus adaptive sample weighting for difficult examples.
+- SPLADE and ColBERT families: sparse lexical expansion and late-interaction multi-vector retrieval remain separate high-quality lanes from single-vector dense retrieval.
+
+Sources consulted:
+
+- https://huggingface.co/Qwen/Qwen3-Embedding-8B
+- https://github.com/QwenLM/Qwen3-Embedding
+- https://arxiv.org/abs/2506.05176
+- https://arxiv.org/abs/2402.03216
+- https://arxiv.org/abs/2409.10173
+- https://arxiv.org/abs/2510.08252
+- https://arxiv.org/abs/2205.13147
+- https://arxiv.org/abs/2107.05720
+- https://arxiv.org/abs/2004.12832
+
+## Current Anchor
+
+The current in-repo best is:
+
+```text
+runs/manta-embed-v1-teacher-hybrid-w005-tw020-nf3train-lr10-20260507T035553Z/candidate/manta-embed-v1.sealed.mll
+```
+
+Compared with the previous fresh-mined hybrid best:
+
+| Dataset | Previous nDCG@10 | Candidate nDCG@10 | Delta | Previous recall@100 | Candidate recall@100 | Delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| SciFact | 0.324437 | 0.330614 | +0.006177 | 0.725222 | 0.725222 | +0.000000 |
+| NFCorpus | 0.084556 | 0.084433 | -0.000123 | 0.128650 | 0.128809 | +0.000159 |
+| FiQA | 0.027711 | 0.028539 | +0.000828 | 0.164380 | 0.166167 | +0.001787 |
+| Macro | 0.145568 | 0.147862 | +0.002294 | - | - | - |
+
+This passes the current gate criteria: macro nDCG delta `>= 0.0005`, per-dataset nDCG regression no worse than `0.001`, per-dataset nDCG ratio `>= 0.98`, recall@100 regression no worse than `0.004`, and recall@100 ratio `>= 0.96`.
+
+## Ready-To-Run Lanes
+
+These require no new model code.
+
+### Lane A: Teacher Loss Shape
+
+Question: is `teacher_loss_weight=0.20` the local optimum, or just the first useful point?
+
+Sweep:
+
+| Var | Values |
+| --- | --- |
+| `MANTA_TEACHER_LOSS_WEIGHT` | `0.05`, `0.10`, `0.20`, `0.35`, `0.50` |
+| `MANTA_TEACHER_TEMPERATURE` | `0.5`, `0.75`, `1.0`, `1.5`, `2.0` |
+| `MANTA_LR` | `0.000005`, `0.000008`, `0.000010`, `0.0000125` |
+| `MANTA_HARD_NEGATIVE_SOURCE_WEIGHTS` | `scifact=1,nfcorpus=3,fiqa=1`, `scifact=1,nfcorpus=4,fiqa=1`, `scifact=2,nfcorpus=3,fiqa=1` |
+
+Gate:
+
+- candidate macro nDCG@10 beats `0.147862`
+- no dataset violates nDCG or recall floors
+- pairwise AUC does not fall below `0.818`
+
+### Lane B: Mining Depth And Negative Budget
+
+Question: are we under-sampling the teacher candidate set?
+
+Sweep:
+
+| Var | Values |
+| --- | --- |
+| `MANTA_ALIGN_MODEL_HARD_MAX_EXAMPLES` | `6000`, `9000`, `12000` |
+| `MANTA_ALIGN_MODEL_HARD_NEGATIVES` | `3`, `5`, `8` |
+| `MANTA_ALIGN_MODEL_HARD_CANDIDATE_TOP_K` | `100`, `200`, `400`, `800` |
+| `MANTA_ALIGN_CANDIDATE_HARD_NEGATIVES` | `1`, `2`, `3` |
+
+Gate:
+
+- train-pair count stays within host budget
+- recall@100 improves or stays flat on NFCorpus and FiQA
+- nDCG improvement is not only SciFact
+
+### Lane C: Source Scheduling
+
+Question: can source scheduling act as a stable control knob for dataset regressions?
+
+Sweep:
+
+```text
+scifact=1,nfcorpus=2,fiqa=1
+scifact=1,nfcorpus=3,fiqa=1
+scifact=1,nfcorpus=4,fiqa=1
+scifact=2,nfcorpus=3,fiqa=1
+scifact=1,nfcorpus=3,fiqa=2
+scifact=2,nfcorpus=4,fiqa=1
+```
+
+Gate:
+
+- per-dataset nDCG deltas form a Pareto improvement or acceptable macro gain
+- no source schedule is promoted from pairwise metrics alone
+
+### Lane D: Bigger Compact Models
+
+Question: how much of the current quality ceiling is architecture size?
+
+New-start configs:
+
+| Name | Max seq | Dim | Hidden | Repeats | Vocab | Use |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `embed-s` | 256 | 128 | 256 | 2 | 32768 | current control |
+| `embed-m` | 512 | 192 | 384 | 3 | 32768 | first quality/VRAM probe |
+| `embed-l` | 1024 | 256 | 512 | 4 | 32768 | C24 quality probe |
+| `embed-xl-smoke` | 1024 | 384 | 768 | 4 | 32768 | throughput/VRAM smoke |
+
+Gate:
+
+- larger model must improve retrieval, not just pairwise AUC
+- docs/s and train pairs/s remain inside C24 target budget
+- sealed artifact remains practical for local serving
+
+### Lane E: TurboQuant And Weight Precision
+
+Question: where is the quality/throughput knee for local serving?
+
+Sweep:
+
+| Var | Values |
+| --- | --- |
+| `MANTA_WEIGHT_BITS` | `4`, `6`, `8` |
+| train/eval dtype | current f16 output plus future q-vector variants |
+| package mode | trainable `.mll` vs sealed `.mll` |
+
+Gate:
+
+- quality regression is measured against dense/f16 candidate
+- package size and encode throughput improve enough to justify regression
+
+## Code Lanes To Unlock
+
+These are likely necessary for true best-in-class local performance.
+
+### Lane F: External Teacher Import
+
+Add a tool that imports query/document/candidate teacher scores from Qwen3, BGE-M3, Jina, Voyage/OpenAI/Gemini APIs, or local TEI servers into the existing `teacher_scores` JSONL field.
+
+Required outputs:
+
+- normalized scores over `positive + negatives`
+- teacher model id, revision, prompt/instruction, dimensionality, and score scale in a sidecar manifest
+- deterministic fallback when the teacher cannot score an item
+
+### Lane G: Synthetic Query And Reasoning Data
+
+Add a data builder for:
+
+- generated queries from documents
+- hard paraphrases
+- adversarial near-miss negatives
+- multi-hop or dispersed-evidence queries
+- domain-specific questions for CorkScrewDB and code/document retrieval
+
+Gate synthetic data by retrieval scoreboards, not by generated-data volume.
+
+### Lane H: Matryoshka Loss
+
+Add a truncation-aware loss over output prefixes, for example:
+
+```text
+full dim: 128 or 256
+prefix dims: 32, 64, 96, 128, 192, 256
+loss = full_loss + sum(prefix_loss[d] * weight[d])
+```
+
+This makes Manta vectors cheaper to store, gives CorkScrewDB multiple latency/quality modes, and aligns with SOTA embedding compression practice.
+
+### Lane I: Sparse Lexical Head
+
+Add an optional lexical-weight output trained from BM25/SPLADE-style teachers.
+
+Minimum version:
+
+- per-token vocabulary logits or hashed lexical bins
+- sparse regularization
+- teacher scores from BM25 and/or SPLADE-like external teacher
+- hybrid retrieval scoreboard: dense only, sparse only, dense+sparse
+
+### Lane J: Multi-Vector Late Interaction
+
+Add span/token vector outputs and a late-interaction scorer.
+
+Minimum version:
+
+- document span vectors
+- query token/span vectors
+- MaxSim or pruned MaxSim scorer
+- scoreboard for first-stage dense retrieval plus late-interaction reranking
+
+This is the direct Manta analogue to BGE-M3 multi-vector and ColBERT-style retrieval.
+
+### Lane K: Reranker Distillation
+
+Use the existing rerank/select runtime surface to train a compact reranker from Qwen3/BGE reranker outputs.
+
+Gate:
+
+- candidate reranker improves top-10/top-100 ordering from Manta dense retrieval
+- reranker latency remains suitable for local desktop serving
+
+### Lane L: Sparse Long-Context Encoder
+
+Move beyond chunking by integrating routed TurboQuant sparse attention into the embedding encoder.
+
+Milestones:
+
+- dense vs exact sparse vs routed sparse encoder score parity on small contexts
+- router trained from high-budget attention/block teacher labels
+- sparse backward or detached-router training smoke
+- 32k training smoke and 128k inference demo on C24
+
+## First Execution Queue
+
+Priority order:
+
+1. Run Lane A around the current best using the existing teacher-scored JSONL. Start with `teacher_loss_weight=0.10`, `0.20`, `0.35` at temperature `1.0`, LR `0.000010`, source weights `scifact=1,nfcorpus=3,fiqa=1`.
+2. Run Lane B with `9000` mined examples, `5` mined negatives, `candidate_top_k=400`, and candidate hard negatives `2`.
+3. Start `embed-m` from scratch with the current best training recipe, then compare full retrieval and throughput.
+4. Implement Lane F so public teachers can write into the same `teacher_scores` path.
+5. Implement Lane H before increasing vector dimension aggressively.
+6. Implement Lane I and Lane J after single-vector dense gains flatten.
+7. Integrate Lane L once short retrieval is stable enough to justify long-context work.
+
+## Promotion Discipline
+
+No SOTA claim without:
+
+- full retrieval scoreboards, not pairwise-only metrics
+- per-dataset nDCG and recall floors
+- latency, package size, and VRAM measurements
+- reproducible run commands and manifests
+- explicit teacher provenance
+- a named baseline set that includes the strongest local public models we can run
