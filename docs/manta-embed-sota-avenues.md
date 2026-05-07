@@ -56,6 +56,7 @@ Rejected nearby probe:
 | `teacher_loss_weight=0.20`, `teacher_temperature=1.5`, `source_weights=scifact=1,nfcorpus=4,fiqa=1`, LR `0.000010` | 0.147560 | NFCorpus nDCG@10 delta `-0.001122`, outside the `-0.001000` floor |
 | `teacher_loss_weight=0.20`, `teacher_temperature=1.5`, `source_weights=scifact=2,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.146288 | Baseline gate pass, but current-best macro and pairwise AUC both regressed |
 | Lane B deep mine, `9000` requested examples, `5` mined negatives, `candidate_top_k=400`, `hard_negatives_per_query=2` | 0.143866 | Promotion gate failed; NFCorpus rose slightly, but SciFact and FiQA regressed hard |
+| Lane B deep mine reuse, `hard_negatives_per_query=1`, `source_weights=scifact=1,nfcorpus=3,fiqa=1` | 0.145870 | NFCorpus high-water mark, but SciFact and FiQA still fail current-best gate |
 
 ## Ready-To-Run Lanes
 
@@ -241,8 +242,8 @@ Milestones:
 
 Priority order:
 
-1. Reuse the Lane B mined JSONL at `runs/manta-embed-v1-laneb-deepmine-w005-tw020-tt150-nf3mine-nf3train-k400-hn2-20260507T073243Z/mined/train-hard-negatives-plus-model.jsonl` with the current best recipe but `hard_negatives_per_query=1`; this isolates whether the new mining depth helps without the two-negative overpressure.
-2. If the `hard_negatives_per_query=1` reuse recovers SciFact/FiQA but misses macro, retry the same JSONL with LR `0.000005` or `grouped_loss_weight=0.025`.
+1. Reuse the Lane B mined JSONL at `runs/manta-embed-v1-laneb-deepmine-w005-tw020-tt150-nf3mine-nf3train-k400-hn2-20260507T073243Z/mined/train-hard-negatives-plus-model.jsonl` with `hard_negatives_per_query=1` but switch training source weights to `scifact=1,nfcorpus=1,fiqa=1`; the deep file is already NF-heavy, and the NF3 schedule over-allocates NFCorpus.
+2. If balanced source sampling recovers SciFact/FiQA but misses macro, retry the same JSONL with LR `0.000005` or `grouped_loss_weight=0.025`.
 3. Start `embed-m` from scratch with the current best training recipe, then compare full retrieval and throughput.
 4. Implement Lane F so public teachers can write into the same `teacher_scores` path.
 5. Implement Lane H before increasing vector dimension aggressively.
