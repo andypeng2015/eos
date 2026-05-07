@@ -70,6 +70,10 @@ func step(label string) {
 }
 
 func shellCapture(dir string, outPath string, name string, args []string) error {
+	return shellCaptureEnv(dir, outPath, name, args, []string{})
+}
+
+func shellCaptureEnv(dir string, outPath string, name string, args []string, extraEnv []string) error {
 	out, err := os.Create(outPath)
 	guard err == nil else return err
 	defer out.Close()
@@ -78,6 +82,9 @@ func shellCapture(dir string, outPath string, name string, args []string) error 
 	cmd.Dir = dir
 	cmd.Stdout = out
 	cmd.Stderr = os.Stderr
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	return cmd.Run()
 }
 
@@ -305,6 +312,8 @@ func main() {
 	benchRegex := getenv("MANTA_SPARSE_BENCH_REGEX", "BenchmarkCUDASparseAttentionSweep|BenchmarkCUDATurboSparseAttentionSweep")
 	benchTime := getenv("MANTA_SPARSE_BENCH_TIME", "200ms")
 	benchCount := getenv("MANTA_SPARSE_BENCH_COUNT", "3")
+	exactBenchKeyLens := getenv("MANTA_SPARSE_BENCH_EXACT_KEY_LENS", "1024,4096")
+	routedBenchKeyLens := getenv("MANTA_SPARSE_BENCH_ROUTED_KEY_LENS", "1024,4096,16384")
 
 	planTSV := filepath.Join(runDir, "sparse-attention-plan.tsv")
 	planJSON := filepath.Join(runDir, "sparse-attention-plan.json")
@@ -347,13 +356,22 @@ func main() {
 		"-benchtime", benchTime,
 		"-count", benchCount,
 	}
+	benchEnv := []string{
+		"MANTA_CUDA_SPARSE_BENCH_EXACT_KEY_LENS=" + exactBenchKeyLens,
+		"MANTA_CUDA_SPARSE_BENCH_ROUTED_KEY_LENS=" + routedBenchKeyLens,
+		"MANTA_CUDA_SPARSE_BENCH_QUERY_DIM=" + queryDim,
+		"MANTA_CUDA_SPARSE_BENCH_VALUE_DIM=" + valueDim,
+		"MANTA_CUDA_SPARSE_BENCH_TOP_K=" + topK,
+		"MANTA_CUDA_SPARSE_BENCH_BITS=" + bits,
+		"MANTA_CUDA_SPARSE_BENCH_ROUTE_TOP_BLOCKS=" + routeTopBlocks,
+	}
 	jsonArgs := append(append([]string{}, benchArgs...), "-json")
-	err = shellCapture(root, benchJSONL, "go", jsonArgs)
+	err = shellCaptureEnv(root, benchJSONL, "go", jsonArgs, benchEnv)
 	guard err == nil else {
 		fmt.Println(f"CUDA sparse attention benchmark JSON run failed: {err}")
 		os.Exit(1)
 	}
-	err = shellCapture(root, benchText, "go", benchArgs)
+	err = shellCaptureEnv(root, benchText, "go", benchArgs, benchEnv)
 	guard err == nil else {
 		fmt.Println(f"CUDA sparse attention benchmark text run failed: {err}")
 		os.Exit(1)
@@ -394,6 +412,8 @@ func main() {
 		"bench_regex=" + benchRegex,
 		"bench_time=" + benchTime,
 		"bench_count=" + benchCount,
+		"exact_bench_key_lens=" + exactBenchKeyLens,
+		"routed_bench_key_lens=" + routedBenchKeyLens,
 		"max_routed_time_alpha=" + maxRoutedTimeAlphaRaw,
 	})
 	guard err == nil else {

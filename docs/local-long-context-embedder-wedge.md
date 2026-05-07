@@ -316,6 +316,7 @@ Interpretation:
 - The subquadratic/TurboQuant kernel path now has shared attention-plan metadata across host reference, CUDA sparse attention, and fused CUDA TurboQuant sparse attention. Each path reports top-k, routing mode, route block counts, selected keys, candidate key budget, estimated per-query score work, and score-work fraction versus dense scoring, so future long-context runs can gate on actual routed work rather than just successful execution.
 - `manta plan-sparse-attention` now turns that metadata into a cheap preflight gate: sweep key lengths, route budgets, and TurboQuant bits, then reject configurations whose routed score-work fraction, fitted score-work alpha, or logical K/V memory budget do not fit the target card before launching CUDA benchmarks or training.
 - `scripts/bench_sparse_attention.fw` now archives that preflight beside CUDA sparse-attention benchmark JSONL/text, a parsed summary TSV, and a measured scaling-alpha TSV, so exact f16 and routed TurboQuant sparse kernels can be compared from a clean run directory with selected-key, candidate-budget, score-fraction, subquadratic, K/V compression, and routed time-alpha gate metrics attached.
+- The sparse benchmark matrix now has separate exact and routed key-length knobs, so the local proof can bound dense/exact costs while pushing routed TurboQuant to longer contexts for the alpha gate.
 
 Short retrieval metrics:
 

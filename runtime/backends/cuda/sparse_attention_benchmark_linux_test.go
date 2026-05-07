@@ -5,7 +5,9 @@ package cuda
 import (
 	"fmt"
 	"math"
+	"os"
 	"strconv"
+	"strings"
 	"testing"
 
 	mantaartifact "github.com/odvcencio/manta/artifact/manta"
@@ -22,9 +24,9 @@ func BenchmarkCUDASparseAttentionSweep(b *testing.B) {
 	}
 	defer rt.close()
 
-	cases := []sparseAttentionBenchCase{
-		{KeyLen: 1024, QueryDim: 64, ValueDim: 64, TopK: 32},
-		{KeyLen: 4096, QueryDim: 64, ValueDim: 64, TopK: 64},
+	cases, err := sparseAttentionBenchCasesFromEnv("MANTA_CUDA_SPARSE_BENCH_EXACT_KEY_LENS", "1024,4096")
+	if err != nil {
+		b.Fatal(err)
 	}
 	for _, tc := range cases {
 		b.Run(tc.name("exact-f16"), func(b *testing.B) {
@@ -69,9 +71,9 @@ func BenchmarkCUDATurboSparseAttentionSweep(b *testing.B) {
 	}
 	defer rt.close()
 
-	cases := []sparseAttentionBenchCase{
-		{KeyLen: 1024, QueryDim: 64, ValueDim: 64, TopK: 32, Bits: 4, RouteTopBlocks: 2},
-		{KeyLen: 4096, QueryDim: 64, ValueDim: 64, TopK: 64, Bits: 4, RouteTopBlocks: 2},
+	cases, err := sparseAttentionBenchCasesFromEnv("MANTA_CUDA_SPARSE_BENCH_ROUTED_KEY_LENS", "1024,4096,16384")
+	if err != nil {
+		b.Fatal(err)
 	}
 	for _, tc := range cases {
 		b.Run(tc.name("routed-tq"), func(b *testing.B) {
@@ -142,8 +144,131 @@ type sparseAttentionBenchCase struct {
 	RouteTopBlocks int
 }
 
+func TestSparseAttentionBenchCasesFromEnv(t *testing.T) {
+	t.Setenv("MANTA_CUDA_SPARSE_BENCH_TEST_KEY_LENS", "256,1024")
+	t.Setenv("MANTA_CUDA_SPARSE_BENCH_QUERY_DIM", "32")
+	t.Setenv("MANTA_CUDA_SPARSE_BENCH_VALUE_DIM", "48")
+	t.Setenv("MANTA_CUDA_SPARSE_BENCH_TOP_K", "0")
+	t.Setenv("MANTA_CUDA_SPARSE_BENCH_BITS", "8")
+	t.Setenv("MANTA_CUDA_SPARSE_BENCH_ROUTE_TOP_BLOCKS", "4")
+
+	cases, err := sparseAttentionBenchCasesFromEnv("MANTA_CUDA_SPARSE_BENCH_TEST_KEY_LENS", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cases) != 2 {
+		t.Fatalf("cases = %d, want 2", len(cases))
+	}
+	if cases[0].KeyLen != 256 || cases[0].QueryDim != 32 || cases[0].ValueDim != 48 || cases[0].TopK != 16 {
+		t.Fatalf("first case = %+v", cases[0])
+	}
+	if cases[1].KeyLen != 1024 || cases[1].TopK != 32 || cases[1].Bits != 8 || cases[1].RouteTopBlocks != 4 {
+		t.Fatalf("second case = %+v", cases[1])
+	}
+}
+
 func (tc sparseAttentionBenchCase) name(prefix string) string {
 	return fmt.Sprintf("%s/n%d/d%d/v%d/k%d", prefix, tc.KeyLen, tc.QueryDim, tc.ValueDim, tc.TopK)
+}
+
+func sparseAttentionBenchCasesFromEnv(keyLensEnv, fallbackKeyLens string) ([]sparseAttentionBenchCase, error) {
+	keyLens, err := sparseAttentionBenchIntListEnv(keyLensEnv, fallbackKeyLens)
+	if err != nil {
+		return nil, err
+	}
+	queryDim, err := sparseAttentionBenchIntEnv("MANTA_CUDA_SPARSE_BENCH_QUERY_DIM", 64)
+	if err != nil {
+		return nil, err
+	}
+	valueDim, err := sparseAttentionBenchIntEnv("MANTA_CUDA_SPARSE_BENCH_VALUE_DIM", 64)
+	if err != nil {
+		return nil, err
+	}
+	topK, err := sparseAttentionBenchIntEnv("MANTA_CUDA_SPARSE_BENCH_TOP_K", 0)
+	if err != nil {
+		return nil, err
+	}
+	bits, err := sparseAttentionBenchIntEnv("MANTA_CUDA_SPARSE_BENCH_BITS", 4)
+	if err != nil {
+		return nil, err
+	}
+	if bits != 2 && bits != 4 && bits != 8 {
+		return nil, fmt.Errorf("MANTA_CUDA_SPARSE_BENCH_BITS must be 2, 4, or 8")
+	}
+	routeTopBlocks, err := sparseAttentionBenchIntEnv("MANTA_CUDA_SPARSE_BENCH_ROUTE_TOP_BLOCKS", 2)
+	if err != nil {
+		return nil, err
+	}
+	if queryDim <= 0 || valueDim <= 0 {
+		return nil, fmt.Errorf("MANTA_CUDA_SPARSE_BENCH_QUERY_DIM and MANTA_CUDA_SPARSE_BENCH_VALUE_DIM must be positive")
+	}
+	if routeTopBlocks <= 0 {
+		return nil, fmt.Errorf("MANTA_CUDA_SPARSE_BENCH_ROUTE_TOP_BLOCKS must be positive")
+	}
+	cases := make([]sparseAttentionBenchCase, 0, len(keyLens))
+	for _, keyLen := range keyLens {
+		selectedTopK := topK
+		if selectedTopK <= 0 {
+			selectedTopK = int(math.Ceil(math.Sqrt(float64(keyLen))))
+		}
+		if selectedTopK < 1 {
+			selectedTopK = 1
+		}
+		if selectedTopK > keyLen {
+			selectedTopK = keyLen
+		}
+		if selectedTopK > cudaSparseAttentionMaxTopK {
+			selectedTopK = cudaSparseAttentionMaxTopK
+		}
+		cases = append(cases, sparseAttentionBenchCase{
+			KeyLen:         keyLen,
+			QueryDim:       queryDim,
+			ValueDim:       valueDim,
+			TopK:           selectedTopK,
+			Bits:           bits,
+			RouteTopBlocks: routeTopBlocks,
+		})
+	}
+	return cases, nil
+}
+
+func sparseAttentionBenchIntEnv(name string, fallback int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return value, nil
+}
+
+func sparseAttentionBenchIntListEnv(name, fallback string) ([]int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		raw = fallback
+	}
+	parts := strings.Split(raw, ",")
+	values := make([]int, 0, len(parts))
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		value, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, fmt.Errorf("%s[%d] must be an integer: %w", name, i, err)
+		}
+		if value <= 0 {
+			return nil, fmt.Errorf("%s[%d] must be positive", name, i)
+		}
+		values = append(values, value)
+	}
+	if len(values) == 0 {
+		return nil, fmt.Errorf("%s must include at least one key length", name)
+	}
+	return values, nil
 }
 
 func sparseAttentionBenchOutputType() mantaartifact.ValueType {
