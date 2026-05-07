@@ -50,6 +50,7 @@ Rejected nearby probe:
 | `teacher_loss_weight=0.10`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.147626 | NFCorpus nDCG@10 delta `-0.001534`, outside the `-0.001000` floor |
 | `teacher_loss_weight=0.35`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.147229 | Gate pass, but lower macro than the current best |
 | `teacher_loss_weight=0.20`, `teacher_temperature=0.75`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.147738 | Gate pass, but lower macro than temperature `1.5` |
+| `teacher_loss_weight=0.20`, `teacher_temperature=1.25`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.147645 | Gate pass, but lower macro than temperature `1.0` and `1.5` |
 | `teacher_loss_weight=0.20`, `teacher_temperature=2.0`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.148029 | Gate pass, but NFCorpus tradeoff keeps macro below temperature `1.5` |
 
 ## Ready-To-Run Lanes
@@ -236,7 +237,7 @@ Milestones:
 
 Priority order:
 
-1. Continue Lane A around the current best using the existing teacher-scored JSONL. `teacher_loss_weight=0.20` with `teacher_temperature=1.5` is the current macro nDCG best, while `0.75` and `2.0` passed but stayed below it. Next pressure tests should sweep `teacher_temperature=1.25`, then try LR `0.000008` around `1.5`, all with source weights `scifact=1,nfcorpus=3,fiqa=1`.
+1. Continue Lane A around the current best using the existing teacher-scored JSONL. `teacher_loss_weight=0.20` with `teacher_temperature=1.5` is the current macro nDCG best, while `0.75`, `1.25`, and `2.0` passed but stayed below it. Next pressure tests should hold temperature `1.5`, then try LR `0.000008` and source weights `scifact=2,nfcorpus=3,fiqa=1` or `scifact=1,nfcorpus=4,fiqa=1`.
 2. Run Lane B with `9000` mined examples, `5` mined negatives, `candidate_top_k=400`, and candidate hard negatives `2`.
 3. Start `embed-m` from scratch with the current best training recipe, then compare full retrieval and throughput.
 4. Implement Lane F so public teachers can write into the same `teacher_scores` path.
