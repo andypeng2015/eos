@@ -2,12 +2,31 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
+
+type benchMetricRow struct {
+	Name           string
+	Iterations     string
+	NsPerOp        float64
+	SelectedKeys   string
+	CandidateKeys  string
+	ScoresPerQuery string
+	ScoreFraction  string
+	SubqPlan       string
+	TurboKVMiB     string
+	KVCompression  string
+	BytesPerOp     string
+	AllocsPerOp    string
+	KeyLen         int
+	Family         string
+}
 
 func getenv(name string, fallback string) string {
 	let value = os.Getenv(name)
@@ -66,10 +85,75 @@ func writeManifest(path string, lines []string) error {
 	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
 }
 
-func writeBenchSummary(benchTextPath string, summaryPath string) error {
+func parseBenchMetricRows(benchTextPath string) ([]benchMetricRow, error) {
 	data, err := os.ReadFile(benchTextPath)
-	guard err == nil else return err
+	guard err == nil else return nil, err
 
+	rows := []benchMetricRow{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "Benchmark") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		metrics := map[string]string{}
+		for i := 4; i+1 < len(fields); i += 2 {
+			metrics[fields[i+1]] = fields[i]
+		}
+		nsPerOp, err := strconv.ParseFloat(fields[2], 64)
+		guard err == nil else return nil, fmt.Errorf("parse ns/op for %s: %w", fields[0], err)
+		keyLen, err := benchKeyLen(fields[0])
+		guard err == nil else return nil, err
+		rows = append(rows, benchMetricRow{
+			Name:           fields[0],
+			Iterations:     fields[1],
+			NsPerOp:        nsPerOp,
+			SelectedKeys:   metrics["selected_keys"],
+			CandidateKeys:  metrics["candidate_keys"],
+			ScoresPerQuery: metrics["scores_per_query"],
+			ScoreFraction:  metrics["score_fraction"],
+			SubqPlan:       metrics["subq_plan"],
+			TurboKVMiB:     metrics["turbo_kv_mib"],
+			KVCompression:  metrics["kv_compression"],
+			BytesPerOp:     metrics["B/op"],
+			AllocsPerOp:    metrics["allocs/op"],
+			KeyLen:         keyLen,
+			Family:         benchFamily(fields[0]),
+		})
+	}
+	guard len(rows) > 0 else return nil, fmt.Errorf("no benchmark rows found in %s", benchTextPath)
+	return rows, nil
+}
+
+func benchFamily(name string) string {
+	if strings.Contains(name, "CUDATurboSparseAttentionSweep") {
+		return "routed_turboquant"
+	}
+	if strings.Contains(name, "CUDASparseAttentionSweep") {
+		return "exact_f16"
+	}
+	return "unknown"
+}
+
+func benchKeyLen(name string) (int, error) {
+	for _, part := range strings.Split(name, "/") {
+		if !strings.HasPrefix(part, "n") {
+			continue
+		}
+		raw := strings.TrimPrefix(part, "n")
+		if cut := strings.Index(raw, "-"); cut >= 0 {
+			raw = raw[:cut]
+		}
+		keyLen, err := strconv.Atoi(raw)
+		guard err == nil else return 0, fmt.Errorf("parse key length from %s: %w", name, err)
+		return keyLen, nil
+	}
+	return 0, fmt.Errorf("benchmark name missing key length segment: %s", name)
+}
+
+func writeBenchSummary(rows []benchMetricRow, summaryPath string) error {
 	columns := []string{
 		"name",
 		"iterations",
@@ -84,36 +168,106 @@ func writeBenchSummary(benchTextPath string, summaryPath string) error {
 		"bytes_per_op",
 		"allocs_per_op",
 	}
-	rows := []string{strings.Join(columns, "\t")}
-	for _, line := range strings.Split(string(data), "\n") {
-		if !strings.HasPrefix(line, "Benchmark") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 4 {
-			continue
-		}
-		metrics := map[string]string{}
-		for i := 4; i+1 < len(fields); i += 2 {
-			metrics[fields[i+1]] = fields[i]
-		}
-		row := []string{
-			fields[0],
-			fields[1],
-			fields[2],
-			metrics["selected_keys"],
-			metrics["candidate_keys"],
-			metrics["scores_per_query"],
-			metrics["score_fraction"],
-			metrics["subq_plan"],
-			metrics["turbo_kv_mib"],
-			metrics["kv_compression"],
-			metrics["B/op"],
-			metrics["allocs/op"],
-		}
-		rows = append(rows, strings.Join(row, "\t"))
+	out := []string{strings.Join(columns, "\t")}
+	for _, row := range rows {
+		out = append(out, strings.Join([]string{
+			row.Name,
+			row.Iterations,
+			fmt.Sprintf("%.0f", row.NsPerOp),
+			row.SelectedKeys,
+			row.CandidateKeys,
+			row.ScoresPerQuery,
+			row.ScoreFraction,
+			row.SubqPlan,
+			row.TurboKVMiB,
+			row.KVCompression,
+			row.BytesPerOp,
+			row.AllocsPerOp,
+		}, "\t"))
 	}
-	return os.WriteFile(summaryPath, []byte(strings.Join(rows, "\n")+"\n"), 0o644)
+	return os.WriteFile(summaryPath, []byte(strings.Join(out, "\n")+"\n"), 0o644)
+}
+
+func writeScalingSummary(rows []benchMetricRow, scalingPath string, maxRoutedAlpha float64) (bool, error) {
+	columns := []string{
+		"family",
+		"rows",
+		"min_key_len",
+		"max_key_len",
+		"time_alpha",
+		"min_ns_per_op",
+		"max_ns_per_op",
+		"gate",
+	}
+	out := []string{strings.Join(columns, "\t")}
+	passed := true
+	for _, family := range []string{"exact_f16", "routed_turboquant"} {
+		count, minKeyLen, maxKeyLen, minNS, maxNS, alpha := fitTimeAlpha(rows, family)
+		gate := "n/a"
+		if family == "routed_turboquant" && maxRoutedAlpha > 0 {
+			gate = "pass"
+			if count < 2 || alpha > maxRoutedAlpha {
+				gate = "fail"
+				passed = false
+			}
+		}
+		out = append(out, strings.Join([]string{
+			family,
+			strconv.Itoa(count),
+			strconv.Itoa(minKeyLen),
+			strconv.Itoa(maxKeyLen),
+			fmt.Sprintf("%.6f", alpha),
+			fmt.Sprintf("%.0f", minNS),
+			fmt.Sprintf("%.0f", maxNS),
+			gate,
+		}, "\t"))
+	}
+	return passed, os.WriteFile(scalingPath, []byte(strings.Join(out, "\n")+"\n"), 0o644)
+}
+
+func fitTimeAlpha(rows []benchMetricRow, family string) (int, int, int, float64, float64, float64) {
+	count := 0
+	minKeyLen := 0
+	maxKeyLen := 0
+	minNS := float64(0)
+	maxNS := float64(0)
+	sumX := float64(0)
+	sumY := float64(0)
+	sumXX := float64(0)
+	sumXY := float64(0)
+	for _, row := range rows {
+		if row.Family != family || row.KeyLen <= 0 || row.NsPerOp <= 0 {
+			continue
+		}
+		if minKeyLen == 0 || row.KeyLen < minKeyLen {
+			minKeyLen = row.KeyLen
+		}
+		if row.KeyLen > maxKeyLen {
+			maxKeyLen = row.KeyLen
+		}
+		if minNS == 0 || row.NsPerOp < minNS {
+			minNS = row.NsPerOp
+		}
+		if row.NsPerOp > maxNS {
+			maxNS = row.NsPerOp
+		}
+		x := math.Log(float64(row.KeyLen))
+		y := math.Log(row.NsPerOp)
+		sumX += x
+		sumY += y
+		sumXX += x * x
+		sumXY += x * y
+		count++
+	}
+	if count < 2 {
+		return count, minKeyLen, maxKeyLen, minNS, maxNS, 0
+	}
+	denom := float64(count)*sumXX - sumX*sumX
+	if denom == 0 {
+		return count, minKeyLen, maxKeyLen, minNS, maxNS, 0
+	}
+	alpha := (float64(count)*sumXY - sumX*sumY) / denom
+	return count, minKeyLen, maxKeyLen, minNS, maxNS, alpha
 }
 
 func main() {
@@ -157,6 +311,13 @@ func main() {
 	benchJSONL := filepath.Join(runDir, "sparse-attention-bench.jsonl")
 	benchText := filepath.Join(runDir, "sparse-attention-bench.txt")
 	benchSummary := filepath.Join(runDir, "sparse-attention-bench-summary.tsv")
+	scalingSummary := filepath.Join(runDir, "sparse-attention-scaling.tsv")
+	maxRoutedTimeAlphaRaw := getenv("MANTA_SPARSE_BENCH_MAX_ROUTED_TIME_ALPHA", "0.95")
+	maxRoutedTimeAlpha, err := strconv.ParseFloat(maxRoutedTimeAlphaRaw, 64)
+	guard err == nil else {
+		fmt.Println(f"failed to parse MANTA_SPARSE_BENCH_MAX_ROUTED_TIME_ALPHA: {err}")
+		os.Exit(1)
+	}
 
 	step("Sparse attention preflight")
 	err = shellCapture(root, planTSV, "go", []string{
@@ -197,9 +358,23 @@ func main() {
 		fmt.Println(f"CUDA sparse attention benchmark text run failed: {err}")
 		os.Exit(1)
 	}
-	err = writeBenchSummary(benchText, benchSummary)
+	benchRows, err := parseBenchMetricRows(benchText)
+	guard err == nil else {
+		fmt.Println(f"failed to parse CUDA sparse attention benchmark rows: {err}")
+		os.Exit(1)
+	}
+	err = writeBenchSummary(benchRows, benchSummary)
 	guard err == nil else {
 		fmt.Println(f"failed to write CUDA sparse attention benchmark summary: {err}")
+		os.Exit(1)
+	}
+	scalingPassed, err := writeScalingSummary(benchRows, scalingSummary, maxRoutedTimeAlpha)
+	guard err == nil else {
+		fmt.Println(f"failed to write CUDA sparse attention scaling summary: {err}")
+		os.Exit(1)
+	}
+	guard scalingPassed else {
+		fmt.Println(f"CUDA sparse attention scaling gate failed; see {scalingSummary}")
 		os.Exit(1)
 	}
 
@@ -219,6 +394,7 @@ func main() {
 		"bench_regex=" + benchRegex,
 		"bench_time=" + benchTime,
 		"bench_count=" + benchCount,
+		"max_routed_time_alpha=" + maxRoutedTimeAlphaRaw,
 	})
 	guard err == nil else {
 		fmt.Println(f"failed to write manifest: {err}")
@@ -231,4 +407,5 @@ func main() {
 	fmt.Println(f"bench_jsonl: {benchJSONL}")
 	fmt.Println(f"bench_text: {benchText}")
 	fmt.Println(f"bench_summary: {benchSummary}")
+	fmt.Println(f"scaling_summary: {scalingSummary}")
 }

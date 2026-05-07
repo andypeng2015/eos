@@ -214,7 +214,7 @@ Implementation:
 - exact fused TurboQuant sparse CUDA path
 - benchmark harness that records time, memory, selected keys, and metadata
 - `manta plan-sparse-attention` preflight that sweeps context lengths and reports routed score-work fraction, estimated score-work alpha, and logical TurboQuant K/V memory before a GPU run
-- `scripts/bench_sparse_attention.fw` harness that archives preflight TSV/JSON plus CUDA sparse-attention benchmark JSONL/text/summary TSV for exact f16 and routed TurboQuant paths
+- `scripts/bench_sparse_attention.fw` harness that archives preflight TSV/JSON plus CUDA sparse-attention benchmark JSONL/text/summary TSV and measured scaling alpha TSV for exact f16 and routed TurboQuant paths
 
 Pass:
 
@@ -222,6 +222,7 @@ Pass:
 - no hidden dense K/V materialization in the TurboQuant fused path
 - benchmarks produce machine-readable JSON/TSV
 - preflight plans fail when routed score work is not actually subquadratic or when the TurboQuant K/V budget exceeds the target device envelope
+- benchmark harness fails when routed TurboQuant measured time alpha exceeds the configured scaling gate
 
 ### Layer 1: Routed Block Sparse Attention
 
