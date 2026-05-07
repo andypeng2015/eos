@@ -19,6 +19,10 @@ The near-term target is an inference-first product surface for embedding, rerank
 
 The credible long-context wedge is the best local long-context embedder: consumer-GPU trainable, compressed for local serving, sealed as `.mll`, and strong on long-document retrieval. The target and scorecard are tracked in [docs/local-long-context-embedder-wedge.md](docs/local-long-context-embedder-wedge.md), with lower-level sparse attention success criteria in [docs/consumer-subquadratic-gpu-spec.md](docs/consumer-subquadratic-gpu-spec.md).
 
+## Agent Skill
+
+Agents working with Manta should use the [using-manta](https://github.com/odvcencio/m31labs-skills/blob/main/skills/using-manta/SKILL.md) skill.
+
 Current embedder work is focused on retrieval-aligned training, not pairwise-only wins. The alignment harness now supports source-aware hard-negative scheduling, promotion gates over full retrieval scoreboards, recall@100 guardrails, grouped hard-negative InfoNCE, hybrid InfoNCE, and teacher-score distillation over mined candidate groups. The current nDCG best is the teacher-distilled hybrid follow-up with grouped weight `0.05`, teacher weight `0.20`, LR `0.000010`, NF-biased model-hard mining, and `nfcorpus=3` source bias during training; macro nDCG@10 improves from `0.145568` to `0.147862` against the previous best while staying inside the nDCG and recall@100 floors.
 
 That means the language and runtime should bias toward:
