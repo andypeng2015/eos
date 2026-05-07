@@ -57,6 +57,7 @@ Rejected nearby probe:
 | `teacher_loss_weight=0.20`, `teacher_temperature=1.5`, `source_weights=scifact=2,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.146288 | Baseline gate pass, but current-best macro and pairwise AUC both regressed |
 | `teacher_loss_weight=0.20`, `teacher_temperature=1.5`, `source_weights=scifact=1,nfcorpus=3,fiqa=2`, LR `0.000010` | 0.147516 | Baseline gate pass, but extra FiQA sampling missed the current best by `0.000628` macro and did not improve FiQA |
 | Full BM25-scored blend, `teacher_loss_weight=0.05`, `teacher_temperature=10`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.147151 | Full teacher-score coverage improved pairwise AUC, but failed the stale-baseline NFCorpus floor and missed the current best by `0.000993` macro |
+| Full BM25-scored blend, source temperatures `scifact/nfcorpus/fiqa=10` and `*:model=1.5`, `teacher_loss_weight=0.20`, LR `0.000010` | 0.145395 | Source-temperature plumbing works, but stronger full-score distillation regressed SciFact and NFCorpus; FiQA rose to `0.029619` |
 | Lane B deep mine, `9000` requested examples, `5` mined negatives, `candidate_top_k=400`, `hard_negatives_per_query=2` | 0.143866 | Promotion gate failed; NFCorpus rose slightly, but SciFact and FiQA regressed hard |
 | Lane B deep mine reuse, `hard_negatives_per_query=1`, `source_weights=scifact=1,nfcorpus=3,fiqa=1` | 0.145870 | NFCorpus high-water mark, but SciFact and FiQA still fail current-best gate |
 | Lane B deep mine reuse, `hard_negatives_per_query=1`, `source_weights=scifact=1,nfcorpus=1,fiqa=1` | 0.144915 | Balanced source sampling reduced NFCorpus gains and did not recover SciFact/FiQA |
@@ -197,7 +198,7 @@ Local Manta teachers can bypass the sidecar step with `manta score-teacher-hard-
 
 Before spending a training run on a new teacher, run `manta audit-teacher-scores <hard-negatives.jsonl> <summary.json>`. It reports score coverage, positive top-1 rate, mean positive rank, positive-vs-best-negative margin, and teacher-distribution entropy overall and by source, giving a cheap reject path for teachers that misorder positives or produce unusably flat/sharp targets.
 
-Status: BM25 and model-hard mining can both emit `teacher_scores`, and dataset acquisition now preserves those scores when it rewrites source-tagged hard-negative JSONL. A full BM25-scored blend gave complete score coverage but rejected at macro `0.147151`; BM25 scores were on a much larger scale than model cosine scores, so the next full-coverage attempt should normalize or source-temperature teacher scores before training instead of mixing raw score scales.
+Status: BM25 and model-hard mining can both emit `teacher_scores`, and dataset acquisition now preserves those scores when it rewrites source-tagged hard-negative JSONL. A full BM25-scored blend gave complete score coverage but rejected at macro `0.147151`; BM25 scores were on a much larger scale than model cosine scores. Source-specific teacher temperatures are now implemented, including exact source, source-family, and wildcard fallback, but the first split-temperature run (`BM25 temp=10`, model temp=`1.5`, `teacher_loss_weight=0.20`) also rejected at macro `0.145395`. The next full-coverage attempt should reduce full-score teacher pressure or normalize scores before training rather than relying on temperature alone.
 
 Required outputs:
 
