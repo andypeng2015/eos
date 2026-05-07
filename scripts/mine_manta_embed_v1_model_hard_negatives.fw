@@ -15,10 +15,11 @@ import (
 )
 
 type hardNegativeRecord struct {
-	Query     string   `json:"query"`
-	Positive  string   `json:"positive"`
-	Negatives []string `json:"negatives"`
-	Source    string   `json:"source,omitempty"`
+	Query         string    `json:"query"`
+	Positive      string    `json:"positive"`
+	Negatives     []string  `json:"negatives"`
+	Source        string    `json:"source,omitempty"`
+	TeacherScores []float32 `json:"teacher_scores,omitempty"`
 }
 
 type mineConfig struct {

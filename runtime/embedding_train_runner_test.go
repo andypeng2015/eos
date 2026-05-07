@@ -806,6 +806,31 @@ func TestEmbeddingTrainerTrainHybridHardNegativeContrastiveStep(t *testing.T) {
 	}
 }
 
+func TestEmbeddingTrainerTrainTeacherDistilledHardNegativeStep(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.005)
+	trainer.config.ContrastiveLoss = "infonce"
+	trainer.config.Temperature = 0.05
+	trainer.config.TeacherLossWeight = 0.5
+	trainer.config.TeacherTemperature = 1
+	batch := tinyEmbeddingHardNegativeDataset()
+	batch[0].TeacherScores = []float32{0.9, 0.7}
+	batch[1].TeacherScores = []float32{0.8, 0.6}
+
+	metrics, err := trainer.TrainHardNegativeContrastiveStep(batch)
+	if err != nil {
+		t.Fatalf("train teacher-distilled hard-negative step: %v", err)
+	}
+	if metrics.BatchSize != 12 {
+		t.Fatalf("batch size = %d, want 12 rectangular plus teacher query-candidate scores", metrics.BatchSize)
+	}
+	if metrics.Loss < 0 {
+		t.Fatalf("loss = %f, want non-negative", metrics.Loss)
+	}
+	if trainer.step != 1 {
+		t.Fatalf("step = %d, want 1", trainer.step)
+	}
+}
+
 func TestEmbeddingTrainerTrainHardNegativeContrastiveStepUsesRectangularAccelerator(t *testing.T) {
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.005)
 	trainer.config.ContrastiveLoss = "infonce"

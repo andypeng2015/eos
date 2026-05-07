@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 )
@@ -17,13 +18,15 @@ type EmbeddingHardNegativeExample struct {
 	QueryMask      []int32
 	PositiveMask   []int32
 	NegativeMasks  [][]int32
+	TeacherScores  []float32
 }
 
 type EmbeddingTextHardNegativeExample struct {
-	Source    string
-	Query     string
-	Positive  string
-	Negatives []string
+	Source        string
+	Query         string
+	Positive      string
+	Negatives     []string
+	TeacherScores []float32
 }
 
 type embeddingHardNegativeRecord struct {
@@ -34,14 +37,16 @@ type embeddingHardNegativeRecord struct {
 	QueryMask      []int32   `json:"query_mask,omitempty"`
 	PositiveMask   []int32   `json:"positive_mask,omitempty"`
 	NegativeMasks  [][]int32 `json:"negative_masks,omitempty"`
+	TeacherScores  []float32 `json:"teacher_scores,omitempty"`
 }
 
 type embeddingTextHardNegativeRecord struct {
-	Source    string   `json:"source,omitempty"`
-	Query     string   `json:"query"`
-	Positive  string   `json:"positive"`
-	Document  string   `json:"document,omitempty"`
-	Negatives []string `json:"negatives,omitempty"`
+	Source        string    `json:"source,omitempty"`
+	Query         string    `json:"query"`
+	Positive      string    `json:"positive"`
+	Document      string    `json:"document,omitempty"`
+	Negatives     []string  `json:"negatives,omitempty"`
+	TeacherScores []float32 `json:"teacher_scores,omitempty"`
 }
 
 // ReadEmbeddingHardNegativeExamplesFile reads tokenized hard-negative JSONL.
@@ -341,6 +346,7 @@ func tokenizeEmbeddingTextHardNegativeExamples(examples []EmbeddingTextHardNegat
 			QueryMask:      query.mask,
 			PositiveMask:   positive.mask,
 			NegativeMasks:  negativeMasks,
+			TeacherScores:  append([]float32(nil), example.TeacherScores...),
 		})
 	}
 	return out, nil
@@ -358,6 +364,9 @@ func limitHardNegativeExamples(examples []EmbeddingHardNegativeExample, maxNegat
 		}
 		if len(out[i].NegativeMasks) > maxNegatives {
 			out[i].NegativeMasks = out[i].NegativeMasks[:maxNegatives]
+		}
+		if len(out[i].TeacherScores) > maxNegatives+1 {
+			out[i].TeacherScores = out[i].TeacherScores[:maxNegatives+1]
 		}
 	}
 	return out
@@ -390,6 +399,9 @@ func newEmbeddingHardNegativeRecord(example EmbeddingHardNegativeExample) (embed
 			return embeddingHardNegativeRecord{}, fmt.Errorf("negative_masks[%d] length %d does not match negative_tokens[%d] length %d", i, len(example.NegativeMasks[i]), i, len(tokens))
 		}
 	}
+	if err := validateHardNegativeTeacherScores(example.TeacherScores, 1+len(example.NegativeTokens)); err != nil {
+		return embeddingHardNegativeRecord{}, err
+	}
 	return embeddingHardNegativeRecord{
 		Source:         example.Source,
 		QueryTokens:    append([]int32(nil), example.QueryTokens...),
@@ -398,6 +410,7 @@ func newEmbeddingHardNegativeRecord(example EmbeddingHardNegativeExample) (embed
 		QueryMask:      append([]int32(nil), example.QueryMask...),
 		PositiveMask:   append([]int32(nil), example.PositiveMask...),
 		NegativeMasks:  cloneInt32Matrix(example.NegativeMasks),
+		TeacherScores:  append([]float32(nil), example.TeacherScores...),
 	}, nil
 }
 
@@ -410,6 +423,7 @@ func (r embeddingHardNegativeRecord) example() (EmbeddingHardNegativeExample, er
 		QueryMask:      r.QueryMask,
 		PositiveMask:   r.PositiveMask,
 		NegativeMasks:  r.NegativeMasks,
+		TeacherScores:  r.TeacherScores,
 	})
 	if err != nil {
 		return EmbeddingHardNegativeExample{}, err
@@ -422,6 +436,7 @@ func (r embeddingHardNegativeRecord) example() (EmbeddingHardNegativeExample, er
 		QueryMask:      record.QueryMask,
 		PositiveMask:   record.PositiveMask,
 		NegativeMasks:  record.NegativeMasks,
+		TeacherScores:  record.TeacherScores,
 	}, nil
 }
 
@@ -440,31 +455,52 @@ func newEmbeddingTextHardNegativeRecord(example EmbeddingTextHardNegativeExample
 			return embeddingTextHardNegativeRecord{}, fmt.Errorf("negative %d is empty", i)
 		}
 	}
+	if err := validateHardNegativeTeacherScores(example.TeacherScores, 1+len(example.Negatives)); err != nil {
+		return embeddingTextHardNegativeRecord{}, err
+	}
 	return embeddingTextHardNegativeRecord{
-		Source:    example.Source,
-		Query:     example.Query,
-		Positive:  example.Positive,
-		Negatives: append([]string(nil), example.Negatives...),
+		Source:        example.Source,
+		Query:         example.Query,
+		Positive:      example.Positive,
+		Negatives:     append([]string(nil), example.Negatives...),
+		TeacherScores: append([]float32(nil), example.TeacherScores...),
 	}, nil
 }
 
 func (r embeddingTextHardNegativeRecord) example() (EmbeddingTextHardNegativeExample, error) {
 	positive := firstNonEmpty(r.Positive, r.Document)
 	record, err := newEmbeddingTextHardNegativeRecord(EmbeddingTextHardNegativeExample{
-		Source:    r.Source,
-		Query:     r.Query,
-		Positive:  positive,
-		Negatives: r.Negatives,
+		Source:        r.Source,
+		Query:         r.Query,
+		Positive:      positive,
+		Negatives:     r.Negatives,
+		TeacherScores: r.TeacherScores,
 	})
 	if err != nil {
 		return EmbeddingTextHardNegativeExample{}, err
 	}
 	return EmbeddingTextHardNegativeExample{
-		Source:    record.Source,
-		Query:     record.Query,
-		Positive:  record.Positive,
-		Negatives: record.Negatives,
+		Source:        record.Source,
+		Query:         record.Query,
+		Positive:      record.Positive,
+		Negatives:     record.Negatives,
+		TeacherScores: record.TeacherScores,
 	}, nil
+}
+
+func validateHardNegativeTeacherScores(scores []float32, want int) error {
+	if len(scores) == 0 {
+		return nil
+	}
+	if len(scores) != want {
+		return fmt.Errorf("teacher_scores length %d does not match candidate count %d", len(scores), want)
+	}
+	for i, score := range scores {
+		if math.IsNaN(float64(score)) || math.IsInf(float64(score), 0) {
+			return fmt.Errorf("teacher_scores[%d] must be finite", i)
+		}
+	}
+	return nil
 }
 
 func cloneInt32Matrix(in [][]int32) [][]int32 {

@@ -427,6 +427,9 @@ func TestRunMineRetrievalHardNegativesWritesTextJSONL(t *testing.T) {
 	if len(examples) != 1 || examples[0].Query != "alpha" || examples[0].Positive != "alpha target" || len(examples[0].Negatives) != 1 || examples[0].Negatives[0] != "alpha distractor" {
 		t.Fatalf("examples = %+v", examples)
 	}
+	if len(examples[0].TeacherScores) != 2 {
+		t.Fatalf("teacher scores = %+v, want positive plus one negative", examples[0].TeacherScores)
+	}
 }
 
 func TestRunMineRetrievalModelHardNegativesWritesTextJSONL(t *testing.T) {
@@ -491,6 +494,9 @@ func TestRunMineRetrievalModelHardNegativesWritesTextJSONL(t *testing.T) {
 	}
 	if len(examples) != 1 || examples[0].Query != "alpha" || examples[0].Positive != "alpha target" || len(examples[0].Negatives) != 1 || examples[0].Negatives[0] == "alpha target" {
 		t.Fatalf("examples = %+v", examples)
+	}
+	if len(examples[0].TeacherScores) != 2 {
+		t.Fatalf("teacher scores = %+v, want positive plus one negative", examples[0].TeacherScores)
 	}
 }
 

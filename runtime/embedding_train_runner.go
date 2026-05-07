@@ -32,6 +32,8 @@ type EmbeddingTrainRunConfig struct {
 	ContrastiveLoss           string
 	Temperature               float32
 	GroupedLossWeight         float32
+	TeacherLossWeight         float32
+	TeacherTemperature        float32
 	ProgressEverySteps        int
 	Progress                  EmbeddingTrainProgressFunc
 }
@@ -823,7 +825,7 @@ func EstimateHardNegativeTrainWorkload(trainExamples, negativesPerExample, evalE
 	if negativesPerExample < 0 {
 		negativesPerExample = 0
 	}
-	batches, trainPairsPerEpoch := hardNegativeBatchWork(trainExamples, cfg.BatchSize, negativesPerExample, cfg.ContrastiveLoss)
+	batches, trainPairsPerEpoch := hardNegativeBatchWork(trainExamples, cfg.BatchSize, negativesPerExample, cfg.ContrastiveLoss, cfg.TeacherLossWeight)
 	evalPasses := plannedEvalPassCount(evalExamples, cfg.Epochs, cfg.EvalEveryEpoch)
 	if cfg.RestoreBest && evalExamples > 0 {
 		evalPasses++
@@ -920,7 +922,7 @@ func contrastiveEvalPairs(total int) int64 {
 	return int64(total) * int64(total)
 }
 
-func hardNegativeBatchWork(total, batchSize, negativesPerExample int, loss string) (int, int64) {
+func hardNegativeBatchWork(total, batchSize, negativesPerExample int, loss string, teacherLossWeight float32) (int, int64) {
 	if total <= 0 || batchSize <= 0 {
 		return 0, 0
 	}
@@ -961,6 +963,9 @@ func hardNegativeBatchWork(total, batchSize, negativesPerExample int, loss strin
 			}
 			batches++
 			pairs += int64(n) * candidates
+		}
+		if teacherLossWeight > 0 && candidatesPerExample >= 2 {
+			pairs += int64(n) * candidatesPerExample
 		}
 	}
 	return batches, pairs
@@ -1306,7 +1311,7 @@ func (t *EmbeddingTrainer) runHardNegativeEpoch(trainSet []EmbeddingHardNegative
 	if len(cfg.HardNegativeSourceWeights) == 0 {
 		order = spreadHardNegativeOrderByQuery(trainSet, order)
 	}
-	totalBatches, plannedEpochPairs := hardNegativeBatchWork(len(order), batchSize, cfg.HardNegativesPerQuery, cfg.ContrastiveLoss)
+	totalBatches, plannedEpochPairs := hardNegativeBatchWork(len(order), batchSize, cfg.HardNegativesPerQuery, cfg.ContrastiveLoss, cfg.TeacherLossWeight)
 	for start := 0; start < len(order); start += batchSize {
 		end := start + batchSize
 		if end > len(order) {
@@ -1537,6 +1542,14 @@ func (t *EmbeddingTrainer) applyTrainRunOverrides(cfg EmbeddingTrainRunConfig) e
 		next.GroupedLossWeight = cfg.GroupedLossWeight
 		changed = true
 	}
+	if cfg.TeacherLossWeight > 0 {
+		next.TeacherLossWeight = cfg.TeacherLossWeight
+		changed = true
+	}
+	if cfg.TeacherTemperature > 0 {
+		next.TeacherTemperature = cfg.TeacherTemperature
+		changed = true
+	}
 	if !changed {
 		return nil
 	}
@@ -1557,6 +1570,12 @@ func (t *EmbeddingTrainer) syncTrainRunObjectiveConfig(cfg EmbeddingTrainRunConf
 	}
 	if cfg.GroupedLossWeight == 0 {
 		cfg.GroupedLossWeight = t.config.GroupedLossWeight
+	}
+	if cfg.TeacherLossWeight == 0 {
+		cfg.TeacherLossWeight = t.config.TeacherLossWeight
+	}
+	if cfg.TeacherTemperature == 0 {
+		cfg.TeacherTemperature = t.config.TeacherTemperature
 	}
 	cfg.GroupedLossWeight = effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
 	return cfg

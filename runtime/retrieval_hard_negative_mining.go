@@ -38,6 +38,12 @@ type retrievalPositiveDoc struct {
 	Text  string
 }
 
+type retrievalScoredText struct {
+	ID    string
+	Score float32
+	Text  string
+}
+
 // MineBM25TextHardNegatives mines text hard negatives from BEIR data using the same BM25 scorer as the lexical baseline.
 func MineBM25TextHardNegatives(ctx context.Context, cfg RetrievalHardNegativeMiningConfig) ([]EmbeddingTextHardNegativeExample, RetrievalHardNegativeMiningSummary, error) {
 	cfg = normalizeRetrievalHardNegativeMiningConfig(cfg)
@@ -70,6 +76,10 @@ func MineBM25TextHardNegatives(ctx context.Context, cfg RetrievalHardNegativeMin
 	for _, doc := range corpus {
 		docText[doc.ID] = doc.Text
 	}
+	indexDocs := make(map[string]bm25Document, len(index.Documents))
+	for _, doc := range index.Documents {
+		indexDocs[doc.ID] = doc
+	}
 	summary := RetrievalHardNegativeMiningSummary{
 		DatasetName:          cfg.DatasetName,
 		Queries:              len(queries),
@@ -89,8 +99,9 @@ func MineBM25TextHardNegatives(ctx context.Context, cfg RetrievalHardNegativeMin
 		for _, positive := range positives {
 			positiveIDs[positive.ID] = true
 		}
-		negativeTexts := bm25MiningNegativeTexts(query.Text, positiveIDs, index, docText, cfg)
-		if len(negativeTexts) == 0 {
+		queryTokens := tokenizeBM25Text(query.Text)
+		negativeCandidates := bm25MiningNegativeCandidates(queryTokens, positiveIDs, index, docText, cfg)
+		if len(negativeCandidates) == 0 {
 			summary.SkippedQueriesNoNegative++
 			continue
 		}
@@ -98,14 +109,19 @@ func MineBM25TextHardNegatives(ctx context.Context, cfg RetrievalHardNegativeMin
 			if cfg.MaxExamples > 0 && len(out) >= cfg.MaxExamples {
 				break
 			}
-			exampleNegatives := negativeTexts
+			exampleNegatives := negativeCandidates
 			if len(exampleNegatives) > cfg.NegativesPerPositive {
 				exampleNegatives = exampleNegatives[:cfg.NegativesPerPositive]
 			}
+			positiveScore := float32(positive.Score)
+			if doc, ok := indexDocs[positive.ID]; ok {
+				positiveScore = float32(scoreBM25Document(queryTokens, doc, index))
+			}
 			out = append(out, EmbeddingTextHardNegativeExample{
-				Query:     query.Text,
-				Positive:  positive.Text,
-				Negatives: append([]string(nil), exampleNegatives...),
+				Query:         query.Text,
+				Positive:      positive.Text,
+				Negatives:     scoredTextValues(exampleNegatives),
+				TeacherScores: teacherScoresFromScoredTexts(positiveScore, exampleNegatives),
 			})
 			summary.PositivePairs++
 			summary.Negatives += len(exampleNegatives)
@@ -164,6 +180,10 @@ func MineModelTextHardNegatives(ctx context.Context, model *EmbeddingModel, cfg 
 	for _, doc := range corpus {
 		docText[doc.ID] = doc.Text
 	}
+	docVectorByID := make(map[string][]float32, len(docVectors))
+	for _, doc := range docVectors {
+		docVectorByID[doc.ID] = doc.Vector
+	}
 	summary := RetrievalHardNegativeMiningSummary{
 		DatasetName:          cfg.DatasetName,
 		Queries:              len(queries),
@@ -185,8 +205,8 @@ func MineModelTextHardNegatives(ctx context.Context, model *EmbeddingModel, cfg 
 		}
 		candidateDepth := cfg.CandidateTopK + len(positiveIDs)
 		scores := topRetrievalScores(query.Vector, docVectors, candidateDepth)
-		negativeTexts := modelMiningNegativeTexts(scores, positiveIDs, docText, cfg)
-		if len(negativeTexts) == 0 {
+		negativeCandidates := modelMiningNegativeCandidates(scores, positiveIDs, docText, cfg)
+		if len(negativeCandidates) == 0 {
 			summary.SkippedQueriesNoNegative++
 			continue
 		}
@@ -194,14 +214,19 @@ func MineModelTextHardNegatives(ctx context.Context, model *EmbeddingModel, cfg 
 			if cfg.MaxExamples > 0 && len(out) >= cfg.MaxExamples {
 				break
 			}
-			exampleNegatives := negativeTexts
+			exampleNegatives := negativeCandidates
 			if len(exampleNegatives) > cfg.NegativesPerPositive {
 				exampleNegatives = exampleNegatives[:cfg.NegativesPerPositive]
 			}
+			positiveScore := float32(positive.Score)
+			if vector, ok := docVectorByID[positive.ID]; ok {
+				positiveScore = dotRetrievalVectors(query.Vector, vector)
+			}
 			out = append(out, EmbeddingTextHardNegativeExample{
-				Query:     queryText[query.ID],
-				Positive:  positive.Text,
-				Negatives: append([]string(nil), exampleNegatives...),
+				Query:         queryText[query.ID],
+				Positive:      positive.Text,
+				Negatives:     scoredTextValues(exampleNegatives),
+				TeacherScores: teacherScoresFromScoredTexts(positiveScore, exampleNegatives),
 			})
 			summary.PositivePairs++
 			summary.Negatives += len(exampleNegatives)
@@ -265,21 +290,20 @@ func bm25MiningPositiveDocs(rels map[string]float64, docText map[string]string) 
 	return positives, skipped
 }
 
-func bm25MiningNegativeTexts(queryText string, positiveIDs map[string]bool, index bm25Index, docText map[string]string, cfg RetrievalHardNegativeMiningConfig) []string {
-	queryTokens := tokenizeBM25Text(queryText)
-	negatives := topBM25NonPositiveTexts(queryTokens, positiveIDs, index, docText, cfg.CandidateTopK)
+func bm25MiningNegativeCandidates(queryTokens []string, positiveIDs map[string]bool, index bm25Index, docText map[string]string, cfg RetrievalHardNegativeMiningConfig) []retrievalScoredText {
+	negatives := topBM25NonPositiveScoredTexts(queryTokens, positiveIDs, index, docText, cfg.CandidateTopK)
 	if len(negatives) > cfg.NegativesPerPositive {
 		negatives = negatives[:cfg.NegativesPerPositive]
 	}
 	return negatives
 }
 
-func modelMiningNegativeTexts(scores []retrievalScoredDoc, positiveIDs map[string]bool, docText map[string]string, cfg RetrievalHardNegativeMiningConfig) []string {
+func modelMiningNegativeCandidates(scores []retrievalScoredDoc, positiveIDs map[string]bool, docText map[string]string, cfg RetrievalHardNegativeMiningConfig) []retrievalScoredText {
 	limit := cfg.NegativesPerPositive
 	if cfg.CandidateTopK > 0 && cfg.CandidateTopK < limit {
 		limit = cfg.CandidateTopK
 	}
-	negatives := make([]string, 0, limit)
+	negatives := make([]retrievalScoredText, 0, limit)
 	seen := map[string]bool{}
 	candidates := 0
 	for _, score := range scores {
@@ -295,10 +319,46 @@ func modelMiningNegativeTexts(scores []retrievalScoredDoc, positiveIDs map[strin
 			break
 		}
 		seen[text] = true
-		negatives = append(negatives, text)
+		negatives = append(negatives, retrievalScoredText{ID: score.ID, Score: score.Score, Text: text})
 		if len(negatives) >= limit {
 			break
 		}
 	}
 	return negatives
+}
+
+func modelMiningNegativeTexts(scores []retrievalScoredDoc, positiveIDs map[string]bool, docText map[string]string, cfg RetrievalHardNegativeMiningConfig) []string {
+	return scoredTextValues(modelMiningNegativeCandidates(scores, positiveIDs, docText, cfg))
+}
+
+func topBM25NonPositiveScoredTexts(queryTokens []string, positiveIDs map[string]bool, index bm25Index, docText map[string]string, topK int) []retrievalScoredText {
+	scores := topBM25NonPositiveScores(queryTokens, positiveIDs, index, topK)
+	out := make([]retrievalScoredText, 0, len(scores))
+	seen := map[string]bool{}
+	for _, score := range scores {
+		text := strings.TrimSpace(docText[score.ID])
+		if text == "" || seen[text] {
+			continue
+		}
+		seen[text] = true
+		out = append(out, retrievalScoredText{ID: score.ID, Score: score.Score, Text: text})
+	}
+	return out
+}
+
+func scoredTextValues(candidates []retrievalScoredText) []string {
+	out := make([]string, len(candidates))
+	for i, candidate := range candidates {
+		out[i] = candidate.Text
+	}
+	return out
+}
+
+func teacherScoresFromScoredTexts(positiveScore float32, negatives []retrievalScoredText) []float32 {
+	out := make([]float32, 1, 1+len(negatives))
+	out[0] = positiveScore
+	for _, negative := range negatives {
+		out = append(out, negative.Score)
+	}
+	return out
 }

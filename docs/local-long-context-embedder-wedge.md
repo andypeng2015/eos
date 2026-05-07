@@ -200,7 +200,7 @@ Training losses:
 - hard-negative contrastive loss
 - grouped hard-negative InfoNCE over each query's explicit candidate set
 - hybrid hard-negative InfoNCE that keeps global batch candidates and adds a weighted grouped term
-- teacher similarity distillation
+- teacher-score distillation over mined candidate groups
 - optional pairwise margin loss
 - optional Matryoshka/truncation loss
 - router block-recall auxiliary loss
@@ -254,6 +254,7 @@ The alignment harness runs the baseline scoreboard, mines model-hard negatives i
 The default candidate training pass uses batch `64` and one explicit hard negative per query so full mined BEIR-style runs stay iterative. Increase `MANTA_ALIGN_CANDIDATE_BATCH_SIZE` or `MANTA_ALIGN_CANDIDATE_HARD_NEGATIVES` only after the planned train-pair count is acceptable for the local GPU.
 Use `MANTA_ALIGN_MODEL_HARD_DATASET_WEIGHTS=fiqa=2` or similar when a dataset needs more mined examples in the next mixed round.
 Use `MANTA_ALIGN_CANDIDATE_SOURCE_WEIGHTS=scifact=1,nfcorpus=1,fiqa=1` or similar when the train JSONL carries `source` fields and the candidate should build source-balanced hard-negative batches without rewriting the dataset. Exact source keys such as `fiqa:model` override the family key; otherwise `fiqa:model` falls back to `fiqa`.
+Use `MANTA_ALIGN_CANDIDATE_TEACHER_LOSS_WEIGHT=0.20` or similar when mined hard negatives carry `teacher_scores` and the candidate should preserve the teacher's soft ordering over each query's positive plus explicit negatives. `MANTA_ALIGN_CANDIDATE_TEACHER_TEMPERATURE` controls the softness of that target distribution.
 For promotion runs, set `MANTA_ALIGN_GATE_CANDIDATE=1`. The gate writes the summary first, then fails the run if macro nDCG@10 misses `MANTA_ALIGN_MIN_MACRO_NDCG_DELTA` or any dataset regresses more than `MANTA_ALIGN_MAX_DATASET_NDCG_REGRESSION`; `MANTA_ALIGN_MIN_DATASET_NDCG_RATIO` adds an optional per-dataset nDCG ratio floor. Use `MANTA_ALIGN_MAX_DATASET_RECALL_AT_100_REGRESSION` and `MANTA_ALIGN_MIN_DATASET_RECALL_AT_100_RATIO` when a candidate must also preserve top-k coverage.
 
 ## Current Retrieval Alignment Findings
@@ -284,6 +285,7 @@ Interpretation:
 - The lower-weight hybrid run (`grouped_loss_weight=0.10`, LR `0.000025`, source weights `scifact=1,nfcorpus=2,fiqa=1`) passed the strict promotion gate: macro nDCG@10 moved from `0.135821` to `0.138397`, SciFact improved, FiQA improved, and NFCorpus stayed inside the allowed regression band while recall@100 improved. This is the current balanced checkpoint to promote and rebase the next round from.
 - A lower-LR ratchet from the promoted checkpoint (`grouped_loss_weight=0.05`, LR `0.0000125`, source weights `scifact=1,nfcorpus=3,fiqa=1`) improved pairwise eval AUC to `0.832026` but failed the promotion gate: macro nDCG@10 moved from `0.138397` to `0.136874`, NFCorpus fell by `0.002764`, and FiQA fell by `0.001096`. Stop ratcheting the same mined blend; the next proof layer should remine model-hard negatives from the promoted artifact or add teacher-score distillation so training sees new ranking signal.
 - Fresh mining from the promoted checkpoint validated that proof layer. The fresh-mined candidate used `6000` max model-hard examples with mining weights `scifact=1,nfcorpus=3,fiqa=1`, training source weights `scifact=1,nfcorpus=2,fiqa=1`, `grouped_loss_weight=0.05`, and LR `0.0000125`; it passed the gate with macro nDCG@10 delta `+0.007171`. Recall@100 dipped on all three retrieval sets, especially FiQA (`0.171556` to `0.164380`), so the next promotion run should enable the recall floor and/or teacher-score distillation that preserves wider top-k coverage.
+- Teacher-score distillation is now implemented for hard-negative runs. BM25 and model-hard mining can preserve per-candidate teacher scores, tokenization carries them through, and `teacher_loss_weight` blends soft teacher-distribution cross-entropy with the selected hard-negative objective.
 
 Short retrieval metrics:
 

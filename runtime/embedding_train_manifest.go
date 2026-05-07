@@ -119,6 +119,8 @@ func (m EmbeddingTrainManifest) mllValues() map[string]authoredManifestValue {
 		"config.contrastive_loss":    authoredString(m.Config.ContrastiveLoss),
 		"config.temperature":         authoredFloat(float64(m.Config.Temperature)),
 		"config.grouped_loss_weight": authoredFloat(float64(m.Config.GroupedLossWeight)),
+		"config.teacher_loss_weight": authoredFloat(float64(m.Config.TeacherLossWeight)),
+		"config.teacher_temperature": authoredFloat(float64(m.Config.TeacherTemperature)),
 	}
 	for key, value := range m.Embedding.mllValues() {
 		values["embedding."+key] = value
@@ -187,6 +189,16 @@ func embeddingTrainManifestFromDoc(doc authoredManifestDoc) (EmbeddingTrainManif
 		return EmbeddingTrainManifest{}, err
 	} else {
 		manifest.Config.GroupedLossWeight = float32(value)
+	}
+	if value, ok, err := doc.float("config.teacher_loss_weight"); err != nil {
+		return EmbeddingTrainManifest{}, err
+	} else if ok {
+		manifest.Config.TeacherLossWeight = float32(value)
+	}
+	if value, ok, err := doc.float("config.teacher_temperature"); err != nil {
+		return EmbeddingTrainManifest{}, err
+	} else if ok {
+		manifest.Config.TeacherTemperature = float32(value)
 	}
 	return manifest, nil
 }

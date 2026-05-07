@@ -23,16 +23,18 @@ type EmbeddingPairExample struct {
 
 // EmbeddingTrainConfig controls the narrow pooled-embedder trainer.
 type EmbeddingTrainConfig struct {
-	LearningRate      float32
-	WeightDecay       float32
-	WeightBits        int
-	Optimizer         string
-	Beta1             float32
-	Beta2             float32
-	Epsilon           float32
-	ContrastiveLoss   string
-	Temperature       float32
-	GroupedLossWeight float32
+	LearningRate       float32
+	WeightDecay        float32
+	WeightBits         int
+	Optimizer          string
+	Beta1              float32
+	Beta2              float32
+	Epsilon            float32
+	ContrastiveLoss    string
+	Temperature        float32
+	GroupedLossWeight  float32
+	TeacherLossWeight  float32
+	TeacherTemperature float32
 }
 
 // EmbeddingTrainMetrics summarizes one training/eval batch.
@@ -1078,6 +1080,7 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 	candidateInputs := make([]embeddingSequenceInput, 0, len(batch)*2)
 	targetIndexes := make([]int, len(batch))
 	candidateSpans := make([]embeddingCandidateSpan, len(batch))
+	teacherScores := make([][]float32, len(batch))
 	for i, example := range batch {
 		queryInputs[i] = embeddingSequenceInput{
 			tokens: example.QueryTokens,
@@ -1103,6 +1106,12 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 			})
 		}
 		candidateSpans[i].End = len(candidateInputs)
+		if len(example.TeacherScores) > 0 {
+			if len(example.TeacherScores) != candidateSpans[i].End-candidateSpans[i].Start {
+				return EmbeddingTrainMetrics{}, fmt.Errorf("hard-negative teacher_scores length %d does not match candidate count %d for batch %d", len(example.TeacherScores), candidateSpans[i].End-candidateSpans[i].Start, i)
+			}
+			teacherScores[i] = example.TeacherScores
+		}
 	}
 	if len(candidateInputs) < 2 {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("hard-negative training batch needs at least two candidate documents")
@@ -1171,6 +1180,24 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 			totalLoss, totalScore = accumulateInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, t.config.Temperature, queryGrads, candidateGrads)
 		}
 	}
+	teacherPairCount := 0
+	teacherWeight := t.config.TeacherLossWeight
+	if teacherWeight > 0 {
+		teacherQueryGrads := newEmbeddingPooledGradBuffers(queries)
+		teacherCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
+		teacherLoss, teacherScore, pairs := accumulateTeacherDistributionHardNegativeGrads(queries, candidates, candidateSpans, teacherScores, t.config.Temperature, t.config.TeacherTemperature, teacherQueryGrads, teacherCandidateGrads)
+		if pairs > 0 {
+			baseScale := float32(1) / (1 + teacherWeight)
+			teacherScale := teacherWeight / (1 + teacherWeight)
+			scaleEmbeddingGradBuffers(queryGrads, baseScale)
+			scaleEmbeddingGradBuffers(candidateGrads, baseScale)
+			addScaledEmbeddingGradBuffers(queryGrads, teacherQueryGrads, teacherScale)
+			addScaledEmbeddingGradBuffers(candidateGrads, teacherCandidateGrads, teacherScale)
+			totalLoss = totalLoss*baseScale + teacherLoss*teacherScale
+			totalScore += teacherScore
+			teacherPairCount = pairs
+		}
+	}
 	if !t.tryBackpropContrastiveBatch(
 		queries,
 		candidates,
@@ -1200,7 +1227,7 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 		}
 	}
 
-	pairCount := hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, t.config.ContrastiveLoss)
+	pairCount := hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, t.config.ContrastiveLoss) + teacherPairCount
 	batchScale := float32(1) / float32(len(queries))
 	t.step++
 	t.applyOptimizerUpdate(t.tokenParam.Name, t.tokenEmbed, t.tokenMom1, t.tokenMom2, gradToken, batchScale)
@@ -2865,6 +2892,71 @@ func accumulateGroupedInfoNCEHardNegativeGrads(queries, candidates []*embeddingE
 	return totalLoss, totalScore
 }
 
+func accumulateTeacherDistributionHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, teacherScores [][]float32, modelTemperature, teacherTemperature float32, queryGrads, candidateGrads [][]float32) (float32, float32, int) {
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	pairCount := 0
+	if modelTemperature <= 0 {
+		modelTemperature = 0.05
+	}
+	if teacherTemperature <= 0 {
+		teacherTemperature = 1
+	}
+	queryMatrix := newContrastivePooledMatrix(queries)
+	candidateMatrix := newContrastivePooledMatrix(candidates)
+	maxCandidates := 0
+	for i := range queries {
+		if i >= len(teacherScores) || len(teacherScores[i]) == 0 {
+			continue
+		}
+		span := groupedCandidateSpan(candidateSpans, i, len(candidates))
+		if n := span.End - span.Start; n > maxCandidates {
+			maxCandidates = n
+		}
+	}
+	if maxCandidates < 2 {
+		return 0, 0, 0
+	}
+	modelScores := make([]float32, maxCandidates)
+	modelProbs := make([]float32, maxCandidates)
+	teacherProbs := make([]float32, maxCandidates)
+	for i := range queries {
+		if i >= len(teacherScores) || len(teacherScores[i]) == 0 {
+			continue
+		}
+		span := groupedCandidateSpan(candidateSpans, i, len(candidates))
+		count := span.End - span.Start
+		if count < 2 || len(teacherScores[i]) != count {
+			continue
+		}
+		query := queryMatrix.row(i)
+		queryNorm := queryMatrix.norms[i]
+		scores := modelScores[:count]
+		for j := span.Start; j < span.End; j++ {
+			local := j - span.Start
+			score := cosineScoreWithNorms(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j])
+			scores[local] = score
+			totalScore += score
+		}
+		model := modelProbs[:count]
+		teacher := teacherProbs[:count]
+		softmaxScoresInto(scores, modelTemperature, model)
+		softmaxScoresInto(teacherScores[i], teacherTemperature, teacher)
+		for local, target := range teacher {
+			prob := model[local]
+			if prob < 1e-12 {
+				prob = 1e-12
+			}
+			totalLoss -= target * float32(math.Log(float64(prob)))
+			j := span.Start + local
+			scale := (model[local] - target) / modelTemperature
+			accumulateCosineGradFromScore(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j], scores[local], scale, queryGrads[i], candidateGrads[j])
+		}
+		pairCount += count
+	}
+	return totalLoss, totalScore, pairCount
+}
+
 func groupedCandidateSpan(spans []embeddingCandidateSpan, index int, candidateCount int) embeddingCandidateSpan {
 	if index >= 0 && index < len(spans) {
 		span := spans[index]
@@ -2981,6 +3073,42 @@ func infoNCERowProbsAndLossInto(scores []float32, targetIndex int, temperature f
 		prob = 1e-12
 	}
 	return -float32(math.Log(float64(prob)))
+}
+
+func softmaxScoresInto(scores []float32, temperature float32, probs []float32) {
+	if len(scores) == 0 || len(probs) < len(scores) {
+		for i := range probs {
+			probs[i] = 0
+		}
+		return
+	}
+	if temperature <= 0 {
+		temperature = 1
+	}
+	probs = probs[:len(scores)]
+	maxLogit := scores[0] / temperature
+	for _, score := range scores[1:] {
+		logit := score / temperature
+		if logit > maxLogit {
+			maxLogit = logit
+		}
+	}
+	sum := float32(0)
+	for i, score := range scores {
+		value := float32(math.Exp(float64(score/temperature - maxLogit)))
+		probs[i] = value
+		sum += value
+	}
+	if sum == 0 {
+		for i := range probs {
+			probs[i] = 0
+		}
+		return
+	}
+	invSum := 1 / sum
+	for i := range probs {
+		probs[i] *= invSum
+	}
 }
 
 func (t *EmbeddingTrainer) prepareForwardWeights() *embeddingForwardWeights {
@@ -3729,6 +3857,9 @@ func normalizedTrainConfig(cfg EmbeddingTrainConfig, params ...mantaartifact.Par
 	if cfg.Temperature == 0 {
 		cfg.Temperature = 0.05
 	}
+	if cfg.TeacherTemperature == 0 {
+		cfg.TeacherTemperature = 1
+	}
 	cfg.GroupedLossWeight = effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
 	return cfg
 }
@@ -3744,6 +3875,12 @@ func validateTrainConfig(cfg EmbeddingTrainConfig) error {
 	}
 	if cfg.GroupedLossWeight < 0 {
 		return fmt.Errorf("grouped_loss_weight must be non-negative")
+	}
+	if cfg.TeacherLossWeight < 0 {
+		return fmt.Errorf("teacher_loss_weight must be non-negative")
+	}
+	if cfg.TeacherTemperature <= 0 {
+		return fmt.Errorf("teacher_temperature must be positive")
 	}
 	return nil
 }

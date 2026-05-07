@@ -16,20 +16,22 @@ const DefaultEmbeddingModelName = "manta-embed-v1"
 // DefaultEmbeddingPackageConfig controls Manta's built-in default
 // embedding-model package initialization.
 type DefaultEmbeddingPackageConfig struct {
-	Name              string
-	VocabSize         int
-	MaxSequence       int
-	EmbeddingDim      int
-	HiddenDim         int
-	EncoderRepeats    int
-	Seed              int64
-	LearningRate      float32
-	WeightDecay       float32
-	WeightBits        int
-	Optimizer         string
-	ContrastiveLoss   string
-	Temperature       float32
-	GroupedLossWeight float32
+	Name               string
+	VocabSize          int
+	MaxSequence        int
+	EmbeddingDim       int
+	HiddenDim          int
+	EncoderRepeats     int
+	Seed               int64
+	LearningRate       float32
+	WeightDecay        float32
+	WeightBits         int
+	Optimizer          string
+	ContrastiveLoss    string
+	Temperature        float32
+	GroupedLossWeight  float32
+	TeacherLossWeight  float32
+	TeacherTemperature float32
 }
 
 // InitDefaultEmbeddingPackage compiles Manta's default trainable embedding
@@ -143,6 +145,9 @@ func (cfg DefaultEmbeddingPackageConfig) normalized() DefaultEmbeddingPackageCon
 	if cfg.Temperature == 0 {
 		cfg.Temperature = 0.05
 	}
+	if cfg.TeacherTemperature == 0 {
+		cfg.TeacherTemperature = 1
+	}
 	return cfg
 }
 
@@ -171,18 +176,26 @@ func (cfg DefaultEmbeddingPackageConfig) validate() error {
 	if cfg.GroupedLossWeight < 0 {
 		return fmt.Errorf("grouped loss weight must be non-negative")
 	}
+	if cfg.TeacherLossWeight < 0 {
+		return fmt.Errorf("teacher loss weight must be non-negative")
+	}
+	if cfg.TeacherTemperature <= 0 {
+		return fmt.Errorf("teacher temperature must be positive")
+	}
 	return nil
 }
 
 func (cfg DefaultEmbeddingPackageConfig) trainConfig() mantaruntime.EmbeddingTrainConfig {
 	return mantaruntime.EmbeddingTrainConfig{
-		LearningRate:      cfg.LearningRate,
-		WeightDecay:       cfg.WeightDecay,
-		WeightBits:        cfg.WeightBits,
-		Optimizer:         cfg.Optimizer,
-		ContrastiveLoss:   cfg.ContrastiveLoss,
-		Temperature:       cfg.Temperature,
-		GroupedLossWeight: cfg.GroupedLossWeight,
+		LearningRate:       cfg.LearningRate,
+		WeightDecay:        cfg.WeightDecay,
+		WeightBits:         cfg.WeightBits,
+		Optimizer:          cfg.Optimizer,
+		ContrastiveLoss:    cfg.ContrastiveLoss,
+		Temperature:        cfg.Temperature,
+		GroupedLossWeight:  cfg.GroupedLossWeight,
+		TeacherLossWeight:  cfg.TeacherLossWeight,
+		TeacherTemperature: cfg.TeacherTemperature,
 	}
 }
 

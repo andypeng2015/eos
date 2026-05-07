@@ -52,6 +52,8 @@ type candidateConfig struct {
 	ContrastiveLoss     string
 	GroupedLossWeight   string
 	Temperature         string
+	TeacherLossWeight   string
+	TeacherTemperature  string
 	EvalEvery           string
 	EvalEverySteps      string
 	Patience            string
@@ -668,6 +670,8 @@ func prepareConfig(root string) (candidateConfig, error) {
 		ContrastiveLoss:     getenv("MANTA_CONTRASTIVE_LOSS", "infonce"),
 		GroupedLossWeight:   getenv("MANTA_GROUPED_LOSS_WEIGHT", "0"),
 		Temperature:         getenv("MANTA_TEMPERATURE", "0.05"),
+		TeacherLossWeight:   getenv("MANTA_TEACHER_LOSS_WEIGHT", "0"),
+		TeacherTemperature:  getenv("MANTA_TEACHER_TEMPERATURE", "1"),
 		EvalEvery:           getenv("MANTA_EVAL_EVERY", "1"),
 		EvalEverySteps:      getenv("MANTA_EVAL_EVERY_STEPS", "0"),
 		Patience:            getenv("MANTA_PATIENCE", "3"),
@@ -800,6 +804,8 @@ func trainCommonArgs(cfg candidateConfig) []string {
 		"--contrastive-loss", cfg.ContrastiveLoss,
 		"--grouped-loss-weight", cfg.GroupedLossWeight,
 		"--temperature", cfg.Temperature,
+		"--teacher-loss-weight", cfg.TeacherLossWeight,
+		"--teacher-temperature", cfg.TeacherTemperature,
 		"--eval-every", cfg.EvalEvery,
 		"--eval-every-steps", cfg.EvalEverySteps,
 		"--patience", cfg.Patience,
