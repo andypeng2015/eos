@@ -29,7 +29,7 @@ Sources consulted:
 The current in-repo best is:
 
 ```text
-runs/manta-embed-v1-teacher-hybrid-w005-tw020-nf3train-lr10-20260507T035553Z/candidate/manta-embed-v1.sealed.mll
+runs/manta-embed-v1-teacher-hybrid-w005-tw020-tt150-nf3train-lr10-20260507T053803Z/candidate/manta-embed-v1.sealed.mll
 ```
 
 Compared with the previous fresh-mined hybrid best:
@@ -54,6 +54,7 @@ Rejected nearby probe:
 | `teacher_loss_weight=0.20`, `teacher_temperature=2.0`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.148029 | Gate pass, but NFCorpus tradeoff keeps macro below temperature `1.5` |
 | `teacher_loss_weight=0.20`, `teacher_temperature=1.5`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000008` | 0.147625 | Gate pass and NFCorpus high-water mark, but SciFact regression keeps macro below LR `0.000010` |
 | `teacher_loss_weight=0.20`, `teacher_temperature=1.5`, `source_weights=scifact=1,nfcorpus=4,fiqa=1`, LR `0.000010` | 0.147560 | NFCorpus nDCG@10 delta `-0.001122`, outside the `-0.001000` floor |
+| `teacher_loss_weight=0.20`, `teacher_temperature=1.5`, `source_weights=scifact=2,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.146288 | Baseline gate pass, but current-best macro and pairwise AUC both regressed |
 
 ## Ready-To-Run Lanes
 
@@ -239,13 +240,12 @@ Milestones:
 
 Priority order:
 
-1. Continue Lane A around the current best using the existing teacher-scored JSONL. `teacher_loss_weight=0.20` with `teacher_temperature=1.5` and LR `0.000010` is the current macro nDCG best. LR `0.000008` improved NFCorpus but lost macro, and `nfcorpus=4` failed the nDCG floor, so next pressure tests should hold temperature `1.5`, LR `0.000010`, and try source weights `scifact=2,nfcorpus=3,fiqa=1`.
-2. Run Lane B with `9000` mined examples, `5` mined negatives, `candidate_top_k=400`, and candidate hard negatives `2`.
-3. Start `embed-m` from scratch with the current best training recipe, then compare full retrieval and throughput.
-4. Implement Lane F so public teachers can write into the same `teacher_scores` path.
-5. Implement Lane H before increasing vector dimension aggressively.
-6. Implement Lane I and Lane J after single-vector dense gains flatten.
-7. Integrate Lane L once short retrieval is stable enough to justify long-context work.
+1. Run Lane B with `9000` mined examples, `5` mined negatives, `candidate_top_k=400`, and candidate hard negatives `2`; the first Lane A source-weight pressure tests around the temperature-`1.5` best are now exhausted.
+2. Start `embed-m` from scratch with the current best training recipe, then compare full retrieval and throughput.
+3. Implement Lane F so public teachers can write into the same `teacher_scores` path.
+4. Implement Lane H before increasing vector dimension aggressively.
+5. Implement Lane I and Lane J after single-vector dense gains flatten.
+6. Integrate Lane L once short retrieval is stable enough to justify long-context work.
 
 ## Promotion Discipline
 
