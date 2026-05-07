@@ -48,6 +48,7 @@ Rejected nearby probe:
 | Probe | Macro | Reason |
 | --- | ---: | --- |
 | `teacher_loss_weight=0.10`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.147626 | NFCorpus nDCG@10 delta `-0.001534`, outside the `-0.001000` floor |
+| `teacher_loss_weight=0.35`, `source_weights=scifact=1,nfcorpus=3,fiqa=1`, LR `0.000010` | 0.147229 | Gate pass, but lower macro than the `0.20` current best |
 
 ## Ready-To-Run Lanes
 
@@ -233,7 +234,7 @@ Milestones:
 
 Priority order:
 
-1. Continue Lane A around the current best using the existing teacher-scored JSONL. `teacher_loss_weight=0.10` is rejected under the NF3 source schedule, so the next pressure tests are `teacher_loss_weight=0.35` and temperature `0.75` or `1.5` at LR `0.000010`, source weights `scifact=1,nfcorpus=3,fiqa=1`.
+1. Continue Lane A around the current best using the existing teacher-scored JSONL. `teacher_loss_weight=0.10` is rejected and `0.35` is below the current best under the NF3 source schedule, so the next pressure tests should hold `teacher_loss_weight=0.20` and sweep teacher temperature `0.75` and `1.5` at LR `0.000010`, source weights `scifact=1,nfcorpus=3,fiqa=1`.
 2. Run Lane B with `9000` mined examples, `5` mined negatives, `candidate_top_k=400`, and candidate hard negatives `2`.
 3. Start `embed-m` from scratch with the current best training recipe, then compare full retrieval and throughput.
 4. Implement Lane F so public teachers can write into the same `teacher_scores` path.

@@ -71,6 +71,16 @@ A lower-LR ratchet from that strict-pass checkpoint with `MANTA_ALIGN_CANDIDATE_
 A fresh-mining round from the strict-pass checkpoint with `MANTA_ALIGN_MODEL_HARD_DATASET_WEIGHTS=scifact=1,nfcorpus=3,fiqa=1`, `MANTA_ALIGN_CANDIDATE_GROUPED_LOSS_WEIGHT=0.05`, `MANTA_ALIGN_CANDIDATE_LR=0.0000125`, and `MANTA_ALIGN_CANDIDATE_SOURCE_WEIGHTS=scifact=1,nfcorpus=2,fiqa=1` passed the retrieval gate: macro nDCG@10 improved from `0.138397` to `0.145568`. Because recall@100 dipped, future promotion-style rounds should set an explicit recall floor when using this recipe.
 A teacher-distilled follow-up from that checkpoint used fresh model-hard examples with `teacher_scores`, `MANTA_ALIGN_CANDIDATE_TEACHER_LOSS_WEIGHT=0.20`, `MANTA_ALIGN_CANDIDATE_LR=0.000010`, and recall floors. The first full gated run with `MANTA_ALIGN_CANDIDATE_SOURCE_WEIGHTS=scifact=1,nfcorpus=2,fiqa=1` improved macro nDCG@10 to `0.146301` but failed the NFCorpus nDCG floor. Reusing the same teacher-scored JSONL with `scifact=1,nfcorpus=3,fiqa=1` fixed that failure and raised macro nDCG@10 to `0.147862` while recall@100 stayed flat or improved on all three retrieval sets.
 
+Compare a retrieval-only candidate scoreboard against a prior alignment summary without rerunning the full alignment harness:
+
+```bash
+MANTA_COMPARE_BASELINE_SUMMARY_JSON=/path/to/retrieval-alignment-summary.json \
+MANTA_COMPARE_CANDIDATE_SCOREBOARD_JSON=/path/to/candidate-scoreboard/scoreboard.json \
+ferrous-wheel run scripts/compare_manta_embed_v1_retrieval_candidate.fw
+```
+
+The comparison writes `retrieval-comparison-summary.tsv/json` beside the candidate scoreboard and applies the same macro nDCG@10, per-dataset nDCG, and recall@100 floors by default.
+
 If you want a binary runner instead of `run` mode:
 
 ```bash
