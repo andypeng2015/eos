@@ -133,6 +133,8 @@ func run(args []string) error {
 		return runImportTeacherScores(args[1:])
 	case "score-teacher-hard-negatives":
 		return runScoreTeacherHardNegatives(args[1:])
+	case "audit-teacher-scores":
+		return runAuditTeacherScores(args[1:])
 	case "train-embed":
 		return runTrainEmbed(args[1:])
 	case "train-corpus":
@@ -664,6 +666,47 @@ type teacherHardNegativeScoreSummary struct {
 	SkippedExisting int    `json:"skipped_existing"`
 }
 
+type teacherScoreAuditSummary struct {
+	Schema      string  `json:"schema"`
+	CreatedUTC  string  `json:"created_utc"`
+	InputJSONL  string  `json:"input_jsonl"`
+	Mode        string  `json:"mode"`
+	Temperature float64 `json:"temperature"`
+	teacherScoreAuditStats
+	Sources map[string]teacherScoreAuditStats `json:"sources,omitempty"`
+}
+
+type teacherScoreAuditStats struct {
+	Examples              int     `json:"examples"`
+	ScoredExamples        int     `json:"scored_examples"`
+	MissingExamples       int     `json:"missing_examples"`
+	Candidates            int     `json:"candidates"`
+	ScoredCandidates      int     `json:"scored_candidates"`
+	PositiveTop1          int     `json:"positive_top1"`
+	PositiveTop1Rate      float64 `json:"positive_top1_rate"`
+	PositiveMeanRank      float64 `json:"positive_mean_rank"`
+	PositiveMeanMargin    float64 `json:"positive_mean_margin"`
+	MeanScore             float64 `json:"mean_score"`
+	MeanScoreRange        float64 `json:"mean_score_range"`
+	MeanEntropy           float64 `json:"mean_entropy"`
+	MeanNormalizedEntropy float64 `json:"mean_normalized_entropy"`
+}
+
+type teacherScoreAuditCounters struct {
+	Examples             int
+	ScoredExamples       int
+	MissingExamples      int
+	Candidates           int
+	ScoredCandidates     int
+	PositiveTop1         int
+	PositiveRankSum      float64
+	PositiveMarginSum    float64
+	ScoreSum             float64
+	ScoreRangeSum        float64
+	EntropySum           float64
+	NormalizedEntropySum float64
+}
+
 func runImportTeacherScores(args []string) error {
 	fs := flag.NewFlagSet("import-teacher-scores", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -819,6 +862,85 @@ func runScoreTeacherHardNegatives(args []string) error {
 	return nil
 }
 
+func runAuditTeacherScores(args []string) error {
+	fs := flag.NewFlagSet("audit-teacher-scores", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	mode := fs.String("mode", "text", "input mode: text or tokenized")
+	temperature := fs.Float64("temperature", 1, "softmax temperature used for entropy diagnostics")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 || fs.Arg(0) == "" {
+		return fmt.Errorf("usage: manta audit-teacher-scores [flags] <hard-negatives.jsonl> [summary.json]")
+	}
+	if *temperature <= 0 {
+		return fmt.Errorf("temperature must be positive")
+	}
+	inputPath := fs.Arg(0)
+	summaryPath := inputPath + ".teacher-score-audit.json"
+	if fs.NArg() > 1 && fs.Arg(1) != "" {
+		summaryPath = fs.Arg(1)
+	}
+	normalizedMode := strings.ToLower(strings.TrimSpace(*mode))
+	total := teacherScoreAuditCounters{}
+	sourceTotals := map[string]*teacherScoreAuditCounters{}
+	add := func(source string, candidateCount int, scores []float32) {
+		total.add(candidateCount, scores, *temperature)
+		key := strings.TrimSpace(source)
+		if key == "" {
+			key = "unknown"
+		}
+		sourceTotal := sourceTotals[key]
+		if sourceTotal == nil {
+			sourceTotal = &teacherScoreAuditCounters{}
+			sourceTotals[key] = sourceTotal
+		}
+		sourceTotal.add(candidateCount, scores, *temperature)
+	}
+	switch normalizedMode {
+	case "text":
+		examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(inputPath)
+		if err != nil {
+			return err
+		}
+		for _, example := range examples {
+			add(example.Source, 1+len(example.Negatives), example.TeacherScores)
+		}
+	case "tokenized", "tokens":
+		normalizedMode = "tokenized"
+		examples, err := mantaruntime.ReadEmbeddingHardNegativeExamplesFile(inputPath)
+		if err != nil {
+			return err
+		}
+		for _, example := range examples {
+			add(example.Source, 1+len(example.NegativeTokens), example.TeacherScores)
+		}
+	default:
+		return fmt.Errorf("unsupported mode %q: want text or tokenized", *mode)
+	}
+	summary := teacherScoreAuditSummary{
+		Schema:                 "manta.teacher_score_audit.v1",
+		CreatedUTC:             time.Now().UTC().Format(time.RFC3339),
+		InputJSONL:             inputPath,
+		Mode:                   normalizedMode,
+		Temperature:            *temperature,
+		teacherScoreAuditStats: total.summary(),
+	}
+	if len(sourceTotals) > 0 {
+		summary.Sources = make(map[string]teacherScoreAuditStats, len(sourceTotals))
+		for source, counters := range sourceTotals {
+			summary.Sources[source] = counters.summary()
+		}
+	}
+	if err := writeTeacherScoreAuditSummary(summaryPath, summary); err != nil {
+		return err
+	}
+	fmt.Printf("audited teacher scores: examples=%d scored=%d missing=%d positive_top1_rate=%.6f mean_margin=%.6f mean_normalized_entropy=%.6f\n",
+		summary.Examples, summary.ScoredExamples, summary.MissingExamples, summary.PositiveTop1Rate, summary.PositiveMeanMargin, summary.MeanNormalizedEntropy)
+	fmt.Printf("summary: %s\n", summaryPath)
+	return nil
+}
+
 func scoreTeacherHardNegativeExample(ctx context.Context, model *mantaruntime.EmbeddingModel, example mantaruntime.EmbeddingTextHardNegativeExample, batchSize int) ([]float32, error) {
 	queryVector, err := embedTeacherText(ctx, model, example.Query)
 	if err != nil {
@@ -912,6 +1034,117 @@ func dotTeacherVectors(a, b []float32) float32 {
 		sum += a[i] * b[i]
 	}
 	return sum
+}
+
+func (c *teacherScoreAuditCounters) add(candidateCount int, scores []float32, temperature float64) {
+	c.Examples++
+	if candidateCount < 0 {
+		candidateCount = 0
+	}
+	c.Candidates += candidateCount
+	if len(scores) == 0 {
+		c.MissingExamples++
+		return
+	}
+	c.ScoredExamples++
+	c.ScoredCandidates += len(scores)
+	positive := float64(scores[0])
+	rank := 1
+	minScore := positive
+	maxScore := positive
+	bestNegative := math.Inf(-1)
+	for i, raw := range scores {
+		score := float64(raw)
+		c.ScoreSum += score
+		if score < minScore {
+			minScore = score
+		}
+		if score > maxScore {
+			maxScore = score
+		}
+		if i > 0 {
+			if score > positive {
+				rank++
+			}
+			if score > bestNegative {
+				bestNegative = score
+			}
+		}
+	}
+	if math.IsInf(bestNegative, -1) {
+		bestNegative = positive
+	}
+	if rank == 1 {
+		c.PositiveTop1++
+	}
+	entropy, normalizedEntropy := teacherScoreEntropy(scores, temperature)
+	c.PositiveRankSum += float64(rank)
+	c.PositiveMarginSum += positive - bestNegative
+	c.ScoreRangeSum += maxScore - minScore
+	c.EntropySum += entropy
+	c.NormalizedEntropySum += normalizedEntropy
+}
+
+func (c teacherScoreAuditCounters) summary() teacherScoreAuditStats {
+	summary := teacherScoreAuditStats{
+		Examples:         c.Examples,
+		ScoredExamples:   c.ScoredExamples,
+		MissingExamples:  c.MissingExamples,
+		Candidates:       c.Candidates,
+		ScoredCandidates: c.ScoredCandidates,
+		PositiveTop1:     c.PositiveTop1,
+	}
+	if c.ScoredExamples > 0 {
+		inv := 1 / float64(c.ScoredExamples)
+		summary.PositiveTop1Rate = float64(c.PositiveTop1) * inv
+		summary.PositiveMeanRank = c.PositiveRankSum * inv
+		summary.PositiveMeanMargin = c.PositiveMarginSum * inv
+		summary.MeanScoreRange = c.ScoreRangeSum * inv
+		summary.MeanEntropy = c.EntropySum * inv
+		summary.MeanNormalizedEntropy = c.NormalizedEntropySum * inv
+	}
+	if c.ScoredCandidates > 0 {
+		summary.MeanScore = c.ScoreSum / float64(c.ScoredCandidates)
+	}
+	return summary
+}
+
+func teacherScoreEntropy(scores []float32, temperature float64) (float64, float64) {
+	if len(scores) == 0 {
+		return 0, 0
+	}
+	if temperature <= 0 {
+		temperature = 1
+	}
+	maxScore := float64(scores[0])
+	for _, raw := range scores[1:] {
+		score := float64(raw)
+		if score > maxScore {
+			maxScore = score
+		}
+	}
+	probs := make([]float64, len(scores))
+	denom := 0.0
+	for i, raw := range scores {
+		v := math.Exp((float64(raw) - maxScore) / temperature)
+		probs[i] = v
+		denom += v
+	}
+	if denom == 0 {
+		return 0, 0
+	}
+	entropy := 0.0
+	for _, p := range probs {
+		p /= denom
+		if p > 0 {
+			entropy -= p * math.Log(p)
+		}
+	}
+	normalized := 0.0
+	if len(scores) > 1 {
+		normalized = entropy / math.Log(float64(len(scores)))
+	}
+	return entropy, normalized
 }
 
 func readTeacherScoreImportTable(path string) (teacherScoreImportTable, error) {
@@ -1077,6 +1310,15 @@ func writeTeacherScoreImportManifest(path string, summary teacherScoreImportSumm
 }
 
 func writeTeacherHardNegativeScoreManifest(path string, summary teacherHardNegativeScoreSummary) error {
+	data, err := json.MarshalIndent(summary, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o644)
+}
+
+func writeTeacherScoreAuditSummary(path string, summary teacherScoreAuditSummary) error {
 	data, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {
 		return err
@@ -3406,6 +3648,7 @@ func printUsage() {
 	fmt.Println("  manta mine-retrieval-model-hard-negatives [flags] <artifact.mll> <beir-dataset-dir> <output.jsonl>")
 	fmt.Println("  manta import-teacher-scores [flags] <hard-negatives.jsonl> <scores.jsonl> <output.jsonl>")
 	fmt.Println("  manta score-teacher-hard-negatives [flags] <teacher.mll> <hard-negatives.jsonl> <output.jsonl>")
+	fmt.Println("  manta audit-teacher-scores [flags] <hard-negatives.jsonl> [summary.json]")
 	fmt.Println("  manta init-model [flags] <artifact.mll>")
 	fmt.Println("  manta init-mirage [flags] <artifact.mll>")
 	fmt.Println("  manta init-train [flags] <artifact.mll>")
@@ -3432,6 +3675,7 @@ func printUsage() {
 	fmt.Println("mine-retrieval-model-hard-negatives creates text hard-negative training JSONL from BEIR qrels using a Manta embedding model's own misses.")
 	fmt.Println("import-teacher-scores merges external teacher score JSONL into text hard-negative JSONL and writes a provenance manifest.")
 	fmt.Println("score-teacher-hard-negatives uses a Manta embedding teacher to score existing text hard-negative JSONL into teacher_scores.")
+	fmt.Println("audit-teacher-scores summarizes teacher score coverage, positive rank, margins, and entropy before distillation runs.")
 	fmt.Println("init-model creates the Manta-owned default quantized embedding training package.")
 	fmt.Println("init-mirage creates the Manta-owned Mirage Image v1 host-reference artifact.")
 	fmt.Println("init-train creates a native training package next to an artifact.")

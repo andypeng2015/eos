@@ -668,6 +668,59 @@ func TestRunScoreTeacherHardNegativesWritesScoresAndManifest(t *testing.T) {
 	}
 }
 
+func TestRunAuditTeacherScoresWritesSummary(t *testing.T) {
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "hard-negatives.jsonl")
+	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []mantaruntime.EmbeddingTextHardNegativeExample{
+		{Source: "scifact", Query: "q1", Positive: "p1", Negatives: []string{"n1", "n2"}, TeacherScores: []float32{0.9, 0.1, 0.2}},
+		{Source: "fiqa", Query: "q2", Positive: "p2", Negatives: []string{"n3"}, TeacherScores: []float32{0.1, 0.8}},
+		{Source: "fiqa", Query: "q3", Positive: "p3", Negatives: []string{"n4"}},
+	}); err != nil {
+		t.Fatalf("write hard negatives: %v", err)
+	}
+	summaryPath := filepath.Join(dir, "teacher-audit.json")
+
+	output := captureRunOutput(t, []string{
+		"audit-teacher-scores",
+		"--temperature", "1.5",
+		inputPath,
+		summaryPath,
+	})
+	for _, want := range []string{
+		"audited teacher scores: examples=3 scored=2 missing=1",
+		"positive_top1_rate=0.500000",
+		"summary: " + summaryPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("audit-teacher-scores output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	var summary teacherScoreAuditSummary
+	data, err := os.ReadFile(summaryPath)
+	if err != nil {
+		t.Fatalf("read summary: %v", err)
+	}
+	if err := json.Unmarshal(data, &summary); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	if summary.Schema != "manta.teacher_score_audit.v1" || summary.Mode != "text" || summary.Examples != 3 || summary.ScoredExamples != 2 || summary.MissingExamples != 1 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	if summary.Candidates != 7 || summary.ScoredCandidates != 5 || summary.PositiveTop1 != 1 {
+		t.Fatalf("summary counts = %+v", summary)
+	}
+	if math.Abs(summary.PositiveTop1Rate-0.5) > 0.000001 || math.Abs(summary.PositiveMeanRank-1.5) > 0.000001 {
+		t.Fatalf("summary ranks = %+v", summary)
+	}
+	if summary.MeanNormalizedEntropy <= 0 || summary.MeanNormalizedEntropy > 1 {
+		t.Fatalf("summary normalized entropy = %f", summary.MeanNormalizedEntropy)
+	}
+	fiqa := summary.Sources["fiqa"]
+	if fiqa.Examples != 2 || fiqa.ScoredExamples != 1 || fiqa.MissingExamples != 1 || fiqa.PositiveTop1 != 0 {
+		t.Fatalf("fiqa source summary = %+v", fiqa)
+	}
+}
+
 func TestRunCompareRetrievalMetricsCanRequireBaselineWin(t *testing.T) {
 	dir := t.TempDir()
 	currentPath := filepath.Join(dir, "current.retrieval.metrics.json")

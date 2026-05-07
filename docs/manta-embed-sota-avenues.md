@@ -191,6 +191,8 @@ The command writes validated text hard-negative JSONL plus a `manta.teacher_scor
 
 Local Manta teachers can bypass the sidecar step with `manta score-teacher-hard-negatives <teacher.mll> <hard-negatives.jsonl> <output.jsonl>`. That command embeds each query and its `positive + negatives`, writes cosine-style `teacher_scores`, and emits a `manta.teacher_hard_negative_score.v1` manifest with artifact, backend, batch size, and teacher provenance.
 
+Before spending a training run on a new teacher, run `manta audit-teacher-scores <hard-negatives.jsonl> <summary.json>`. It reports score coverage, positive top-1 rate, mean positive rank, positive-vs-best-negative margin, and teacher-distribution entropy overall and by source, giving a cheap reject path for teachers that misorder positives or produce unusably flat/sharp targets.
+
 Required outputs:
 
 - normalized scores over `positive + negatives`
