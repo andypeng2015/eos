@@ -200,6 +200,14 @@ or one row per query/candidate pair:
 
 The command writes validated text hard-negative JSONL plus a `manta.teacher_score_import.v1` provenance manifest. External scorers should now target this sidecar format first, then let the existing tokenizer and `teacher_loss_weight` path carry scores into training.
 
+Use `manta export-teacher-score-requests <hard-negatives.jsonl> <requests.jsonl>` to generate one external-teacher request per query/candidate pair:
+
+```json
+{"source":"scifact","query":"...","candidate":"document text","role":"negative","example_index":0,"candidate_index":1}
+```
+
+An external scorer can add a `score` field to those rows and feed them directly into `manta import-teacher-scores`. The export command writes a `manta.teacher_score_requests.v1` manifest and supports `--missing-only` for partially scored files.
+
 Local Manta teachers can bypass the sidecar step with `manta score-teacher-hard-negatives <teacher.mll> <hard-negatives.jsonl> <output.jsonl>`. That command embeds each query and its `positive + negatives`, writes cosine-style `teacher_scores`, and emits a `manta.teacher_hard_negative_score.v1` manifest with artifact, backend, batch size, and teacher provenance.
 
 Before spending a training run on a new teacher, run `manta audit-teacher-scores <hard-negatives.jsonl> <summary.json>`. It reports score coverage, positive top-1 rate, mean positive rank, positive-vs-best-negative margin, and teacher-distribution entropy overall and by source, giving a cheap reject path for teachers that misorder positives or produce unusably flat/sharp targets.
@@ -209,6 +217,7 @@ Status: BM25 and model-hard mining can both emit `teacher_scores`, and dataset a
 Required outputs:
 
 - normalized scores over `positive + negatives`
+- request rows for every query/candidate pair that an external teacher must score
 - teacher model id, revision, prompt/instruction, dimensionality, and score scale in a sidecar manifest
 - deterministic fallback when the teacher cannot score an item; by default the importer fails incomplete examples, and `--allow-missing` can preserve unscored examples for smoke checks
 

@@ -556,6 +556,123 @@ func TestRunImportTeacherScoresWritesVectorsAndManifest(t *testing.T) {
 	}
 }
 
+func TestRunExportTeacherScoreRequestsRoundTripsThroughImport(t *testing.T) {
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "hard-negatives.jsonl")
+	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []mantaruntime.EmbeddingTextHardNegativeExample{
+		{Source: "nfcorpus", Query: "vitamin c", Positive: "ascorbic acid", Negatives: []string{"calcium", "zinc"}},
+	}); err != nil {
+		t.Fatalf("write hard negatives: %v", err)
+	}
+	requestPath := filepath.Join(dir, "teacher-requests.jsonl")
+	manifestPath := filepath.Join(dir, "requests.manifest.json")
+
+	output := captureRunOutput(t, []string{
+		"export-teacher-score-requests",
+		"--manifest", manifestPath,
+		inputPath,
+		requestPath,
+	})
+	for _, want := range []string{
+		"exported teacher score requests: examples=1 exported=1 skipped_existing=0 rows=3 positive_rows=1 negative_rows=2",
+		"output: " + requestPath,
+		"manifest: " + manifestPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("export-teacher-score-requests output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	data, err := os.ReadFile(requestPath)
+	if err != nil {
+		t.Fatalf("read requests: %v", err)
+	}
+	var requests []teacherScoreRequestRecord
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var record teacherScoreRequestRecord
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("decode request %q: %v", line, err)
+		}
+		requests = append(requests, record)
+	}
+	if len(requests) != 3 || requests[0].Role != "positive" || requests[0].CandidateIndex != 0 || requests[1].Role != "negative" || requests[1].Candidate != "calcium" {
+		t.Fatalf("requests = %+v", requests)
+	}
+	var manifest teacherScoreRequestSummary
+	manifestData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if manifest.Schema != "manta.teacher_score_requests.v1" || manifest.Rows != 3 || manifest.PositiveRows != 1 || manifest.NegativeRows != 2 {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+
+	scorePath := filepath.Join(dir, "scores.jsonl")
+	var scoreRows []string
+	wantScores := []float32{0.8, 0.2, 0.1}
+	for i, request := range requests {
+		score := float64(wantScores[i])
+		row, err := json.Marshal(teacherScoreImportRecord{
+			Source:    request.Source,
+			Query:     request.Query,
+			Candidate: request.Candidate,
+			Score:     &score,
+		})
+		if err != nil {
+			t.Fatalf("encode score row: %v", err)
+		}
+		scoreRows = append(scoreRows, string(row))
+	}
+	if err := os.WriteFile(scorePath, []byte(strings.Join(scoreRows, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("write scores: %v", err)
+	}
+	outputPath := filepath.Join(dir, "with-teacher.jsonl")
+	_ = captureRunOutput(t, []string{"import-teacher-scores", inputPath, scorePath, outputPath})
+	examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if len(examples) != 1 || len(examples[0].TeacherScores) != len(wantScores) {
+		t.Fatalf("examples = %+v", examples)
+	}
+	for i, want := range wantScores {
+		if examples[0].TeacherScores[i] != want {
+			t.Fatalf("teacher score %d = %f, want %f", i, examples[0].TeacherScores[i], want)
+		}
+	}
+}
+
+func TestRunExportTeacherScoreRequestsMissingOnly(t *testing.T) {
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "hard-negatives.jsonl")
+	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []mantaruntime.EmbeddingTextHardNegativeExample{
+		{Source: "scifact", Query: "q1", Positive: "p1", Negatives: []string{"n1"}, TeacherScores: []float32{0.8, 0.1}},
+		{Source: "fiqa", Query: "q2", Positive: "p2", Negatives: []string{"n2"}},
+	}); err != nil {
+		t.Fatalf("write hard negatives: %v", err)
+	}
+	requestPath := filepath.Join(dir, "missing-requests.jsonl")
+
+	output := captureRunOutput(t, []string{
+		"export-teacher-score-requests",
+		"--missing-only",
+		inputPath,
+		requestPath,
+	})
+	if !strings.Contains(output, "exported teacher score requests: examples=2 exported=1 skipped_existing=1 rows=2") {
+		t.Fatalf("unexpected output:\n%s", output)
+	}
+	data, err := os.ReadFile(requestPath)
+	if err != nil {
+		t.Fatalf("read requests: %v", err)
+	}
+	if got := strings.Count(strings.TrimSpace(string(data)), "\n") + 1; got != 2 {
+		t.Fatalf("request rows = %d, want 2\n%s", got, data)
+	}
+}
+
 func TestRunImportTeacherScoresMatchesCandidateRows(t *testing.T) {
 	dir := t.TempDir()
 	inputPath := filepath.Join(dir, "hard-negatives.jsonl")

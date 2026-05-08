@@ -129,6 +129,8 @@ func run(args []string) error {
 		return runTokenizeEmbed(args[1:])
 	case "mine-text-pairs":
 		return runMineTextPairs(args[1:])
+	case "export-teacher-score-requests":
+		return runExportTeacherScoreRequests(args[1:])
 	case "import-teacher-scores":
 		return runImportTeacherScores(args[1:])
 	case "score-teacher-hard-negatives":
@@ -626,11 +628,33 @@ type teacherScoreImportRecord struct {
 	NegativeScores []float64 `json:"negative_scores,omitempty"`
 }
 
+type teacherScoreRequestRecord struct {
+	Source         string `json:"source,omitempty"`
+	Query          string `json:"query"`
+	Candidate      string `json:"candidate"`
+	Role           string `json:"role"`
+	ExampleIndex   int    `json:"example_index"`
+	CandidateIndex int    `json:"candidate_index"`
+}
+
 type teacherScoreImportTable struct {
 	ExampleScores   map[string][]float32
 	CandidateScores map[string]float32
 	ExampleRows     int
 	CandidateRows   int
+}
+
+type teacherScoreRequestSummary struct {
+	Schema           string `json:"schema"`
+	CreatedUTC       string `json:"created_utc"`
+	InputJSONL       string `json:"input_jsonl"`
+	OutputJSONL      string `json:"output_jsonl"`
+	Examples         int    `json:"examples"`
+	ExportedExamples int    `json:"exported_examples"`
+	SkippedExisting  int    `json:"skipped_existing"`
+	Rows             int    `json:"rows"`
+	PositiveRows     int    `json:"positive_rows"`
+	NegativeRows     int    `json:"negative_rows"`
 }
 
 type teacherScoreImportSummary struct {
@@ -768,6 +792,90 @@ type sparseAttentionPlanRow struct {
 	TurboQuantKVBytes           int64   `json:"turboquant_kv_bytes"`
 	TurboQuantKVMiB             float64 `json:"turboquant_kv_mib"`
 	TurboQuantCompressionRatio  float64 `json:"turboquant_compression_ratio"`
+}
+
+func runExportTeacherScoreRequests(args []string) error {
+	fs := flag.NewFlagSet("export-teacher-score-requests", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	missingOnly := fs.Bool("missing-only", false, "only export examples that do not already have teacher_scores")
+	maxExamples := fs.Int("max-examples", 0, "maximum examples to export; 0 means all")
+	manifestPath := fs.String("manifest", "", "request manifest path; default is <output>.teacher-score-requests.manifest.json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
+		return fmt.Errorf("usage: manta export-teacher-score-requests [flags] <hard-negatives.jsonl> <requests.jsonl>")
+	}
+	if *maxExamples < 0 {
+		return fmt.Errorf("max-examples must be non-negative")
+	}
+	inputPath := fs.Arg(0)
+	outputPath := fs.Arg(1)
+	if *manifestPath == "" {
+		*manifestPath = outputPath + ".teacher-score-requests.manifest.json"
+	}
+	examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(inputPath)
+	if err != nil {
+		return err
+	}
+	out, err := os.Create(outputPath)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(out)
+	summary := teacherScoreRequestSummary{
+		Schema:      "manta.teacher_score_requests.v1",
+		CreatedUTC:  time.Now().UTC().Format(time.RFC3339),
+		InputJSONL:  inputPath,
+		OutputJSONL: outputPath,
+		Examples:    len(examples),
+	}
+	for exampleIndex, example := range examples {
+		if *maxExamples > 0 && summary.ExportedExamples >= *maxExamples {
+			break
+		}
+		if *missingOnly && len(example.TeacherScores) > 0 {
+			summary.SkippedExisting++
+			continue
+		}
+		candidates := append([]string{example.Positive}, example.Negatives...)
+		for candidateIndex, candidate := range candidates {
+			role := "negative"
+			if candidateIndex == 0 {
+				role = "positive"
+			}
+			record := teacherScoreRequestRecord{
+				Source:         example.Source,
+				Query:          example.Query,
+				Candidate:      candidate,
+				Role:           role,
+				ExampleIndex:   exampleIndex,
+				CandidateIndex: candidateIndex,
+			}
+			if err := enc.Encode(record); err != nil {
+				_ = out.Close()
+				return err
+			}
+			summary.Rows++
+			if role == "positive" {
+				summary.PositiveRows++
+			} else {
+				summary.NegativeRows++
+			}
+		}
+		summary.ExportedExamples++
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	if err := writeTeacherScoreRequestManifest(*manifestPath, summary); err != nil {
+		return err
+	}
+	fmt.Printf("exported teacher score requests: examples=%d exported=%d skipped_existing=%d rows=%d positive_rows=%d negative_rows=%d\n",
+		summary.Examples, summary.ExportedExamples, summary.SkippedExisting, summary.Rows, summary.PositiveRows, summary.NegativeRows)
+	fmt.Printf("output: %s\n", outputPath)
+	fmt.Printf("manifest: %s\n", *manifestPath)
+	return nil
 }
 
 func runImportTeacherScores(args []string) error {
@@ -1629,6 +1737,15 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func writeTeacherScoreRequestManifest(path string, summary teacherScoreRequestSummary) error {
+	data, err := json.MarshalIndent(summary, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o644)
 }
 
 func writeTeacherScoreImportManifest(path string, summary teacherScoreImportSummary) error {
@@ -4028,6 +4145,7 @@ func printUsage() {
 	fmt.Println("  manta eval-retrieval-bm25 [flags] <beir-dataset-dir>")
 	fmt.Println("  manta mine-retrieval-hard-negatives [flags] <beir-dataset-dir> <output.jsonl>")
 	fmt.Println("  manta mine-retrieval-model-hard-negatives [flags] <artifact.mll> <beir-dataset-dir> <output.jsonl>")
+	fmt.Println("  manta export-teacher-score-requests [flags] <hard-negatives.jsonl> <requests.jsonl>")
 	fmt.Println("  manta import-teacher-scores [flags] <hard-negatives.jsonl> <scores.jsonl> <output.jsonl>")
 	fmt.Println("  manta score-teacher-hard-negatives [flags] <teacher.mll> <hard-negatives.jsonl> <output.jsonl>")
 	fmt.Println("  manta audit-teacher-scores [flags] <hard-negatives.jsonl> [summary.json]")
@@ -4056,6 +4174,7 @@ func printUsage() {
 	fmt.Println("eval-retrieval-bm25 scores the same BEIR files with an in-repo BM25 lexical baseline.")
 	fmt.Println("mine-retrieval-hard-negatives creates text hard-negative training JSONL from BEIR qrels using the BM25 baseline.")
 	fmt.Println("mine-retrieval-model-hard-negatives creates text hard-negative training JSONL from BEIR qrels using a Manta embedding model's own misses.")
+	fmt.Println("export-teacher-score-requests writes per-candidate JSONL rows for external teachers to score before import-teacher-scores.")
 	fmt.Println("import-teacher-scores merges external teacher score JSONL into text hard-negative JSONL and writes a provenance manifest.")
 	fmt.Println("score-teacher-hard-negatives uses a Manta embedding teacher to score existing text hard-negative JSONL into teacher_scores.")
 	fmt.Println("audit-teacher-scores summarizes teacher score coverage, positive rank, margins, and entropy before distillation runs.")
