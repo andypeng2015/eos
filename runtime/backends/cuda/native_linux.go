@@ -645,7 +645,7 @@ import (
 
 	mantaartifact "m31labs.dev/manta/artifact/manta"
 	"m31labs.dev/manta/runtime/backend"
-	turboquant "github.com/odvcencio/turboquant"
+	turboquant "m31labs.dev/turboquant"
 )
 
 const forwardQuantizeKernelSource = `

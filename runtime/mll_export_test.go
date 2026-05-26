@@ -10,7 +10,7 @@ import (
 	"m31labs.dev/manta/compiler"
 	"m31labs.dev/manta/runtime/backends/cuda"
 	"m31labs.dev/manta/runtime/backends/metal"
-	mll "github.com/odvcencio/mll"
+	mll "m31labs.dev/mll"
 )
 
 func TestDefaultMLLPath(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 	"unicode"
 
 	mantaartifact "m31labs.dev/manta/artifact/manta"
-	mll "github.com/odvcencio/mll"
+	mll "m31labs.dev/mll"
 )
 
 const TokenizerFileVersion = "manta/tokenizer/v0alpha1"

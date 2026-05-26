@@ -4,8 +4,8 @@ go 1.25.1
 
 require (
 	github.com/odvcencio/gotreesitter v0.15.2
-	github.com/odvcencio/mll v0.0.1
-	github.com/odvcencio/turboquant v0.1.2
+	m31labs.dev/mll v0.1.0
+	m31labs.dev/turboquant v0.2.0
 )
 
 require (

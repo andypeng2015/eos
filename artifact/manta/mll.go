@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	mll "github.com/odvcencio/mll"
+	mll "m31labs.dev/mll"
 )
 
 const MLLMetadataVersion = "manta/mll/v0alpha1"

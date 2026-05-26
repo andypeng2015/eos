@@ -13,7 +13,7 @@ import (
 
 	mantaartifact "m31labs.dev/manta/artifact/manta"
 	"m31labs.dev/manta/runtime/backend"
-	mll "github.com/odvcencio/mll"
+	mll "m31labs.dev/mll"
 )
 
 type mllExportState struct {

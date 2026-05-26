@@ -5,7 +5,7 @@ import (
 	"math"
 	"strconv"
 
-	turboquant "github.com/odvcencio/turboquant"
+	turboquant "m31labs.dev/turboquant"
 )
 
 const (

@@ -13,7 +13,7 @@ import (
 	mantaartifact "m31labs.dev/manta/artifact/manta"
 	"m31labs.dev/manta/compiler"
 	mantaruntime "m31labs.dev/manta/runtime"
-	mll "github.com/odvcencio/mll"
+	mll "m31labs.dev/mll"
 )
 
 func TestFormatTrainThroughputIncludesExamplePairAndStepRates(t *testing.T) {

@@ -2,9 +2,9 @@ github.com/klauspost/cpuid/v2 v2.0.9 h1:lgaqFMSdTdQYdZ04uHyN2d/eKdOMyi2YLSvlQIBF
 github.com/klauspost/cpuid/v2 v2.0.9/go.mod h1:FInQzS24/EEf25PyTYn52gqo7WaD8xa0213Md/qVLRg=
 github.com/odvcencio/gotreesitter v0.15.2 h1:XDNuSI1Gg738HGK62Mc06tornEfdteOTtLlpME0F5y4=
 github.com/odvcencio/gotreesitter v0.15.2/go.mod h1:Sx+iYJBfw5xSWkSttLSuFvguJctlH+ma1BTxZ0MPCqo=
-github.com/odvcencio/mll v0.0.1 h1:rmsQoXQu3EnKLsoeX+q/w2XaPxoSKIZq2QJhG4lUO8E=
-github.com/odvcencio/mll v0.0.1/go.mod h1:Yjspjp/u0/Yap+hoDkJyJxjuyhFWcmLLJksgLi4WTWA=
-github.com/odvcencio/turboquant v0.1.2 h1:nS5gA7xTPk/qvqIn2F8hCytZcKHPCjE3k+hV3Uvx9uM=
-github.com/odvcencio/turboquant v0.1.2/go.mod h1:ty5h3EkX85p64iBnvWzUGvDuRr6kplOcCE2KBZLtAf8=
 lukechampine.com/blake3 v1.4.1 h1:I3Smz7gso8w4/TunLKec6K2fn+kyKtDxr/xcQEN84Wg=
 lukechampine.com/blake3 v1.4.1/go.mod h1:QFosUxmjB8mnrWFSNwKmvxHpfY72bmD2tQ0kBMM3kwo=
+m31labs.dev/mll v0.1.0 h1:NQW/QlIVr0mnOUr0xNH4SHsgAiPH82KyY7XlQNHcABQ=
+m31labs.dev/mll v0.1.0/go.mod h1:7NwSeLhUULCN4Ylcdm9ICzJsAlZWvqH0l0RYkuxTd6w=
+m31labs.dev/turboquant v0.2.0 h1:Ej3pN8mTFlvANNJAHfvamofCSrOkTrP2DhlxZZ5QyOs=
+m31labs.dev/turboquant v0.2.0/go.mod h1:7nkx3Sf/xgz/6V992ePuUpXTN6HyWL+2ueOGCEdlg84=
