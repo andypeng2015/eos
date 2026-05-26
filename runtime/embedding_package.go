@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
 )
 
 // EmbeddingPackagePaths names the files that make up a packaged embedding model.

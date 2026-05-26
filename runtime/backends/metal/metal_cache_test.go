@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/odvcencio/manta/compiler"
-	"github.com/odvcencio/manta/runtime/backend"
+	"m31labs.dev/manta/compiler"
+	"m31labs.dev/manta/runtime/backend"
 )
 
 func TestLoadWithCacheKeyReusesCompiledLoad(t *testing.T) {

@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
-	"github.com/odvcencio/manta/compiler"
-	mantaruntime "github.com/odvcencio/manta/runtime"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
+	"m31labs.dev/manta/compiler"
+	mantaruntime "m31labs.dev/manta/runtime"
 )
 
 const DefaultEmbeddingModelName = "manta-embed-v1"

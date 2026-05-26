@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
 	mll "github.com/odvcencio/mll"
 )
 

@@ -5,7 +5,7 @@ import (
 	"math"
 	"slices"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
 )
 
 // GradTensor is a runtime tensor value tracked by the reference reverse-mode

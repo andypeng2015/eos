@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strconv"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
 )
 
 // Tensor is the bootstrap dense runtime tensor representation.

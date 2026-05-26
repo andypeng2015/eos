@@ -6,8 +6,8 @@ import (
 	"math/rand"
 	"strconv"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
-	"github.com/odvcencio/manta/runtime/backend"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
+	"m31labs.dev/manta/runtime/backend"
 )
 
 // EmbeddingTrainInitOptions controls training-package initialization from an artifact.

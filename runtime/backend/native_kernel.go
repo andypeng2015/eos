@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
 )
 
 // CompileNativeKernelProgram builds a backend-owned kernel program from a

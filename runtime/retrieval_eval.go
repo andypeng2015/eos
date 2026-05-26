@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/odvcencio/manta/runtime/backend"
+	"m31labs.dev/manta/runtime/backend"
 )
 
 const RetrievalEvalMetricsSchema = "manta.embedding_retrieval_metrics.v1"

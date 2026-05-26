@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	mantaruntime "github.com/odvcencio/manta/runtime"
+	mantaruntime "m31labs.dev/manta/runtime"
 )
 
 func TestInitDefaultEmbeddingPackageCreatesTrainablePackage(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
-	"github.com/odvcencio/manta/runtime/backend"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
+	"m31labs.dev/manta/runtime/backend"
 )
 
 // Runtime owns backend selection and module loading.

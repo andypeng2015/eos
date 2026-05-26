@@ -4,7 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
 )
 
 // BuiltinKernel describes a WebGPU WGSL builtin used by Mirage decode steps.

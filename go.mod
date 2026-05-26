@@ -1,4 +1,4 @@
-module github.com/odvcencio/manta
+module m31labs.dev/manta
 
 go 1.25.1
 

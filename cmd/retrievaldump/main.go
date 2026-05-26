@@ -22,13 +22,13 @@ import (
 	"strconv"
 	"strings"
 
-	mantaruntime "github.com/odvcencio/manta/runtime"
-	"github.com/odvcencio/manta/runtime/backend"
-	"github.com/odvcencio/manta/runtime/backends/cuda"
-	"github.com/odvcencio/manta/runtime/backends/directml"
-	"github.com/odvcencio/manta/runtime/backends/metal"
-	"github.com/odvcencio/manta/runtime/backends/vulkan"
-	"github.com/odvcencio/manta/runtime/backends/webgpu"
+	mantaruntime "m31labs.dev/manta/runtime"
+	"m31labs.dev/manta/runtime/backend"
+	"m31labs.dev/manta/runtime/backends/cuda"
+	"m31labs.dev/manta/runtime/backends/directml"
+	"m31labs.dev/manta/runtime/backends/metal"
+	"m31labs.dev/manta/runtime/backends/vulkan"
+	"m31labs.dev/manta/runtime/backends/webgpu"
 )
 
 func tensorRows(t *backend.Tensor, wantRows int) ([][]float32, error) {

@@ -5,11 +5,11 @@ import (
 	"strconv"
 	"strings"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
-	"github.com/odvcencio/manta/ir/hir"
-	"github.com/odvcencio/manta/ir/lir"
-	"github.com/odvcencio/manta/ir/mir"
-	"github.com/odvcencio/manta/syntax"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
+	"m31labs.dev/manta/ir/hir"
+	"m31labs.dev/manta/ir/lir"
+	"m31labs.dev/manta/ir/mir"
+	"m31labs.dev/manta/syntax"
 )
 
 // Options configures compilation.

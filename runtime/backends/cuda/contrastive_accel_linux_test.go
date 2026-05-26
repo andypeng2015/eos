@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/odvcencio/manta/runtime/backend"
+	"m31labs.dev/manta/runtime/backend"
 )
 
 func TestCUDAContrastiveAcceleratorMatchesHostInfoNCE(t *testing.T) {

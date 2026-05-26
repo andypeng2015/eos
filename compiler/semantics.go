@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/odvcencio/manta/ir/hir"
-	"github.com/odvcencio/manta/syntax"
+	"m31labs.dev/manta/ir/hir"
+	"m31labs.dev/manta/syntax"
 )
 
 // DiagnosticsError reports one or more source-tied compiler diagnostics.

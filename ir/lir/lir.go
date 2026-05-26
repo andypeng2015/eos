@@ -1,6 +1,6 @@
 package lir
 
-import mantaartifact "github.com/odvcencio/manta/artifact/manta"
+import mantaartifact "m31labs.dev/manta/artifact/manta"
 
 // Plan is the scheduled executable IR.
 type Plan struct {

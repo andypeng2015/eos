@@ -3,8 +3,8 @@ package backend
 import (
 	"testing"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
-	"github.com/odvcencio/manta/compiler"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
+	"m31labs.dev/manta/compiler"
 )
 
 func TestCompileNativeKernelProgramCUDAConfig(t *testing.T) {

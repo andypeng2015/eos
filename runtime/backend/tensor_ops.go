@@ -7,7 +7,7 @@ import (
 	"slices"
 	"strconv"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
 )
 
 func executeStep(ctx context.Context, mod *mantaartifact.Module, entry mantaartifact.EntryPoint, step mantaartifact.Step, env map[string]Value, compiled map[string]CompiledKernel, dispatch KernelDispatcher, dispatchStep StepDispatcher, bindings map[string]int, kind mantaartifact.BackendKind) ([]Value, string, error) {

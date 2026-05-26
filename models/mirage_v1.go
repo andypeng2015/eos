@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
 )
 
 const DefaultMirageV1ModelName = "mirage_image_v1"

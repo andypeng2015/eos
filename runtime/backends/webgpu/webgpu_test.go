@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
-	mantaruntime "github.com/odvcencio/manta/runtime"
-	"github.com/odvcencio/manta/runtime/backend"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
+	mantaruntime "m31labs.dev/manta/runtime"
+	"m31labs.dev/manta/runtime/backend"
 )
 
 func TestMirageDecodeBuiltinWGSLKernels(t *testing.T) {

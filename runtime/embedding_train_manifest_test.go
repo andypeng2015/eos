@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/odvcencio/manta/compiler"
+	"m31labs.dev/manta/compiler"
 )
 
 func TestDefaultEmbeddingTrainManifestPath(t *testing.T) {

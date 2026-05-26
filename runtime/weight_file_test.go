@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/odvcencio/manta/runtime/backend"
+	"m31labs.dev/manta/runtime/backend"
 )
 
 func TestDefaultWeightFilePath(t *testing.T) {

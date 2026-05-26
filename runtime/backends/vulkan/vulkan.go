@@ -1,8 +1,8 @@
 package vulkan
 
 import (
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
-	"github.com/odvcencio/manta/runtime/backends/internal/fallback"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
+	"m31labs.dev/manta/runtime/backends/internal/fallback"
 )
 
 // New returns the Vulkan backend surface. Device execution is added behind the

@@ -6,8 +6,8 @@ import (
 	"math"
 	"testing"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
-	"github.com/odvcencio/manta/runtime/backend"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
+	"m31labs.dev/manta/runtime/backend"
 )
 
 func TestCUDAMirageScalarLossSteps(t *testing.T) {

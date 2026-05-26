@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
 )
 
 // ExecuteSymbolic runs the current Manta runtime path. The selected

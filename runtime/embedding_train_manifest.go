@@ -3,7 +3,7 @@ package mantaruntime
 import (
 	"fmt"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
 )
 
 const EmbeddingTrainManifestVersion = "manta/train-manifest/v0alpha1"

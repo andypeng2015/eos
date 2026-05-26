@@ -5,7 +5,7 @@ package cuda
 import (
 	"testing"
 
-	"github.com/odvcencio/manta/runtime/backend"
+	"m31labs.dev/manta/runtime/backend"
 )
 
 func TestCUDAOptimizerAcceleratorKeepsResidentStateAcrossUpdates(t *testing.T) {

@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/odvcencio/manta/compiler"
-	"github.com/odvcencio/manta/runtime/backend"
-	"github.com/odvcencio/manta/runtime/backends/cuda"
+	"m31labs.dev/manta/compiler"
+	"m31labs.dev/manta/runtime/backend"
+	"m31labs.dev/manta/runtime/backends/cuda"
 )
 
 func TestRunMatMulStepBatchedUsesCUDADeviceDispatch(t *testing.T) {

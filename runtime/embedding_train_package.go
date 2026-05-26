@@ -3,7 +3,7 @@ package mantaruntime
 import (
 	"os"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
 )
 
 // EmbeddingTrainPackagePaths names the files that make up a packaged native-training embedder.

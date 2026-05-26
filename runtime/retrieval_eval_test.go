@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/odvcencio/manta/compiler"
-	"github.com/odvcencio/manta/runtime/backends/cuda"
-	"github.com/odvcencio/manta/runtime/backends/metal"
+	"m31labs.dev/manta/compiler"
+	"m31labs.dev/manta/runtime/backends/cuda"
+	"m31labs.dev/manta/runtime/backends/metal"
 )
 
 func TestComputeRetrievalQualityPerfectRanking(t *testing.T) {

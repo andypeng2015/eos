@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	mantaartifact "github.com/odvcencio/manta/artifact/manta"
+	mantaartifact "m31labs.dev/manta/artifact/manta"
 )
 
 // Request is an execution request for a loaded program.
