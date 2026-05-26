@@ -4,7 +4,7 @@ github.com/odvcencio/gotreesitter v0.15.2 h1:XDNuSI1Gg738HGK62Mc06tornEfdteOTtLl
 github.com/odvcencio/gotreesitter v0.15.2/go.mod h1:Sx+iYJBfw5xSWkSttLSuFvguJctlH+ma1BTxZ0MPCqo=
 github.com/odvcencio/mll v0.0.1 h1:rmsQoXQu3EnKLsoeX+q/w2XaPxoSKIZq2QJhG4lUO8E=
 github.com/odvcencio/mll v0.0.1/go.mod h1:Yjspjp/u0/Yap+hoDkJyJxjuyhFWcmLLJksgLi4WTWA=
-github.com/odvcencio/turboquant v0.1.2 h1:4GIs+6wQAd0Tz765mC+KDt2ESmBLfm1z7zVZj2tGrzc=
+github.com/odvcencio/turboquant v0.1.2 h1:nS5gA7xTPk/qvqIn2F8hCytZcKHPCjE3k+hV3Uvx9uM=
 github.com/odvcencio/turboquant v0.1.2/go.mod h1:ty5h3EkX85p64iBnvWzUGvDuRr6kplOcCE2KBZLtAf8=
 lukechampine.com/blake3 v1.4.1 h1:I3Smz7gso8w4/TunLKec6K2fn+kyKtDxr/xcQEN84Wg=
 lukechampine.com/blake3 v1.4.1/go.mod h1:QFosUxmjB8mnrWFSNwKmvxHpfY72bmD2tQ0kBMM3kwo=
