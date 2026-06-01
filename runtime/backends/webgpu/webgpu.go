@@ -20,16 +20,32 @@ type cachedLoad struct {
 // execution uses the shared reference implementation and records that fact in
 // step metadata.
 type Backend struct {
-	mu          sync.Mutex
-	loadCache   map[string]cachedLoad
-	cacheHits   int
-	cacheMisses int
+	mu             sync.Mutex
+	loadCache      map[string]cachedLoad
+	cacheHits      int
+	cacheMisses    int
+	externalDevice any // an externally-owned GPU device to adopt, or nil
 }
 
 // New returns the WebGPU backend surface.
 func New() *Backend {
 	return &Backend{loadCache: map[string]cachedLoad{}}
 }
+
+// SetExternalDevice adopts an externally-owned WebGPU device (a syscall/js
+// GPUDevice value on wasm, e.g. from GoSX's jsgpu.Device.NativeDevice()) so
+// Manta inference shares the renderer's device instead of requesting its own.
+// Pass nil to clear. Takes effect on the next uncached Load.
+func (b *Backend) SetExternalDevice(handle any) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	b.externalDevice = handle
+	b.mu.Unlock()
+}
+
+var _ backend.DeviceInjector = (*Backend)(nil)
 
 func (b *Backend) Kind() mantaartifact.BackendKind {
 	return mantaartifact.BackendWebGPU
@@ -73,7 +89,12 @@ func (b *Backend) load(ctx context.Context, mod *mantaartifact.Module, weights m
 	if err != nil {
 		return nil, err
 	}
-	device, err := newDeviceRuntime(ctx)
+	var device *deviceRuntime
+	if b.externalDevice != nil {
+		device, err = adoptDeviceRuntime(b.externalDevice)
+	} else {
+		device, err = newDeviceRuntime(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}

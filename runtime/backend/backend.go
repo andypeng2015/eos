@@ -266,6 +266,18 @@ type Backend interface {
 	Load(ctx context.Context, mod *mantaartifact.Module, weights map[string]WeightBinding) (Executor, error)
 }
 
+// DeviceInjector is an optional capability a Backend may implement to adopt an
+// externally-owned GPU device — one shared with a renderer (GoSX) or a
+// render-coupled compute layer (Elio) — instead of creating its own. The handle
+// is backend-specific (a WebGPU GPUDevice as a syscall/js value, a Metal
+// device, …); pass nil to clear. This is the Manta side of the
+// Manta↔Elio↔Selena device-sharing seam; it pairs with GoSX's
+// jsgpu.Device.NativeDevice() / jsgpu.WrapDevice. It takes effect on the next
+// uncached Load.
+type DeviceInjector interface {
+	SetExternalDevice(handle any)
+}
+
 // CapabilityProvider reports runtime features a backend can satisfy.
 type CapabilityProvider interface {
 	Capabilities() []string

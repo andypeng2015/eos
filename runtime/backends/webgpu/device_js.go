@@ -54,6 +54,24 @@ func newDeviceRuntime(ctx context.Context) (*deviceRuntime, error) {
 	}, nil
 }
 
+// adoptDeviceRuntime wraps an externally-owned GPUDevice (a syscall/js value,
+// e.g. from GoSX's jsgpu.Device.NativeDevice()) as a deviceRuntime, so Manta
+// shares the renderer's device instead of requesting its own.
+func adoptDeviceRuntime(handle any) (*deviceRuntime, error) {
+	dev, ok := handle.(js.Value)
+	if !ok {
+		return nil, fmt.Errorf("webgpu: external device must be a syscall/js GPUDevice value, got %T", handle)
+	}
+	if !dev.Truthy() {
+		return nil, fmt.Errorf("webgpu: external device is not a live GPUDevice")
+	}
+	return &deviceRuntime{
+		device:    dev,
+		queue:     dev.Get("queue"),
+		pipelines: map[mantaartifact.StepKind]js.Value{},
+	}, nil
+}
+
 func (d *deviceRuntime) dispatchStep(ctx context.Context, step mantaartifact.Step, inputs []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
 	if d == nil || !d.device.Truthy() {
 		return backend.StepDispatchResult{}, false, nil
