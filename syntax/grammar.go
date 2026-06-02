@@ -9,14 +9,14 @@ import (
 )
 
 var (
-	mantaLangOnce sync.Once
-	mantaLang     *gotreesitter.Language
-	mantaLangErr  error
+	eosLangOnce sync.Once
+	eosLang     *gotreesitter.Language
+	eosLangErr  error
 )
 
-// MantaGrammar returns the tree-sitter grammar for the Manta source language.
-func MantaGrammar() *grammargen.Grammar {
-	g := grammargen.NewGrammar("manta")
+// EosGrammar returns the tree-sitter grammar for the Eos source language.
+func EosGrammar() *grammargen.Grammar {
+	g := grammargen.NewGrammar("eos")
 
 	g.Define("source_file", grammargen.Repeat(grammargen.Sym("_declaration")))
 
@@ -211,24 +211,24 @@ pipeline embed(tokens: i32[T]) -> f16[T, D] {
 	return g
 }
 
-// Language returns the cached generated Manta tree-sitter language.
+// Language returns the cached generated Eos tree-sitter language.
 func Language() (*gotreesitter.Language, error) {
-	mantaLangOnce.Do(func() {
-		mantaLang, mantaLangErr = grammargen.GenerateLanguage(MantaGrammar())
+	eosLangOnce.Do(func() {
+		eosLang, eosLangErr = grammargen.GenerateLanguage(EosGrammar())
 	})
-	return mantaLang, mantaLangErr
+	return eosLang, eosLangErr
 }
 
-// ParseTree parses Manta source and returns the tree-sitter tree and language.
+// ParseTree parses Eos source and returns the tree-sitter tree and language.
 func ParseTree(src []byte) (*gotreesitter.Tree, *gotreesitter.Language, error) {
 	lang, err := Language()
 	if err != nil {
-		return nil, nil, fmt.Errorf("generate Manta language: %w", err)
+		return nil, nil, fmt.Errorf("generate Eos language: %w", err)
 	}
 	parser := gotreesitter.NewParser(lang)
 	tree, err := parser.Parse(src)
 	if err != nil {
-		return nil, nil, fmt.Errorf("parse Manta source: %w", err)
+		return nil, nil, fmt.Errorf("parse Eos source: %w", err)
 	}
 	return tree, lang, nil
 }

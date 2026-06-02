@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"context"
@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/compiler"
-	"m31labs.dev/manta/runtime/backend"
-	"m31labs.dev/manta/runtime/backends/cuda"
-	"m31labs.dev/manta/runtime/backends/metal"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/compiler"
+	"m31labs.dev/eos/runtime/backend"
+	"m31labs.dev/eos/runtime/backends/cuda"
+	"m31labs.dev/eos/runtime/backends/metal"
 )
 
 func TestFlattenFixedFloat32MatricesScratchReusesContiguousViews(t *testing.T) {
@@ -75,10 +75,10 @@ type countingMatMulAccelerator struct {
 	bound             map[string]*backend.Tensor
 }
 
-func (a *countingMatMulAccelerator) Backend() mantaartifact.BackendKind {
-	return mantaartifact.BackendCUDA
+func (a *countingMatMulAccelerator) Backend() eosartifact.BackendKind {
+	return eosartifact.BackendCUDA
 }
-func (a *countingMatMulAccelerator) RunMatMul(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
+func (a *countingMatMulAccelerator) RunMatMul(inputs []*backend.Tensor, outputType eosartifact.ValueType) (backend.StepDispatchResult, error) {
 	a.runCalls++
 	if len(inputs) == 2 && len(inputs[0].Shape) == 3 && len(inputs[1].Shape) == 3 {
 		lhs := inputs[0]
@@ -111,7 +111,7 @@ func (a *countingMatMulAccelerator) RunMatMul(inputs []*backend.Tensor, outputTy
 	}
 	return backend.StepDispatchResult{}, nil
 }
-func (a *countingMatMulAccelerator) RunMatMulWithTranspose(inputs []*backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (a *countingMatMulAccelerator) RunMatMulWithTranspose(inputs []*backend.Tensor, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	a.runCalls++
 	if len(inputs) == 2 && len(inputs[0].Shape) == 3 && len(inputs[1].Shape) == 3 {
 		lhs := inputs[0]
@@ -179,17 +179,17 @@ func (a *countingMatMulAccelerator) UnbindMatrix(name string) error {
 	delete(a.bound, name)
 	return nil
 }
-func (a *countingMatMulAccelerator) RunMatMulWithBoundLeft(leftName string, rhs *backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (a *countingMatMulAccelerator) RunMatMulWithBoundLeft(leftName string, rhs *backend.Tensor, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
-func (a *countingMatMulAccelerator) RunMatMulWithBoundRight(lhs *backend.Tensor, rightName string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (a *countingMatMulAccelerator) RunMatMulWithBoundRight(lhs *backend.Tensor, rightName string, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	a.boundRightRuns++
 	if lhs != nil && len(lhs.Shape) > 0 && lhs.Shape[0] > a.maxBoundRightRows {
 		a.maxBoundRightRows = lhs.Shape[0]
 	}
 	return backend.StepDispatchResult{}, nil
 }
-func (a *countingMatMulAccelerator) RunMatMulWithBoundRights(lhs *backend.Tensor, rightNames []string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+func (a *countingMatMulAccelerator) RunMatMulWithBoundRights(lhs *backend.Tensor, rightNames []string, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
 	a.multiBoundRuns++
 	a.boundRightRuns += len(rightNames)
 	if lhs != nil && len(lhs.Shape) > 0 && lhs.Shape[0] > a.maxBoundRightRows {
@@ -215,7 +215,7 @@ func (a *countingMatMulAccelerator) RunMatMulWithBoundRights(lhs *backend.Tensor
 	}
 	return results, nil
 }
-func (a *countingMatMulAccelerator) RunAccumulatedMatMulsWithBoundRights(lhsInputs []*backend.Tensor, rightNames []string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (a *countingMatMulAccelerator) RunAccumulatedMatMulsWithBoundRights(lhsInputs []*backend.Tensor, rightNames []string, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	a.accumulatedRuns++
 	a.boundRightRuns += len(rightNames)
 	if len(rightNames) > a.maxAccumTerms {
@@ -258,7 +258,7 @@ func (a *countingMatMulAccelerator) RunAccumulatedMatMulsWithBoundRights(lhsInpu
 		backend.NewTensorF32(outShape, out),
 	}}, nil
 }
-func (a *countingMatMulAccelerator) RunMatMulsWithSharedLeft(lhs *backend.Tensor, rhs []*backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+func (a *countingMatMulAccelerator) RunMatMulsWithSharedLeft(lhs *backend.Tensor, rhs []*backend.Tensor, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
 	a.sharedLeftRuns++
 	if len(rhs) > a.maxSharedLeftRHS {
 		a.maxSharedLeftRHS = len(rhs)
@@ -306,8 +306,8 @@ type countingActivationAccelerator struct {
 	bound                  map[string]*backend.Tensor
 }
 
-func (a *countingActivationAccelerator) Backend() mantaartifact.BackendKind {
-	return mantaartifact.BackendCUDA
+func (a *countingActivationAccelerator) Backend() eosartifact.BackendKind {
+	return eosartifact.BackendCUDA
 }
 
 func (a *countingActivationAccelerator) BindTensor(name string, tensor *backend.Tensor) error {
@@ -1228,7 +1228,7 @@ func TestEmbeddingTrainerForwardMatMulAcceleratorMatchesHost(t *testing.T) {
 	if trainer.forwardMatMul == nil {
 		t.Skip("no trainer matmul accelerator available")
 	}
-	if trainer.forwardBackend != mantaartifact.BackendCUDA && trainer.forwardBackend != mantaartifact.BackendMetal {
+	if trainer.forwardBackend != eosartifact.BackendCUDA && trainer.forwardBackend != eosartifact.BackendMetal {
 		t.Fatalf("forward backend = %q, want cuda or metal", trainer.forwardBackend)
 	}
 	rhs := backend.NewTensorF32([]int{2, 3}, []float32{
@@ -1288,9 +1288,9 @@ func TestEmbeddingTrainerBoundRightMatMulMatchesHostAndRefreshes(t *testing.T) {
 	if err := trainer.forwardMatMul.BindMatrix(trainer.projParam.Name, rhsA); err != nil {
 		t.Fatalf("bind rhsA: %v", err)
 	}
-	resultA, err := trainer.forwardMatMul.RunMatMulWithBoundRight(lhs, trainer.projParam.Name, mantaartifact.ValueType{
-		Kind: mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{
+	resultA, err := trainer.forwardMatMul.RunMatMulWithBoundRight(lhs, trainer.projParam.Name, eosartifact.ValueType{
+		Kind: eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{
 			DType: "f32",
 		},
 	}, false, false)
@@ -1314,9 +1314,9 @@ func TestEmbeddingTrainerBoundRightMatMulMatchesHostAndRefreshes(t *testing.T) {
 	if err := trainer.forwardMatMul.BindMatrix(trainer.projParam.Name, rhsB); err != nil {
 		t.Fatalf("bind rhsB: %v", err)
 	}
-	resultB, err := trainer.forwardMatMul.RunMatMulWithBoundRight(lhs, trainer.projParam.Name, mantaartifact.ValueType{
-		Kind: mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{
+	resultB, err := trainer.forwardMatMul.RunMatMulWithBoundRight(lhs, trainer.projParam.Name, eosartifact.ValueType{
+		Kind: eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{
 			DType: "f32",
 		},
 	}, false, false)
@@ -1347,9 +1347,9 @@ func TestEmbeddingTrainerBoundLeftMatMulMatchesHostAndRefreshes(t *testing.T) {
 	if err := trainer.forwardMatMul.BindMatrix(trainer.hiddenParam.Name, lhsA); err != nil {
 		t.Fatalf("bind lhsA: %v", err)
 	}
-	resultA, err := trainer.forwardMatMul.RunMatMulWithBoundLeft(trainer.hiddenParam.Name, rhs, mantaartifact.ValueType{
-		Kind: mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{
+	resultA, err := trainer.forwardMatMul.RunMatMulWithBoundLeft(trainer.hiddenParam.Name, rhs, eosartifact.ValueType{
+		Kind: eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{
 			DType: "f32",
 		},
 	}, true, false)
@@ -1370,9 +1370,9 @@ func TestEmbeddingTrainerBoundLeftMatMulMatchesHostAndRefreshes(t *testing.T) {
 	if err := trainer.forwardMatMul.BindMatrix(trainer.hiddenParam.Name, lhsB); err != nil {
 		t.Fatalf("bind lhsB: %v", err)
 	}
-	resultB, err := trainer.forwardMatMul.RunMatMulWithBoundLeft(trainer.hiddenParam.Name, rhs, mantaartifact.ValueType{
-		Kind: mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{
+	resultB, err := trainer.forwardMatMul.RunMatMulWithBoundLeft(trainer.hiddenParam.Name, rhs, eosartifact.ValueType{
+		Kind: eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{
 			DType: "f32",
 		},
 	}, true, false)
@@ -1477,7 +1477,7 @@ func TestTrainerActivationAccelModeFromEnv(t *testing.T) {
 		{
 			name: "full enables all activation backward",
 			env: map[string]string{
-				"MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL": "1",
+				"EOS_TRAIN_ENABLE_ACTIVATION_ACCEL": "1",
 			},
 			full:    true,
 			softmax: true,
@@ -1485,32 +1485,32 @@ func TestTrainerActivationAccelModeFromEnv(t *testing.T) {
 		{
 			name: "softmax only",
 			env: map[string]string{
-				"MANTA_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL": "1",
+				"EOS_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL": "1",
 			},
 			softmax: true,
 		},
 		{
 			name: "global disable wins",
 			env: map[string]string{
-				"MANTA_TRAIN_DISABLE_ACTIVATION_ACCEL":      "1",
-				"MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL":       "1",
-				"MANTA_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL": "1",
+				"EOS_TRAIN_DISABLE_ACTIVATION_ACCEL":      "1",
+				"EOS_TRAIN_ENABLE_ACTIVATION_ACCEL":       "1",
+				"EOS_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL": "1",
 			},
 		},
 		{
 			name: "softmax disable can narrow full mode",
 			env: map[string]string{
-				"MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL":        "1",
-				"MANTA_TRAIN_DISABLE_SOFTMAX_BACKWARD_ACCEL": "1",
+				"EOS_TRAIN_ENABLE_ACTIVATION_ACCEL":        "1",
+				"EOS_TRAIN_DISABLE_SOFTMAX_BACKWARD_ACCEL": "1",
 			},
 			full: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("MANTA_TRAIN_DISABLE_ACTIVATION_ACCEL", "")
-			t.Setenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", "")
-			t.Setenv("MANTA_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL", "")
-			t.Setenv("MANTA_TRAIN_DISABLE_SOFTMAX_BACKWARD_ACCEL", "")
+			t.Setenv("EOS_TRAIN_DISABLE_ACTIVATION_ACCEL", "")
+			t.Setenv("EOS_TRAIN_ENABLE_ACTIVATION_ACCEL", "")
+			t.Setenv("EOS_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL", "")
+			t.Setenv("EOS_TRAIN_DISABLE_SOFTMAX_BACKWARD_ACCEL", "")
 			for name, value := range tc.env {
 				t.Setenv(name, value)
 			}
@@ -1526,11 +1526,11 @@ func TestTrainerActivationAccelModeFromEnv(t *testing.T) {
 }
 
 func TestFastGELUApproximationIsOptIn(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_ENABLE_FAST_GELU", "")
+	t.Setenv("EOS_TRAIN_ENABLE_FAST_GELU", "")
 	if fastGELUEnabled() {
 		t.Fatal("fast GELU enabled by default")
 	}
-	t.Setenv("MANTA_TRAIN_ENABLE_FAST_GELU", "1")
+	t.Setenv("EOS_TRAIN_ENABLE_FAST_GELU", "1")
 	if !fastGELUEnabled() {
 		t.Fatal("fast GELU env did not enable approximation")
 	}
@@ -1547,7 +1547,7 @@ func TestFastGELUApproximationIsOptIn(t *testing.T) {
 }
 
 func TestEmbeddingTrainerGELUBackwardAcceleratorMatchesHost(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
+	t.Setenv("EOS_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
 	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
 	if trainer.activationAccel == nil {
 		t.Skip("no trainer activation accelerator available")
@@ -1572,7 +1572,7 @@ func TestEmbeddingTrainerGELUBackwardAcceleratorMatchesHost(t *testing.T) {
 }
 
 func TestEmbeddingTrainerActivationAccelShapeLimitSkipsLargeUnboundCalls(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_ACTIVATION_ACCEL_MAX_ELEMENTS", "4")
+	t.Setenv("EOS_TRAIN_ACTIVATION_ACCEL_MAX_ELEMENTS", "4")
 	activation := &countingActivationAccelerator{}
 	trainer := &EmbeddingTrainer{
 		activationAccel:      activation,
@@ -1594,7 +1594,7 @@ func TestEmbeddingTrainerActivationAccelShapeLimitSkipsLargeUnboundCalls(t *test
 		t.Fatalf("gelu backward calls = %d, want 0", activation.geluBackwardCalls)
 	}
 
-	t.Setenv("MANTA_TRAIN_ACTIVATION_ACCEL_MAX_ELEMENTS", "0")
+	t.Setenv("EOS_TRAIN_ACTIVATION_ACCEL_MAX_ELEMENTS", "0")
 	if _, ok := trainer.tryBatchedGELUBackwardMul(grad, pre, 1, 3); !ok {
 		t.Fatal("expected unlimited activation shape limit to allow accelerator")
 	}
@@ -1604,7 +1604,7 @@ func TestEmbeddingTrainerActivationAccelShapeLimitSkipsLargeUnboundCalls(t *test
 }
 
 func TestEmbeddingTrainerActivationAccelShapeLimitAllowsBoundInputs(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_ACTIVATION_ACCEL_MAX_ELEMENTS", "4")
+	t.Setenv("EOS_TRAIN_ACTIVATION_ACCEL_MAX_ELEMENTS", "4")
 	activation := &countingActivationAccelerator{}
 	trainer := &EmbeddingTrainer{
 		activationAccel:     activation,
@@ -1624,7 +1624,7 @@ func TestEmbeddingTrainerActivationAccelShapeLimitAllowsBoundInputs(t *testing.T
 }
 
 func TestEmbeddingTrainerSoftmaxBackwardAcceleratorMatchesHost(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL", "1")
+	t.Setenv("EOS_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL", "1")
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	if trainer.activationAccel == nil {
 		t.Skip("no trainer activation accelerator available")
@@ -1658,7 +1658,7 @@ func TestEmbeddingTrainerSoftmaxBackwardAcceleratorMatchesHost(t *testing.T) {
 }
 
 func TestEmbeddingTrainerLayerNormBackwardAcceleratorMatchesHost(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
+	t.Setenv("EOS_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
 	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.05)
 	if trainer.activationAccel == nil {
 		t.Skip("no trainer activation accelerator available")
@@ -1692,7 +1692,7 @@ func TestEmbeddingTrainerLayerNormBackwardAcceleratorMatchesHost(t *testing.T) {
 }
 
 func TestEmbeddingTrainerBatchedGELUBackwardAcceleratorMatchesHost(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
+	t.Setenv("EOS_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
 	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
 	if trainer.activationAccel == nil {
 		t.Skip("no trainer activation accelerator available")
@@ -1734,7 +1734,7 @@ func TestEmbeddingTrainerBatchedGELUBackwardAcceleratorMatchesHost(t *testing.T)
 }
 
 func TestEmbeddingTrainerBatchedSoftmaxBackwardAcceleratorMatchesHost(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
+	t.Setenv("EOS_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	if trainer.activationAccel == nil {
 		t.Skip("no trainer activation accelerator available")
@@ -1776,7 +1776,7 @@ func TestEmbeddingTrainerBatchedSoftmaxBackwardAcceleratorMatchesHost(t *testing
 }
 
 func TestEmbeddingTrainerBatchedLayerNormBackwardAcceleratorMatchesHost(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
+	t.Setenv("EOS_TRAIN_ENABLE_ACTIVATION_ACCEL", "1")
 	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.05)
 	if trainer.activationAccel == nil {
 		t.Skip("no trainer activation accelerator available")
@@ -1889,7 +1889,7 @@ func TestEmbeddingTrainerBatchedForwardSkipsSingletonActivationBindings(t *testi
 }
 
 func TestEmbeddingTrainerBatchedForwardKeepsActivationBindingsWhenBatchedBackwardDisabled(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_DISABLE_BATCHED_BACKWARD", "1")
+	t.Setenv("EOS_TRAIN_DISABLE_BATCHED_BACKWARD", "1")
 	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.05)
 	if trainer.forwardMatMul != nil {
 		trainer.forwardMatMul.Close()
@@ -1969,7 +1969,7 @@ func TestEmbeddingTrainerSingleForwardKeepsActivationBindings(t *testing.T) {
 }
 
 func TestEmbeddingTrainerAttentionActivationsBindAndRelease(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS", "1")
+	t.Setenv("EOS_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS", "1")
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	if trainer.forwardMatMul == nil {
 		t.Skip("no trainer matmul accelerator available")
@@ -2000,7 +2000,7 @@ func TestEmbeddingTrainerAttentionActivationsBindAndRelease(t *testing.T) {
 	result, err := trainer.forwardMatMul.RunMatMulWithBoundRight(
 		backend.NewTensorF32([]int{2, 2}, layer.attnQ),
 		layer.attnKBinding,
-		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f32"}},
+		eosartifact.ValueType{Kind: eosartifact.ValueTensor, Tensor: &eosartifact.TensorType{DType: "f32"}},
 		false,
 		true,
 	)
@@ -2013,7 +2013,7 @@ func TestEmbeddingTrainerAttentionActivationsBindAndRelease(t *testing.T) {
 	leftResult, err := trainer.forwardMatMul.RunMatMulWithBoundLeft(
 		layer.inputBinding,
 		backend.NewTensorF32([]int{2, 2}, layer.attnQ),
-		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f32"}},
+		eosartifact.ValueType{Kind: eosartifact.ValueTensor, Tensor: &eosartifact.TensorType{DType: "f32"}},
 		true,
 		false,
 	)
@@ -2030,7 +2030,7 @@ func TestEmbeddingTrainerAttentionActivationsBindAndRelease(t *testing.T) {
 	if _, err := trainer.forwardMatMul.RunMatMulWithBoundRight(
 		backend.NewTensorF32([]int{2, 2}, layer.attnQ),
 		"seq_missing_k",
-		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f32"}},
+		eosartifact.ValueType{Kind: eosartifact.ValueTensor, Tensor: &eosartifact.TensorType{DType: "f32"}},
 		false,
 		true,
 	); err == nil {
@@ -2039,7 +2039,7 @@ func TestEmbeddingTrainerAttentionActivationsBindAndRelease(t *testing.T) {
 	if _, err := trainer.forwardMatMul.RunMatMulWithBoundLeft(
 		"seq_missing_input",
 		backend.NewTensorF32([]int{2, 2}, layer.attnQ),
-		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f32"}},
+		eosartifact.ValueType{Kind: eosartifact.ValueTensor, Tensor: &eosartifact.TensorType{DType: "f32"}},
 		true,
 		false,
 	); err == nil {
@@ -2048,7 +2048,7 @@ func TestEmbeddingTrainerAttentionActivationsBindAndRelease(t *testing.T) {
 }
 
 func TestEmbeddingTrainerFFNActivationsBindAndRelease(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS", "1")
+	t.Setenv("EOS_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS", "1")
 	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
 	if trainer.forwardMatMul == nil {
 		t.Skip("no trainer matmul accelerator available")
@@ -2079,7 +2079,7 @@ func TestEmbeddingTrainerFFNActivationsBindAndRelease(t *testing.T) {
 			1, 0,
 			0, 1,
 		}),
-		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f32"}},
+		eosartifact.ValueType{Kind: eosartifact.ValueTensor, Tensor: &eosartifact.TensorType{DType: "f32"}},
 		true,
 		false,
 	)
@@ -2192,7 +2192,7 @@ func TestEmbeddingTrainerEvaluatePairsSkipsSequenceBindingChurn(t *testing.T) {
 }
 
 func TestEmbeddingTrainerEvaluatePairsUsesBatchedForwardChunks(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_PAIR_EVAL_BATCH_SIZE", "2")
+	t.Setenv("EOS_TRAIN_PAIR_EVAL_BATCH_SIZE", "2")
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	if trainer.forwardMatMul != nil {
 		trainer.forwardMatMul.Close()
@@ -2227,14 +2227,14 @@ func TestEmbeddingTrainerEvaluatePairsUsesBatchedForwardChunks(t *testing.T) {
 }
 
 func TestPairwiseEvalBatchSizeDefaultAndEnv(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_PAIR_EVAL_BATCH_SIZE", "")
+	t.Setenv("EOS_TRAIN_PAIR_EVAL_BATCH_SIZE", "")
 	if got := pairwiseEvalBatchSize(1024); got != 512 {
 		t.Fatalf("default pairwise eval batch size = %d, want 512", got)
 	}
 	if got := pairwiseEvalBatchSize(128); got != 128 {
 		t.Fatalf("capped pairwise eval batch size = %d, want total size", got)
 	}
-	t.Setenv("MANTA_TRAIN_PAIR_EVAL_BATCH_SIZE", "64")
+	t.Setenv("EOS_TRAIN_PAIR_EVAL_BATCH_SIZE", "64")
 	if got := pairwiseEvalBatchSize(1024); got != 64 {
 		t.Fatalf("env pairwise eval batch size = %d, want 64", got)
 	}
@@ -2306,7 +2306,7 @@ func TestEmbeddingTrainerTrainStepUsesBatchedPairwiseForward(t *testing.T) {
 }
 
 func TestEmbeddingTrainerEvalBatchUsesPairwiseEvalGate(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_DISABLE_BATCHED_PAIR_TRAIN", "1")
+	t.Setenv("EOS_TRAIN_DISABLE_BATCHED_PAIR_TRAIN", "1")
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	if trainer.forwardMatMul != nil {
 		trainer.forwardMatMul.Close()
@@ -2407,7 +2407,7 @@ func TestEmbeddingTrainerBatchedForwardGroupsVariableSequenceLengths(t *testing.
 }
 
 func TestEmbeddingTrainerQKVMultiBoundCanBeDisabled(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_DISABLE_QKV_MULTI_BOUND", "1")
+	t.Setenv("EOS_TRAIN_DISABLE_QKV_MULTI_BOUND", "1")
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	if trainer.forwardMatMul != nil {
 		trainer.forwardMatMul.Close()
@@ -2523,7 +2523,7 @@ func TestEmbeddingTrainerConcatenatedSharedLeftQKVGradMatchesSeparateMatMuls(t *
 }
 
 func TestEmbeddingTrainerConcatenatedSharedLeftQKVGradCanBeDisabled(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_DISABLE_CONCAT_SHARED_LEFT_MATMUL", "1")
+	t.Setenv("EOS_TRAIN_DISABLE_CONCAT_SHARED_LEFT_MATMUL", "1")
 	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.005)
 	if trainer.forwardMatMul != nil {
 		trainer.forwardMatMul.Close()
@@ -2612,7 +2612,7 @@ func TestEmbeddingTrainerCombinedAttentionVKGradMatchesSeparateMatMuls(t *testin
 }
 
 func TestEmbeddingTrainerCombinedAttentionVKGradCanBeDisabled(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_DISABLE_COMBINED_ATTENTION_VK_GRAD", "1")
+	t.Setenv("EOS_TRAIN_DISABLE_COMBINED_ATTENTION_VK_GRAD", "1")
 	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.005)
 	if trainer.forwardMatMul != nil {
 		trainer.forwardMatMul.Close()
@@ -2741,7 +2741,7 @@ func TestEmbeddingTrainerAccumulatedAttentionInputGradMatchesSeparateMatMuls(t *
 }
 
 func TestEmbeddingTrainerAccumulatedAttentionInputGradCanBeDisabled(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_DISABLE_ACCUMULATED_ATTENTION_INPUT_GRAD", "1")
+	t.Setenv("EOS_TRAIN_DISABLE_ACCUMULATED_ATTENTION_INPUT_GRAD", "1")
 	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.005)
 	if trainer.forwardMatMul != nil {
 		trainer.forwardMatMul.Close()
@@ -2777,7 +2777,7 @@ func TestEmbeddingTrainerAccumulatedAttentionInputGradCanBeDisabled(t *testing.T
 }
 
 func TestEmbeddingTrainerSharedLeftQKVGradMatMulCanBeDisabled(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_DISABLE_SHARED_LEFT_MATMUL", "1")
+	t.Setenv("EOS_TRAIN_DISABLE_SHARED_LEFT_MATMUL", "1")
 	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.005)
 	if trainer.forwardMatMul != nil {
 		trainer.forwardMatMul.Close()
@@ -2796,7 +2796,7 @@ func TestEmbeddingTrainerSharedLeftQKVGradMatMulCanBeDisabled(t *testing.T) {
 }
 
 func TestEmbeddingTrainerBatchedForwardCanBeDisabled(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_DISABLE_BATCHED_FORWARD", "1")
+	t.Setenv("EOS_TRAIN_DISABLE_BATCHED_FORWARD", "1")
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	if trainer.forwardMatMul != nil {
 		trainer.forwardMatMul.Close()
@@ -2826,7 +2826,7 @@ func TestEmbeddingTrainerBatchedForwardCanBeDisabled(t *testing.T) {
 }
 
 func TestEmbeddingTrainerSequenceMatMulBindingsCanBeEnabled(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS", "1")
+	t.Setenv("EOS_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS", "1")
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	if trainer.forwardMatMul != nil {
 		trainer.forwardMatMul.Close()

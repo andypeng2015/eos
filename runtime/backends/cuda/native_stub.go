@@ -3,8 +3,8 @@
 package cuda
 
 import (
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 type deviceRuntime struct{}
@@ -19,7 +19,7 @@ func (rt *deviceRuntime) matMulStatsSnapshot() backend.MatMulAcceleratorStats {
 	return backend.MatMulAcceleratorStats{}
 }
 
-func (rt *deviceRuntime) attachDeviceExecution(prog *backend.NativeKernelProgram, kernel mantaartifact.Kernel) error {
+func (rt *deviceRuntime) attachDeviceExecution(prog *backend.NativeKernelProgram, kernel eosartifact.Kernel) error {
 	if prog.LaunchConfig == nil {
 		prog.LaunchConfig = map[string]any{}
 	}
@@ -28,59 +28,59 @@ func (rt *deviceRuntime) attachDeviceExecution(prog *backend.NativeKernelProgram
 	return nil
 }
 
-func (rt *deviceRuntime) runMatMul(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMul(inputs []*backend.Tensor, outputType eosartifact.ValueType) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
 
-func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
 
-func (rt *deviceRuntime) runGDNStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, inverse bool) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runGDNStep(inputs []*backend.Tensor, outputType eosartifact.ValueType, inverse bool) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
 
-func (rt *deviceRuntime) runConv2DStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaConv2DConfig) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runConv2DStep(inputs []*backend.Tensor, outputType eosartifact.ValueType, cfg cudaConv2DConfig) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
 
-func (rt *deviceRuntime) runConv2DTransposeStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaConv2DTransposeConfig) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runConv2DTransposeStep(inputs []*backend.Tensor, outputType eosartifact.ValueType, cfg cudaConv2DTransposeConfig) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
 
-func (rt *deviceRuntime) runTurboQEncodeStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaTurboQConfig) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runTurboQEncodeStep(inputs []*backend.Tensor, outputType eosartifact.ValueType, cfg cudaTurboQConfig) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
 
-func (rt *deviceRuntime) runTurboQDecodeStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaTurboQConfig) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runTurboQDecodeStep(inputs []*backend.Tensor, outputType eosartifact.ValueType, cfg cudaTurboQConfig) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
 
-func (rt *deviceRuntime) runSparseAttentionStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaSparseAttentionConfig) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runSparseAttentionStep(inputs []*backend.Tensor, outputType eosartifact.ValueType, cfg cudaSparseAttentionConfig) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
 
-func (rt *deviceRuntime) runTurboSparseAttentionStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaTurboSparseAttentionConfig) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runTurboSparseAttentionStep(inputs []*backend.Tensor, outputType eosartifact.ValueType, cfg cudaTurboSparseAttentionConfig) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
 
-func (rt *deviceRuntime) runMSELossStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMSELossStep(inputs []*backend.Tensor, outputType eosartifact.ValueType) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
 
-func (rt *deviceRuntime) runMSSSIMLossStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMSSSIMLossStep(inputs []*backend.Tensor, outputType eosartifact.ValueType) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
 
-func (rt *deviceRuntime) runScalarAddStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runScalarAddStep(inputs []*backend.Tensor, outputType eosartifact.ValueType) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
 
-func (rt *deviceRuntime) runRDLossStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, lambda float32) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runRDLossStep(inputs []*backend.Tensor, outputType eosartifact.ValueType, lambda float32) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
 
-func (rt *deviceRuntime) runCrossEntropyStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, plan cudaCrossEntropyPlan) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runCrossEntropyStep(inputs []*backend.Tensor, outputType eosartifact.ValueType, plan cudaCrossEntropyPlan) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
 
@@ -92,22 +92,22 @@ func (rt *deviceRuntime) unbindMatMulRight(name string) error {
 	return nil
 }
 
-func (rt *deviceRuntime) runMatMulWithBoundRight(lhs *backend.Tensor, rightName string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMulWithBoundRight(lhs *backend.Tensor, rightName string, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
 
-func (rt *deviceRuntime) runMatMulWithBoundRights(lhs *backend.Tensor, rightNames []string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMulWithBoundRights(lhs *backend.Tensor, rightNames []string, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
 	return nil, nil
 }
 
-func (rt *deviceRuntime) runMatMulsWithSharedLeft(lhs *backend.Tensor, rhs []*backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMulsWithSharedLeft(lhs *backend.Tensor, rhs []*backend.Tensor, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
 	return nil, nil
 }
 
-func (rt *deviceRuntime) runAccumulatedMatMulsWithBoundRights(lhs []*backend.Tensor, rightNames []string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runAccumulatedMatMulsWithBoundRights(lhs []*backend.Tensor, rightNames []string, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }
 
-func (rt *deviceRuntime) runMatMulWithBoundLeft(leftName string, rhs *backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMulWithBoundLeft(leftName string, rhs *backend.Tensor, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	return backend.StepDispatchResult{}, nil
 }

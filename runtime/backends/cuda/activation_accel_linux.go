@@ -12,8 +12,8 @@ import (
 	"fmt"
 	"time"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 const geluBackwardMulKernelSource = `
@@ -226,7 +226,7 @@ type residentActivationTensor struct {
 }
 
 func init() {
-	backend.RegisterActivationAccelerator(mantaartifact.BackendCUDA, NewActivationAccelerator)
+	backend.RegisterActivationAccelerator(eosartifact.BackendCUDA, NewActivationAccelerator)
 }
 
 func NewActivationAccelerator() (backend.ActivationAccelerator, error) {
@@ -258,8 +258,8 @@ func NewActivationAccelerator() (backend.ActivationAccelerator, error) {
 	return &activationAccelerator{device: device, geluKernel: kernel, softmaxKernel: softmaxKernel, layerNormKernel: layerNormKernel, bound: map[string]residentActivationTensor{}}, nil
 }
 
-func (a *activationAccelerator) Backend() mantaartifact.BackendKind {
-	return mantaartifact.BackendCUDA
+func (a *activationAccelerator) Backend() eosartifact.BackendKind {
+	return eosartifact.BackendCUDA
 }
 
 func (a *activationAccelerator) Stats() backend.ActivationAcceleratorStats {

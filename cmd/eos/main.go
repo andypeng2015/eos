@@ -16,16 +16,16 @@ import (
 	"strings"
 	"time"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/compiler"
-	"m31labs.dev/manta/models"
-	mantaruntime "m31labs.dev/manta/runtime"
-	"m31labs.dev/manta/runtime/backend"
-	"m31labs.dev/manta/runtime/backends/cuda"
-	"m31labs.dev/manta/runtime/backends/directml"
-	"m31labs.dev/manta/runtime/backends/metal"
-	"m31labs.dev/manta/runtime/backends/vulkan"
-	"m31labs.dev/manta/runtime/backends/webgpu"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/compiler"
+	"m31labs.dev/eos/models"
+	eosruntime "m31labs.dev/eos/runtime"
+	"m31labs.dev/eos/runtime/backend"
+	"m31labs.dev/eos/runtime/backends/cuda"
+	"m31labs.dev/eos/runtime/backends/directml"
+	"m31labs.dev/eos/runtime/backends/metal"
+	"m31labs.dev/eos/runtime/backends/vulkan"
+	"m31labs.dev/eos/runtime/backends/webgpu"
 )
 
 func main() {
@@ -42,8 +42,8 @@ func main() {
 }
 
 func startOptionalProfiles() (func(), error) {
-	cpuPath := mantaEnv("MANTA_CPU_PROFILE")
-	memPath := mantaEnv("MANTA_MEM_PROFILE")
+	cpuPath := eosEnv("EOS_CPU_PROFILE")
+	memPath := eosEnv("EOS_MEM_PROFILE")
 	var cpuFile *os.File
 	if cpuPath != "" {
 		file, err := os.Create(cpuPath)
@@ -78,7 +78,7 @@ func startOptionalProfiles() (func(), error) {
 	}, nil
 }
 
-func mantaEnv(name string) string {
+func eosEnv(name string) string {
 	if value, ok := os.LookupEnv(name); ok {
 		return value
 	}
@@ -93,7 +93,7 @@ func run(args []string) error {
 
 	switch args[0] {
 	case "version":
-		fmt.Println("manta dev")
+		fmt.Println("eos dev")
 		return nil
 	case "compile":
 		return runCompile(args[1:])
@@ -160,7 +160,7 @@ func run(args []string) error {
 
 func runCompile(args []string) error {
 	if len(args) == 0 || args[0] == "" {
-		return fmt.Errorf("usage: manta compile <source.manta> [output.mll]")
+		return fmt.Errorf("usage: eos compile <source.eos> [output.mll]")
 	}
 	srcPath := args[0]
 	outPath := defaultArtifactPath(srcPath)
@@ -177,7 +177,7 @@ func runCompile(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := mantaartifact.WriteFile(outPath, bundle.Artifact); err != nil {
+	if err := eosartifact.WriteFile(outPath, bundle.Artifact); err != nil {
 		return err
 	}
 
@@ -228,7 +228,7 @@ func runDemo(args []string) error {
 		return err
 	}
 
-	rt := mantaruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+	rt := eosruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
 	prog, err := rt.Load(context.Background(), bundle.Artifact, stubLoadOptions(bundle.Artifact)...)
 	if err != nil {
 		return err
@@ -260,8 +260,8 @@ func runDemo(args []string) error {
 	return nil
 }
 
-func runDemoModule(mod *mantaartifact.Module) error {
-	rt := mantaruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+func runDemoModule(mod *eosartifact.Module) error {
+	rt := eosruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
 	prog, err := rt.Load(context.Background(), mod, stubLoadOptions(mod)...)
 	if err != nil {
 		return err
@@ -292,10 +292,10 @@ func runDemoModule(mod *mantaartifact.Module) error {
 
 func runArtifact(args []string) error {
 	if len(args) == 0 || args[0] == "" {
-		return fmt.Errorf("usage: manta run <artifact.mll> [entry]")
+		return fmt.Errorf("usage: eos run <artifact.mll> [entry]")
 	}
 	path := args[0]
-	mod, err := mantaartifact.ReadFile(path)
+	mod, err := eosartifact.ReadFile(path)
 	if err != nil {
 		return err
 	}
@@ -307,7 +307,7 @@ func runArtifact(args []string) error {
 	if err != nil {
 		return err
 	}
-	rt := mantaruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+	rt := eosruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
 	prog, err := rt.Load(context.Background(), mod, stubLoadOptions(mod)...)
 	if err != nil {
 		return err
@@ -330,11 +330,11 @@ func runArtifact(args []string) error {
 
 func runEmbedText(args []string) error {
 	if len(args) < 2 || args[0] == "" {
-		return fmt.Errorf("usage: manta embed-text <artifact.mll> <text...>")
+		return fmt.Errorf("usage: eos embed-text <artifact.mll> <text...>")
 	}
 	path := args[0]
 	text := strings.Join(args[1:], " ")
-	rt := mantaruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+	rt := eosruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
 	model, err := rt.LoadEmbeddingPackage(context.Background(), path)
 	if err != nil {
 		return err
@@ -372,11 +372,11 @@ func runEvalRetrieval(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: manta eval-retrieval [flags] <artifact.mll> <beir-dataset-dir>")
+		return fmt.Errorf("usage: eos eval-retrieval [flags] <artifact.mll> <beir-dataset-dir>")
 	}
 	artifactPath := fs.Arg(0)
 	datasetDir := fs.Arg(1)
-	corpusPath, queriesPath, defaultQrelsPath := mantaruntime.BEIRRetrievalPaths(datasetDir, *split)
+	corpusPath, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
 	if *qrelsPath == "" {
 		*qrelsPath = defaultQrelsPath
 	}
@@ -384,12 +384,12 @@ func runEvalRetrieval(args []string) error {
 		*datasetName = filepath.Base(datasetDir)
 	}
 
-	rt := mantaruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+	rt := eosruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
 	model, err := rt.LoadEmbeddingPackage(context.Background(), artifactPath)
 	if err != nil {
 		return err
 	}
-	metrics, err := mantaruntime.EvaluateEmbeddingRetrieval(context.Background(), model, mantaruntime.RetrievalEvalConfig{
+	metrics, err := eosruntime.EvaluateEmbeddingRetrieval(context.Background(), model, eosruntime.RetrievalEvalConfig{
 		DatasetName:  *datasetName,
 		ArtifactPath: artifactPath,
 		CorpusPath:   corpusPath,
@@ -439,17 +439,17 @@ func runEvalRetrievalBM25(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 || fs.Arg(0) == "" {
-		return fmt.Errorf("usage: manta eval-retrieval-bm25 [flags] <beir-dataset-dir>")
+		return fmt.Errorf("usage: eos eval-retrieval-bm25 [flags] <beir-dataset-dir>")
 	}
 	datasetDir := fs.Arg(0)
-	corpusPath, queriesPath, defaultQrelsPath := mantaruntime.BEIRRetrievalPaths(datasetDir, *split)
+	corpusPath, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
 	if *qrelsPath == "" {
 		*qrelsPath = defaultQrelsPath
 	}
 	if *datasetName == "" {
 		*datasetName = filepath.Base(datasetDir)
 	}
-	metrics, err := mantaruntime.EvaluateBM25Retrieval(context.Background(), mantaruntime.RetrievalEvalConfig{
+	metrics, err := eosruntime.EvaluateBM25Retrieval(context.Background(), eosruntime.RetrievalEvalConfig{
 		DatasetName: *datasetName,
 		CorpusPath:  corpusPath,
 		QueriesPath: queriesPath,
@@ -498,7 +498,7 @@ func runMineRetrievalHardNegatives(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: manta mine-retrieval-hard-negatives [flags] <beir-dataset-dir> <output.jsonl>")
+		return fmt.Errorf("usage: eos mine-retrieval-hard-negatives [flags] <beir-dataset-dir> <output.jsonl>")
 	}
 	if *negatives <= 0 {
 		return fmt.Errorf("negatives must be positive")
@@ -511,14 +511,14 @@ func runMineRetrievalHardNegatives(args []string) error {
 	}
 	datasetDir := fs.Arg(0)
 	outputPath := fs.Arg(1)
-	corpusPath, queriesPath, defaultQrelsPath := mantaruntime.BEIRRetrievalPaths(datasetDir, *split)
+	corpusPath, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
 	if *qrelsPath == "" {
 		*qrelsPath = defaultQrelsPath
 	}
 	if *datasetName == "" {
 		*datasetName = filepath.Base(datasetDir)
 	}
-	examples, summary, err := mantaruntime.MineBM25TextHardNegatives(context.Background(), mantaruntime.RetrievalHardNegativeMiningConfig{
+	examples, summary, err := eosruntime.MineBM25TextHardNegatives(context.Background(), eosruntime.RetrievalHardNegativeMiningConfig{
 		DatasetName:          *datasetName,
 		CorpusPath:           corpusPath,
 		QueriesPath:          queriesPath,
@@ -532,7 +532,7 @@ func runMineRetrievalHardNegatives(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(outputPath, examples); err != nil {
+	if err := eosruntime.WriteEmbeddingTextHardNegativeExamplesFile(outputPath, examples); err != nil {
 		return err
 	}
 	fmt.Printf("mined retrieval hard negatives: dataset=%s examples=%d positives=%d negatives=%d queries=%d\n",
@@ -559,7 +559,7 @@ func runMineRetrievalModelHardNegatives(args []string) error {
 		return err
 	}
 	if fs.NArg() < 3 || fs.Arg(0) == "" || fs.Arg(1) == "" || fs.Arg(2) == "" {
-		return fmt.Errorf("usage: manta mine-retrieval-model-hard-negatives [flags] <artifact.mll> <beir-dataset-dir> <output.jsonl>")
+		return fmt.Errorf("usage: eos mine-retrieval-model-hard-negatives [flags] <artifact.mll> <beir-dataset-dir> <output.jsonl>")
 	}
 	if *negatives <= 0 {
 		return fmt.Errorf("negatives must be positive")
@@ -576,19 +576,19 @@ func runMineRetrievalModelHardNegatives(args []string) error {
 	artifactPath := fs.Arg(0)
 	datasetDir := fs.Arg(1)
 	outputPath := fs.Arg(2)
-	corpusPath, queriesPath, defaultQrelsPath := mantaruntime.BEIRRetrievalPaths(datasetDir, *split)
+	corpusPath, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
 	if *qrelsPath == "" {
 		*qrelsPath = defaultQrelsPath
 	}
 	if *datasetName == "" {
 		*datasetName = filepath.Base(datasetDir)
 	}
-	rt := mantaruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+	rt := eosruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
 	model, err := rt.LoadEmbeddingPackage(context.Background(), artifactPath)
 	if err != nil {
 		return err
 	}
-	examples, summary, err := mantaruntime.MineModelTextHardNegatives(context.Background(), model, mantaruntime.RetrievalHardNegativeMiningConfig{
+	examples, summary, err := eosruntime.MineModelTextHardNegatives(context.Background(), model, eosruntime.RetrievalHardNegativeMiningConfig{
 		DatasetName:          *datasetName,
 		CorpusPath:           corpusPath,
 		QueriesPath:          queriesPath,
@@ -603,7 +603,7 @@ func runMineRetrievalModelHardNegatives(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(outputPath, examples); err != nil {
+	if err := eosruntime.WriteEmbeddingTextHardNegativeExamplesFile(outputPath, examples); err != nil {
 		return err
 	}
 	fmt.Printf("mined model retrieval hard negatives: dataset=%s backend=%s examples=%d positives=%d negatives=%d queries=%d\n",
@@ -804,7 +804,7 @@ func runExportTeacherScoreRequests(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: manta export-teacher-score-requests [flags] <hard-negatives.jsonl> <requests.jsonl>")
+		return fmt.Errorf("usage: eos export-teacher-score-requests [flags] <hard-negatives.jsonl> <requests.jsonl>")
 	}
 	if *maxExamples < 0 {
 		return fmt.Errorf("max-examples must be non-negative")
@@ -814,7 +814,7 @@ func runExportTeacherScoreRequests(args []string) error {
 	if *manifestPath == "" {
 		*manifestPath = outputPath + ".teacher-score-requests.manifest.json"
 	}
-	examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(inputPath)
+	examples, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(inputPath)
 	if err != nil {
 		return err
 	}
@@ -892,7 +892,7 @@ func runImportTeacherScores(args []string) error {
 		return err
 	}
 	if fs.NArg() < 3 || fs.Arg(0) == "" || fs.Arg(1) == "" || fs.Arg(2) == "" {
-		return fmt.Errorf("usage: manta import-teacher-scores [flags] <hard-negatives.jsonl> <scores.jsonl> <output.jsonl>")
+		return fmt.Errorf("usage: eos import-teacher-scores [flags] <hard-negatives.jsonl> <scores.jsonl> <output.jsonl>")
 	}
 	inputPath := fs.Arg(0)
 	scoresPath := fs.Arg(1)
@@ -900,7 +900,7 @@ func runImportTeacherScores(args []string) error {
 	if *manifestPath == "" {
 		*manifestPath = outputPath + ".teacher-scores.manifest.json"
 	}
-	examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(inputPath)
+	examples, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(inputPath)
 	if err != nil {
 		return err
 	}
@@ -939,7 +939,7 @@ func runImportTeacherScores(args []string) error {
 		example.TeacherScores = scores
 		summary.Updated++
 	}
-	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(outputPath, examples); err != nil {
+	if err := eosruntime.WriteEmbeddingTextHardNegativeExamplesFile(outputPath, examples); err != nil {
 		return err
 	}
 	if err := writeTeacherScoreImportManifest(*manifestPath, summary); err != nil {
@@ -968,7 +968,7 @@ func runScoreTeacherHardNegatives(args []string) error {
 		return err
 	}
 	if fs.NArg() < 3 || fs.Arg(0) == "" || fs.Arg(1) == "" || fs.Arg(2) == "" {
-		return fmt.Errorf("usage: manta score-teacher-hard-negatives [flags] <teacher.mll> <hard-negatives.jsonl> <output.jsonl>")
+		return fmt.Errorf("usage: eos score-teacher-hard-negatives [flags] <teacher.mll> <hard-negatives.jsonl> <output.jsonl>")
 	}
 	if *batchSize <= 0 {
 		return fmt.Errorf("batch-size must be positive")
@@ -979,11 +979,11 @@ func runScoreTeacherHardNegatives(args []string) error {
 	if *manifestPath == "" {
 		*manifestPath = outputPath + ".teacher-scores.manifest.json"
 	}
-	examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(inputPath)
+	examples, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(inputPath)
 	if err != nil {
 		return err
 	}
-	rt := mantaruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+	rt := eosruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
 	model, err := rt.LoadEmbeddingPackage(context.Background(), artifactPath)
 	if err != nil {
 		return err
@@ -1019,7 +1019,7 @@ func runScoreTeacherHardNegatives(args []string) error {
 		example.TeacherScores = scores
 		summary.Updated++
 	}
-	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(outputPath, examples); err != nil {
+	if err := eosruntime.WriteEmbeddingTextHardNegativeExamplesFile(outputPath, examples); err != nil {
 		return err
 	}
 	if err := writeTeacherHardNegativeScoreManifest(*manifestPath, summary); err != nil {
@@ -1042,7 +1042,7 @@ func runAuditTeacherScores(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 || fs.Arg(0) == "" {
-		return fmt.Errorf("usage: manta audit-teacher-scores [flags] <hard-negatives.jsonl> [summary.json]")
+		return fmt.Errorf("usage: eos audit-teacher-scores [flags] <hard-negatives.jsonl> [summary.json]")
 	}
 	if *temperature <= 0 {
 		return fmt.Errorf("temperature must be positive")
@@ -1070,7 +1070,7 @@ func runAuditTeacherScores(args []string) error {
 	}
 	switch normalizedMode {
 	case "text":
-		examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(inputPath)
+		examples, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(inputPath)
 		if err != nil {
 			return err
 		}
@@ -1079,7 +1079,7 @@ func runAuditTeacherScores(args []string) error {
 		}
 	case "tokenized", "tokens":
 		normalizedMode = "tokenized"
-		examples, err := mantaruntime.ReadEmbeddingHardNegativeExamplesFile(inputPath)
+		examples, err := eosruntime.ReadEmbeddingHardNegativeExamplesFile(inputPath)
 		if err != nil {
 			return err
 		}
@@ -1134,7 +1134,7 @@ func runPlanSparseAttention(args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: manta plan-sparse-attention [flags]")
+		return fmt.Errorf("usage: eos plan-sparse-attention [flags]")
 	}
 	keyLens, err := parsePositiveIntCSV(*keyLensCSV, "key-lens")
 	if err != nil {
@@ -1380,7 +1380,7 @@ func passFail(pass bool) string {
 	return "fail"
 }
 
-func scoreTeacherHardNegativeExample(ctx context.Context, model *mantaruntime.EmbeddingModel, example mantaruntime.EmbeddingTextHardNegativeExample, batchSize int) ([]float32, error) {
+func scoreTeacherHardNegativeExample(ctx context.Context, model *eosruntime.EmbeddingModel, example eosruntime.EmbeddingTextHardNegativeExample, batchSize int) ([]float32, error) {
 	queryVector, err := embedTeacherText(ctx, model, example.Query)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
@@ -1404,7 +1404,7 @@ func scoreTeacherHardNegativeExample(ctx context.Context, model *mantaruntime.Em
 	return scores, nil
 }
 
-func embedTeacherText(ctx context.Context, model *mantaruntime.EmbeddingModel, text string) ([]float32, error) {
+func embedTeacherText(ctx context.Context, model *eosruntime.EmbeddingModel, text string) ([]float32, error) {
 	result, err := model.EmbedText(ctx, text)
 	if err != nil {
 		return nil, err
@@ -1672,7 +1672,7 @@ func (r teacherScoreImportRecord) teacherScoreVector() ([]float32, bool, error) 
 	return out, true, nil
 }
 
-func teacherScoresForExample(example mantaruntime.EmbeddingTextHardNegativeExample, table teacherScoreImportTable) ([]float32, bool) {
+func teacherScoresForExample(example eosruntime.EmbeddingTextHardNegativeExample, table teacherScoreImportTable) ([]float32, bool) {
 	if scores, ok := lookupTeacherScoreVector(table, example.Source, example.Query); ok {
 		if len(scores) != 1+len(example.Negatives) {
 			return nil, false
@@ -1777,10 +1777,10 @@ func writeTeacherScoreAuditSummary(path string, summary teacherScoreAuditSummary
 
 func runInspect(args []string) error {
 	if len(args) == 0 || args[0] == "" {
-		return fmt.Errorf("usage: manta inspect <artifact.mll>")
+		return fmt.Errorf("usage: eos inspect <artifact.mll>")
 	}
 	path := args[0]
-	mod, err := mantaartifact.ReadFile(path)
+	mod, err := eosartifact.ReadFile(path)
 	if err != nil {
 		return err
 	}
@@ -1792,39 +1792,39 @@ func runInspect(args []string) error {
 		fmt.Printf("capabilities: %s\n", strings.Join(mod.Requirements.Capabilities, ", "))
 	}
 	embeddedPackage := false
-	embeddingManifestPath := mantaruntime.ResolveEmbeddingManifestPath(path)
+	embeddingManifestPath := eosruntime.ResolveEmbeddingManifestPath(path)
 	if _, err := os.Stat(embeddingManifestPath); err == nil {
-		manifest, err := mantaruntime.ReadEmbeddingManifestFile(embeddingManifestPath)
+		manifest, err := eosruntime.ReadEmbeddingManifestFile(embeddingManifestPath)
 		if err != nil {
 			return err
 		}
 		fmt.Printf("embedding manifest: %s\n", embeddingManifestPath)
 		printEmbeddingManifestSummary(manifest)
-	} else if sealed, err := mantaruntime.ReadSealedEmbeddingPackage(path); err == nil {
+	} else if sealed, err := eosruntime.ReadSealedEmbeddingPackage(path); err == nil {
 		fmt.Println("embedding manifest: embedded")
 		printEmbeddingManifestSummary(sealed.Manifest)
 		fmt.Println("package: embedded sealed MLL")
 		fmt.Println("package verify: OK")
 		embeddedPackage = true
 	}
-	packagePath := mantaruntime.ResolvePackageManifestPath(path)
+	packagePath := eosruntime.ResolvePackageManifestPath(path)
 	if !embeddedPackage {
 		if _, err := os.Stat(packagePath); err == nil {
-			pkg, err := mantaruntime.ReadPackageManifestFile(packagePath)
+			pkg, err := eosruntime.ReadPackageManifestFile(packagePath)
 			if err != nil {
 				return err
 			}
 			verifyPaths := map[string]string{
 				"artifact":           path,
-				"embedding_manifest": mantaruntime.DefaultEmbeddingManifestPath(path),
-				"tokenizer":          mantaruntime.DefaultTokenizerPath(path),
-				"weights":            mantaruntime.DefaultWeightFilePath(path),
-				"memory_plan":        mantaruntime.DefaultMemoryPlanPath(path),
-				"train_manifest":     mantaruntime.DefaultEmbeddingTrainManifestPath(path),
-				"checkpoint":         mantaruntime.DefaultEmbeddingCheckpointPath(path),
-				"train_profile":      mantaruntime.DefaultEmbeddingTrainProfilePath(path),
+				"embedding_manifest": eosruntime.DefaultEmbeddingManifestPath(path),
+				"tokenizer":          eosruntime.DefaultTokenizerPath(path),
+				"weights":            eosruntime.DefaultWeightFilePath(path),
+				"memory_plan":        eosruntime.DefaultMemoryPlanPath(path),
+				"train_manifest":     eosruntime.DefaultEmbeddingTrainManifestPath(path),
+				"checkpoint":         eosruntime.DefaultEmbeddingCheckpointPath(path),
+				"train_profile":      eosruntime.DefaultEmbeddingTrainProfilePath(path),
 			}
-			if pkg.Kind == mantaruntime.PackageEmbedding {
+			if pkg.Kind == eosruntime.PackageEmbedding {
 				delete(verifyPaths, "train_manifest")
 				delete(verifyPaths, "checkpoint")
 				delete(verifyPaths, "train_profile")
@@ -1838,9 +1838,9 @@ func runInspect(args []string) error {
 			}
 		}
 	}
-	profilePath := mantaruntime.DefaultEmbeddingTrainProfilePath(path)
+	profilePath := eosruntime.DefaultEmbeddingTrainProfilePath(path)
 	if _, err := os.Stat(profilePath); err == nil {
-		profile, err := mantaruntime.ReadEmbeddingTrainProfileFile(profilePath)
+		profile, err := eosruntime.ReadEmbeddingTrainProfileFile(profilePath)
 		if err != nil {
 			return err
 		}
@@ -1855,7 +1855,7 @@ func runInspect(args []string) error {
 	return nil
 }
 
-func printEmbeddingManifestSummary(manifest mantaruntime.EmbeddingManifest) {
+func printEmbeddingManifestSummary(manifest eosruntime.EmbeddingManifest) {
 	fmt.Printf("embedding model: %s pooled=%s batch=%s output=%s/%s\n",
 		displayManifestName(manifest.Name),
 		manifest.PooledEntry,
@@ -1871,14 +1871,14 @@ func printEmbeddingManifestSummary(manifest mantaruntime.EmbeddingManifest) {
 
 func runExportMLL(args []string) error {
 	if len(args) == 0 || args[0] == "" {
-		return fmt.Errorf("usage: manta export-mll <artifact.mll> [output.mll]")
+		return fmt.Errorf("usage: eos export-mll <artifact.mll> [output.mll]")
 	}
 	artifactPath := args[0]
 	outputPath := ""
 	if len(args) > 1 {
 		outputPath = args[1]
 	}
-	writtenPath, err := mantaruntime.ExportPackageToMLL(artifactPath, outputPath)
+	writtenPath, err := eosruntime.ExportPackageToMLL(artifactPath, outputPath)
 	if err != nil {
 		return err
 	}
@@ -1925,7 +1925,7 @@ func runInitModel(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 || fs.Arg(0) == "" {
-		return fmt.Errorf("usage: manta init-model [flags] <artifact.mll>")
+		return fmt.Errorf("usage: eos init-model [flags] <artifact.mll>")
 	}
 	if learningRate < 0 {
 		return fmt.Errorf("lr must be non-negative")
@@ -1967,11 +1967,11 @@ func runInitModel(args []string) error {
 	if err != nil {
 		return err
 	}
-	manifest, err := mantaruntime.ReadEmbeddingManifestFile(paths.EmbeddingManifestPath)
+	manifest, err := eosruntime.ReadEmbeddingManifestFile(paths.EmbeddingManifestPath)
 	if err != nil {
 		return err
 	}
-	checkpoint, err := mantaruntime.ReadEmbeddingTrainCheckpointFile(paths.CheckpointPath)
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(paths.CheckpointPath)
 	if err != nil {
 		return err
 	}
@@ -2016,7 +2016,7 @@ func runInitMirage(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 || fs.Arg(0) == "" {
-		return fmt.Errorf("usage: manta init-mirage [flags] <artifact.mll>")
+		return fmt.Errorf("usage: eos init-mirage [flags] <artifact.mll>")
 	}
 	cfg := models.MirageV1Config{
 		Name:           name,
@@ -2031,7 +2031,7 @@ func runInitMirage(args []string) error {
 	if err := models.InitMirageV1Artifact(fs.Arg(0), cfg); err != nil {
 		return err
 	}
-	mod, err := mantaartifact.ReadFile(fs.Arg(0))
+	mod, err := eosartifact.ReadFile(fs.Arg(0))
 	if err != nil {
 		return err
 	}
@@ -2081,10 +2081,10 @@ func runInitTrain(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 || fs.Arg(0) == "" {
-		return fmt.Errorf("usage: manta init-train [flags] <artifact.mll>")
+		return fmt.Errorf("usage: eos init-train [flags] <artifact.mll>")
 	}
 	path := fs.Arg(0)
-	cfg := mantaruntime.EmbeddingTrainConfig{
+	cfg := eosruntime.EmbeddingTrainConfig{
 		LearningRate:       float32(learningRate),
 		WeightDecay:        float32(weightDecay),
 		WeightBits:         weightBits,
@@ -2098,22 +2098,22 @@ func runInitTrain(args []string) error {
 		TeacherLossWeight:  float32(teacherLossWeight),
 		TeacherTemperature: float32(teacherTemperature),
 	}
-	opts := mantaruntime.EmbeddingTrainInitOptions{
+	opts := eosruntime.EmbeddingTrainInitOptions{
 		Seed:       seed,
 		ShapeSizes: dims.values(),
 	}
 	var (
-		paths mantaruntime.EmbeddingTrainPackagePaths
+		paths eosruntime.EmbeddingTrainPackagePaths
 		err   error
 	)
 	if manifestPath == "" {
-		manifestPath = mantaruntime.ResolveEmbeddingManifestPath(path)
+		manifestPath = eosruntime.ResolveEmbeddingManifestPath(path)
 	}
-	manifest, readErr := mantaruntime.ReadEmbeddingManifestFile(manifestPath)
+	manifest, readErr := eosruntime.ReadEmbeddingManifestFile(manifestPath)
 	if readErr != nil {
 		return readErr
 	}
-	paths, err = mantaruntime.InitializeEmbeddingTrainerPackageWithManifest(path, manifest, cfg, opts)
+	paths, err = eosruntime.InitializeEmbeddingTrainerPackageWithManifest(path, manifest, cfg, opts)
 	if err != nil {
 		return err
 	}
@@ -2135,11 +2135,11 @@ func runRenameEmbed(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: manta rename-embed --name <model-name> <input.mll> <output.mll>")
+		return fmt.Errorf("usage: eos rename-embed --name <model-name> <input.mll> <output.mll>")
 	}
 	inputPath := fs.Arg(0)
 	outputPath := fs.Arg(1)
-	trainer, err := mantaruntime.LoadEmbeddingTrainerPackage(inputPath)
+	trainer, err := eosruntime.LoadEmbeddingTrainerPackage(inputPath)
 	if err != nil {
 		return err
 	}
@@ -2166,7 +2166,7 @@ func runRenameEmbed(args []string) error {
 }
 
 func copyTokenizerIfPresent(inputPath, outputPath string) error {
-	sourcePath := mantaruntime.DefaultTokenizerPath(inputPath)
+	sourcePath := eosruntime.DefaultTokenizerPath(inputPath)
 	if _, err := os.Stat(sourcePath); err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -2177,7 +2177,7 @@ func copyTokenizerIfPresent(inputPath, outputPath string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(mantaruntime.DefaultTokenizerPath(outputPath), data, 0o644)
+	return os.WriteFile(eosruntime.DefaultTokenizerPath(outputPath), data, 0o644)
 }
 
 func runTrainEmbed(args []string) error {
@@ -2245,7 +2245,7 @@ func runTrainEmbed(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: manta train-embed [flags] <artifact.mll> <train.jsonl> [eval.jsonl]\n       manta train-embed --eval-only [flags] <artifact.mll> <eval.jsonl>")
+		return fmt.Errorf("usage: eos train-embed [flags] <artifact.mll> <train.jsonl> [eval.jsonl]\n       eos train-embed --eval-only [flags] <artifact.mll> <eval.jsonl>")
 	}
 	if learningRate < 0 {
 		return fmt.Errorf("lr must be non-negative")
@@ -2305,12 +2305,12 @@ func runTrainEmbed(args []string) error {
 		return fmt.Errorf("set either --tokenizer or --no-tokenizer, not both")
 	}
 	if tokenizerPath == "" && !noTokenizer {
-		defaultTokenizerPath := mantaruntime.DefaultTokenizerPath(path)
+		defaultTokenizerPath := eosruntime.DefaultTokenizerPath(path)
 		if _, err := os.Stat(defaultTokenizerPath); err == nil {
 			tokenizerPath = defaultTokenizerPath
 		}
 	}
-	runConfig := mantaruntime.EmbeddingTrainRunConfig{
+	runConfig := eosruntime.EmbeddingTrainRunConfig{
 		Epochs:                    epochs,
 		BatchSize:                 batchSize,
 		Shuffle:                   shuffle,
@@ -2351,14 +2351,14 @@ func runTrainEmbed(args []string) error {
 		return nil
 	}
 	var (
-		summary mantaruntime.EmbeddingTrainRunSummary
-		paths   mantaruntime.EmbeddingTrainPackagePaths
+		summary eosruntime.EmbeddingTrainRunSummary
+		paths   eosruntime.EmbeddingTrainPackagePaths
 		err     error
 	)
 	if tokenizerPath != "" {
-		summary, paths, err = mantaruntime.TrainEmbeddingPackageFromTextContrastiveFiles(path, tokenizerPath, trainPath, evalPath, runConfig)
+		summary, paths, err = eosruntime.TrainEmbeddingPackageFromTextContrastiveFiles(path, tokenizerPath, trainPath, evalPath, runConfig)
 	} else {
-		summary, paths, err = mantaruntime.TrainEmbeddingPackageFromContrastiveFiles(path, trainPath, evalPath, runConfig)
+		summary, paths, err = eosruntime.TrainEmbeddingPackageFromContrastiveFiles(path, trainPath, evalPath, runConfig)
 	}
 	if err != nil {
 		return err
@@ -2470,16 +2470,16 @@ func parsePositiveFloatMap(raw string) (map[string]float32, error) {
 	return out, nil
 }
 
-func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg mantaruntime.EmbeddingTrainRunConfig) (mantaruntime.EmbeddingTrainWorkload, error) {
+func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg eosruntime.EmbeddingTrainRunConfig) (eosruntime.EmbeddingTrainWorkload, error) {
 	if cfg.EvalOnly && evalPath == "" {
 		evalPath = trainPath
 		trainPath = ""
 	}
 	if tokenizerPath != "" {
 		if cfg.EvalOnly {
-			evalPairs, err := mantaruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
+			evalPairs, err := eosruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
 			if err != nil {
-				return mantaruntime.EmbeddingTrainWorkload{}, err
+				return eosruntime.EmbeddingTrainWorkload{}, err
 			}
 			allPositive := true
 			positiveCount := 0
@@ -2491,57 +2491,57 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg m
 				}
 			}
 			if allPositive {
-				return mantaruntime.EstimateContrastiveTrainWorkload(0, positiveCount, cfg), nil
+				return eosruntime.EstimateContrastiveTrainWorkload(0, positiveCount, cfg), nil
 			}
-			return mantaruntime.EstimatePairwiseTrainWorkload(0, len(evalPairs), cfg), nil
+			return eosruntime.EstimatePairwiseTrainWorkload(0, len(evalPairs), cfg), nil
 		}
 		if cfg.PairwiseTrain {
-			trainPairs, err := mantaruntime.ReadEmbeddingTextPairExamplesFile(trainPath)
+			trainPairs, err := eosruntime.ReadEmbeddingTextPairExamplesFile(trainPath)
 			if err != nil {
-				return mantaruntime.EmbeddingTrainWorkload{}, err
+				return eosruntime.EmbeddingTrainWorkload{}, err
 			}
 			evalCount := 0
 			if evalPath != "" {
-				evalPairs, err := mantaruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
+				evalPairs, err := eosruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
 				if err != nil {
-					return mantaruntime.EmbeddingTrainWorkload{}, err
+					return eosruntime.EmbeddingTrainWorkload{}, err
 				}
 				evalCount = len(evalPairs)
 			}
-			return mantaruntime.EstimatePairwiseTrainWorkload(len(trainPairs), evalCount, cfg), nil
+			return eosruntime.EstimatePairwiseTrainWorkload(len(trainPairs), evalCount, cfg), nil
 		}
 		if cfg.HardNegativeTrain {
-			trainSet, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(trainPath)
+			trainSet, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(trainPath)
 			if err != nil {
-				trainPairs, pairErr := mantaruntime.ReadEmbeddingTextPairExamplesFile(trainPath)
+				trainPairs, pairErr := eosruntime.ReadEmbeddingTextPairExamplesFile(trainPath)
 				if pairErr != nil {
-					return mantaruntime.EmbeddingTrainWorkload{}, err
+					return eosruntime.EmbeddingTrainWorkload{}, err
 				}
-				trainSet, err = mantaruntime.BuildEmbeddingTextHardNegativeExamplesFromPairs(trainPairs, cfg.HardNegativesPerQuery)
+				trainSet, err = eosruntime.BuildEmbeddingTextHardNegativeExamplesFromPairs(trainPairs, cfg.HardNegativesPerQuery)
 				if err != nil {
-					return mantaruntime.EmbeddingTrainWorkload{}, err
+					return eosruntime.EmbeddingTrainWorkload{}, err
 				}
 			}
 			evalCount := 0
 			if evalPath != "" {
-				evalPairs, err := mantaruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
+				evalPairs, err := eosruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
 				if err != nil {
-					return mantaruntime.EmbeddingTrainWorkload{}, err
+					return eosruntime.EmbeddingTrainWorkload{}, err
 				}
 				evalCount = len(evalPairs)
 			}
-			return mantaruntime.EstimateHardNegativeTrainWorkload(len(trainSet), cfg.HardNegativesPerQuery, evalCount, cfg), nil
+			return eosruntime.EstimateHardNegativeTrainWorkload(len(trainSet), cfg.HardNegativesPerQuery, evalCount, cfg), nil
 		}
-		trainSet, err := mantaruntime.ReadEmbeddingTextContrastiveExamplesFile(trainPath)
+		trainSet, err := eosruntime.ReadEmbeddingTextContrastiveExamplesFile(trainPath)
 		if err != nil {
-			return mantaruntime.EmbeddingTrainWorkload{}, err
+			return eosruntime.EmbeddingTrainWorkload{}, err
 		}
 		if evalPath == "" {
-			return mantaruntime.EstimateContrastiveTrainWorkload(len(trainSet), 0, cfg), nil
+			return eosruntime.EstimateContrastiveTrainWorkload(len(trainSet), 0, cfg), nil
 		}
-		evalPairs, err := mantaruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
+		evalPairs, err := eosruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
 		if err != nil {
-			return mantaruntime.EmbeddingTrainWorkload{}, err
+			return eosruntime.EmbeddingTrainWorkload{}, err
 		}
 		allPositive := true
 		positiveCount := 0
@@ -2553,9 +2553,9 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg m
 			}
 		}
 		if allPositive {
-			return mantaruntime.EstimateContrastiveTrainWorkload(len(trainSet), positiveCount, cfg), nil
+			return eosruntime.EstimateContrastiveTrainWorkload(len(trainSet), positiveCount, cfg), nil
 		}
-		workload := mantaruntime.EstimateContrastiveTrainWorkload(len(trainSet), 0, cfg)
+		workload := eosruntime.EstimateContrastiveTrainWorkload(len(trainSet), 0, cfg)
 		workload.EvalMode = "pairwise"
 		workload.EvalExamples = len(evalPairs)
 		workload.EvalPairsPerPass = int64(len(evalPairs))
@@ -2566,66 +2566,66 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg m
 	}
 
 	if cfg.EvalOnly {
-		evalSet, err := mantaruntime.ReadEmbeddingContrastiveExamplesFile(evalPath)
+		evalSet, err := eosruntime.ReadEmbeddingContrastiveExamplesFile(evalPath)
 		if err != nil {
-			evalPairs, pairErr := mantaruntime.ReadEmbeddingPairExamplesFile(evalPath)
+			evalPairs, pairErr := eosruntime.ReadEmbeddingPairExamplesFile(evalPath)
 			if pairErr != nil {
-				return mantaruntime.EmbeddingTrainWorkload{}, err
+				return eosruntime.EmbeddingTrainWorkload{}, err
 			}
-			return mantaruntime.EstimatePairwiseTrainWorkload(0, len(evalPairs), cfg), nil
+			return eosruntime.EstimatePairwiseTrainWorkload(0, len(evalPairs), cfg), nil
 		}
-		return mantaruntime.EstimateContrastiveTrainWorkload(0, len(evalSet), cfg), nil
+		return eosruntime.EstimateContrastiveTrainWorkload(0, len(evalSet), cfg), nil
 	}
 	if cfg.PairwiseTrain {
-		trainPairs, err := mantaruntime.ReadEmbeddingPairExamplesFile(trainPath)
+		trainPairs, err := eosruntime.ReadEmbeddingPairExamplesFile(trainPath)
 		if err != nil {
-			return mantaruntime.EmbeddingTrainWorkload{}, err
+			return eosruntime.EmbeddingTrainWorkload{}, err
 		}
 		evalCount := 0
 		if evalPath != "" {
-			evalPairs, err := mantaruntime.ReadEmbeddingPairExamplesFile(evalPath)
+			evalPairs, err := eosruntime.ReadEmbeddingPairExamplesFile(evalPath)
 			if err != nil {
-				return mantaruntime.EmbeddingTrainWorkload{}, err
+				return eosruntime.EmbeddingTrainWorkload{}, err
 			}
 			evalCount = len(evalPairs)
 		}
-		return mantaruntime.EstimatePairwiseTrainWorkload(len(trainPairs), evalCount, cfg), nil
+		return eosruntime.EstimatePairwiseTrainWorkload(len(trainPairs), evalCount, cfg), nil
 	}
 	if cfg.HardNegativeTrain {
-		trainSet, err := mantaruntime.ReadEmbeddingHardNegativeExamplesFile(trainPath)
+		trainSet, err := eosruntime.ReadEmbeddingHardNegativeExamplesFile(trainPath)
 		if err != nil {
-			trainPairs, pairErr := mantaruntime.ReadEmbeddingPairExamplesFile(trainPath)
+			trainPairs, pairErr := eosruntime.ReadEmbeddingPairExamplesFile(trainPath)
 			if pairErr != nil {
-				return mantaruntime.EmbeddingTrainWorkload{}, err
+				return eosruntime.EmbeddingTrainWorkload{}, err
 			}
-			trainSet, err = mantaruntime.BuildEmbeddingHardNegativeExamplesFromPairs(trainPairs, cfg.HardNegativesPerQuery)
+			trainSet, err = eosruntime.BuildEmbeddingHardNegativeExamplesFromPairs(trainPairs, cfg.HardNegativesPerQuery)
 			if err != nil {
-				return mantaruntime.EmbeddingTrainWorkload{}, err
+				return eosruntime.EmbeddingTrainWorkload{}, err
 			}
 		}
 		evalCount := 0
 		if evalPath != "" {
-			evalPairs, err := mantaruntime.ReadEmbeddingPairExamplesFile(evalPath)
+			evalPairs, err := eosruntime.ReadEmbeddingPairExamplesFile(evalPath)
 			if err != nil {
-				return mantaruntime.EmbeddingTrainWorkload{}, err
+				return eosruntime.EmbeddingTrainWorkload{}, err
 			}
 			evalCount = len(evalPairs)
 		}
-		return mantaruntime.EstimateHardNegativeTrainWorkload(len(trainSet), cfg.HardNegativesPerQuery, evalCount, cfg), nil
+		return eosruntime.EstimateHardNegativeTrainWorkload(len(trainSet), cfg.HardNegativesPerQuery, evalCount, cfg), nil
 	}
-	trainSet, err := mantaruntime.ReadEmbeddingContrastiveExamplesFile(trainPath)
+	trainSet, err := eosruntime.ReadEmbeddingContrastiveExamplesFile(trainPath)
 	if err != nil {
-		return mantaruntime.EmbeddingTrainWorkload{}, err
+		return eosruntime.EmbeddingTrainWorkload{}, err
 	}
 	evalCount := 0
 	if evalPath != "" {
-		evalSet, err := mantaruntime.ReadEmbeddingContrastiveExamplesFile(evalPath)
+		evalSet, err := eosruntime.ReadEmbeddingContrastiveExamplesFile(evalPath)
 		if err != nil {
-			evalPairs, pairErr := mantaruntime.ReadEmbeddingPairExamplesFile(evalPath)
+			evalPairs, pairErr := eosruntime.ReadEmbeddingPairExamplesFile(evalPath)
 			if pairErr != nil {
-				return mantaruntime.EmbeddingTrainWorkload{}, err
+				return eosruntime.EmbeddingTrainWorkload{}, err
 			}
-			workload := mantaruntime.EstimateContrastiveTrainWorkload(len(trainSet), 0, cfg)
+			workload := eosruntime.EstimateContrastiveTrainWorkload(len(trainSet), 0, cfg)
 			workload.EvalMode = "pairwise"
 			workload.EvalExamples = len(evalPairs)
 			workload.EvalPairsPerPass = int64(len(evalPairs))
@@ -2636,10 +2636,10 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg m
 		}
 		evalCount = len(evalSet)
 	}
-	return mantaruntime.EstimateContrastiveTrainWorkload(len(trainSet), evalCount, cfg), nil
+	return eosruntime.EstimateContrastiveTrainWorkload(len(trainSet), evalCount, cfg), nil
 }
 
-func formatTrainWorkload(workload mantaruntime.EmbeddingTrainWorkload) string {
+func formatTrainWorkload(workload eosruntime.EmbeddingTrainWorkload) string {
 	parts := []string{
 		fmt.Sprintf("train=%d %s examples", workload.TrainExamples, workload.TrainMode),
 		fmt.Sprintf("batch=%d", workload.BatchSize),
@@ -2659,7 +2659,7 @@ func formatTrainWorkload(workload mantaruntime.EmbeddingTrainWorkload) string {
 	return strings.Join(parts, " ")
 }
 
-func formatTrainThroughput(summary mantaruntime.EmbeddingTrainRunSummary) string {
+func formatTrainThroughput(summary eosruntime.EmbeddingTrainRunSummary) string {
 	parts := []string{fmt.Sprintf("elapsed=%s", summary.Elapsed.Round(time.Millisecond))}
 	if rate := itemsPerSecond(summary.Workload.ActualTotalExamples, summary.Elapsed); rate > 0 {
 		parts = append(parts, fmt.Sprintf("examples/s=%.2f", rate))
@@ -2685,7 +2685,7 @@ func formatTrainThroughput(summary mantaruntime.EmbeddingTrainRunSummary) string
 	return strings.Join(parts, " ")
 }
 
-func printTrainProgress(progress mantaruntime.EmbeddingTrainProgress) {
+func printTrainProgress(progress eosruntime.EmbeddingTrainProgress) {
 	epochPairs := fmt.Sprintf("%d", progress.EpochTrainPairs)
 	if progress.PlannedEpochPairs > 0 {
 		epochPairs = fmt.Sprintf("%d/%d", progress.EpochTrainPairs, progress.PlannedEpochPairs)
@@ -2781,7 +2781,7 @@ func runTrainCorpus(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: manta train-corpus [flags] <artifact.mll> <corpus.txt>")
+		return fmt.Errorf("usage: eos train-corpus [flags] <artifact.mll> <corpus.txt>")
 	}
 	if learningRate < 0 {
 		return fmt.Errorf("lr must be non-negative")
@@ -2806,7 +2806,7 @@ func runTrainCorpus(args []string) error {
 	}
 	path := fs.Arg(0)
 	corpusPath := fs.Arg(1)
-	runConfig := mantaruntime.EmbeddingTrainRunConfig{
+	runConfig := eosruntime.EmbeddingTrainRunConfig{
 		Epochs:                epochs,
 		BatchSize:             batchSize,
 		Shuffle:               shuffle,
@@ -2829,13 +2829,13 @@ func runTrainCorpus(args []string) error {
 	if progressEvery > 0 {
 		runConfig.Progress = printTrainProgress
 	}
-	summary, paths, err := mantaruntime.TrainEmbeddingPackageFromCorpusFile(path, corpusPath, mantaruntime.EmbeddingCorpusTrainConfig{
+	summary, paths, err := eosruntime.TrainEmbeddingPackageFromCorpusFile(path, corpusPath, eosruntime.EmbeddingCorpusTrainConfig{
 		TokenizerPath:      tokenizerPath,
 		TokenizerVocabSize: vocabSize,
 		TokenizerMinFreq:   minFreq,
 		TrainPairsPath:     trainPairsPath,
 		EvalPairsPath:      evalPairsPath,
-		Mining: mantaruntime.EmbeddingTextMiningConfig{
+		Mining: eosruntime.EmbeddingTextMiningConfig{
 			MinChars:  minChars,
 			MaxPairs:  maxPairs,
 			EvalPairs: evalPairs,
@@ -3041,7 +3041,7 @@ type trainPackagePathsJSON struct {
 	Package      string `json:"package,omitempty"`
 }
 
-func writeTrainMetricsJSON(outputPath, command, mode, artifactPath, tokenizerPath string, summary mantaruntime.EmbeddingTrainRunSummary, paths mantaruntime.EmbeddingTrainPackagePaths, extraArtifacts map[string]string) error {
+func writeTrainMetricsJSON(outputPath, command, mode, artifactPath, tokenizerPath string, summary eosruntime.EmbeddingTrainRunSummary, paths eosruntime.EmbeddingTrainPackagePaths, extraArtifacts map[string]string) error {
 	payload := trainMetricsPayload(command, mode, artifactPath, tokenizerPath, summary, paths, extraArtifacts)
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
@@ -3054,7 +3054,7 @@ func writeTrainMetricsJSON(outputPath, command, mode, artifactPath, tokenizerPat
 	return nil
 }
 
-func trainMetricsPayload(command, mode, artifactPath, tokenizerPath string, summary mantaruntime.EmbeddingTrainRunSummary, paths mantaruntime.EmbeddingTrainPackagePaths, extraArtifacts map[string]string) trainMetricsJSON {
+func trainMetricsPayload(command, mode, artifactPath, tokenizerPath string, summary eosruntime.EmbeddingTrainRunSummary, paths eosruntime.EmbeddingTrainPackagePaths, extraArtifacts map[string]string) trainMetricsJSON {
 	return trainMetricsJSON{
 		Schema:       "manta.embedding_train_metrics.v1",
 		Command:      command,
@@ -3076,7 +3076,7 @@ func trainMetricsPayload(command, mode, artifactPath, tokenizerPath string, summ
 	}
 }
 
-func trainRunSummaryPayload(summary mantaruntime.EmbeddingTrainRunSummary) trainRunSummaryJSON {
+func trainRunSummaryPayload(summary eosruntime.EmbeddingTrainRunSummary) trainRunSummaryJSON {
 	return trainRunSummaryJSON{
 		EpochsCompleted: summary.EpochsCompleted,
 		StepsCompleted:  summary.StepsCompleted,
@@ -3088,7 +3088,7 @@ func trainRunSummaryPayload(summary mantaruntime.EmbeddingTrainRunSummary) train
 	}
 }
 
-func trainRunConfigPayload(cfg mantaruntime.EmbeddingTrainRunConfig) trainRunConfigJSON {
+func trainRunConfigPayload(cfg eosruntime.EmbeddingTrainRunConfig) trainRunConfigJSON {
 	return trainRunConfigJSON{
 		Epochs:                    cfg.Epochs,
 		BatchSize:                 cfg.BatchSize,
@@ -3118,7 +3118,7 @@ func trainRunConfigPayload(cfg mantaruntime.EmbeddingTrainRunConfig) trainRunCon
 	}
 }
 
-func trainBatchMetricsPayload(metrics mantaruntime.EmbeddingTrainMetrics) trainBatchMetricsJSON {
+func trainBatchMetricsPayload(metrics eosruntime.EmbeddingTrainMetrics) trainBatchMetricsJSON {
 	return trainBatchMetricsJSON{
 		Loss:         metrics.Loss,
 		AverageScore: metrics.AverageScore,
@@ -3126,7 +3126,7 @@ func trainBatchMetricsPayload(metrics mantaruntime.EmbeddingTrainMetrics) trainB
 	}
 }
 
-func evalMetricsPayload(metrics *mantaruntime.EmbeddingEvalMetrics) *evalMetricsJSON {
+func evalMetricsPayload(metrics *eosruntime.EmbeddingEvalMetrics) *evalMetricsJSON {
 	if metrics == nil {
 		return nil
 	}
@@ -3151,7 +3151,7 @@ func evalMetricsPayload(metrics *mantaruntime.EmbeddingEvalMetrics) *evalMetrics
 	}
 }
 
-func trainWorkloadPayload(workload mantaruntime.EmbeddingTrainWorkload) trainWorkloadJSON {
+func trainWorkloadPayload(workload eosruntime.EmbeddingTrainWorkload) trainWorkloadJSON {
 	return trainWorkloadJSON{
 		TrainMode:            workload.TrainMode,
 		EvalMode:             workload.EvalMode,
@@ -3177,7 +3177,7 @@ func trainWorkloadPayload(workload mantaruntime.EmbeddingTrainWorkload) trainWor
 	}
 }
 
-func trainThroughputPayload(summary mantaruntime.EmbeddingTrainRunSummary) trainThroughputJSON {
+func trainThroughputPayload(summary eosruntime.EmbeddingTrainRunSummary) trainThroughputJSON {
 	return trainThroughputJSON{
 		ElapsedSeconds:          summary.Elapsed.Seconds(),
 		TrainSeconds:            summary.TrainDuration.Seconds(),
@@ -3192,7 +3192,7 @@ func trainThroughputPayload(summary mantaruntime.EmbeddingTrainRunSummary) train
 	}
 }
 
-func trainAcceleratorsPayload(profile mantaruntime.EmbeddingTrainProfile) trainAcceleratorsJSON {
+func trainAcceleratorsPayload(profile eosruntime.EmbeddingTrainProfile) trainAcceleratorsJSON {
 	return trainAcceleratorsJSON{
 		Forward:     displayTrainBackend(profile.ForwardBackend),
 		Optimizer:   displayTrainBackend(profile.OptimizerBackend),
@@ -3201,7 +3201,7 @@ func trainAcceleratorsPayload(profile mantaruntime.EmbeddingTrainProfile) trainA
 	}
 }
 
-func trainProfileDeltaPayload(profile mantaruntime.EmbeddingTrainProfile) trainProfileDeltaJSON {
+func trainProfileDeltaPayload(profile eosruntime.EmbeddingTrainProfile) trainProfileDeltaJSON {
 	return trainProfileDeltaJSON{
 		MatMulBindCalls:     profile.ForwardResidency.MatMul.BindCalls,
 		MatMulRuns:          profile.ForwardResidency.MatMul.RunCalls,
@@ -3214,7 +3214,7 @@ func trainProfileDeltaPayload(profile mantaruntime.EmbeddingTrainProfile) trainP
 	}
 }
 
-func trainPackagePathsPayload(paths mantaruntime.EmbeddingTrainPackagePaths) trainPackagePathsJSON {
+func trainPackagePathsPayload(paths eosruntime.EmbeddingTrainPackagePaths) trainPackagePathsJSON {
 	return trainPackagePathsJSON{
 		Artifact:     paths.ArtifactPath,
 		Checkpoint:   paths.CheckpointPath,
@@ -3237,7 +3237,7 @@ func runCompareTrainMetrics(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 || fs.Arg(0) == "" {
-		return fmt.Errorf("usage: manta compare-train-metrics <current.metrics.json> [baseline.metrics.json]")
+		return fmt.Errorf("usage: eos compare-train-metrics <current.metrics.json> [baseline.metrics.json]")
 	}
 	currentPath := fs.Arg(0)
 	current, err := readTrainMetricsJSON(currentPath)
@@ -3268,7 +3268,7 @@ func runCompareRetrievalMetrics(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: manta compare-retrieval-metrics [--metric ndcg_at_10] [--min-ratio 1.0] [--require-win] <current.retrieval.metrics.json> <baseline.retrieval.metrics.json>")
+		return fmt.Errorf("usage: eos compare-retrieval-metrics [--metric ndcg_at_10] [--min-ratio 1.0] [--require-win] <current.retrieval.metrics.json> <baseline.retrieval.metrics.json>")
 	}
 	if *minRatio < 0 {
 		return fmt.Errorf("min-ratio must be non-negative")
@@ -3418,7 +3418,7 @@ func runDiagnoseTrainMetrics(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 || fs.Arg(0) == "" {
-		return fmt.Errorf("usage: manta diagnose-train-metrics <metrics.json>")
+		return fmt.Errorf("usage: eos diagnose-train-metrics <metrics.json>")
 	}
 	metricsPath := fs.Arg(0)
 	metrics, err := readTrainMetricsJSON(metricsPath)
@@ -3564,22 +3564,22 @@ type trainMetricThreshold struct {
 }
 
 var trainMetricThresholds = []trainMetricThreshold{
-	{Env: "MANTA_MIN_MRR", Metric: "mrr", Op: ">=", Scope: "quality"},
-	{Env: "MANTA_MIN_TOP1", Metric: "top1", Op: ">=", Scope: "quality"},
-	{Env: "MANTA_MIN_TOP5", Metric: "top5", Op: ">=", Scope: "quality"},
-	{Env: "MANTA_MIN_TOP10", Metric: "top10", Op: ">=", Scope: "quality"},
-	{Env: "MANTA_MAX_MEAN_RANK", Metric: "mean_rank", Op: "<=", Scope: "quality"},
-	{Env: "MANTA_MIN_AUC", Metric: "auc", Op: ">=", Scope: "quality"},
-	{Env: "MANTA_MIN_THRESHOLD_ACCURACY", Metric: "threshold_accuracy", Op: ">=", Scope: "quality"},
-	{Env: "MANTA_MIN_SCORE_MARGIN", Metric: "margin", Op: ">=", Scope: "quality"},
-	{Env: "MANTA_MIN_PAIR_ACCURACY", Metric: "accuracy", Op: ">=", Scope: "quality"},
-	{Env: "MANTA_MAX_LOSS", Metric: "loss", Op: "<=", Scope: "quality"},
-	{Env: "MANTA_MIN_TRAIN_PAIRS_PER_SEC", Metric: "train_pairs/s", Op: ">=", Scope: "efficiency"},
-	{Env: "MANTA_MIN_OPTIMIZER_STEPS_PER_SEC", Metric: "optimizer_steps/s", Op: ">=", Scope: "efficiency"},
-	{Env: "MANTA_MAX_MATMUL_RUNS", Metric: "matmul_runs", Op: "<=", Scope: "efficiency"},
-	{Env: "MANTA_MAX_MATMUL_RUN_UPLOAD_MB", Metric: "matmul_run_upload_mb", Op: "<=", Scope: "efficiency"},
-	{Env: "MANTA_MAX_MATMUL_RUN_DOWNLOAD_MB", Metric: "matmul_run_download_mb", Op: "<=", Scope: "efficiency"},
-	{Env: "MANTA_MAX_OPTIMIZER_UPDATES", Metric: "optimizer_updates", Op: "<=", Scope: "eval-only"},
+	{Env: "EOS_MIN_MRR", Metric: "mrr", Op: ">=", Scope: "quality"},
+	{Env: "EOS_MIN_TOP1", Metric: "top1", Op: ">=", Scope: "quality"},
+	{Env: "EOS_MIN_TOP5", Metric: "top5", Op: ">=", Scope: "quality"},
+	{Env: "EOS_MIN_TOP10", Metric: "top10", Op: ">=", Scope: "quality"},
+	{Env: "EOS_MAX_MEAN_RANK", Metric: "mean_rank", Op: "<=", Scope: "quality"},
+	{Env: "EOS_MIN_AUC", Metric: "auc", Op: ">=", Scope: "quality"},
+	{Env: "EOS_MIN_THRESHOLD_ACCURACY", Metric: "threshold_accuracy", Op: ">=", Scope: "quality"},
+	{Env: "EOS_MIN_SCORE_MARGIN", Metric: "margin", Op: ">=", Scope: "quality"},
+	{Env: "EOS_MIN_PAIR_ACCURACY", Metric: "accuracy", Op: ">=", Scope: "quality"},
+	{Env: "EOS_MAX_LOSS", Metric: "loss", Op: "<=", Scope: "quality"},
+	{Env: "EOS_MIN_TRAIN_PAIRS_PER_SEC", Metric: "train_pairs/s", Op: ">=", Scope: "efficiency"},
+	{Env: "EOS_MIN_OPTIMIZER_STEPS_PER_SEC", Metric: "optimizer_steps/s", Op: ">=", Scope: "efficiency"},
+	{Env: "EOS_MAX_MATMUL_RUNS", Metric: "matmul_runs", Op: "<=", Scope: "efficiency"},
+	{Env: "EOS_MAX_MATMUL_RUN_UPLOAD_MB", Metric: "matmul_run_upload_mb", Op: "<=", Scope: "efficiency"},
+	{Env: "EOS_MAX_MATMUL_RUN_DOWNLOAD_MB", Metric: "matmul_run_download_mb", Op: "<=", Scope: "efficiency"},
+	{Env: "EOS_MAX_OPTIMIZER_UPDATES", Metric: "optimizer_updates", Op: "<=", Scope: "eval-only"},
 }
 
 func runGateTrainMetrics(args []string) error {
@@ -3593,7 +3593,7 @@ func runGateTrainMetrics(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 || fs.Arg(0) == "" {
-		return fmt.Errorf("usage: manta gate-train-metrics [--thresholds thresholds.env] [--scope all|quality|efficiency|eval-only] <metrics.json>")
+		return fmt.Errorf("usage: eos gate-train-metrics [--thresholds thresholds.env] [--scope all|quality|efficiency|eval-only] <metrics.json>")
 	}
 	scope = strings.ToLower(scope)
 	if !validTrainMetricsGateScope(scope) {
@@ -3686,7 +3686,7 @@ func trainMetricThresholdValues(path string) (map[string]string, error) {
 	values := map[string]string{}
 	for _, env := range os.Environ() {
 		key, value, ok := strings.Cut(env, "=")
-		if ok && strings.HasPrefix(key, "MANTA_") {
+		if ok && strings.HasPrefix(key, "EOS_") {
 			values[key] = value
 		}
 	}
@@ -3708,8 +3708,8 @@ func trainMetricThresholdValues(path string) (map[string]string, error) {
 		}
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
-		if !strings.HasPrefix(key, "MANTA_") {
-			return nil, fmt.Errorf("%s:%d: threshold key must start with MANTA_: %s", path, i+1, key)
+		if !strings.HasPrefix(key, "EOS_") {
+			return nil, fmt.Errorf("%s:%d: threshold key must start with EOS_: %s", path, i+1, key)
 		}
 		if values[key] == "" {
 			values[key] = value
@@ -3782,13 +3782,13 @@ type retrievalMetricThreshold struct {
 }
 
 var retrievalMetricThresholds = []retrievalMetricThreshold{
-	{Env: "MANTA_MIN_RETRIEVAL_NDCG10", Metric: "ndcg_at_10", Op: ">=", Scope: "quality"},
-	{Env: "MANTA_MIN_RETRIEVAL_MRR10", Metric: "mrr_at_10", Op: ">=", Scope: "quality"},
-	{Env: "MANTA_MIN_RETRIEVAL_RECALL10", Metric: "recall_at_10", Op: ">=", Scope: "quality"},
-	{Env: "MANTA_MIN_RETRIEVAL_RECALL100", Metric: "recall_at_100", Op: ">=", Scope: "quality"},
-	{Env: "MANTA_MIN_RETRIEVAL_DOCUMENTS_PER_SEC", Metric: "documents/s", Op: ">=", Scope: "efficiency"},
-	{Env: "MANTA_MIN_RETRIEVAL_QUERIES_PER_SEC", Metric: "queries/s", Op: ">=", Scope: "efficiency"},
-	{Env: "MANTA_MIN_RETRIEVAL_SCORES_PER_SEC", Metric: "scores/s", Op: ">=", Scope: "efficiency"},
+	{Env: "EOS_MIN_RETRIEVAL_NDCG10", Metric: "ndcg_at_10", Op: ">=", Scope: "quality"},
+	{Env: "EOS_MIN_RETRIEVAL_MRR10", Metric: "mrr_at_10", Op: ">=", Scope: "quality"},
+	{Env: "EOS_MIN_RETRIEVAL_RECALL10", Metric: "recall_at_10", Op: ">=", Scope: "quality"},
+	{Env: "EOS_MIN_RETRIEVAL_RECALL100", Metric: "recall_at_100", Op: ">=", Scope: "quality"},
+	{Env: "EOS_MIN_RETRIEVAL_DOCUMENTS_PER_SEC", Metric: "documents/s", Op: ">=", Scope: "efficiency"},
+	{Env: "EOS_MIN_RETRIEVAL_QUERIES_PER_SEC", Metric: "queries/s", Op: ">=", Scope: "efficiency"},
+	{Env: "EOS_MIN_RETRIEVAL_SCORES_PER_SEC", Metric: "scores/s", Op: ">=", Scope: "efficiency"},
 }
 
 func runGateRetrievalMetrics(args []string) error {
@@ -3802,7 +3802,7 @@ func runGateRetrievalMetrics(args []string) error {
 		return err
 	}
 	if fs.NArg() < 1 || fs.Arg(0) == "" {
-		return fmt.Errorf("usage: manta gate-retrieval-metrics [--thresholds thresholds.env] [--scope all|quality|efficiency] <retrieval.metrics.json>")
+		return fmt.Errorf("usage: eos gate-retrieval-metrics [--thresholds thresholds.env] [--scope all|quality|efficiency] <retrieval.metrics.json>")
 	}
 	scope = strings.ToLower(scope)
 	if !validRetrievalMetricsGateScope(scope) {
@@ -3861,17 +3861,17 @@ func runGateRetrievalMetrics(args []string) error {
 	return nil
 }
 
-func readRetrievalMetricsJSON(path string) (mantaruntime.RetrievalEvalMetrics, error) {
+func readRetrievalMetricsJSON(path string) (eosruntime.RetrievalEvalMetrics, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return mantaruntime.RetrievalEvalMetrics{}, err
+		return eosruntime.RetrievalEvalMetrics{}, err
 	}
-	var metrics mantaruntime.RetrievalEvalMetrics
+	var metrics eosruntime.RetrievalEvalMetrics
 	if err := json.Unmarshal(data, &metrics); err != nil {
-		return mantaruntime.RetrievalEvalMetrics{}, fmt.Errorf("parse retrieval metrics JSON %q: %w", path, err)
+		return eosruntime.RetrievalEvalMetrics{}, fmt.Errorf("parse retrieval metrics JSON %q: %w", path, err)
 	}
-	if metrics.Schema != mantaruntime.RetrievalEvalMetricsSchema {
-		return mantaruntime.RetrievalEvalMetrics{}, fmt.Errorf("unsupported retrieval metrics schema %q", metrics.Schema)
+	if metrics.Schema != eosruntime.RetrievalEvalMetricsSchema {
+		return eosruntime.RetrievalEvalMetrics{}, fmt.Errorf("unsupported retrieval metrics schema %q", metrics.Schema)
 	}
 	return metrics, nil
 }
@@ -3916,7 +3916,7 @@ func retrievalDatasetEnvSuffix(dataset string) string {
 	return strings.Trim(b.String(), "_")
 }
 
-func retrievalMetricValue(metrics mantaruntime.RetrievalEvalMetrics, metric string) (float64, bool) {
+func retrievalMetricValue(metrics eosruntime.RetrievalEvalMetrics, metric string) (float64, bool) {
 	switch metric {
 	case "ndcg_at_10":
 		return metrics.Quality.NDCGAt10, true
@@ -3952,18 +3952,18 @@ func runTrainTokenizer(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: manta train-tokenizer [flags] <artifact.mll> <corpus.txt>")
+		return fmt.Errorf("usage: eos train-tokenizer [flags] <artifact.mll> <corpus.txt>")
 	}
 	artifactPath := fs.Arg(0)
 	corpusPath := fs.Arg(1)
 	if outputPath == "" {
-		outputPath = mantaruntime.DefaultTokenizerPath(artifactPath)
+		outputPath = eosruntime.DefaultTokenizerPath(artifactPath)
 	}
 	if manifestPath == "" {
-		manifestPath = mantaruntime.DefaultEmbeddingManifestPath(artifactPath)
+		manifestPath = eosruntime.DefaultEmbeddingManifestPath(artifactPath)
 	}
 	if vocabSize == 0 {
-		manifest, err := mantaruntime.ReadEmbeddingManifestFile(manifestPath)
+		manifest, err := eosruntime.ReadEmbeddingManifestFile(manifestPath)
 		if err != nil {
 			return fmt.Errorf("read embedding manifest for vocab size: %w", err)
 		}
@@ -3972,7 +3972,7 @@ func runTrainTokenizer(args []string) error {
 	if vocabSize <= 0 {
 		return fmt.Errorf("tokenizer vocab size must be set via --vocab-size or embedding manifest")
 	}
-	tokenizer, err := mantaruntime.TrainTokenizerFromCorpus(mantaruntime.TokenizerTrainConfig{
+	tokenizer, err := eosruntime.TrainTokenizerFromCorpus(eosruntime.TokenizerTrainConfig{
 		CorpusPath: corpusPath,
 		VocabSize:  vocabSize,
 		MinFreq:    minFreq,
@@ -3983,8 +3983,8 @@ func runTrainTokenizer(args []string) error {
 	if err := tokenizer.WriteFile(outputPath); err != nil {
 		return err
 	}
-	if err := mantaruntime.SyncEmbeddingTokenizerVocab(artifactPath, len(tokenizer.Tokens)); err != nil {
-		return fmt.Errorf("sync tokenizer vocab through Manta package: %w", err)
+	if err := eosruntime.SyncEmbeddingTokenizerVocab(artifactPath, len(tokenizer.Tokens)); err != nil {
+		return fmt.Errorf("sync tokenizer vocab through Eos package: %w", err)
 	}
 	fmt.Printf("trained tokenizer %q\n", outputPath)
 	fmt.Printf("vocab: %d tokens, merges: %d\n", len(tokenizer.Tokens), len(tokenizer.Merges))
@@ -4004,7 +4004,7 @@ func runTokenizeEmbed(args []string) error {
 		return err
 	}
 	if fs.NArg() < 3 || fs.Arg(0) == "" || fs.Arg(1) == "" || fs.Arg(2) == "" {
-		return fmt.Errorf("usage: manta tokenize-embed [--mode contrastive|pair|hard-negative] [--tokenizer tokenizer.mll] <artifact.mll> <input-text.jsonl> <output-token.jsonl>")
+		return fmt.Errorf("usage: eos tokenize-embed [--mode contrastive|pair|hard-negative] [--tokenizer tokenizer.mll] <artifact.mll> <input-text.jsonl> <output-token.jsonl>")
 	}
 	if hardNegativesPerQuery < 0 {
 		return fmt.Errorf("hard-negatives-per-query must be non-negative")
@@ -4013,64 +4013,64 @@ func runTokenizeEmbed(args []string) error {
 	inputPath := fs.Arg(1)
 	outputPath := fs.Arg(2)
 	if tokenizerPath == "" {
-		tokenizerPath = mantaruntime.DefaultTokenizerPath(artifactPath)
+		tokenizerPath = eosruntime.DefaultTokenizerPath(artifactPath)
 	}
-	tokenizerFile, err := mantaruntime.ReadTokenizerFile(tokenizerPath)
+	tokenizerFile, err := eosruntime.ReadTokenizerFile(tokenizerPath)
 	if err != nil {
 		return fmt.Errorf("read tokenizer: %w", err)
 	}
-	manifest, err := mantaruntime.ReadEmbeddingManifestFile(mantaruntime.ResolveEmbeddingManifestPath(artifactPath))
+	manifest, err := eosruntime.ReadEmbeddingManifestFile(eosruntime.ResolveEmbeddingManifestPath(artifactPath))
 	if err != nil {
 		return fmt.Errorf("read embedding manifest: %w", err)
 	}
-	tokenizer, err := mantaruntime.NewBPETokenizer(tokenizerFile, manifest.Tokenizer)
+	tokenizer, err := eosruntime.NewBPETokenizer(tokenizerFile, manifest.Tokenizer)
 	if err != nil {
 		return fmt.Errorf("build tokenizer: %w", err)
 	}
 	switch strings.ToLower(mode) {
 	case "contrastive":
-		examples, err := mantaruntime.ReadEmbeddingTextContrastiveExamplesFile(inputPath)
+		examples, err := eosruntime.ReadEmbeddingTextContrastiveExamplesFile(inputPath)
 		if err != nil {
 			return fmt.Errorf("read text contrastive dataset: %w", err)
 		}
-		tokenized, err := mantaruntime.TokenizeEmbeddingTextContrastiveExamples(examples, tokenizer)
+		tokenized, err := eosruntime.TokenizeEmbeddingTextContrastiveExamples(examples, tokenizer)
 		if err != nil {
 			return fmt.Errorf("tokenize contrastive dataset: %w", err)
 		}
-		if err := mantaruntime.WriteEmbeddingContrastiveExamplesFile(outputPath, tokenized); err != nil {
+		if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(outputPath, tokenized); err != nil {
 			return err
 		}
 		fmt.Printf("tokenized contrastive examples: %d\n", len(tokenized))
 	case "pair":
-		examples, err := mantaruntime.ReadEmbeddingTextPairExamplesFile(inputPath)
+		examples, err := eosruntime.ReadEmbeddingTextPairExamplesFile(inputPath)
 		if err != nil {
 			return fmt.Errorf("read text pair dataset: %w", err)
 		}
-		tokenized, err := mantaruntime.TokenizeEmbeddingTextPairExamples(examples, tokenizer)
+		tokenized, err := eosruntime.TokenizeEmbeddingTextPairExamples(examples, tokenizer)
 		if err != nil {
 			return fmt.Errorf("tokenize pair dataset: %w", err)
 		}
-		if err := mantaruntime.WriteEmbeddingPairExamplesFile(outputPath, tokenized); err != nil {
+		if err := eosruntime.WriteEmbeddingPairExamplesFile(outputPath, tokenized); err != nil {
 			return err
 		}
 		fmt.Printf("tokenized pair examples: %d\n", len(tokenized))
 	case "hard-negative", "hard_negative":
-		examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(inputPath)
+		examples, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(inputPath)
 		if err != nil {
-			pairs, pairErr := mantaruntime.ReadEmbeddingTextPairExamplesFile(inputPath)
+			pairs, pairErr := eosruntime.ReadEmbeddingTextPairExamplesFile(inputPath)
 			if pairErr != nil {
 				return fmt.Errorf("read text hard-negative dataset: %w", err)
 			}
-			examples, err = mantaruntime.BuildEmbeddingTextHardNegativeExamplesFromPairs(pairs, hardNegativesPerQuery)
+			examples, err = eosruntime.BuildEmbeddingTextHardNegativeExamplesFromPairs(pairs, hardNegativesPerQuery)
 			if err != nil {
 				return fmt.Errorf("build text hard-negative dataset: %w", err)
 			}
 		}
-		tokenized, err := mantaruntime.TokenizeEmbeddingTextHardNegativeExamples(examples, tokenizer)
+		tokenized, err := eosruntime.TokenizeEmbeddingTextHardNegativeExamples(examples, tokenizer)
 		if err != nil {
 			return fmt.Errorf("tokenize hard-negative dataset: %w", err)
 		}
-		if err := mantaruntime.WriteEmbeddingHardNegativeExamplesFile(outputPath, tokenized); err != nil {
+		if err := eosruntime.WriteEmbeddingHardNegativeExamplesFile(outputPath, tokenized); err != nil {
 			return err
 		}
 		fmt.Printf("tokenized hard-negative examples: %d\n", len(tokenized))
@@ -4098,7 +4098,7 @@ func runMineTextPairs(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: manta mine-text-pairs [flags] <corpus.txt> <train.jsonl> [eval.jsonl]")
+		return fmt.Errorf("usage: eos mine-text-pairs [flags] <corpus.txt> <train.jsonl> [eval.jsonl]")
 	}
 	corpusPath := fs.Arg(0)
 	trainPath := fs.Arg(1)
@@ -4106,7 +4106,7 @@ func runMineTextPairs(args []string) error {
 	if fs.NArg() > 2 {
 		evalPath = fs.Arg(2)
 	}
-	trainSet, evalSet, err := mantaruntime.MineEmbeddingTextDatasetsFromCorpusFile(corpusPath, mantaruntime.EmbeddingTextMiningConfig{
+	trainSet, evalSet, err := eosruntime.MineEmbeddingTextDatasetsFromCorpusFile(corpusPath, eosruntime.EmbeddingTextMiningConfig{
 		MinChars:  minChars,
 		MaxPairs:  maxPairs,
 		EvalPairs: evalPairs,
@@ -4115,11 +4115,11 @@ func runMineTextPairs(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := mantaruntime.WriteEmbeddingTextContrastiveExamplesFile(trainPath, trainSet); err != nil {
+	if err := eosruntime.WriteEmbeddingTextContrastiveExamplesFile(trainPath, trainSet); err != nil {
 		return err
 	}
 	if evalPath != "" && len(evalSet) > 0 {
-		if err := mantaruntime.WriteEmbeddingTextPairExamplesFile(evalPath, evalSet); err != nil {
+		if err := eosruntime.WriteEmbeddingTextPairExamplesFile(evalPath, evalSet); err != nil {
 			return err
 		}
 	}
@@ -4136,67 +4136,67 @@ func runMineTextPairs(args []string) error {
 
 func printUsage() {
 	fmt.Println("usage:")
-	fmt.Println("  manta version")
-	fmt.Println("  manta compile <source.manta> [output.mll]")
-	fmt.Println("  manta inspect <artifact.mll>")
-	fmt.Println("  manta export-mll <artifact.mll> [output.mll]")
-	fmt.Println("  manta embed-text <artifact.mll> <text...>")
-	fmt.Println("  manta eval-retrieval [flags] <artifact.mll> <beir-dataset-dir>")
-	fmt.Println("  manta eval-retrieval-bm25 [flags] <beir-dataset-dir>")
-	fmt.Println("  manta mine-retrieval-hard-negatives [flags] <beir-dataset-dir> <output.jsonl>")
-	fmt.Println("  manta mine-retrieval-model-hard-negatives [flags] <artifact.mll> <beir-dataset-dir> <output.jsonl>")
-	fmt.Println("  manta export-teacher-score-requests [flags] <hard-negatives.jsonl> <requests.jsonl>")
-	fmt.Println("  manta import-teacher-scores [flags] <hard-negatives.jsonl> <scores.jsonl> <output.jsonl>")
-	fmt.Println("  manta score-teacher-hard-negatives [flags] <teacher.mll> <hard-negatives.jsonl> <output.jsonl>")
-	fmt.Println("  manta audit-teacher-scores [flags] <hard-negatives.jsonl> [summary.json]")
-	fmt.Println("  manta plan-sparse-attention [flags]")
-	fmt.Println("  manta init-model [flags] <artifact.mll>")
-	fmt.Println("  manta init-mirage [flags] <artifact.mll>")
-	fmt.Println("  manta init-train [flags] <artifact.mll>")
-	fmt.Println("  manta rename-embed --name <model-name> <input.mll> <output.mll>")
-	fmt.Println("  manta train-tokenizer [flags] <artifact.mll> <corpus.txt>")
-	fmt.Println("  manta tokenize-embed [flags] <artifact.mll> <input-text.jsonl> <output-token.jsonl>")
-	fmt.Println("  manta train-corpus [flags] <artifact.mll> <corpus.txt>")
-	fmt.Println("  manta train-embed [flags] <artifact.mll> <train.jsonl> [eval.jsonl]")
-	fmt.Println("  manta compare-train-metrics <current.metrics.json> [baseline.metrics.json]")
-	fmt.Println("  manta compare-retrieval-metrics <current.retrieval.metrics.json> <baseline.retrieval.metrics.json>")
-	fmt.Println("  manta diagnose-train-metrics <metrics.json>")
-	fmt.Println("  manta gate-train-metrics [flags] <metrics.json>")
-	fmt.Println("  manta gate-retrieval-metrics [flags] <retrieval.metrics.json>")
-	fmt.Println("  manta run <artifact.mll> [entry]")
-	fmt.Println("  manta demo [module-name]")
+	fmt.Println("  eos version")
+	fmt.Println("  eos compile <source.eos> [output.mll]")
+	fmt.Println("  eos inspect <artifact.mll>")
+	fmt.Println("  eos export-mll <artifact.mll> [output.mll]")
+	fmt.Println("  eos embed-text <artifact.mll> <text...>")
+	fmt.Println("  eos eval-retrieval [flags] <artifact.mll> <beir-dataset-dir>")
+	fmt.Println("  eos eval-retrieval-bm25 [flags] <beir-dataset-dir>")
+	fmt.Println("  eos mine-retrieval-hard-negatives [flags] <beir-dataset-dir> <output.jsonl>")
+	fmt.Println("  eos mine-retrieval-model-hard-negatives [flags] <artifact.mll> <beir-dataset-dir> <output.jsonl>")
+	fmt.Println("  eos export-teacher-score-requests [flags] <hard-negatives.jsonl> <requests.jsonl>")
+	fmt.Println("  eos import-teacher-scores [flags] <hard-negatives.jsonl> <scores.jsonl> <output.jsonl>")
+	fmt.Println("  eos score-teacher-hard-negatives [flags] <teacher.mll> <hard-negatives.jsonl> <output.jsonl>")
+	fmt.Println("  eos audit-teacher-scores [flags] <hard-negatives.jsonl> [summary.json]")
+	fmt.Println("  eos plan-sparse-attention [flags]")
+	fmt.Println("  eos init-model [flags] <artifact.mll>")
+	fmt.Println("  eos init-mirage [flags] <artifact.mll>")
+	fmt.Println("  eos init-train [flags] <artifact.mll>")
+	fmt.Println("  eos rename-embed --name <model-name> <input.mll> <output.mll>")
+	fmt.Println("  eos train-tokenizer [flags] <artifact.mll> <corpus.txt>")
+	fmt.Println("  eos tokenize-embed [flags] <artifact.mll> <input-text.jsonl> <output-token.jsonl>")
+	fmt.Println("  eos train-corpus [flags] <artifact.mll> <corpus.txt>")
+	fmt.Println("  eos train-embed [flags] <artifact.mll> <train.jsonl> [eval.jsonl]")
+	fmt.Println("  eos compare-train-metrics <current.metrics.json> [baseline.metrics.json]")
+	fmt.Println("  eos compare-retrieval-metrics <current.retrieval.metrics.json> <baseline.retrieval.metrics.json>")
+	fmt.Println("  eos diagnose-train-metrics <metrics.json>")
+	fmt.Println("  eos gate-train-metrics [flags] <metrics.json>")
+	fmt.Println("  eos gate-retrieval-metrics [flags] <retrieval.metrics.json>")
+	fmt.Println("  eos run <artifact.mll> [entry]")
+	fmt.Println("  eos demo [module-name]")
 	fmt.Println()
-	fmt.Println("compile lowers a Manta source file into an .mll artifact.")
+	fmt.Println("compile lowers a Eos source file into an .mll artifact.")
 	fmt.Println("inspect summarizes an artifact and verifies its sibling package manifest when present.")
-	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Manta metadata in XMTA.")
+	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Eos metadata in XMTA.")
 	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
 	fmt.Println("eval-retrieval scores a sealed embedding .mll on BEIR-style corpus/query/qrels files with nDCG/MRR/Recall metrics.")
 	fmt.Println("eval-retrieval-bm25 scores the same BEIR files with an in-repo BM25 lexical baseline.")
 	fmt.Println("mine-retrieval-hard-negatives creates text hard-negative training JSONL from BEIR qrels using the BM25 baseline.")
-	fmt.Println("mine-retrieval-model-hard-negatives creates text hard-negative training JSONL from BEIR qrels using a Manta embedding model's own misses.")
+	fmt.Println("mine-retrieval-model-hard-negatives creates text hard-negative training JSONL from BEIR qrels using a Eos embedding model's own misses.")
 	fmt.Println("export-teacher-score-requests writes per-candidate JSONL rows for external teachers to score before import-teacher-scores.")
 	fmt.Println("import-teacher-scores merges external teacher score JSONL into text hard-negative JSONL and writes a provenance manifest.")
-	fmt.Println("score-teacher-hard-negatives uses a Manta embedding teacher to score existing text hard-negative JSONL into teacher_scores.")
+	fmt.Println("score-teacher-hard-negatives uses a Eos embedding teacher to score existing text hard-negative JSONL into teacher_scores.")
 	fmt.Println("audit-teacher-scores summarizes teacher score coverage, positive rank, margins, and entropy before distillation runs.")
 	fmt.Println("plan-sparse-attention preflights routed sparse attention plus logical TurboQuant K/V memory budgets before GPU runs.")
-	fmt.Println("init-model creates the Manta-owned default quantized embedding training package.")
-	fmt.Println("init-mirage creates the Manta-owned Mirage Image v1 host-reference artifact.")
+	fmt.Println("init-model creates the Eos-owned default quantized embedding training package.")
+	fmt.Println("init-mirage creates the Eos-owned Mirage Image v1 host-reference artifact.")
 	fmt.Println("init-train creates a native training package next to an artifact.")
 	fmt.Println("rename-embed rewrites a training package under a new embedding model identity.")
 	fmt.Println("train-tokenizer builds a sibling .tokenizer.mll from a raw text corpus, using embedding-manifest vocab_size by default.")
 	fmt.Println("tokenize-embed converts text JSONL into reusable token JSONL for contrastive, pair, or hard-negative training and eval.")
-	fmt.Println("train-corpus trains tokenizer + mined text pairs + embedder in one Manta job from a raw text corpus.")
+	fmt.Println("train-corpus trains tokenizer + mined text pairs + embedder in one Eos job from a raw text corpus.")
 	fmt.Println("train-embed reloads a training package, fits or --eval-only evaluates token JSONL or text JSONL (with --tokenizer or a sibling .tokenizer.mll; use --no-tokenizer for token JSONL beside a tokenizer), and writes it back.")
 	fmt.Println("compare-train-metrics summarizes metrics JSON and prints deltas against a baseline metrics JSON when provided.")
 	fmt.Println("compare-retrieval-metrics summarizes retrieval quality deltas and can gate a candidate against a baseline.")
 	fmt.Println("diagnose-train-metrics explains backend use, transfer pressure, and suspicious training/eval counters from metrics JSON.")
-	fmt.Println("gate-train-metrics checks metrics JSON against MANTA_* thresholds from the environment or a thresholds env file.")
-	fmt.Println("gate-retrieval-metrics checks BEIR retrieval metrics against dataset-specific MANTA_* thresholds.")
+	fmt.Println("gate-train-metrics checks metrics JSON against EOS_* thresholds from the environment or a thresholds env file.")
+	fmt.Println("gate-retrieval-metrics checks BEIR retrieval metrics against dataset-specific EOS_* thresholds.")
 	fmt.Println("run loads an artifact, binds stub weights and inputs, and executes one entrypoint.")
 	fmt.Println("demo creates a tiny inference-style module and loads it through the runtime.")
 }
 
-func totalKernelOps(kernels []mantaartifact.Kernel) int {
+func totalKernelOps(kernels []eosartifact.Kernel) int {
 	total := 0
 	for _, kernel := range kernels {
 		total += len(kernel.Body)
@@ -4212,36 +4212,36 @@ func defaultArtifactPath(srcPath string) string {
 	return strings.TrimSuffix(srcPath, ext) + ".mll"
 }
 
-func stubLoadOptions(mod *mantaartifact.Module) []mantaruntime.LoadOption {
+func stubLoadOptions(mod *eosartifact.Module) []eosruntime.LoadOption {
 	sizes := defaultSymbolSizes(mod)
-	opts := make([]mantaruntime.LoadOption, 0, len(mod.Params))
+	opts := make([]eosruntime.LoadOption, 0, len(mod.Params))
 	for _, param := range mod.Params {
-		opts = append(opts, mantaruntime.WithWeight(param.Name, stubTensorForParam(param.Name, param.Type, sizes)))
+		opts = append(opts, eosruntime.WithWeight(param.Name, stubTensorForParam(param.Name, param.Type, sizes)))
 	}
 	return opts
 }
 
-func defaultEntryName(mod *mantaartifact.Module) string {
+func defaultEntryName(mod *eosartifact.Module) string {
 	if mod != nil && len(mod.EntryPoints) > 0 {
 		return mod.EntryPoints[0].Name
 	}
 	return ""
 }
 
-func entryPointByName(mod *mantaartifact.Module, name string) (mantaartifact.EntryPoint, error) {
+func entryPointByName(mod *eosartifact.Module, name string) (eosartifact.EntryPoint, error) {
 	for _, entry := range mod.EntryPoints {
 		if entry.Name == name {
 			return entry, nil
 		}
 	}
-	return mantaartifact.EntryPoint{}, fmt.Errorf("unknown entrypoint %q", name)
+	return eosartifact.EntryPoint{}, fmt.Errorf("unknown entrypoint %q", name)
 }
 
-func stubInputs(entry mantaartifact.EntryPoint) map[string]any {
+func stubInputs(entry eosartifact.EntryPoint) map[string]any {
 	sizes := defaultShapeSizes(entry)
 	out := make(map[string]any, len(entry.Inputs))
 	for _, input := range entry.Inputs {
-		if input.Type.Kind == mantaartifact.ValueKVCache {
+		if input.Type.Kind == eosartifact.ValueKVCache {
 			out[input.Name] = backend.NewKVCache(backend.NewTensorF16([]int{sizes["T"], sizes["D"]}, make([]float32, sizes["T"]*sizes["D"])))
 			continue
 		}
@@ -4250,7 +4250,7 @@ func stubInputs(entry mantaartifact.EntryPoint) map[string]any {
 	return out
 }
 
-func displayTrainBackend(kind mantaartifact.BackendKind) string {
+func displayTrainBackend(kind eosartifact.BackendKind) string {
 	if kind == "" {
 		return "host"
 	}
@@ -4268,7 +4268,7 @@ func displayManifestName(value string) string {
 	return value
 }
 
-func joinBackendKinds(kinds []mantaartifact.BackendKind) string {
+func joinBackendKinds(kinds []eosartifact.BackendKind) string {
 	if len(kinds) == 0 {
 		return ""
 	}
@@ -4349,7 +4349,7 @@ func (f *dimFlag) values() map[string]int {
 	return out
 }
 
-func defaultSymbolSizes(mod *mantaartifact.Module) map[string]int {
+func defaultSymbolSizes(mod *eosartifact.Module) map[string]int {
 	sizes := map[string]int{
 		"V":  3,
 		"D":  2,
@@ -4388,7 +4388,7 @@ func defaultSymbolSizes(mod *mantaartifact.Module) map[string]int {
 	return sizes
 }
 
-func defaultShapeSizes(entry mantaartifact.EntryPoint) map[string]int {
+func defaultShapeSizes(entry eosartifact.EntryPoint) map[string]int {
 	sizes := map[string]int{
 		"V":  3,
 		"D":  2,
@@ -4412,7 +4412,7 @@ func defaultShapeSizes(entry mantaartifact.EntryPoint) map[string]int {
 	return sizes
 }
 
-func stubTensorForParam(name string, typ mantaartifact.ValueType, sizes map[string]int) *backend.Tensor {
+func stubTensorForParam(name string, typ eosartifact.ValueType, sizes map[string]int) *backend.Tensor {
 	shape := concreteShape(typ, sizes)
 	switch name {
 	case "token_embedding":
@@ -4436,7 +4436,7 @@ func stubTensorForParam(name string, typ mantaartifact.ValueType, sizes map[stri
 	}
 }
 
-func stubTensorForInput(name string, typ mantaartifact.ValueType, sizes map[string]int) *backend.Tensor {
+func stubTensorForInput(name string, typ eosartifact.ValueType, sizes map[string]int) *backend.Tensor {
 	shape := concreteShape(typ, sizes)
 	if typ.Tensor != nil && typ.Tensor.DType == "i32" {
 		values := make([]int32, product(shape))
@@ -4518,7 +4518,7 @@ func stubTensorForInput(name string, typ mantaartifact.ValueType, sizes map[stri
 	return fillTensor(typ, shape, 0)
 }
 
-func fillTensor(typ mantaartifact.ValueType, shape []int, offset float32) *backend.Tensor {
+func fillTensor(typ eosartifact.ValueType, shape []int, offset float32) *backend.Tensor {
 	n := product(shape)
 	switch typ.Tensor.DType {
 	case "i32":
@@ -4566,7 +4566,7 @@ func fillTensor(typ mantaartifact.ValueType, shape []int, offset float32) *backe
 	}
 }
 
-func concreteShape(typ mantaartifact.ValueType, sizes map[string]int) []int {
+func concreteShape(typ eosartifact.ValueType, sizes map[string]int) []int {
 	if typ.Tensor == nil {
 		return []int{1}
 	}

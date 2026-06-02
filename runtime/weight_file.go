@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"encoding/binary"
@@ -8,12 +8,12 @@ import (
 	"os"
 	"sort"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 	mll "m31labs.dev/mll"
 )
 
-// WeightFileVersion identifies the serialized Manta weight file schema.
+// WeightFileVersion identifies the serialized Eos weight file schema.
 const WeightFileVersion = "manta/weights/v0alpha1"
 
 var tagXWGT = [4]byte{'X', 'W', 'G', 'T'}
@@ -95,7 +95,7 @@ func ReadWeightFile(path string) (WeightFile, error) {
 	if err != nil {
 		return WeightFile{}, err
 	}
-	if !mantaartifact.IsMLLBytes(data) {
+	if !eosartifact.IsMLLBytes(data) {
 		return WeightFile{}, fmt.Errorf("weight file %q is not an MLL file", path)
 	}
 	return decodeWeightFileMLL(data)
@@ -171,7 +171,7 @@ func encodeWeightFileMLL(weights WeightFile) ([]byte, error) {
 
 	head := mll.HeadSection{
 		Name:        strg.Intern("manta-weights"),
-		Description: strg.Intern("Manta weight container"),
+		Description: strg.Intern("Eos weight container"),
 		Metadata: []mll.HeadMetadataEntry{
 			headStringMeta(strg, "weight_file_version", weights.Version),
 			headIntMeta(strg, "weight_count", int64(len(names))),
@@ -312,7 +312,7 @@ func decodeTensorEntry(entry mll.TensorEntry, logicalDType string) (*backend.Ten
 	dtype := logicalDType
 	if dtype == "" {
 		var err error
-		dtype, err = mllDTypeToManta(entry.DType)
+		dtype, err = mllDTypeToEos(entry.DType)
 		if err != nil {
 			return nil, err
 		}
@@ -366,7 +366,7 @@ func decodeTensorEntry(entry mll.TensorEntry, logicalDType string) (*backend.Ten
 	}
 }
 
-func mllDTypeToManta(dtype mll.DType) (string, error) {
+func mllDTypeToEos(dtype mll.DType) (string, error) {
 	switch dtype {
 	case mll.DTypeI32:
 		return "i32", nil

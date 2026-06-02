@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"bufio"
@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"m31labs.dev/manta/runtime/backend"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 const RetrievalEvalMetricsSchema = "manta.embedding_retrieval_metrics.v1"

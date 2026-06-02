@@ -1,11 +1,11 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"context"
 	"fmt"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 // Candidate is one scored retrieval result.
@@ -115,7 +115,7 @@ func decodeCandidateResult(raw backend.Result, lookup map[int64]map[string]strin
 	outputName := ""
 	var output backend.Value
 	for name, value := range raw.Outputs {
-		if value.Type.Kind != mantaartifact.ValueCandidatePack {
+		if value.Type.Kind != eosartifact.ValueCandidatePack {
 			continue
 		}
 		if outputName != "" {
@@ -142,33 +142,33 @@ func decodeCandidateResult(raw backend.Result, lookup map[int64]map[string]strin
 	}, nil
 }
 
-func (p *Program) requireCandidateEntry(name string, batched bool) (mantaartifact.EntryPoint, error) {
+func (p *Program) requireCandidateEntry(name string, batched bool) (eosartifact.EntryPoint, error) {
 	if p == nil || p.module == nil {
-		return mantaartifact.EntryPoint{}, fmt.Errorf("program is not loaded")
+		return eosartifact.EntryPoint{}, fmt.Errorf("program is not loaded")
 	}
 	for _, entry := range p.module.EntryPoints {
 		if entry.Name != name {
 			continue
 		}
 		if len(entry.Inputs) < 3 {
-			return mantaartifact.EntryPoint{}, fmt.Errorf("entrypoint %q does not declare query/docs/candidate_ids inputs", name)
+			return eosartifact.EntryPoint{}, fmt.Errorf("entrypoint %q does not declare query/docs/candidate_ids inputs", name)
 		}
 		queryName, _, _, err := candidateEntryInputNames(entry)
 		if err != nil {
-			return mantaartifact.EntryPoint{}, err
+			return eosartifact.EntryPoint{}, err
 		}
 		if batched && queryName != "queries" {
-			return mantaartifact.EntryPoint{}, fmt.Errorf("entrypoint %q is not batched", name)
+			return eosartifact.EntryPoint{}, fmt.Errorf("entrypoint %q is not batched", name)
 		}
 		if !batched && queryName != "query" {
-			return mantaartifact.EntryPoint{}, fmt.Errorf("entrypoint %q is not unbatched", name)
+			return eosartifact.EntryPoint{}, fmt.Errorf("entrypoint %q is not unbatched", name)
 		}
 		return entry, nil
 	}
-	return mantaartifact.EntryPoint{}, fmt.Errorf("unknown entrypoint %q", name)
+	return eosartifact.EntryPoint{}, fmt.Errorf("unknown entrypoint %q", name)
 }
 
-func candidateEntryInputNames(entry mantaartifact.EntryPoint) (queryName, docsName, idsName string, err error) {
+func candidateEntryInputNames(entry eosartifact.EntryPoint) (queryName, docsName, idsName string, err error) {
 	for _, input := range entry.Inputs {
 		switch input.Name {
 		case "query", "queries":

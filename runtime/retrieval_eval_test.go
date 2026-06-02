@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"context"
@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"m31labs.dev/manta/compiler"
-	"m31labs.dev/manta/runtime/backends/cuda"
-	"m31labs.dev/manta/runtime/backends/metal"
+	"m31labs.dev/eos/compiler"
+	"m31labs.dev/eos/runtime/backends/cuda"
+	"m31labs.dev/eos/runtime/backends/metal"
 )
 
 func TestComputeRetrievalQualityPerfectRanking(t *testing.T) {

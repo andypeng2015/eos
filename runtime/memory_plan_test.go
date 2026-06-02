@@ -1,11 +1,11 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"path/filepath"
 	"testing"
 
-	"m31labs.dev/manta/compiler"
-	"m31labs.dev/manta/runtime/backend"
+	"m31labs.dev/eos/compiler"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 func TestDefaultMemoryPlanPath(t *testing.T) {

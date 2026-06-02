@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
+	eosartifact "m31labs.dev/eos/artifact/eos"
 )
 
 func TestExecuteAutogradConv2DMSEMatchesFiniteDifference(t *testing.T) {
@@ -49,27 +49,27 @@ func TestExecuteAutogradConv2DMSEMatchesFiniteDifference(t *testing.T) {
 }
 
 func TestAutogradTurboQuantStraightThroughEstimator(t *testing.T) {
-	mod := mantaartifact.NewModule("tq_ste")
-	mod.EntryPoints = []mantaartifact.EntryPoint{{
+	mod := eosartifact.NewModule("tq_ste")
+	mod.EntryPoints = []eosartifact.EntryPoint{{
 		Name: "train",
-		Kind: mantaartifact.EntryPointPipeline,
-		Inputs: []mantaartifact.ValueBinding{
+		Kind: eosartifact.EntryPointPipeline,
+		Inputs: []eosartifact.ValueBinding{
 			{Name: "y", Type: autogradTensorType("f16", []string{"1", "4", "1", "1"})},
 			{Name: "target", Type: autogradTensorType("f16", []string{"1", "4", "1", "1"})},
 		},
-		Outputs: []mantaartifact.ValueBinding{{Name: "loss", Type: autogradTensorType("f32", []string{"1"})}},
+		Outputs: []eosartifact.ValueBinding{{Name: "loss", Type: autogradTensorType("f32", []string{"1"})}},
 	}}
-	mod.Buffers = []mantaartifact.Buffer{
+	mod.Buffers = []eosartifact.Buffer{
 		{Name: "coords", DType: "q2", Shape: []string{"1", "4", "1", "1"}},
 		{Name: "norms", DType: "q_norm", Shape: []string{"1", "1", "1"}},
 		{Name: "y_hat", DType: "f16", Shape: []string{"1", "4", "1", "1"}},
 		{Name: "loss", DType: "f32", Shape: []string{"1"}},
 	}
-	mod.Steps = []mantaartifact.Step{
-		{Entry: "train", Kind: mantaartifact.StepTurboQEncode, Name: "encode", Inputs: []string{"y"}, Outputs: []string{"coords", "norms"}, Attributes: map[string]string{"bits": "2", "seed": "17"}},
-		{Entry: "train", Kind: mantaartifact.StepTurboQDecode, Name: "decode", Inputs: []string{"coords", "norms"}, Outputs: []string{"y_hat"}, Attributes: map[string]string{"bits": "2", "seed": "17"}},
-		{Entry: "train", Kind: mantaartifact.StepMSELoss, Name: "mse", Inputs: []string{"y_hat", "target"}, Outputs: []string{"loss"}},
-		{Entry: "train", Kind: mantaartifact.StepReturn, Name: "return", Outputs: []string{"loss"}},
+	mod.Steps = []eosartifact.Step{
+		{Entry: "train", Kind: eosartifact.StepTurboQEncode, Name: "encode", Inputs: []string{"y"}, Outputs: []string{"coords", "norms"}, Attributes: map[string]string{"bits": "2", "seed": "17"}},
+		{Entry: "train", Kind: eosartifact.StepTurboQDecode, Name: "decode", Inputs: []string{"coords", "norms"}, Outputs: []string{"y_hat"}, Attributes: map[string]string{"bits": "2", "seed": "17"}},
+		{Entry: "train", Kind: eosartifact.StepMSELoss, Name: "mse", Inputs: []string{"y_hat", "target"}, Outputs: []string{"loss"}},
+		{Entry: "train", Kind: eosartifact.StepReturn, Name: "return", Outputs: []string{"loss"}},
 	}
 
 	result, err := ExecuteAutograd(mod, GradRequest{
@@ -160,25 +160,25 @@ func TestRateDistortionLossAutogradUsesRateWeight(t *testing.T) {
 }
 
 func TestRateGradientFlowsThroughTurboQuantEncodeToInput(t *testing.T) {
-	mod := mantaartifact.NewModule("tq_rate_ste")
-	mod.EntryPoints = []mantaartifact.EntryPoint{{
+	mod := eosartifact.NewModule("tq_rate_ste")
+	mod.EntryPoints = []eosartifact.EntryPoint{{
 		Name: "train",
-		Kind: mantaartifact.EntryPointPipeline,
-		Inputs: []mantaartifact.ValueBinding{
+		Kind: eosartifact.EntryPointPipeline,
+		Inputs: []eosartifact.ValueBinding{
 			{Name: "y", Type: autogradTensorType("f16", []string{"1", "4", "1", "1"})},
 			{Name: "logits", Type: autogradTensorType("f16", []string{"4"})},
 		},
-		Outputs: []mantaartifact.ValueBinding{{Name: "loss", Type: autogradTensorType("f32", []string{"1"})}},
+		Outputs: []eosartifact.ValueBinding{{Name: "loss", Type: autogradTensorType("f32", []string{"1"})}},
 	}}
-	mod.Buffers = []mantaartifact.Buffer{
+	mod.Buffers = []eosartifact.Buffer{
 		{Name: "coords", DType: "q2", Shape: []string{"1", "4", "1", "1"}},
 		{Name: "norms", DType: "q_norm", Shape: []string{"1", "1", "1"}},
 		{Name: "loss", DType: "f32", Shape: []string{"1"}},
 	}
-	mod.Steps = []mantaartifact.Step{
-		{Entry: "train", Kind: mantaartifact.StepTurboQEncode, Name: "encode", Inputs: []string{"y"}, Outputs: []string{"coords", "norms"}, Attributes: map[string]string{"bits": "2", "seed": "17"}},
-		{Entry: "train", Kind: mantaartifact.StepCrossEntropy, Name: "rate", Inputs: []string{"coords", "logits"}, Outputs: []string{"loss"}, Attributes: map[string]string{"bits": "2"}},
-		{Entry: "train", Kind: mantaartifact.StepReturn, Name: "return", Outputs: []string{"loss"}},
+	mod.Steps = []eosartifact.Step{
+		{Entry: "train", Kind: eosartifact.StepTurboQEncode, Name: "encode", Inputs: []string{"y"}, Outputs: []string{"coords", "norms"}, Attributes: map[string]string{"bits": "2", "seed": "17"}},
+		{Entry: "train", Kind: eosartifact.StepCrossEntropy, Name: "rate", Inputs: []string{"coords", "logits"}, Outputs: []string{"loss"}, Attributes: map[string]string{"bits": "2"}},
+		{Entry: "train", Kind: eosartifact.StepReturn, Name: "return", Outputs: []string{"loss"}},
 	}
 
 	result, err := ExecuteAutograd(mod, GradRequest{
@@ -228,29 +228,29 @@ func TestGDNAutogradInputMatchesFiniteDifference(t *testing.T) {
 	}
 }
 
-func autogradConvModule() *mantaartifact.Module {
-	mod := mantaartifact.NewModule("conv_autograd")
-	mod.Params = []mantaartifact.Param{
+func autogradConvModule() *eosartifact.Module {
+	mod := eosartifact.NewModule("conv_autograd")
+	mod.Params = []eosartifact.Param{
 		{Name: "w", Type: autogradTensorType("f16", []string{"1", "1", "2", "2"}), Binding: "weights/w", Trainable: true},
 		{Name: "b", Type: autogradTensorType("f16", []string{"1"}), Binding: "weights/b", Trainable: true},
 	}
-	mod.EntryPoints = []mantaartifact.EntryPoint{{
+	mod.EntryPoints = []eosartifact.EntryPoint{{
 		Name: "train",
-		Kind: mantaartifact.EntryPointPipeline,
-		Inputs: []mantaartifact.ValueBinding{
+		Kind: eosartifact.EntryPointPipeline,
+		Inputs: []eosartifact.ValueBinding{
 			{Name: "x", Type: autogradTensorType("f16", []string{"1", "1", "3", "3"})},
 			{Name: "target", Type: autogradTensorType("f16", []string{"1", "1", "2", "2"})},
 		},
-		Outputs: []mantaartifact.ValueBinding{{Name: "loss", Type: autogradTensorType("f32", []string{"1"})}},
+		Outputs: []eosartifact.ValueBinding{{Name: "loss", Type: autogradTensorType("f32", []string{"1"})}},
 	}}
-	mod.Buffers = []mantaartifact.Buffer{
+	mod.Buffers = []eosartifact.Buffer{
 		{Name: "y", DType: "f16", Shape: []string{"1", "1", "2", "2"}},
 		{Name: "loss", DType: "f32", Shape: []string{"1"}},
 	}
-	mod.Steps = []mantaartifact.Step{
-		{Entry: "train", Kind: mantaartifact.StepConv2D, Name: "conv", Inputs: []string{"x", "w", "b"}, Outputs: []string{"y"}},
-		{Entry: "train", Kind: mantaartifact.StepMSELoss, Name: "mse", Inputs: []string{"y", "target"}, Outputs: []string{"loss"}},
-		{Entry: "train", Kind: mantaartifact.StepReturn, Name: "return", Outputs: []string{"loss"}},
+	mod.Steps = []eosartifact.Step{
+		{Entry: "train", Kind: eosartifact.StepConv2D, Name: "conv", Inputs: []string{"x", "w", "b"}, Outputs: []string{"y"}},
+		{Entry: "train", Kind: eosartifact.StepMSELoss, Name: "mse", Inputs: []string{"y", "target"}, Outputs: []string{"loss"}},
+		{Entry: "train", Kind: eosartifact.StepReturn, Name: "return", Outputs: []string{"loss"}},
 	}
 	return mod
 }
@@ -308,10 +308,10 @@ func gdnMSELoss(t *testing.T, input, beta, gamma *Tensor) float32 {
 	return loss.F32[0]
 }
 
-func autogradTensorType(dtype string, shape []string) mantaartifact.ValueType {
-	return mantaartifact.ValueType{
-		Kind:   mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{DType: dtype, Shape: append([]string(nil), shape...)},
+func autogradTensorType(dtype string, shape []string) eosartifact.ValueType {
+	return eosartifact.ValueType{
+		Kind:   eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{DType: dtype, Shape: append([]string(nil), shape...)},
 	}
 }
 

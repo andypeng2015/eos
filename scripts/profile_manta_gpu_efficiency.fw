@@ -39,25 +39,25 @@ func usage() {
 	fmt.Println(`Profile Manta embedding GPU efficiency with repeatable per-variant runs.
 
 Required:
-  MANTA_GPU_PROFILE_ASSETS=/path/to/package-assets
-  MANTA_GPU_PROFILE_TRAIN=/path/to/train.jsonl
-  MANTA_GPU_PROFILE_EVAL=/path/to/eval.jsonl
+  EOS_GPU_PROFILE_ASSETS=/path/to/package-assets
+  EOS_GPU_PROFILE_TRAIN=/path/to/train.jsonl
+  EOS_GPU_PROFILE_EVAL=/path/to/eval.jsonl
 
 Common:
-  MANTA_REPO_ROOT=$PWD
-  MANTA_GPU_PROFILE_RUN_ROOT=$PWD/runs
-  MANTA_GPU_PROFILE_RUN_ID=gpu-efficiency-20260412
-  MANTA_GPU_PROFILE_MODEL=manta-embed-v1
-  MANTA_GPU_PROFILE_NO_TOKENIZER=1
-  MANTA_GPU_PROFILE_BATCH=256
-  MANTA_GPU_PROFILE_EPOCHS=1
-  MANTA_GPU_PROFILE_EVAL_EVERY=4
-  MANTA_GPU_PROFILE_EVAL_EVERY_STEPS=4
+  EOS_REPO_ROOT=$PWD
+  EOS_GPU_PROFILE_RUN_ROOT=$PWD/runs
+  EOS_GPU_PROFILE_RUN_ID=gpu-efficiency-20260412
+  EOS_GPU_PROFILE_MODEL=manta-embed-v1
+  EOS_GPU_PROFILE_NO_TOKENIZER=1
+  EOS_GPU_PROFILE_BATCH=256
+  EOS_GPU_PROFILE_EPOCHS=1
+  EOS_GPU_PROFILE_EVAL_EVERY=4
+  EOS_GPU_PROFILE_EVAL_EVERY_STEPS=4
 
 Variants:
-  MANTA_GPU_PROFILE_VARIANTS=default,disable-batched-forward
-  MANTA_GPU_PROFILE_ENV_DEFAULT=
-  MANTA_GPU_PROFILE_ENV_DISABLE_BATCHED_FORWARD=MANTA_TRAIN_DISABLE_BATCHED_FORWARD=1
+  EOS_GPU_PROFILE_VARIANTS=default,disable-batched-forward
+  EOS_GPU_PROFILE_ENV_DEFAULT=
+  EOS_GPU_PROFILE_ENV_DISABLE_BATCHED_FORWARD=EOS_TRAIN_DISABLE_BATCHED_FORWARD=1
 
 Outputs:
   <run_dir>/<variant>/run.log
@@ -97,7 +97,7 @@ func hasRepoRoot(dir string) bool {
 }
 
 func findRoot() (string, error) {
-	let explicit = os.Getenv("MANTA_REPO_ROOT")
+	let explicit = os.Getenv("EOS_REPO_ROOT")
 	if hasRepoRoot(explicit) {
 		return filepath.Abs(explicit)
 	}
@@ -110,7 +110,7 @@ func findRoot() (string, error) {
 	if hasRepoRoot(cwd) {
 		return filepath.Abs(cwd)
 	}
-	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
 }
 
 func requireFile(path string, label string) (string, error) {
@@ -178,16 +178,16 @@ func parseEnvList(raw string) []string {
 }
 
 func parseVariants() []variantConfig {
-	raw := getenv("MANTA_GPU_PROFILE_VARIANTS", "default")
+	raw := getenv("EOS_GPU_PROFILE_VARIANTS", "default")
 	variants := []variantConfig{}
-	commonEnv := parseEnvList(os.Getenv("MANTA_GPU_PROFILE_ENV"))
+	commonEnv := parseEnvList(os.Getenv("EOS_GPU_PROFILE_ENV"))
 	for _, part := range strings.Split(raw, ",") {
 		name := strings.TrimSpace(part)
 		if name == "" {
 			continue
 		}
 		env := append([]string{}, commonEnv...)
-		env = append(env, parseEnvList(os.Getenv("MANTA_GPU_PROFILE_ENV_"+sanitizeEnvSuffix(name)))...)
+		env = append(env, parseEnvList(os.Getenv("EOS_GPU_PROFILE_ENV_"+sanitizeEnvSuffix(name)))...)
 		variants = append(variants, variantConfig{Name: name, Env: env})
 	}
 	if len(variants) == 0 {
@@ -197,9 +197,9 @@ func parseVariants() []variantConfig {
 }
 
 func prepareConfig(root string) (profileConfig, error) {
-	runID := getenv("MANTA_GPU_PROFILE_RUN_ID", "gpu-efficiency-"+time.Now().UTC().Format("20060102T150405Z"))
-	runRoot := getenv("MANTA_GPU_PROFILE_RUN_ROOT", filepath.Join(root, "runs"))
-	runDir, err := filepath.Abs(getenv("MANTA_GPU_PROFILE_RUN_DIR", filepath.Join(runRoot, runID)))
+	runID := getenv("EOS_GPU_PROFILE_RUN_ID", "gpu-efficiency-"+time.Now().UTC().Format("20060102T150405Z"))
+	runRoot := getenv("EOS_GPU_PROFILE_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir, err := filepath.Abs(getenv("EOS_GPU_PROFILE_RUN_DIR", filepath.Join(runRoot, runID)))
 	guard err == nil else return profileConfig{}, err
 	if entries, err := os.ReadDir(runDir); err == nil && len(entries) > 0 {
 		return profileConfig{}, fmt.Errorf("run directory already exists and is not empty: %s", runDir)
@@ -207,15 +207,15 @@ func prepareConfig(root string) (profileConfig, error) {
 	err = os.MkdirAll(runDir, 0o755)
 	guard err == nil else return profileConfig{}, err
 
-	assets, err := requireDir(os.Getenv("MANTA_GPU_PROFILE_ASSETS"), "MANTA_GPU_PROFILE_ASSETS")
+	assets, err := requireDir(os.Getenv("EOS_GPU_PROFILE_ASSETS"), "EOS_GPU_PROFILE_ASSETS")
 	guard err == nil else return profileConfig{}, err
-	train, err := requireFile(os.Getenv("MANTA_GPU_PROFILE_TRAIN"), "MANTA_GPU_PROFILE_TRAIN")
+	train, err := requireFile(os.Getenv("EOS_GPU_PROFILE_TRAIN"), "EOS_GPU_PROFILE_TRAIN")
 	guard err == nil else return profileConfig{}, err
-	eval, err := requireFile(os.Getenv("MANTA_GPU_PROFILE_EVAL"), "MANTA_GPU_PROFILE_EVAL")
+	eval, err := requireFile(os.Getenv("EOS_GPU_PROFILE_EVAL"), "EOS_GPU_PROFILE_EVAL")
 	guard err == nil else return profileConfig{}, err
-	tokenizer := os.Getenv("MANTA_GPU_PROFILE_TOKENIZER")
+	tokenizer := os.Getenv("EOS_GPU_PROFILE_TOKENIZER")
 	if tokenizer != "" {
-		tokenizer, err = requireFile(tokenizer, "MANTA_GPU_PROFILE_TOKENIZER")
+		tokenizer, err = requireFile(tokenizer, "EOS_GPU_PROFILE_TOKENIZER")
 		guard err == nil else return profileConfig{}, err
 	}
 
@@ -224,17 +224,17 @@ func prepareConfig(root string) (profileConfig, error) {
 		RunID:          runID,
 		RunDir:         runDir,
 		AssetsDir:      assets,
-		ModelName:      getenv("MANTA_GPU_PROFILE_MODEL", "manta-embed-v1"),
+		ModelName:      getenv("EOS_GPU_PROFILE_MODEL", "manta-embed-v1"),
 		TrainJSONL:     train,
 		EvalJSONL:      eval,
 		TokenizerPath:  tokenizer,
-		NoTokenizer:    envEnabled("MANTA_GPU_PROFILE_NO_TOKENIZER"),
-		Epochs:         getenv("MANTA_GPU_PROFILE_EPOCHS", "1"),
-		BatchSize:      getenv("MANTA_GPU_PROFILE_BATCH", "256"),
-		LR:             getenv("MANTA_GPU_PROFILE_LR", "0.005"),
-		Temperature:    getenv("MANTA_GPU_PROFILE_TEMPERATURE", "0.05"),
-		EvalEvery:      getenv("MANTA_GPU_PROFILE_EVAL_EVERY", "4"),
-		EvalEverySteps: getenv("MANTA_GPU_PROFILE_EVAL_EVERY_STEPS", "4"),
+		NoTokenizer:    envEnabled("EOS_GPU_PROFILE_NO_TOKENIZER"),
+		Epochs:         getenv("EOS_GPU_PROFILE_EPOCHS", "1"),
+		BatchSize:      getenv("EOS_GPU_PROFILE_BATCH", "256"),
+		LR:             getenv("EOS_GPU_PROFILE_LR", "0.005"),
+		Temperature:    getenv("EOS_GPU_PROFILE_TEMPERATURE", "0.05"),
+		EvalEvery:      getenv("EOS_GPU_PROFILE_EVAL_EVERY", "4"),
+		EvalEverySteps: getenv("EOS_GPU_PROFILE_EVAL_EVERY_STEPS", "4"),
 		Variants:       parseVariants(),
 	}, nil
 }
@@ -323,7 +323,7 @@ func trainArgs(cfg profileConfig, variantDir string) []string {
 		}
 	}
 	args := []string{
-		"go", "run", "./cmd/manta", "train-embed",
+		"go", "run", "./cmd/eos", "train-embed",
 		"--epochs", cfg.Epochs,
 		"--batch-size", cfg.BatchSize,
 		"--lr", cfg.LR,
@@ -347,7 +347,7 @@ func profileVariant(cfg profileConfig, variant variantConfig) (string, error) {
 	err = copyMatching(filepath.Join(cfg.AssetsDir, cfg.ModelName+".*"), variantDir)
 	guard err == nil else return "", err
 	env := append([]string{}, variant.Env...)
-	env = append(env, "MANTA_CPU_PROFILE="+filepath.Join(variantDir, "cpu.pprof"))
+	env = append(env, "EOS_CPU_PROFILE="+filepath.Join(variantDir, "cpu.pprof"))
 	logPath := filepath.Join(variantDir, "run.log")
 	timePath := filepath.Join(variantDir, "time.txt")
 	args := []string{"-v", "-o", timePath}

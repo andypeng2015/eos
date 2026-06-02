@@ -1,6 +1,6 @@
 package hir
 
-import "m31labs.dev/manta/syntax"
+import "m31labs.dev/eos/syntax"
 
 // Module is the source-oriented typed IR.
 type Module struct {

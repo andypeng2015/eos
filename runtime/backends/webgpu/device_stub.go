@@ -5,8 +5,8 @@ package webgpu
 import (
 	"context"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 type deviceRuntime struct{}
@@ -21,6 +21,6 @@ func adoptDeviceRuntime(any) (*deviceRuntime, error) {
 	return nil, nil
 }
 
-func (*deviceRuntime) dispatchStep(context.Context, mantaartifact.Step, []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
+func (*deviceRuntime) dispatchStep(context.Context, eosartifact.Step, []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
 	return backend.StepDispatchResult{}, false, nil
 }

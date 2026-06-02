@@ -1,13 +1,13 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"math"
 	"testing"
 	"time"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/compiler"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/compiler"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 func TestEstimateContrastiveTrainWorkload(t *testing.T) {
@@ -359,7 +359,7 @@ func TestEmbeddingTrainerFitContrastiveEvaluatesWithinEpoch(t *testing.T) {
 }
 
 func TestBucketContrastiveOrderByLengthSortsWithinDefaultWindows(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_LENGTH_BUCKET_WINDOW", "")
+	t.Setenv("EOS_TRAIN_LENGTH_BUCKET_WINDOW", "")
 	trainSet := []EmbeddingContrastiveExample{
 		{QueryTokens: make([]int32, 8), PositiveTokens: make([]int32, 1)},
 		{QueryTokens: make([]int32, 2), PositiveTokens: make([]int32, 1)},
@@ -385,7 +385,7 @@ func TestBucketContrastiveOrderByLengthSortsWithinDefaultWindows(t *testing.T) {
 }
 
 func TestBucketContrastiveOrderByLengthPreservesEqualLengthShuffleOrder(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_LENGTH_BUCKET_WINDOW", "")
+	t.Setenv("EOS_TRAIN_LENGTH_BUCKET_WINDOW", "")
 	trainSet := []EmbeddingContrastiveExample{
 		{QueryTokens: make([]int32, 8), PositiveTokens: make([]int32, 10)},
 		{QueryTokens: make([]int32, 2), PositiveTokens: make([]int32, 10)},
@@ -405,7 +405,7 @@ func TestBucketContrastiveOrderByLengthPreservesEqualLengthShuffleOrder(t *testi
 }
 
 func TestBucketContrastiveOrderByLengthHonorsWindowOverride(t *testing.T) {
-	t.Setenv("MANTA_TRAIN_LENGTH_BUCKET_WINDOW", "4")
+	t.Setenv("EOS_TRAIN_LENGTH_BUCKET_WINDOW", "4")
 	trainSet := []EmbeddingContrastiveExample{
 		{QueryTokens: make([]int32, 8), PositiveTokens: make([]int32, 1)},
 		{QueryTokens: make([]int32, 1), PositiveTokens: make([]int32, 1)},
@@ -1010,8 +1010,8 @@ type countingContrastiveAccelerator struct {
 	targetIndexes []int
 }
 
-func (a *countingContrastiveAccelerator) Backend() mantaartifact.BackendKind {
-	return mantaartifact.BackendCUDA
+func (a *countingContrastiveAccelerator) Backend() eosartifact.BackendKind {
+	return eosartifact.BackendCUDA
 }
 
 func (a *countingContrastiveAccelerator) RunInfoNCE(query, positive *backend.Tensor, cfg backend.ContrastiveLossConfig) (backend.ContrastiveGradResult, error) {

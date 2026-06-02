@@ -5,8 +5,8 @@ package cuda
 import (
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 func TestCUDASparseAttentionStepMatchesReference(t *testing.T) {
@@ -33,14 +33,14 @@ func TestCUDASparseAttentionStepMatchesReference(t *testing.T) {
 		0, 20,
 		-10, 0,
 	})
-	step := mantaartifact.Step{Kind: mantaartifact.StepSparseAttention, Attributes: map[string]string{"top_k": "1"}}
+	step := eosartifact.Step{Kind: eosartifact.StepSparseAttention, Attributes: map[string]string{"top_k": "1"}}
 	cfg, ok := planBuiltinSparseAttention(step, []*backend.Tensor{query, key, value})
 	if !ok {
 		t.Fatal("sparse_attention should be supported")
 	}
-	outputType := mantaartifact.ValueType{
-		Kind:   mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{DType: "f16"},
+	outputType := eosartifact.ValueType{
+		Kind:   eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{DType: "f16"},
 	}
 	got, err := rt.runSparseAttentionStep([]*backend.Tensor{query, key, value}, outputType, cfg)
 	if err != nil {
@@ -93,15 +93,15 @@ func TestCUDATurboSparseAttentionStepMatchesReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	step := mantaartifact.Step{Kind: mantaartifact.StepTurboSparseAttention, Attributes: attrs}
+	step := eosartifact.Step{Kind: eosartifact.StepTurboSparseAttention, Attributes: attrs}
 	inputs := []*backend.Tensor{query, keyCoords, keyNorms, valueCoords, valueNorms}
 	cfg, ok := planBuiltinTurboSparseAttention(step, inputs)
 	if !ok {
 		t.Fatal("turbo_sparse_attention should be supported")
 	}
-	outputType := mantaartifact.ValueType{
-		Kind:   mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{DType: "f16"},
+	outputType := eosartifact.ValueType{
+		Kind:   eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{DType: "f16"},
 	}
 	got, err := rt.runTurboSparseAttentionStep(inputs, outputType, cfg)
 	if err != nil {
@@ -161,15 +161,15 @@ func TestCUDATurboSparseAttentionBatchedStepMatchesReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	step := mantaartifact.Step{Kind: mantaartifact.StepTurboSparseAttention, Attributes: attrs}
+	step := eosartifact.Step{Kind: eosartifact.StepTurboSparseAttention, Attributes: attrs}
 	inputs := []*backend.Tensor{query, keyCoords, keyNorms, valueCoords, valueNorms}
 	cfg, ok := planBuiltinTurboSparseAttention(step, inputs)
 	if !ok {
 		t.Fatal("batched turbo_sparse_attention should be supported")
 	}
-	outputType := mantaartifact.ValueType{
-		Kind:   mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{DType: "f16"},
+	outputType := eosartifact.ValueType{
+		Kind:   eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{DType: "f16"},
 	}
 	got, err := rt.runTurboSparseAttentionStep(inputs, outputType, cfg)
 	if err != nil {
@@ -216,15 +216,15 @@ func TestCUDATurboSparseAttentionRoutedStepMatchesReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	step := mantaartifact.Step{Kind: mantaartifact.StepTurboSparseAttention, Attributes: attrs}
+	step := eosartifact.Step{Kind: eosartifact.StepTurboSparseAttention, Attributes: attrs}
 	inputs := []*backend.Tensor{query, keyCoords, keyNorms, valueCoords, valueNorms}
 	cfg, ok := planBuiltinTurboSparseAttention(step, inputs)
 	if !ok {
 		t.Fatal("routed turbo_sparse_attention should be supported")
 	}
-	outputType := mantaartifact.ValueType{
-		Kind:   mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{DType: "f16"},
+	outputType := eosartifact.ValueType{
+		Kind:   eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{DType: "f16"},
 	}
 	got, err := rt.runTurboSparseAttentionStep(inputs, outputType, cfg)
 	if err != nil {

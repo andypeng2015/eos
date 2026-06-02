@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"context"
@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/compiler"
-	"m31labs.dev/manta/runtime/backend"
-	"m31labs.dev/manta/runtime/backends/cuda"
-	"m31labs.dev/manta/runtime/backends/metal"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/compiler"
+	"m31labs.dev/eos/runtime/backend"
+	"m31labs.dev/eos/runtime/backends/cuda"
+	"m31labs.dev/eos/runtime/backends/metal"
 )
 
 func TestScoreManifestRoundTrip(t *testing.T) {
@@ -143,7 +143,7 @@ pipeline score(query: f16[D], docs: q4[N, D]) -> f32[N] {
 
 	dir := t.TempDir()
 	artifactPath := filepath.Join(dir, "score_bundle.mll")
-	if err := mantaartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
+	if err := eosartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
 	if err := scoreBundleManifest().WriteFile(DefaultScoreManifestPath(artifactPath)); err != nil {

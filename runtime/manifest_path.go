@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"path/filepath"

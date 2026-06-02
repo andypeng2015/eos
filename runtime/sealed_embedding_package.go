@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"context"
@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"os"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
+	eosartifact "m31labs.dev/eos/artifact/eos"
 	mll "m31labs.dev/mll"
 )
 
 // SealedEmbeddingPackage is a monolithic exported embedding package.
 type SealedEmbeddingPackage struct {
-	Module     *mantaartifact.Module
+	Module     *eosartifact.Module
 	Manifest   EmbeddingManifest
 	Tokenizer  *TokenizerFile
 	Weights    WeightFile
@@ -45,7 +45,7 @@ func (rt *Runtime) LoadSealedEmbeddingPackage(ctx context.Context, path string, 
 
 // ReadSealedEmbeddingPackage decodes a single-file sealed MLL embedding package.
 func ReadSealedEmbeddingPackage(path string) (SealedEmbeddingPackage, error) {
-	reader, meta, err := readSealedMantaMLL(path)
+	reader, meta, err := readSealedEosMLL(path)
 	if err != nil {
 		return SealedEmbeddingPackage{}, err
 	}
@@ -59,33 +59,33 @@ func ReadSealedEmbeddingPackage(path string) (SealedEmbeddingPackage, error) {
 	return pkg, nil
 }
 
-func readSealedMantaMLL(path string) (*mll.Reader, mantaartifact.MLLMetadata, error) {
+func readSealedEosMLL(path string) (*mll.Reader, eosartifact.MLLMetadata, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, mantaartifact.MLLMetadata{}, err
+		return nil, eosartifact.MLLMetadata{}, err
 	}
-	if !mantaartifact.IsMLLBytes(data) {
-		return nil, mantaartifact.MLLMetadata{}, fmt.Errorf("%q is not an MLL file", path)
+	if !eosartifact.IsMLLBytes(data) {
+		return nil, eosartifact.MLLMetadata{}, fmt.Errorf("%q is not an MLL file", path)
 	}
 	reader, err := mll.ReadBytes(data, mll.WithDigestVerification())
 	if err != nil {
-		return nil, mantaartifact.MLLMetadata{}, err
+		return nil, eosartifact.MLLMetadata{}, err
 	}
 	if reader.Profile() != mll.ProfileSealed {
-		return nil, mantaartifact.MLLMetadata{}, fmt.Errorf("sealed package profile = %d, want %d", reader.Profile(), mll.ProfileSealed)
+		return nil, eosartifact.MLLMetadata{}, fmt.Errorf("sealed package profile = %d, want %d", reader.Profile(), mll.ProfileSealed)
 	}
-	body, ok := reader.Section(mantaartifact.MLLTagXMTA)
+	body, ok := reader.Section(eosartifact.MLLTagXMTA)
 	if !ok {
-		return nil, mantaartifact.MLLMetadata{}, fmt.Errorf("sealed package missing XMTA metadata")
+		return nil, eosartifact.MLLMetadata{}, fmt.Errorf("sealed package missing XMTA metadata")
 	}
-	meta, err := mantaartifact.DecodeMLLMetadata(body)
+	meta, err := eosartifact.DecodeMLLMetadata(body)
 	if err != nil {
-		return nil, mantaartifact.MLLMetadata{}, err
+		return nil, eosartifact.MLLMetadata{}, err
 	}
 	return reader, meta, nil
 }
 
-func sealedEmbeddingPackageFromReader(reader *mll.Reader, meta mantaartifact.MLLMetadata) (SealedEmbeddingPackage, bool, error) {
+func sealedEmbeddingPackageFromReader(reader *mll.Reader, meta eosartifact.MLLMetadata) (SealedEmbeddingPackage, bool, error) {
 	body, ok := meta.JSONFiles["embedding_manifest"]
 	if !ok {
 		return SealedEmbeddingPackage{}, false, nil
@@ -94,7 +94,7 @@ func sealedEmbeddingPackageFromReader(reader *mll.Reader, meta mantaartifact.MLL
 	if err := json.Unmarshal(body, &manifest); err != nil {
 		return SealedEmbeddingPackage{}, false, fmt.Errorf("decode embedded embedding_manifest: %w", err)
 	}
-	mod, err := mantaartifact.DecodeJSON(meta.Artifact)
+	mod, err := eosartifact.DecodeJSON(meta.Artifact)
 	if err != nil {
 		return SealedEmbeddingPackage{}, false, err
 	}

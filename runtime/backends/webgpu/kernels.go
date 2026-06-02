@@ -4,12 +4,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
+	eosartifact "m31labs.dev/eos/artifact/eos"
 )
 
 // BuiltinKernel describes a WebGPU WGSL builtin used by Mirage decode steps.
 type BuiltinKernel struct {
-	StepKind      mantaartifact.StepKind
+	StepKind      eosartifact.StepKind
 	Entry         string
 	Source        string
 	WorkgroupSize [3]int
@@ -19,16 +19,16 @@ type BuiltinKernel struct {
 // MirageDecodeKernels returns the v1 decode-side WGSL kernel surface.
 func MirageDecodeKernels() []BuiltinKernel {
 	return []BuiltinKernel{
-		{StepKind: mantaartifact.StepConv2D, Entry: "manta_webgpu_conv2d_nchw", Source: conv2DWGSL, WorkgroupSize: [3]int{8, 8, 1}, Grid: "2d"},
-		{StepKind: mantaartifact.StepConv2DTrans, Entry: "manta_webgpu_conv2d_transpose_nchw", Source: conv2DTransposeWGSL, WorkgroupSize: [3]int{8, 8, 1}, Grid: "2d"},
-		{StepKind: mantaartifact.StepGDN, Entry: "manta_webgpu_gdn_nchw", Source: gdnWGSL, WorkgroupSize: [3]int{64, 1, 1}, Grid: "1d"},
-		{StepKind: mantaartifact.StepIGDN, Entry: "manta_webgpu_igdn_nchw", Source: igdnWGSL, WorkgroupSize: [3]int{64, 1, 1}, Grid: "1d"},
-		{StepKind: mantaartifact.StepTurboQDecode, Entry: "manta_webgpu_turboquant_decode_nchw", Source: turboQuantDecodeWGSL, WorkgroupSize: [3]int{64, 1, 1}, Grid: "1d"},
+		{StepKind: eosartifact.StepConv2D, Entry: "manta_webgpu_conv2d_nchw", Source: conv2DWGSL, WorkgroupSize: [3]int{8, 8, 1}, Grid: "2d"},
+		{StepKind: eosartifact.StepConv2DTrans, Entry: "manta_webgpu_conv2d_transpose_nchw", Source: conv2DTransposeWGSL, WorkgroupSize: [3]int{8, 8, 1}, Grid: "2d"},
+		{StepKind: eosartifact.StepGDN, Entry: "manta_webgpu_gdn_nchw", Source: gdnWGSL, WorkgroupSize: [3]int{64, 1, 1}, Grid: "1d"},
+		{StepKind: eosartifact.StepIGDN, Entry: "manta_webgpu_igdn_nchw", Source: igdnWGSL, WorkgroupSize: [3]int{64, 1, 1}, Grid: "1d"},
+		{StepKind: eosartifact.StepTurboQDecode, Entry: "manta_webgpu_turboquant_decode_nchw", Source: turboQuantDecodeWGSL, WorkgroupSize: [3]int{64, 1, 1}, Grid: "1d"},
 	}
 }
 
-// BuiltinForStep returns the WebGPU builtin kernel for a high-level Manta step.
-func BuiltinForStep(kind mantaartifact.StepKind) (BuiltinKernel, bool) {
+// BuiltinForStep returns the WebGPU builtin kernel for a high-level Eos step.
+func BuiltinForStep(kind eosartifact.StepKind) (BuiltinKernel, bool) {
 	for _, kernel := range MirageDecodeKernels() {
 		if kernel.StepKind == kind {
 			return kernel, true
@@ -45,7 +45,7 @@ func (k BuiltinKernel) SourceHash() string {
 func (k BuiltinKernel) Metadata() map[string]any {
 	return map[string]any{
 		"dispatch_mode":                 "backend_native",
-		"dispatch_backend":              string(mantaartifact.BackendWebGPU),
+		"dispatch_backend":              string(eosartifact.BackendWebGPU),
 		"device_execution":              false,
 		"execution_mode":                "wgsl_host_reference",
 		"fallback_reason":               "webgpu_device_runtime_not_bound",

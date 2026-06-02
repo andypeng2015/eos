@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	mantaruntime "m31labs.dev/manta/runtime"
-	"m31labs.dev/manta/runtime/backend"
-	"m31labs.dev/manta/runtime/backends/webgpu"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	eosruntime "m31labs.dev/eos/runtime"
+	"m31labs.dev/eos/runtime/backend"
+	"m31labs.dev/eos/runtime/backends/webgpu"
 )
 
 func TestDefaultMirageV1ModuleRuns(t *testing.T) {
@@ -18,7 +18,7 @@ func TestDefaultMirageV1ModuleRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt := mantaruntime.New(webgpu.New())
+	rt := eosruntime.New(webgpu.New())
 	prog, err := rt.Load(context.Background(), mod, mirageLoadOptions(t, mod)...)
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +136,7 @@ func TestDefaultMirageV1BitPlaneModuleRuns(t *testing.T) {
 	if got := mod.Metadata["factorization"]; got != "bit-plane" {
 		t.Fatalf("factorization metadata = %v", got)
 	}
-	rt := mantaruntime.New(webgpu.New())
+	rt := eosruntime.New(webgpu.New())
 	prog, err := rt.Load(context.Background(), mod, mirageLoadOptions(t, mod)...)
 	if err != nil {
 		t.Fatal(err)
@@ -155,7 +155,7 @@ func TestDefaultMirageV1BitPlaneModuleRuns(t *testing.T) {
 	}
 }
 
-func findMirageStep(t *testing.T, mod *mantaartifact.Module, entry, name string) mantaartifact.Step {
+func findMirageStep(t *testing.T, mod *eosartifact.Module, entry, name string) eosartifact.Step {
 	t.Helper()
 	for _, step := range mod.Steps {
 		if step.Entry == entry && step.Name == name {
@@ -163,7 +163,7 @@ func findMirageStep(t *testing.T, mod *mantaartifact.Module, entry, name string)
 		}
 	}
 	t.Fatalf("missing step %s/%s", entry, name)
-	return mantaartifact.Step{}
+	return eosartifact.Step{}
 }
 
 func TestDefaultMirageV1AutogradProducesTrainableGradients(t *testing.T) {
@@ -202,7 +202,7 @@ func TestDefaultMirageV1WebGPUSynthesizeUsesDecodeBuiltins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt := mantaruntime.New(webgpu.New())
+	rt := eosruntime.New(webgpu.New())
 	prog, err := rt.Load(context.Background(), mod, mirageLoadOptions(t, mod)...)
 	if err != nil {
 		t.Fatal(err)
@@ -238,9 +238,9 @@ func TestDefaultMirageV1WebGPUSynthesizeUsesDecodeBuiltins(t *testing.T) {
 	}
 }
 
-func mirageLoadOptions(t *testing.T, mod *mantaartifact.Module) []mantaruntime.LoadOption {
+func mirageLoadOptions(t *testing.T, mod *eosartifact.Module) []eosruntime.LoadOption {
 	t.Helper()
-	opts := make([]mantaruntime.LoadOption, 0, len(mod.Params))
+	opts := make([]eosruntime.LoadOption, 0, len(mod.Params))
 	for _, param := range mod.Params {
 		shape := concreteShape(t, param.Type.Tensor.Shape)
 		n := 1
@@ -256,12 +256,12 @@ func mirageLoadOptions(t *testing.T, mod *mantaartifact.Module) []mantaruntime.L
 		case strings.Contains(param.Name, "bias"):
 			value = 0.05
 		}
-		opts = append(opts, mantaruntime.WithWeight(param.Name, backend.NewTensorF16(shape, filled(n, value))))
+		opts = append(opts, eosruntime.WithWeight(param.Name, backend.NewTensorF16(shape, filled(n, value))))
 	}
 	return opts
 }
 
-func mirageGradWeights(t *testing.T, mod *mantaartifact.Module) map[string]*backend.Tensor {
+func mirageGradWeights(t *testing.T, mod *eosartifact.Module) map[string]*backend.Tensor {
 	t.Helper()
 	weights := make(map[string]*backend.Tensor, len(mod.Params))
 	for _, param := range mod.Params {

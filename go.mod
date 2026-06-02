@@ -1,4 +1,4 @@
-module m31labs.dev/manta
+module m31labs.dev/eos
 
 go 1.25.1
 

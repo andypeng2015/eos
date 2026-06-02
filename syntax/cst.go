@@ -35,7 +35,7 @@ func parseWithTreeSitter(moduleName string, src []byte) (*File, []Diagnostic) {
 		if !l.collectParseErrors(root) {
 			l.diags = append(l.diags, Diagnostic{
 				Severity: SeverityError,
-				Message:  "invalid Manta syntax",
+				Message:  "invalid Eos syntax",
 				Span:     spanOf(root),
 			})
 		}
@@ -89,7 +89,7 @@ func (l *cstLowerer) lowerParamDecl(n *gotreesitter.Node) Decl {
 	return &ParamDecl{
 		Name:      nodeText(nameNode, l.src),
 		Type:      typ,
-		Binding:   unquoteMantaString(nodeText(weight, l.src)),
+		Binding:   unquoteEosString(nodeText(weight, l.src)),
 		Trainable: childByField(n, l.lang, "trainable") != nil,
 		Span:      spanOf(n),
 	}
@@ -250,7 +250,7 @@ func (l *cstLowerer) lowerExpr(n *gotreesitter.Node) Expr {
 	case "number":
 		return &NumberExpr{Text: nodeText(n, l.src), Span: spanOf(n)}
 	case "string_literal":
-		return &StringExpr{Value: unquoteMantaString(nodeText(n, l.src)), Span: spanOf(n)}
+		return &StringExpr{Value: unquoteEosString(nodeText(n, l.src)), Span: spanOf(n)}
 	case "call_expression":
 		return l.lowerCallExpr(n, false)
 	case "intrinsic_call_expression":
@@ -312,7 +312,7 @@ func (l *cstLowerer) collectParseErrors(n *gotreesitter.Node) bool {
 	if n.IsError() || n.IsMissing() {
 		l.diags = append(l.diags, Diagnostic{
 			Severity: SeverityError,
-			Message:  fmt.Sprintf("invalid Manta syntax near %q", strings.TrimSpace(nodeText(n, l.src))),
+			Message:  fmt.Sprintf("invalid Eos syntax near %q", strings.TrimSpace(nodeText(n, l.src))),
 			Span:     spanOf(n),
 		})
 		return true
@@ -381,7 +381,7 @@ func spanOf(n *gotreesitter.Node) Span {
 	}
 }
 
-func unquoteMantaString(raw string) string {
+func unquoteEosString(raw string) string {
 	value, err := strconv.Unquote(raw)
 	if err == nil {
 		return value

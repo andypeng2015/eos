@@ -6,8 +6,8 @@ import (
 	"math"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 func TestCUDAGDNStepMatchesHost(t *testing.T) {
@@ -29,9 +29,9 @@ func TestCUDAGDNStepMatchesHost(t *testing.T) {
 		0.1, 0.2,
 		0.3, 0.4,
 	})
-	outputType := mantaartifact.ValueType{
-		Kind:   mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{DType: "f32"},
+	outputType := eosartifact.ValueType{
+		Kind:   eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{DType: "f32"},
 	}
 
 	result, err := rt.runGDNStep([]*backend.Tensor{input, beta, gamma}, outputType, false)

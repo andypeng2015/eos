@@ -1,12 +1,12 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"fmt"
 	"math/rand"
 	"os"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 func SyncEmbeddingTokenizerVocab(artifactPath string, vocabSize int) error {
@@ -55,7 +55,7 @@ func SyncEmbeddingTokenizerVocab(artifactPath string, vocabSize int) error {
 			return err
 		}
 		if memoryPlanPath := DefaultMemoryPlanPath(artifactPath); fileExists(memoryPlanPath) {
-			mod, err := mantaartifact.ReadFile(artifactPath)
+			mod, err := eosartifact.ReadFile(artifactPath)
 			if err != nil {
 				return err
 			}

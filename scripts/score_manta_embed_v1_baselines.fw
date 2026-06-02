@@ -125,29 +125,29 @@ func usage() {
 	fmt.Println(`Build a baseline scoreboard for the Manta long-context embedder wedge.
 
 Required:
-  MANTA_SCOREBOARD_ARTIFACT=/path/to/manta-embed-v1.sealed.mll
+  EOS_SCOREBOARD_ARTIFACT=/path/to/manta-embed-v1.sealed.mll
 
 Run:
-  MANTA_REPO_ROOT=$PWD ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
 
 Optional pairwise eval:
-  MANTA_SCOREBOARD_PAIRWISE_JSONL=/path/to/eval.jsonl
-  MANTA_SCOREBOARD_HARD_JSONL=/path/to/hard-eval.jsonl
-  MANTA_SCOREBOARD_PAIRWISE_ARTIFACT=/path/to/manta-embed-v1.mll
-  MANTA_SCOREBOARD_TOKENIZER=/path/to/tokenizer.mll
-  MANTA_SCOREBOARD_NO_TOKENIZER=1
+  EOS_SCOREBOARD_PAIRWISE_JSONL=/path/to/eval.jsonl
+  EOS_SCOREBOARD_HARD_JSONL=/path/to/hard-eval.jsonl
+  EOS_SCOREBOARD_PAIRWISE_ARTIFACT=/path/to/manta-embed-v1.mll
+  EOS_SCOREBOARD_TOKENIZER=/path/to/tokenizer.mll
+  EOS_SCOREBOARD_NO_TOKENIZER=1
 
 Optional retrieval eval:
-  MANTA_SCOREBOARD_RETRIEVAL_ROOT=/data/manta/datasets/manta-embed-v1
-  MANTA_SCOREBOARD_RETRIEVAL_DATASETS=scifact,nfcorpus,fiqa
-  MANTA_SCOREBOARD_LONG_ROOT=/data/manta/datasets/longembed
-  MANTA_SCOREBOARD_LONG_DATASETS=passkey,needle
-  MANTA_SCOREBOARD_BM25_BASELINE=1
-  MANTA_SCOREBOARD_SPLIT=test
-  MANTA_SCOREBOARD_BATCH_SIZE=512
-  MANTA_SCOREBOARD_TOP_K=100
-  MANTA_SCOREBOARD_MAX_DOCS=0
-  MANTA_SCOREBOARD_MAX_QUERIES=0`)
+  EOS_SCOREBOARD_RETRIEVAL_ROOT=/data/manta/datasets/manta-embed-v1
+  EOS_SCOREBOARD_RETRIEVAL_DATASETS=scifact,nfcorpus,fiqa
+  EOS_SCOREBOARD_LONG_ROOT=/data/manta/datasets/longembed
+  EOS_SCOREBOARD_LONG_DATASETS=passkey,needle
+  EOS_SCOREBOARD_BM25_BASELINE=1
+  EOS_SCOREBOARD_SPLIT=test
+  EOS_SCOREBOARD_BATCH_SIZE=512
+  EOS_SCOREBOARD_TOP_K=100
+  EOS_SCOREBOARD_MAX_DOCS=0
+  EOS_SCOREBOARD_MAX_QUERIES=0`)
 }
 
 func getenv(name string, fallback string) string {
@@ -175,7 +175,7 @@ func hasRepoRoot(dir string) bool {
 }
 
 func findRoot() (string, error) {
-	explicit := os.Getenv("MANTA_REPO_ROOT")
+	explicit := os.Getenv("EOS_REPO_ROOT")
 	if hasRepoRoot(explicit) {
 		return filepath.Abs(explicit)
 	}
@@ -188,7 +188,7 @@ func findRoot() (string, error) {
 	if hasRepoRoot(cwd) {
 		return filepath.Abs(cwd)
 	}
-	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
 }
 
 func shellQuote(value string) string {
@@ -275,37 +275,37 @@ func inferPairwiseArtifact(artifact string) string {
 }
 
 func prepareConfig(root string) (scoreboardConfig, error) {
-	artifact, err := absIfSet(os.Getenv("MANTA_SCOREBOARD_ARTIFACT"))
+	artifact, err := absIfSet(os.Getenv("EOS_SCOREBOARD_ARTIFACT"))
 	guard err == nil else return scoreboardConfig{}, err
-	guard artifact != "" else return scoreboardConfig{}, fmt.Errorf("MANTA_SCOREBOARD_ARTIFACT is required")
-	err = requireExistingFile("MANTA_SCOREBOARD_ARTIFACT", artifact)
+	guard artifact != "" else return scoreboardConfig{}, fmt.Errorf("EOS_SCOREBOARD_ARTIFACT is required")
+	err = requireExistingFile("EOS_SCOREBOARD_ARTIFACT", artifact)
 	guard err == nil else return scoreboardConfig{}, err
 
-	pairwiseArtifact, err := absIfSet(os.Getenv("MANTA_SCOREBOARD_PAIRWISE_ARTIFACT"))
+	pairwiseArtifact, err := absIfSet(os.Getenv("EOS_SCOREBOARD_PAIRWISE_ARTIFACT"))
 	guard err == nil else return scoreboardConfig{}, err
 	if pairwiseArtifact == "" {
 		pairwiseArtifact = inferPairwiseArtifact(artifact)
 	}
-	err = requireExistingFile("MANTA_SCOREBOARD_PAIRWISE_ARTIFACT", pairwiseArtifact)
+	err = requireExistingFile("EOS_SCOREBOARD_PAIRWISE_ARTIFACT", pairwiseArtifact)
 	guard err == nil else return scoreboardConfig{}, err
 
-	tokenizer, err := absIfSet(os.Getenv("MANTA_SCOREBOARD_TOKENIZER"))
+	tokenizer, err := absIfSet(os.Getenv("EOS_SCOREBOARD_TOKENIZER"))
 	guard err == nil else return scoreboardConfig{}, err
-	err = requireExistingFile("MANTA_SCOREBOARD_TOKENIZER", tokenizer)
-	guard err == nil else return scoreboardConfig{}, err
-
-	pairwise, err := absIfSet(os.Getenv("MANTA_SCOREBOARD_PAIRWISE_JSONL"))
-	guard err == nil else return scoreboardConfig{}, err
-	err = requireExistingFile("MANTA_SCOREBOARD_PAIRWISE_JSONL", pairwise)
+	err = requireExistingFile("EOS_SCOREBOARD_TOKENIZER", tokenizer)
 	guard err == nil else return scoreboardConfig{}, err
 
-	hard, err := absIfSet(os.Getenv("MANTA_SCOREBOARD_HARD_JSONL"))
+	pairwise, err := absIfSet(os.Getenv("EOS_SCOREBOARD_PAIRWISE_JSONL"))
 	guard err == nil else return scoreboardConfig{}, err
-	err = requireExistingFile("MANTA_SCOREBOARD_HARD_JSONL", hard)
+	err = requireExistingFile("EOS_SCOREBOARD_PAIRWISE_JSONL", pairwise)
 	guard err == nil else return scoreboardConfig{}, err
 
-	runID := getenv("MANTA_SCOREBOARD_RUN_ID", "manta-embed-v1-scoreboard-"+time.Now().UTC().Format("20060102T150405Z"))
-	runRoot, err := filepath.Abs(getenv("MANTA_SCOREBOARD_RUN_ROOT", filepath.Join(root, "runs")))
+	hard, err := absIfSet(os.Getenv("EOS_SCOREBOARD_HARD_JSONL"))
+	guard err == nil else return scoreboardConfig{}, err
+	err = requireExistingFile("EOS_SCOREBOARD_HARD_JSONL", hard)
+	guard err == nil else return scoreboardConfig{}, err
+
+	runID := getenv("EOS_SCOREBOARD_RUN_ID", "manta-embed-v1-scoreboard-"+time.Now().UTC().Format("20060102T150405Z"))
+	runRoot, err := filepath.Abs(getenv("EOS_SCOREBOARD_RUN_ROOT", filepath.Join(root, "runs")))
 	guard err == nil else return scoreboardConfig{}, err
 	runDir := filepath.Join(runRoot, runID)
 	if entries, err := os.ReadDir(runDir); err == nil && len(entries) > 0 {
@@ -316,15 +316,15 @@ func prepareConfig(root string) (scoreboardConfig, error) {
 	err = os.MkdirAll(filepath.Join(runDir, "logs"), 0o755)
 	guard err == nil else return scoreboardConfig{}, err
 
-	retrievalDatasets := splitList(os.Getenv("MANTA_SCOREBOARD_RETRIEVAL_DATASETS"))
-	longDatasets := splitList(os.Getenv("MANTA_SCOREBOARD_LONG_DATASETS"))
+	retrievalDatasets := splitList(os.Getenv("EOS_SCOREBOARD_RETRIEVAL_DATASETS"))
+	longDatasets := splitList(os.Getenv("EOS_SCOREBOARD_LONG_DATASETS"))
 	guard pairwise != "" || hard != "" || len(retrievalDatasets) > 0 || len(longDatasets) > 0 else {
 		return scoreboardConfig{}, fmt.Errorf("provide at least one eval source: pairwise JSONL, hard JSONL, retrieval datasets, or long datasets")
 	}
 
-	retrievalRoot, err := filepath.Abs(getenv("MANTA_SCOREBOARD_RETRIEVAL_ROOT", filepath.Join(root, "datasets", "manta-embed-v1")))
+	retrievalRoot, err := filepath.Abs(getenv("EOS_SCOREBOARD_RETRIEVAL_ROOT", filepath.Join(root, "datasets", "manta-embed-v1")))
 	guard err == nil else return scoreboardConfig{}, err
-	longRoot, err := filepath.Abs(getenv("MANTA_SCOREBOARD_LONG_ROOT", filepath.Join(root, "datasets", "longembed")))
+	longRoot, err := filepath.Abs(getenv("EOS_SCOREBOARD_LONG_ROOT", filepath.Join(root, "datasets", "longembed")))
 	guard err == nil else return scoreboardConfig{}, err
 
 	return scoreboardConfig{
@@ -337,19 +337,19 @@ func prepareConfig(root string) (scoreboardConfig, error) {
 		Artifact:          artifact,
 		PairwiseArtifact:  pairwiseArtifact,
 		Tokenizer:         tokenizer,
-		NoTokenizer:       getenv("MANTA_SCOREBOARD_NO_TOKENIZER", "0"),
+		NoTokenizer:       getenv("EOS_SCOREBOARD_NO_TOKENIZER", "0"),
 		PairwiseEvalJSONL: pairwise,
 		HardEvalJSONL:     hard,
 		RetrievalRoot:     retrievalRoot,
 		RetrievalDatasets: retrievalDatasets,
 		LongRoot:          longRoot,
 		LongDatasets:      longDatasets,
-		Split:             getenv("MANTA_SCOREBOARD_SPLIT", "test"),
-		BatchSize:         getenv("MANTA_SCOREBOARD_BATCH_SIZE", "512"),
-		TopK:              getenv("MANTA_SCOREBOARD_TOP_K", "100"),
-		MaxDocs:           getenv("MANTA_SCOREBOARD_MAX_DOCS", "0"),
-		MaxQueries:        getenv("MANTA_SCOREBOARD_MAX_QUERIES", "0"),
-		BM25Baseline:      getenv("MANTA_SCOREBOARD_BM25_BASELINE", "1"),
+		Split:             getenv("EOS_SCOREBOARD_SPLIT", "test"),
+		BatchSize:         getenv("EOS_SCOREBOARD_BATCH_SIZE", "512"),
+		TopK:              getenv("EOS_SCOREBOARD_TOP_K", "100"),
+		MaxDocs:           getenv("EOS_SCOREBOARD_MAX_DOCS", "0"),
+		MaxQueries:        getenv("EOS_SCOREBOARD_MAX_QUERIES", "0"),
+		BM25Baseline:      getenv("EOS_SCOREBOARD_BM25_BASELINE", "1"),
 		ScoreboardTSV:     filepath.Join(runDir, "scoreboard.tsv"),
 		ScoreboardJSON:    filepath.Join(runDir, "scoreboard.json"),
 	}, nil
@@ -566,7 +566,7 @@ func writeManifest(cfg scoreboardConfig, rows []scoreboardRow) error {
 }
 
 func runScoreboard(cfg scoreboardConfig) error {
-	err := runCmd(cfg, "Build manta CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.MantaBin, "./cmd/manta"})
+	err := runCmd(cfg, "Build manta CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.MantaBin, "./cmd/eos"})
 	guard err == nil else return err
 	err = os.WriteFile(cfg.ScoreboardTSV, []byte(tsvHeader()), 0o644)
 	guard err == nil else return err

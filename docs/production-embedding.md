@@ -1,6 +1,6 @@
 # Production Embedding Candidate
 
-Use `scripts/train_manta_embed_v1_candidate.fw` to create a release-grade `manta-embed-v1` candidate. The workflow wraps the current Manta CLI primitives with production guardrails:
+Use `scripts/train_manta_embed_v1_candidate.fw` to create a release-grade `manta-embed-v1` candidate. The workflow wraps the current Eos CLI primitives with production guardrails:
 
 - refuses temporary input paths unless explicitly overridden
 - refuses dirty repositories unless explicitly overridden
@@ -16,18 +16,18 @@ Use `scripts/train_manta_embed_v1_candidate.fw` to create a release-grade `manta
 Run the local preflight before spending trainer time on a candidate:
 
 ```bash
-MANTA_REPO_ROOT=$PWD ferrous-wheel run scripts/verify_manta_production.fw
+EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/verify_manta_production.fw
 ```
 
-This uses generated tiny fixtures to verify the public Manta surface, build `cmd/manta`, initialize and train a `.mll` package, run eval-only checks with `optimizer_updates=0`, export a sealed `.mll`, and inspect both packages. It is a production path check, not a model quality result.
+This uses generated tiny fixtures to verify the public Eos surface, build `cmd/eos`, initialize and train a `.mll` package, run eval-only checks with `optimizer_updates=0`, export a sealed `.mll`, and inspect both packages. It is a production path check, not a model quality result.
 
 ## Acquire Datasets
 
-The default acquisition workflow downloads public BEIR retrieval datasets (`scifact`, `nfcorpus`, and `fiqa`), converts qrels to Manta text-pair JSONL, writes a tokenizer corpus, and emits initial threshold gates:
+The default acquisition workflow downloads public BEIR retrieval datasets (`scifact`, `nfcorpus`, and `fiqa`), converts qrels to Eos text-pair JSONL, writes a tokenizer corpus, and emits initial threshold gates:
 
 ```bash
-MANTA_REPO_ROOT=$PWD \
-MANTA_DATASET_ROOT=/data/manta/datasets/manta-embed-v1 \
+EOS_REPO_ROOT=$PWD \
+EOS_DATASET_ROOT=/data/manta/datasets/manta-embed-v1 \
 ferrous-wheel run scripts/acquire_manta_embed_v1_datasets.fw
 ```
 
@@ -48,51 +48,51 @@ Review dataset licenses before commercial use. The default avoids MS MARCO becau
 Prepared JSONL is the preferred path for production because train/eval splits are fixed before training starts.
 
 ```bash
-MANTA_RUN_ROOT=/data/manta/runs \
-MANTA_REPO_ROOT=$PWD \
-MANTA_RUN_ID=manta-embed-v1-20260412-a \
-MANTA_TRAIN_JSONL=/data/manta/datasets/manta-embed-v1/processed/train.jsonl \
-MANTA_EVAL_JSONL=/data/manta/datasets/manta-embed-v1/processed/eval.jsonl \
-MANTA_HARD_EVAL_JSONL=/data/manta/datasets/manta-embed-v1/processed/hard-eval.jsonl \
-MANTA_TOKENIZER_CORPUS=/data/manta/datasets/manta-embed-v1/processed/tokenizer-corpus.txt \
-MANTA_THRESHOLDS_ENV=/data/manta/datasets/manta-embed-v1/processed/thresholds.env \
-MANTA_EPOCHS=3 \
-MANTA_BATCH_SIZE=1024 \
-MANTA_LR=0.005 \
-MANTA_TEMPERATURE=0.05 \
-MANTA_SELECT_METRIC=score_margin \
-MANTA_EVAL_EVERY_STEPS=0 \
-MANTA_MIN_AUC=0.70 \
-MANTA_MIN_THRESHOLD_ACCURACY=0.65 \
-MANTA_MIN_SCORE_MARGIN=0.05 \
-MANTA_MAX_LOSS=0.35 \
+EOS_RUN_ROOT=/data/manta/runs \
+EOS_REPO_ROOT=$PWD \
+EOS_RUN_ID=manta-embed-v1-20260412-a \
+EOS_TRAIN_JSONL=/data/manta/datasets/manta-embed-v1/processed/train.jsonl \
+EOS_EVAL_JSONL=/data/manta/datasets/manta-embed-v1/processed/eval.jsonl \
+EOS_HARD_EVAL_JSONL=/data/manta/datasets/manta-embed-v1/processed/hard-eval.jsonl \
+EOS_TOKENIZER_CORPUS=/data/manta/datasets/manta-embed-v1/processed/tokenizer-corpus.txt \
+EOS_THRESHOLDS_ENV=/data/manta/datasets/manta-embed-v1/processed/thresholds.env \
+EOS_EPOCHS=3 \
+EOS_BATCH_SIZE=1024 \
+EOS_LR=0.005 \
+EOS_TEMPERATURE=0.05 \
+EOS_SELECT_METRIC=score_margin \
+EOS_EVAL_EVERY_STEPS=0 \
+EOS_MIN_AUC=0.70 \
+EOS_MIN_THRESHOLD_ACCURACY=0.65 \
+EOS_MIN_SCORE_MARGIN=0.05 \
+EOS_MAX_LOSS=0.35 \
 ferrous-wheel run scripts/train_manta_embed_v1_candidate.fw
 ```
 
-`MANTA_THRESHOLDS_ENV` loads the acquisition workflow's current gate file and records its SHA256 in the run manifest. Explicitly exported `MANTA_*` values still override values from that file. Set `MANTA_TOKENIZER=/path/to/tokenizer.mll` when you want to reuse an existing tokenizer instead of training one from `MANTA_TOKENIZER_CORPUS`.
+`EOS_THRESHOLDS_ENV` loads the acquisition workflow's current gate file and records its SHA256 in the run manifest. Explicitly exported `EOS_*` values still override values from that file. Set `EOS_TOKENIZER=/path/to/tokenizer.mll` when you want to reuse an existing tokenizer instead of training one from `EOS_TOKENIZER_CORPUS`.
 
 When prepared JSONL is text and a tokenizer is available, the production workflow tokenizes train, validation, and hard-eval JSONL into run-local token files before training. Training and eval then read token JSONL directly, which front-loads BPE cost, makes the optimizer profile reflect model work, and records the generated token files in `datasets.sha256`.
-Use `manta train-embed --no-tokenizer` when directly training token JSONL beside a sibling tokenizer; otherwise the CLI intentionally auto-discovers that tokenizer and treats the JSONL as text.
-Use `manta diagnose-train-metrics /path/to/train.metrics.json` to explain backend use, transfer pressure, and suspicious training/eval counters from any run. Use `manta gate-train-metrics --thresholds /path/to/thresholds.env --scope quality /path/to/final-eval.metrics.json` to apply the same quality gate outside the production workflow. Use `--scope efficiency` for training throughput and backend counters, and `--scope eval-only` to enforce zero optimizer updates on validation runs.
+Use `eos train-embed --no-tokenizer` when directly training token JSONL beside a sibling tokenizer; otherwise the CLI intentionally auto-discovers that tokenizer and treats the JSONL as text.
+Use `eos diagnose-train-metrics /path/to/train.metrics.json` to explain backend use, transfer pressure, and suspicious training/eval counters from any run. Use `eos gate-train-metrics --thresholds /path/to/thresholds.env --scope quality /path/to/final-eval.metrics.json` to apply the same quality gate outside the production workflow. Use `--scope efficiency` for training throughput and backend counters, and `--scope eval-only` to enforce zero optimizer updates on validation runs.
 
-Contrastive training uses pair-length-aware bucketing by default so batches reach larger exact-length matmul groups. `MANTA_TRAIN_LENGTH_BUCKET_WINDOW` controls the shuffled sort window; larger values can improve grouping but must be profiled because they reduce local length randomness and can increase per-batch working-set pressure.
+Contrastive training uses pair-length-aware bucketing by default so batches reach larger exact-length matmul groups. `EOS_TRAIN_LENGTH_BUCKET_WINDOW` controls the shuffled sort window; larger values can improve grouping but must be profiled because they reduce local length randomness and can increase per-batch working-set pressure.
 
-The production workflow defaults `MANTA_EVAL_EVERY_STEPS=0`. Keep within-epoch eval disabled for full candidate runs unless you are debugging convergence; epoch eval, final validation eval, and hard holdout eval still run and are enough for release gating. On the acquired full split, step-level eval every 4 batches adds many full eval passes and dominates transfer without improving the optimizer update itself.
+The production workflow defaults `EOS_EVAL_EVERY_STEPS=0`. Keep within-epoch eval disabled for full candidate runs unless you are debugging convergence; epoch eval, final validation eval, and hard holdout eval still run and are enough for release gating. On the acquired full split, step-level eval every 4 batches adds many full eval passes and dominates transfer without improving the optimizer update itself.
 
-Eval-only candidate gates batch pairwise forward encodes by exact token length. `MANTA_TRAIN_PAIR_EVAL_BATCH_SIZE` defaults to `256`; set `MANTA_TRAIN_DISABLE_BATCHED_PAIR_EVAL=1` only for scalar A/B checks.
+Eval-only candidate gates batch pairwise forward encodes by exact token length. `EOS_TRAIN_PAIR_EVAL_BATCH_SIZE` defaults to `256`; set `EOS_TRAIN_DISABLE_BATCHED_PAIR_EVAL=1` only for scalar A/B checks.
 
-`MANTA_TRAIN_ENABLE_FAST_GELU=1` is available for throughput experiments. It changes GELU math from precise tanh to a bounded rational tanh approximation, so use it only when the exact-GELU candidate and fast-GELU candidate are both evaluated against validation and hard holdout gates.
+`EOS_TRAIN_ENABLE_FAST_GELU=1` is available for throughput experiments. It changes GELU math from precise tanh to a bounded rational tanh approximation, so use it only when the exact-GELU candidate and fast-GELU candidate are both evaluated against validation and hard holdout gates.
 
 ## Metric Thresholds
 
 The default acquired eval files are pairwise positive/negative judgments with one deterministic sampled negative per positive. The initial release gates are:
 
 ```text
-MANTA_SELECT_METRIC=score_margin
-MANTA_MIN_AUC=0.70
-MANTA_MIN_THRESHOLD_ACCURACY=0.65
-MANTA_MIN_SCORE_MARGIN=0.05
-MANTA_MAX_LOSS=0.35
+EOS_SELECT_METRIC=score_margin
+EOS_MIN_AUC=0.70
+EOS_MIN_THRESHOLD_ACCURACY=0.65
+EOS_MIN_SCORE_MARGIN=0.05
+EOS_MAX_LOSS=0.35
 ```
 
 These gates are intentionally concrete rather than advisory. AUC must clear 0.70 as a threshold-free separability check, calibrated threshold accuracy must clear 0.65 against a 0.50 random baseline, positive scores must beat negative scores by at least 0.05 on average, and pairwise loss must stay at or below 0.35. Tighten them after the first stable full-size candidate establishes the project baseline.
@@ -102,11 +102,11 @@ These gates are intentionally concrete rather than advisory. AUC must clear 0.70
 Production candidate runs can also enforce hardware-specific training efficiency gates from `train.metrics.json`:
 
 ```text
-MANTA_MIN_TRAIN_PAIRS_PER_SEC=85000
-MANTA_MIN_OPTIMIZER_STEPS_PER_SEC=0.08
-MANTA_MAX_MATMUL_RUNS=400000
-MANTA_MAX_MATMUL_RUN_UPLOAD_MB=950000
-MANTA_MAX_MATMUL_RUN_DOWNLOAD_MB=485000
+EOS_MIN_TRAIN_PAIRS_PER_SEC=85000
+EOS_MIN_OPTIMIZER_STEPS_PER_SEC=0.08
+EOS_MAX_MATMUL_RUNS=400000
+EOS_MAX_MATMUL_RUN_UPLOAD_MB=950000
+EOS_MAX_MATMUL_RUN_DOWNLOAD_MB=485000
 ```
 
 Set these from a known-good run on the target trainer host. Keep quality gates hardware-independent, and keep efficiency gates host-specific so a CPU fallback or data-transfer regression does not silently produce a slow candidate.
@@ -116,15 +116,15 @@ Set these from a known-good run on the target trainer host. Keep quality gates h
 Use corpus mode only when you intentionally want this run to mine the train/eval pairs:
 
 ```bash
-MANTA_RUN_ROOT=/data/manta/runs \
-MANTA_REPO_ROOT=$PWD \
-MANTA_RUN_ID=manta-embed-v1-20260412-corpus-a \
-MANTA_CORPUS=/data/manta/corpus/prod-corpus.txt \
-MANTA_HARD_EVAL_JSONL=/data/manta/datasets/manta-embed-v1/hard-eval.jsonl \
-MANTA_EPOCHS=3 \
-MANTA_BATCH_SIZE=1024 \
-MANTA_MAX_PAIRS=0 \
-MANTA_EVAL_PAIRS=512 \
+EOS_RUN_ROOT=/data/manta/runs \
+EOS_REPO_ROOT=$PWD \
+EOS_RUN_ID=manta-embed-v1-20260412-corpus-a \
+EOS_CORPUS=/data/manta/corpus/prod-corpus.txt \
+EOS_HARD_EVAL_JSONL=/data/manta/datasets/manta-embed-v1/hard-eval.jsonl \
+EOS_EPOCHS=3 \
+EOS_BATCH_SIZE=1024 \
+EOS_MAX_PAIRS=0 \
+EOS_EVAL_PAIRS=512 \
 ferrous-wheel run scripts/train_manta_embed_v1_candidate.fw
 ```
 

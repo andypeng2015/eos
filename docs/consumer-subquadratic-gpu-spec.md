@@ -1,16 +1,16 @@
 # Consumer GPU Subquadratic Training And Inference Spec
 
-This document defines what success means for Manta's long-context sparse attention direction: a single consumer-grade GPU should be able to train and serve models whose attention path scales below quadratic cost with context length.
+This document defines what success means for Eos's long-context sparse attention direction: a single consumer-grade GPU should be able to train and serve models whose attention path scales below quadratic cost with context length.
 
-The goal is not to claim frontier-model pretraining on a desktop card. The goal is to prove a direct, reproducible path where Manta-native kernels, training loops, and `.mll` artifacts can train the sparse policy and model components that make long-context inference practical on one local GPU.
+The goal is not to claim frontier-model pretraining on a desktop card. The goal is to prove a direct, reproducible path where Eos-native kernels, training loops, and `.mll` artifacts can train the sparse policy and model components that make long-context inference practical on one local GPU.
 
 The primary product wedge for this work is the local long-context embedder described in [local-long-context-embedder-wedge.md](local-long-context-embedder-wedge.md). This spec defines the lower-level GPU and attention gates needed to make that embedder credible.
 
 ## Success Statement
 
-Manta succeeds when a user with one consumer GPU can:
+Eos succeeds when a user with one consumer GPU can:
 
-- train or fine-tune a Manta-authored long-context model without dense `N x N` attention materialization
+- train or fine-tune a Eos-authored long-context model without dense `N x N` attention materialization
 - run inference with TurboQuant-compressed K/V cache and routed sparse attention
 - show measured attention scaling below quadratic as context length grows
 - preserve task quality within explicit gates against dense or higher-budget teacher baselines
@@ -187,7 +187,7 @@ Already present in the repo:
 - fused CUDA TurboQuant sparse attention with inline K decode while scoring and inline V decode for selected keys
 - optional routed form:
 
-```manta
+```eos
 turbo_sparse_attention(q, kc, kn, vc, vn, top_k, route_block_size, route_top_blocks)
 ```
 
@@ -213,7 +213,7 @@ Implementation:
 - exact sparse top-k reference
 - exact fused TurboQuant sparse CUDA path
 - benchmark harness that records time, memory, selected keys, and metadata
-- `manta plan-sparse-attention` preflight that sweeps context lengths and reports routed score-work fraction, estimated score-work alpha, and logical TurboQuant K/V memory before a GPU run
+- `eos plan-sparse-attention` preflight that sweeps context lengths and reports routed score-work fraction, estimated score-work alpha, and logical TurboQuant K/V memory before a GPU run
 - `scripts/bench_sparse_attention.fw` harness that archives preflight TSV/JSON plus CUDA sparse-attention benchmark JSONL/text/summary TSV and measured scaling alpha TSV for exact f16 and routed TurboQuant paths
 - configurable CUDA benchmark matrices that keep exact f16 key lengths small while sweeping deeper routed TurboQuant key lengths for measured alpha
 
@@ -538,20 +538,20 @@ Milestone 8: hierarchy and portability
 
 After Layer 1:
 
-- "Manta has a fused TurboQuant sparse attention kernel and an experimental routed block sparse CUDA path."
+- "Eos has a fused TurboQuant sparse attention kernel and an experimental routed block sparse CUDA path."
 
 After Layer 3:
 
-- "Manta can learn a sparse routing policy that approximates dense attention on calibration workloads."
+- "Eos can learn a sparse routing policy that approximates dense attention on calibration workloads."
 
 After Layer 5:
 
-- "Manta can train a long-context sparse-attention model on one consumer GPU without dense attention materialization."
+- "Eos can train a long-context sparse-attention model on one consumer GPU without dense attention materialization."
 
 After Layer 6:
 
-- "Manta can serve long-context inference on one consumer GPU with compressed K/V and subquadratic attention scaling."
+- "Eos can serve long-context inference on one consumer GPU with compressed K/V and subquadratic attention scaling."
 
 After Layer 7:
 
-- "Manta has a direct path toward near-linear long-context attention through hierarchical learned routing."
+- "Eos has a direct path toward near-linear long-context attention through hierarchical learned routing."

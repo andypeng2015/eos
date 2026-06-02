@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"context"
@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/compiler"
-	"m31labs.dev/manta/runtime/backend"
-	"m31labs.dev/manta/runtime/backends/cuda"
-	"m31labs.dev/manta/runtime/backends/metal"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/compiler"
+	"m31labs.dev/eos/runtime/backend"
+	"m31labs.dev/eos/runtime/backends/cuda"
+	"m31labs.dev/eos/runtime/backends/metal"
 )
 
 func TestEmbeddingManifestRoundTrip(t *testing.T) {
@@ -152,7 +152,7 @@ func TestLoadEmbeddingFileUsesManifest(t *testing.T) {
 	dir := t.TempDir()
 	artifactPath := filepath.Join(dir, "tiny_embed_pooled.mll")
 	manifestPath := filepath.Join(dir, "tiny_embed_pooled.embedding.mll")
-	if err := mantaartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
+	if err := eosartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
 	if err := tinyEmbeddingManifest().WriteFile(manifestPath); err != nil {
@@ -185,7 +185,7 @@ func TestLoadEmbeddingBundleUsesSiblingManifest(t *testing.T) {
 
 	dir := t.TempDir()
 	artifactPath := filepath.Join(dir, "tiny_embed_pooled.mll")
-	if err := mantaartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
+	if err := eosartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
 	if err := tinyEmbeddingManifest().WriteFile(DefaultEmbeddingManifestPath(artifactPath)); err != nil {
@@ -214,7 +214,7 @@ func TestLoadEmbeddingPackageUsesSiblingWeights(t *testing.T) {
 
 	dir := t.TempDir()
 	artifactPath := filepath.Join(dir, "tiny_embed_pooled.mll")
-	if err := mantaartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
+	if err := eosartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
 	if err := tinyEmbeddingManifest().WriteFile(DefaultEmbeddingManifestPath(artifactPath)); err != nil {

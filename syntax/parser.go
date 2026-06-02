@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// Parse parses Manta source into the compiler-facing AST.
+// Parse parses Eos source into the compiler-facing AST.
 func Parse(moduleName string, src []byte) (*File, []Diagnostic) {
 	return parseWithTreeSitter(moduleName, src)
 }

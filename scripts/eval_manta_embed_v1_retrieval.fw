@@ -60,25 +60,25 @@ func usage() {
 	fmt.Println(`Evaluate a sealed manta-embed-v1 .mll on BEIR-style retrieval metrics.
 
 Run:
-  MANTA_REPO_ROOT=$PWD \
-  MANTA_EVAL_ARTIFACT=/path/to/manta-embed-v1.sealed.mll \
+  EOS_REPO_ROOT=$PWD \
+  EOS_EVAL_ARTIFACT=/path/to/manta-embed-v1.sealed.mll \
   ferrous-wheel run scripts/eval_manta_embed_v1_retrieval.fw
 
 Optional:
-  MANTA_EVAL_RUN_ROOT=$PWD/runs
-  MANTA_EVAL_RUN_ID=manta-embed-v1-retrieval-20260414
-  MANTA_DATASET_ROOT=$PWD/datasets/manta-embed-v1
-  MANTA_EVAL_DATASETS=scifact,nfcorpus,fiqa
-  MANTA_EVAL_SPLIT=test
-  MANTA_EVAL_BATCH_SIZE=512
-  MANTA_EVAL_TOP_K=100
-  MANTA_EVAL_MAX_DOCS=0
-  MANTA_EVAL_MAX_QUERIES=0
-  MANTA_THRESHOLDS_ENV=/path/to/thresholds.env
-  MANTA_EVAL_BM25_BASELINE=1
-  MANTA_GATE_BM25_BASELINE=0
-  MANTA_GATE_BM25_METRIC=ndcg_at_10
-  MANTA_GATE_BM25_MIN_RATIO=1.0`)
+  EOS_EVAL_RUN_ROOT=$PWD/runs
+  EOS_EVAL_RUN_ID=manta-embed-v1-retrieval-20260414
+  EOS_DATASET_ROOT=$PWD/datasets/manta-embed-v1
+  EOS_EVAL_DATASETS=scifact,nfcorpus,fiqa
+  EOS_EVAL_SPLIT=test
+  EOS_EVAL_BATCH_SIZE=512
+  EOS_EVAL_TOP_K=100
+  EOS_EVAL_MAX_DOCS=0
+  EOS_EVAL_MAX_QUERIES=0
+  EOS_THRESHOLDS_ENV=/path/to/thresholds.env
+  EOS_EVAL_BM25_BASELINE=1
+  EOS_GATE_BM25_BASELINE=0
+  EOS_GATE_BM25_METRIC=ndcg_at_10
+  EOS_GATE_BM25_MIN_RATIO=1.0`)
 }
 
 func getenv(name string, fallback string) string {
@@ -106,7 +106,7 @@ func hasRepoRoot(dir string) bool {
 }
 
 func findRoot() (string, error) {
-	let explicit = os.Getenv("MANTA_REPO_ROOT")
+	let explicit = os.Getenv("EOS_REPO_ROOT")
 	if hasRepoRoot(explicit) {
 		return filepath.Abs(explicit)
 	}
@@ -119,7 +119,7 @@ func findRoot() (string, error) {
 	if hasRepoRoot(cwd) {
 		return filepath.Abs(cwd)
 	}
-	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
 }
 
 func shellQuote(value string) string {
@@ -171,14 +171,14 @@ func splitList(value string) []string {
 }
 
 func prepareConfig(root string) (evalConfig, error) {
-	artifact := os.Getenv("MANTA_EVAL_ARTIFACT")
-	guard artifact != "" else return evalConfig{}, fmt.Errorf("MANTA_EVAL_ARTIFACT is required")
+	artifact := os.Getenv("EOS_EVAL_ARTIFACT")
+	guard artifact != "" else return evalConfig{}, fmt.Errorf("EOS_EVAL_ARTIFACT is required")
 	artifactAbs, err := filepath.Abs(artifact)
 	guard err == nil else return evalConfig{}, err
 	_, err = os.Stat(artifactAbs)
-	guard err == nil else return evalConfig{}, fmt.Errorf("MANTA_EVAL_ARTIFACT does not exist: %s", artifactAbs)
-	runID := getenv("MANTA_EVAL_RUN_ID", "manta-embed-v1-retrieval-"+time.Now().UTC().Format("20060102T150405Z"))
-	runRoot := getenv("MANTA_EVAL_RUN_ROOT", filepath.Join(root, "runs"))
+	guard err == nil else return evalConfig{}, fmt.Errorf("EOS_EVAL_ARTIFACT does not exist: %s", artifactAbs)
+	runID := getenv("EOS_EVAL_RUN_ID", "manta-embed-v1-retrieval-"+time.Now().UTC().Format("20060102T150405Z"))
+	runRoot := getenv("EOS_EVAL_RUN_ROOT", filepath.Join(root, "runs"))
 	runDir, err := filepath.Abs(filepath.Join(runRoot, runID))
 	guard err == nil else return evalConfig{}, err
 	if entries, err := os.ReadDir(runDir); err == nil && len(entries) > 0 {
@@ -188,16 +188,16 @@ func prepareConfig(root string) (evalConfig, error) {
 	guard err == nil else return evalConfig{}, err
 	err = os.MkdirAll(filepath.Join(runDir, "logs"), 0o755)
 	guard err == nil else return evalConfig{}, err
-	datasetRoot, err := filepath.Abs(getenv("MANTA_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1")))
+	datasetRoot, err := filepath.Abs(getenv("EOS_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1")))
 	guard err == nil else return evalConfig{}, err
-	datasets := splitList(getenv("MANTA_EVAL_DATASETS", "scifact,nfcorpus,fiqa"))
-	guard len(datasets) > 0 else return evalConfig{}, fmt.Errorf("MANTA_EVAL_DATASETS is empty")
-	thresholdsEnv := os.Getenv("MANTA_THRESHOLDS_ENV")
+	datasets := splitList(getenv("EOS_EVAL_DATASETS", "scifact,nfcorpus,fiqa"))
+	guard len(datasets) > 0 else return evalConfig{}, fmt.Errorf("EOS_EVAL_DATASETS is empty")
+	thresholdsEnv := os.Getenv("EOS_THRESHOLDS_ENV")
 	if thresholdsEnv != "" {
 		thresholdsEnv, err = filepath.Abs(thresholdsEnv)
 		guard err == nil else return evalConfig{}, err
 		_, err = os.Stat(thresholdsEnv)
-		guard err == nil else return evalConfig{}, fmt.Errorf("MANTA_THRESHOLDS_ENV does not exist: %s", thresholdsEnv)
+		guard err == nil else return evalConfig{}, fmt.Errorf("EOS_THRESHOLDS_ENV does not exist: %s", thresholdsEnv)
 	}
 	return evalConfig{
 		Root:        root,
@@ -208,17 +208,17 @@ func prepareConfig(root string) (evalConfig, error) {
 		Artifact:    artifactAbs,
 		DatasetRoot: datasetRoot,
 		Datasets:    datasets,
-		Split:       getenv("MANTA_EVAL_SPLIT", "test"),
-		BatchSize:   getenv("MANTA_EVAL_BATCH_SIZE", "512"),
-		TopK:        getenv("MANTA_EVAL_TOP_K", "100"),
-		MaxDocs:     getenv("MANTA_EVAL_MAX_DOCS", "0"),
-		MaxQueries:  getenv("MANTA_EVAL_MAX_QUERIES", "0"),
+		Split:       getenv("EOS_EVAL_SPLIT", "test"),
+		BatchSize:   getenv("EOS_EVAL_BATCH_SIZE", "512"),
+		TopK:        getenv("EOS_EVAL_TOP_K", "100"),
+		MaxDocs:     getenv("EOS_EVAL_MAX_DOCS", "0"),
+		MaxQueries:  getenv("EOS_EVAL_MAX_QUERIES", "0"),
 		Leaderboard: filepath.Join(runDir, "leaderboard.tsv"),
 		ThresholdsEnv: thresholdsEnv,
-		BM25Baseline: getenv("MANTA_EVAL_BM25_BASELINE", "1"),
-		BM25Gate: getenv("MANTA_GATE_BM25_BASELINE", "0"),
-		BM25GateMetric: getenv("MANTA_GATE_BM25_METRIC", "ndcg_at_10"),
-		BM25GateMinRatio: getenv("MANTA_GATE_BM25_MIN_RATIO", "1.0"),
+		BM25Baseline: getenv("EOS_EVAL_BM25_BASELINE", "1"),
+		BM25Gate: getenv("EOS_GATE_BM25_BASELINE", "0"),
+		BM25GateMetric: getenv("EOS_GATE_BM25_METRIC", "ndcg_at_10"),
+		BM25GateMinRatio: getenv("EOS_GATE_BM25_MIN_RATIO", "1.0"),
 	}, nil
 }
 
@@ -259,7 +259,7 @@ func appendLeaderboard(path string, metrics retrievalMetrics) error {
 }
 
 func runEval(cfg evalConfig) error {
-	err := runCmd(cfg, "Build manta CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.MantaBin, "./cmd/manta"})
+	err := runCmd(cfg, "Build manta CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.MantaBin, "./cmd/eos"})
 	guard err == nil else return err
 	header := "dataset\tbackend\tdocuments\tqueries\trelevant_pairs\tscored_pairs\tndcg_at_10\tmrr_at_10\trecall_at_10\trecall_at_100\telapsed_seconds\tdocuments_per_second\tqueries_per_second\tscores_per_second\n"
 	err = os.WriteFile(cfg.Leaderboard, []byte(header), 0o644)

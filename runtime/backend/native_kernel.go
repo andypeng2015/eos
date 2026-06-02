@@ -5,14 +5,14 @@ import (
 	"strconv"
 	"strings"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
+	eosartifact "m31labs.dev/eos/artifact/eos"
 )
 
 // CompileNativeKernelProgram builds a backend-owned kernel program from a
 // compiled variant plus the backend-neutral kernel body. The program still
 // executes the supported v0 ops numerically for now, but the launch path is
 // owned by the selected backend rather than the generic plan executor.
-func CompileNativeKernelProgram(kind mantaartifact.BackendKind, kernel mantaartifact.Kernel, compiled CompiledKernel) (NativeKernelProgram, error) {
+func CompileNativeKernelProgram(kind eosartifact.BackendKind, kernel eosartifact.Kernel, compiled CompiledKernel) (NativeKernelProgram, error) {
 	if kernel.Name == "" {
 		return NativeKernelProgram{}, fmt.Errorf("kernel name is required")
 	}
@@ -34,25 +34,25 @@ func CompileNativeKernelProgram(kind mantaartifact.BackendKind, kernel mantaarti
 	}, nil
 }
 
-func validateCompiledKernelSource(kind mantaartifact.BackendKind, compiled CompiledKernel) error {
+func validateCompiledKernelSource(kind eosartifact.BackendKind, compiled CompiledKernel) error {
 	switch kind {
-	case mantaartifact.BackendCUDA:
+	case eosartifact.BackendCUDA:
 		if !strings.Contains(compiled.Source, "__global__ void "+compiled.Entry+"(") {
 			return fmt.Errorf("kernel %q CUDA source does not define entry %q", compiled.Name, compiled.Entry)
 		}
-	case mantaartifact.BackendMetal:
+	case eosartifact.BackendMetal:
 		if !strings.Contains(compiled.Source, "kernel void "+compiled.Entry+"(") {
 			return fmt.Errorf("kernel %q Metal source does not define entry %q", compiled.Name, compiled.Entry)
 		}
-	case mantaartifact.BackendVulkan:
+	case eosartifact.BackendVulkan:
 		if !strings.Contains(compiled.Source, "void "+compiled.Entry+"(") {
 			return fmt.Errorf("kernel %q Vulkan source does not define entry %q", compiled.Name, compiled.Entry)
 		}
-	case mantaartifact.BackendDirectML:
-		if !strings.Contains(compiled.Source, "manta_directml_graph "+compiled.Entry+"(") {
+	case eosartifact.BackendDirectML:
+		if !strings.Contains(compiled.Source, "eos_directml_graph "+compiled.Entry+"(") {
 			return fmt.Errorf("kernel %q DirectML source does not define entry %q", compiled.Name, compiled.Entry)
 		}
-	case mantaartifact.BackendWebGPU:
+	case eosartifact.BackendWebGPU:
 		if !strings.Contains(compiled.Source, "fn "+compiled.Entry+"(") {
 			return fmt.Errorf("kernel %q WebGPU source does not define entry %q", compiled.Name, compiled.Entry)
 		}
@@ -62,7 +62,7 @@ func validateCompiledKernelSource(kind mantaartifact.BackendKind, compiled Compi
 	return nil
 }
 
-func nativeLaunchConfig(kind mantaartifact.BackendKind, kernel mantaartifact.Kernel, compiled CompiledKernel) map[string]any {
+func nativeLaunchConfig(kind eosartifact.BackendKind, kernel eosartifact.Kernel, compiled CompiledKernel) map[string]any {
 	config := map[string]any{
 		"dispatch_mode":       "backend_native",
 		"dispatch_backend":    string(kind),
@@ -82,27 +82,27 @@ func nativeLaunchConfig(kind mantaartifact.BackendKind, kernel mantaartifact.Ker
 		grid = "2d"
 	}
 	switch kind {
-	case mantaartifact.BackendCUDA:
+	case eosartifact.BackendCUDA:
 		config["launch_api"] = "cuLaunchKernel"
 		config["launch_grid"] = grid
 		config["launch_block_size"] = tile
 		config["launch_shared_bytes"] = estimatedSharedBytes(kernel, tile)
-	case mantaartifact.BackendMetal:
+	case eosartifact.BackendMetal:
 		config["launch_api"] = "dispatchThreadgroups"
 		config["launch_grid"] = grid
 		config["launch_threadgroup_size"] = tile
 		config["launch_threadgroup_memory_bytes"] = estimatedSharedBytes(kernel, tile)
-	case mantaartifact.BackendVulkan:
+	case eosartifact.BackendVulkan:
 		config["launch_api"] = "vkCmdDispatch"
 		config["launch_grid"] = grid
 		config["launch_workgroup_size"] = tile
 		config["launch_shared_bytes"] = estimatedSharedBytes(kernel, tile)
-	case mantaartifact.BackendDirectML:
+	case eosartifact.BackendDirectML:
 		config["launch_api"] = "IDMLCommandRecorder::RecordDispatch"
 		config["launch_grid"] = grid
 		config["launch_threadgroup_size"] = tile
 		config["launch_temporary_resource_bytes"] = estimatedSharedBytes(kernel, tile)
-	case mantaartifact.BackendWebGPU:
+	case eosartifact.BackendWebGPU:
 		config["launch_api"] = "GPUComputePassEncoder.dispatchWorkgroups"
 		config["launch_grid"] = grid
 		config["launch_workgroup_size"] = tile
@@ -111,7 +111,7 @@ func nativeLaunchConfig(kind mantaartifact.BackendKind, kernel mantaartifact.Ker
 	return config
 }
 
-func firstTileSize(kernel mantaartifact.Kernel, compiled CompiledKernel) int {
+func firstTileSize(kernel eosartifact.Kernel, compiled CompiledKernel) int {
 	if len(kernel.Hints.Tile) > 0 && kernel.Hints.Tile[0] > 0 {
 		return kernel.Hints.Tile[0]
 	}
@@ -128,7 +128,7 @@ func firstTileSize(kernel mantaartifact.Kernel, compiled CompiledKernel) int {
 	return 1
 }
 
-func estimatedSharedBytes(kernel mantaartifact.Kernel, tile int) int {
+func estimatedSharedBytes(kernel eosartifact.Kernel, tile int) int {
 	if tile <= 0 {
 		tile = 1
 	}

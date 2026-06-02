@@ -1,19 +1,19 @@
 # Local Long-Context Embedder Wedge
 
-This is the product wedge for Manta's sparse attention work:
+This is the product wedge for Eos's sparse attention work:
 
 ```text
 Build the best local long-context embedder that can be trained, adapted, exported, and served on consumer GPUs.
 ```
 
-This is more credible than claiming general frontier-model performance from a desktop card. Embedding models are smaller, retrieval quality can be improved through distillation and hard negatives, long-context embedding is still underdeveloped, and Manta's TurboQuant plus routed sparse attention stack directly attacks the memory and attention-cost bottlenecks that make long-document embedding expensive.
+This is more credible than claiming general frontier-model performance from a desktop card. Embedding models are smaller, retrieval quality can be improved through distillation and hard negatives, long-context embedding is still underdeveloped, and Eos's TurboQuant plus routed sparse attention stack directly attacks the memory and attention-cost bottlenecks that make long-document embedding expensive.
 
 ## Target Claim
 
 The target claim is:
 
 ```text
-Manta can train and serve a best-in-class local long-context embedding model on a single consumer GPU, with sealed .mll export, compressed deployment, and subquadratic long-context attention.
+Eos can train and serve a best-in-class local long-context embedding model on a single consumer GPU, with sealed .mll export, compressed deployment, and subquadratic long-context attention.
 ```
 
 This means best-in-class in the local/efficient/long-context class first, then public leaderboard competitiveness second.
@@ -67,7 +67,7 @@ Every baseline run must record model id, revision/version, dimensions, max token
 
 ## Model Path
 
-### Stage A: Manta Embed V1 Reliable Baseline
+### Stage A: Eos Embed V1 Reliable Baseline
 
 Goal: make the existing native embedding pipeline a trustworthy baseline.
 
@@ -81,7 +81,7 @@ Work:
 Pass:
 
 - current production embedding gates pass
-- candidate beats the prior Manta baseline on hard eval
+- candidate beats the prior Eos baseline on hard eval
 - no hidden CPU fallback in the measured candidate run
 
 ### Stage B: Distilled Compact Embedder
@@ -152,7 +152,7 @@ Work:
 
 Pass:
 
-- candidate is better than current Manta baseline on local RAG gates
+- candidate is better than current Eos baseline on local RAG gates
 - long-context candidate beats chunked baseline on long-context gates
 - package verifies and serves through normal runtime
 
@@ -229,35 +229,35 @@ efficiency.metrics.json
 Build the first scoreboard with:
 
 ```bash
-MANTA_REPO_ROOT=$PWD \
-MANTA_SCOREBOARD_ARTIFACT=/path/to/manta-embed-v1.sealed.mll \
-MANTA_SCOREBOARD_PAIRWISE_JSONL=/data/manta/datasets/manta-embed-v1/processed/eval.jsonl \
-MANTA_SCOREBOARD_HARD_JSONL=/data/manta/datasets/manta-embed-v1/processed/hard-eval.jsonl \
-MANTA_SCOREBOARD_RETRIEVAL_ROOT=/data/manta/datasets/manta-embed-v1 \
-MANTA_SCOREBOARD_RETRIEVAL_DATASETS=scifact,nfcorpus,fiqa \
+EOS_REPO_ROOT=$PWD \
+EOS_SCOREBOARD_ARTIFACT=/path/to/manta-embed-v1.sealed.mll \
+EOS_SCOREBOARD_PAIRWISE_JSONL=/data/manta/datasets/manta-embed-v1/processed/eval.jsonl \
+EOS_SCOREBOARD_HARD_JSONL=/data/manta/datasets/manta-embed-v1/processed/hard-eval.jsonl \
+EOS_SCOREBOARD_RETRIEVAL_ROOT=/data/manta/datasets/manta-embed-v1 \
+EOS_SCOREBOARD_RETRIEVAL_DATASETS=scifact,nfcorpus,fiqa \
 ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
 ```
 
-The scoreboard harness writes `runs/<run-id>/scoreboard.tsv`, `runs/<run-id>/scoreboard.json`, per-task metrics JSON, command logs, and the exact `manta` binary used for the run. Enable `MANTA_SCOREBOARD_BM25_BASELINE=1` to include the in-repo BM25 baseline beside Manta retrieval scores.
-For pairwise `train-embed --eval-only` rows, the harness uses `MANTA_SCOREBOARD_PAIRWISE_ARTIFACT` when set; otherwise it infers the sibling trainable package when `MANTA_SCOREBOARD_ARTIFACT` points at a sealed `.mll`.
+The scoreboard harness writes `runs/<run-id>/scoreboard.tsv`, `runs/<run-id>/scoreboard.json`, per-task metrics JSON, command logs, and the exact `eos` binary used for the run. Enable `EOS_SCOREBOARD_BM25_BASELINE=1` to include the in-repo BM25 baseline beside Eos retrieval scores.
+For pairwise `train-embed --eval-only` rows, the harness uses `EOS_SCOREBOARD_PAIRWISE_ARTIFACT` when set; otherwise it infers the sibling trainable package when `EOS_SCOREBOARD_ARTIFACT` points at a sealed `.mll`.
 
 Run a closed retrieval-alignment round when the scoreboard shows a retrieval gap:
 
 ```bash
-MANTA_REPO_ROOT=$PWD \
-MANTA_ALIGN_INITIAL_ARTIFACT=/path/to/manta-embed-v1.sealed.mll \
-MANTA_ALIGN_DATASETS=scifact,nfcorpus,fiqa \
+EOS_REPO_ROOT=$PWD \
+EOS_ALIGN_INITIAL_ARTIFACT=/path/to/manta-embed-v1.sealed.mll \
+EOS_ALIGN_DATASETS=scifact,nfcorpus,fiqa \
 ferrous-wheel run scripts/run_manta_embed_v1_retrieval_alignment_round.fw
 ```
 
-The alignment harness runs the baseline scoreboard, mines model-hard negatives into the run directory, blends them with the existing BM25 hard-negative file, trains a focused candidate from the initial trainable artifact, runs the candidate scoreboard, and writes `retrieval-alignment-summary.tsv` plus `retrieval-alignment-summary.json`. It is the first loop to run after the current Manta candidate underperforms BM25 or open embedders on BEIR-style retrieval.
-The default candidate training pass uses batch `64` and one explicit hard negative per query so full mined BEIR-style runs stay iterative. Increase `MANTA_ALIGN_CANDIDATE_BATCH_SIZE` or `MANTA_ALIGN_CANDIDATE_HARD_NEGATIVES` only after the planned train-pair count is acceptable for the local GPU.
-Use `MANTA_ALIGN_MODEL_HARD_DATASET_WEIGHTS=fiqa=2` or similar when a dataset needs more mined examples in the next mixed round.
-Use `MANTA_ALIGN_CANDIDATE_SOURCE_WEIGHTS=scifact=1,nfcorpus=1,fiqa=1` or similar when the train JSONL carries `source` fields and the candidate should build source-balanced hard-negative batches without rewriting the dataset. Exact source keys such as `fiqa:model` override the family key; otherwise `fiqa:model` falls back to `fiqa`.
-Use `MANTA_ALIGN_CANDIDATE_TEACHER_LOSS_WEIGHT=0.20` or similar when mined hard negatives carry `teacher_scores` and the candidate should preserve the teacher's soft ordering over each query's positive plus explicit negatives. `MANTA_ALIGN_CANDIDATE_TEACHER_TEMPERATURE` controls the softness of that target distribution.
-Use `MANTA_ALIGN_CANDIDATE_TEACHER_SOURCE_TEMPERATURES=scifact=10,nfcorpus=10,fiqa=10,scifact:model=1.5,nfcorpus:model=1.5,fiqa:model=1.5` when mixed teacher-score sources need different softmax temperatures. Exact keys win first, then source-family keys, then `*`, then the global teacher temperature.
-Use `MANTA_ALIGN_CANDIDATE_TEACHER_SCORE_NORMALIZATION=source_zscore` when mixed `teacher_scores` are on incompatible scales before the teacher softmax. Supported modes are `source_zscore`, `family_zscore`, and `example_zscore`; leave it empty for raw scores.
-For promotion runs, set `MANTA_ALIGN_GATE_CANDIDATE=1`. The gate writes the summary first, then fails the run if macro nDCG@10 misses `MANTA_ALIGN_MIN_MACRO_NDCG_DELTA` or any dataset regresses more than `MANTA_ALIGN_MAX_DATASET_NDCG_REGRESSION`; `MANTA_ALIGN_MIN_DATASET_NDCG_RATIO` adds an optional per-dataset nDCG ratio floor. Use `MANTA_ALIGN_MAX_DATASET_RECALL_AT_100_REGRESSION` and `MANTA_ALIGN_MIN_DATASET_RECALL_AT_100_RATIO` when a candidate must also preserve top-k coverage.
+The alignment harness runs the baseline scoreboard, mines model-hard negatives into the run directory, blends them with the existing BM25 hard-negative file, trains a focused candidate from the initial trainable artifact, runs the candidate scoreboard, and writes `retrieval-alignment-summary.tsv` plus `retrieval-alignment-summary.json`. It is the first loop to run after the current Eos candidate underperforms BM25 or open embedders on BEIR-style retrieval.
+The default candidate training pass uses batch `64` and one explicit hard negative per query so full mined BEIR-style runs stay iterative. Increase `EOS_ALIGN_CANDIDATE_BATCH_SIZE` or `EOS_ALIGN_CANDIDATE_HARD_NEGATIVES` only after the planned train-pair count is acceptable for the local GPU.
+Use `EOS_ALIGN_MODEL_HARD_DATASET_WEIGHTS=fiqa=2` or similar when a dataset needs more mined examples in the next mixed round.
+Use `EOS_ALIGN_CANDIDATE_SOURCE_WEIGHTS=scifact=1,nfcorpus=1,fiqa=1` or similar when the train JSONL carries `source` fields and the candidate should build source-balanced hard-negative batches without rewriting the dataset. Exact source keys such as `fiqa:model` override the family key; otherwise `fiqa:model` falls back to `fiqa`.
+Use `EOS_ALIGN_CANDIDATE_TEACHER_LOSS_WEIGHT=0.20` or similar when mined hard negatives carry `teacher_scores` and the candidate should preserve the teacher's soft ordering over each query's positive plus explicit negatives. `EOS_ALIGN_CANDIDATE_TEACHER_TEMPERATURE` controls the softness of that target distribution.
+Use `EOS_ALIGN_CANDIDATE_TEACHER_SOURCE_TEMPERATURES=scifact=10,nfcorpus=10,fiqa=10,scifact:model=1.5,nfcorpus:model=1.5,fiqa:model=1.5` when mixed teacher-score sources need different softmax temperatures. Exact keys win first, then source-family keys, then `*`, then the global teacher temperature.
+Use `EOS_ALIGN_CANDIDATE_TEACHER_SCORE_NORMALIZATION=source_zscore` when mixed `teacher_scores` are on incompatible scales before the teacher softmax. Supported modes are `source_zscore`, `family_zscore`, and `example_zscore`; leave it empty for raw scores.
+For promotion runs, set `EOS_ALIGN_GATE_CANDIDATE=1`. The gate writes the summary first, then fails the run if macro nDCG@10 misses `EOS_ALIGN_MIN_MACRO_NDCG_DELTA` or any dataset regresses more than `EOS_ALIGN_MAX_DATASET_NDCG_REGRESSION`; `EOS_ALIGN_MIN_DATASET_NDCG_RATIO` adds an optional per-dataset nDCG ratio floor. Use `EOS_ALIGN_MAX_DATASET_RECALL_AT_100_REGRESSION` and `EOS_ALIGN_MIN_DATASET_RECALL_AT_100_RATIO` when a candidate must also preserve top-k coverage.
 
 ## Current Retrieval Alignment Findings
 
@@ -325,7 +325,7 @@ Interpretation:
 - The cached-tokenizer `embed-m` capacity probe (`vocab=16384`, max sequence `512`, dim `192`, hidden `384`, repeats `3`) trained and sealed successfully at batch `64` on the desktop GPU. It processed `1.393M` actual train pairs in `19m20s` with CUDA forward/optimizer/activation/contrastive accelerators and `1460.78` train pairs/s, but quality collapsed from the current best: validation AUC `0.595854`, hard AUC `0.598887`, SciFact `0.160753`, NFCorpus `0.060778`, FiQA `0.012688`, macro `0.078073`. The fine-tune LR `0.000010` is not a valid random-start recipe for `embed-m`.
 - A scratch-style cached-tokenizer `embed-m` pretrain pass with pure hard-negative `infonce`, LR `0.002`, one epoch, and batch `64` also rejected before retrieval: validation AUC `0.495137`, hard AUC `0.498731`, hard score margin `-0.000154`, and `1259.54` train pairs/s. This closes blind random-start `embed-m` as a near-term path. The next larger-model attempt needs either dimension-compatible bootstrapping from a smaller trained model, staged pretraining data, or imported teacher scores rather than another single-epoch scratch LR sweep.
 - The subquadratic/TurboQuant kernel path now has shared attention-plan metadata across host reference, CUDA sparse attention, and fused CUDA TurboQuant sparse attention. Each path reports top-k, routing mode, route block counts, selected keys, candidate key budget, estimated per-query score work, and score-work fraction versus dense scoring, so future long-context runs can gate on actual routed work rather than just successful execution.
-- `manta plan-sparse-attention` now turns that metadata into a cheap preflight gate: sweep key lengths, route budgets, and TurboQuant bits, then reject configurations whose routed score-work fraction, fitted score-work alpha, or logical K/V memory budget do not fit the target card before launching CUDA benchmarks or training.
+- `eos plan-sparse-attention` now turns that metadata into a cheap preflight gate: sweep key lengths, route budgets, and TurboQuant bits, then reject configurations whose routed score-work fraction, fitted score-work alpha, or logical K/V memory budget do not fit the target card before launching CUDA benchmarks or training.
 - `scripts/bench_sparse_attention.fw` now archives that preflight beside CUDA sparse-attention benchmark JSONL/text, a parsed summary TSV, and a measured scaling-alpha TSV, so exact f16 and routed TurboQuant sparse kernels can be compared from a clean run directory with selected-key, candidate-budget, score-fraction, subquadratic, K/V compression, and routed time-alpha gate metrics attached.
 - The sparse benchmark matrix now has separate exact and routed key-length knobs, so the local proof can bound dense/exact costs while pushing routed TurboQuant to longer contexts for the alpha gate.
 
@@ -362,7 +362,7 @@ Efficiency metrics:
 
 Initial local release gate:
 
-- beats prior Manta baseline on hard eval
+- beats prior Eos baseline on hard eval
 - no package verification failures
 - sealed `.mll` export works
 - efficiency metrics recorded
@@ -385,7 +385,7 @@ Best-local claim gate:
 
 Experiment 1: baseline scoreboard
 
-- run current Manta embedder against the fixed baseline tasks
+- run current Eos embedder against the fixed baseline tasks
 - use `scripts/score_manta_embed_v1_baselines.fw` to produce `scoreboard.tsv` and `scoreboard.json`
 - include pairwise eval, hard eval, BEIR-style retrieval, optional long retrieval, and BM25 baselines
 - identify the smallest set of evals that catches real retrieval regressions
@@ -394,7 +394,7 @@ Experiment 2: teacher distillation
 
 - choose a strong teacher baseline
 - generate teacher scores for train/eval pairs
-- train a compact Manta embedder with teacher similarity loss
+- train a compact Eos embedder with teacher similarity loss
 - compare to contrastive-only training
 
 Experiment 3: hard-negative loop
@@ -436,6 +436,6 @@ The shortest path is:
 6. prove C24 training/serving
 7. publish the best-local claim only on the scorecard we actually win
 
-This path does not require solving general long-context LLM training first. It uses the fact that embedding quality is trainable at smaller scale, long-context retrieval has open space, and Manta can own the deployment/runtime path end to end.
+This path does not require solving general long-context LLM training first. It uses the fact that embedding quality is trainable at smaller scale, long-context retrieval has open space, and Eos can own the deployment/runtime path end to end.
 
 The expanded SOTA experiment surface is tracked in [manta-embed-sota-avenues.md](manta-embed-sota-avenues.md). Treat that file as the queue for objective, data, architecture, retrieval-head, compression, and sparse-long-context lanes.

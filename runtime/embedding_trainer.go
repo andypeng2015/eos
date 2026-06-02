@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"fmt"
@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 // EmbeddingPairExample is one supervised pairwise training example.
@@ -85,18 +85,18 @@ type embeddingEvalRankScore struct {
 
 // EmbeddingTrainer trains a pooled embedding model with quantization-aware forward passes.
 type EmbeddingTrainer struct {
-	module               *mantaartifact.Module
+	module               *eosartifact.Module
 	manifest             EmbeddingManifest
 	config               EmbeddingTrainConfig
 	memoryPlan           *MemoryPlan
 	step                 int
-	tokenParam           mantaartifact.Param
-	attnQParam           mantaartifact.Param
-	attnKParam           mantaartifact.Param
-	attnVParam           mantaartifact.Param
-	attnOParam           mantaartifact.Param
-	hiddenParam          mantaartifact.Param
-	projParam            mantaartifact.Param
+	tokenParam           eosartifact.Param
+	attnQParam           eosartifact.Param
+	attnKParam           eosartifact.Param
+	attnVParam           eosartifact.Param
+	attnOParam           eosartifact.Param
+	hiddenParam          eosartifact.Param
+	projParam            eosartifact.Param
 	tokenEmbed           *backend.Tensor
 	attentionQuery       *backend.Tensor
 	attentionKey         *backend.Tensor
@@ -119,15 +119,15 @@ type EmbeddingTrainer struct {
 	projMom1             *backend.Tensor
 	projMom2             *backend.Tensor
 	forwardMatMul        backend.MatMulAccelerator
-	forwardBackend       mantaartifact.BackendKind
+	forwardBackend       eosartifact.BackendKind
 	optimizerAccel       backend.OptimizerAccelerator
-	optimizerBackend     mantaartifact.BackendKind
+	optimizerBackend     eosartifact.BackendKind
 	activationAccel      backend.ActivationAccelerator
-	activationBackend    mantaartifact.BackendKind
+	activationBackend    eosartifact.BackendKind
 	activationAccelFull  bool
 	softmaxBackwardAccel bool
 	contrastiveAccel     backend.ContrastiveAccelerator
-	contrastiveBackend   mantaartifact.BackendKind
+	contrastiveBackend   eosartifact.BackendKind
 	sequenceBindingID    int
 	momentsDirty         bool
 	forwardCache         *embeddingForwardWeights
@@ -198,7 +198,7 @@ type embeddingForwardWeights struct {
 }
 
 // NewEmbeddingTrainer constructs the first native pooled-embedder trainer.
-func NewEmbeddingTrainer(mod *mantaartifact.Module, manifest EmbeddingManifest, weights map[string]*backend.Tensor, cfg EmbeddingTrainConfig) (*EmbeddingTrainer, error) {
+func NewEmbeddingTrainer(mod *eosartifact.Module, manifest EmbeddingManifest, weights map[string]*backend.Tensor, cfg EmbeddingTrainConfig) (*EmbeddingTrainer, error) {
 	manifest = manifest.normalized()
 	if err := manifest.ValidateModule(mod); err != nil {
 		return nil, err
@@ -1336,7 +1336,7 @@ func (t *EmbeddingTrainer) WriteEmbeddingPackage(artifactPath string) (Embedding
 	if t == nil {
 		return EmbeddingPackagePaths{}, fmt.Errorf("embedding trainer is not initialized")
 	}
-	if err := mantaartifact.WriteFile(artifactPath, t.module); err != nil {
+	if err := eosartifact.WriteFile(artifactPath, t.module); err != nil {
 		return EmbeddingPackagePaths{}, err
 	}
 	manifestPath := DefaultEmbeddingManifestPath(artifactPath)
@@ -1390,7 +1390,7 @@ func (t *EmbeddingTrainer) WriteTrainingPackage(artifactPath string) (EmbeddingT
 	if t == nil {
 		return EmbeddingTrainPackagePaths{}, fmt.Errorf("embedding trainer is not initialized")
 	}
-	if err := mantaartifact.WriteFile(artifactPath, t.module); err != nil {
+	if err := eosartifact.WriteFile(artifactPath, t.module); err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
 	embeddingManifestPath := DefaultEmbeddingManifestPath(artifactPath)
@@ -1927,10 +1927,10 @@ func (t *EmbeddingTrainer) encodeBatchSequencesByLength(sequences []*embeddingBa
 }
 
 func batchedContrastiveForwardEnabled() bool {
-	if trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_BATCHED_FORWARD") {
+	if trainEnvFlagEnabled("EOS_TRAIN_DISABLE_BATCHED_FORWARD") {
 		return false
 	}
-	switch trainEnv("MANTA_TRAIN_BATCHED_FORWARD") {
+	switch trainEnv("EOS_TRAIN_BATCHED_FORWARD") {
 	case "0", "false", "FALSE", "no", "NO":
 		return false
 	default:
@@ -1939,10 +1939,10 @@ func batchedContrastiveForwardEnabled() bool {
 }
 
 func batchedPairwiseEvalEnabled() bool {
-	if !batchedContrastiveForwardEnabled() || trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_BATCHED_PAIR_EVAL") {
+	if !batchedContrastiveForwardEnabled() || trainEnvFlagEnabled("EOS_TRAIN_DISABLE_BATCHED_PAIR_EVAL") {
 		return false
 	}
-	switch trainEnv("MANTA_TRAIN_BATCHED_PAIR_EVAL") {
+	switch trainEnv("EOS_TRAIN_BATCHED_PAIR_EVAL") {
 	case "0", "false", "FALSE", "no", "NO":
 		return false
 	default:
@@ -1951,10 +1951,10 @@ func batchedPairwiseEvalEnabled() bool {
 }
 
 func batchedPairwiseTrainEnabled() bool {
-	if !batchedContrastiveForwardEnabled() || trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_BATCHED_PAIR_TRAIN") {
+	if !batchedContrastiveForwardEnabled() || trainEnvFlagEnabled("EOS_TRAIN_DISABLE_BATCHED_PAIR_TRAIN") {
 		return false
 	}
-	switch trainEnv("MANTA_TRAIN_BATCHED_PAIR_TRAIN") {
+	switch trainEnv("EOS_TRAIN_BATCHED_PAIR_TRAIN") {
 	case "0", "false", "FALSE", "no", "NO":
 		return false
 	default:
@@ -1967,7 +1967,7 @@ func pairwiseEvalBatchSize(total int) int {
 		return 0
 	}
 	size := 512
-	if raw := trainEnv("MANTA_TRAIN_PAIR_EVAL_BATCH_SIZE"); raw != "" {
+	if raw := trainEnv("EOS_TRAIN_PAIR_EVAL_BATCH_SIZE"); raw != "" {
 		var parsed int
 		if _, err := fmt.Sscanf(raw, "%d", &parsed); err == nil && parsed > 0 {
 			size = parsed
@@ -1980,17 +1980,17 @@ func pairwiseEvalBatchSize(total int) int {
 }
 
 func sequenceMatMulBindingsEnabled() bool {
-	if trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_SEQUENCE_MATMUL_BINDINGS") {
+	if trainEnvFlagEnabled("EOS_TRAIN_DISABLE_SEQUENCE_MATMUL_BINDINGS") {
 		return false
 	}
-	return trainEnvFlagEnabled("MANTA_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS")
+	return trainEnvFlagEnabled("EOS_TRAIN_ENABLE_SEQUENCE_MATMUL_BINDINGS")
 }
 
 func qkvMultiBoundRightEnabled() bool {
-	if trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_QKV_MULTI_BOUND") {
+	if trainEnvFlagEnabled("EOS_TRAIN_DISABLE_QKV_MULTI_BOUND") {
 		return false
 	}
-	switch trainEnv("MANTA_TRAIN_QKV_MULTI_BOUND") {
+	switch trainEnv("EOS_TRAIN_QKV_MULTI_BOUND") {
 	case "0", "false", "FALSE", "no", "NO":
 		return false
 	default:
@@ -1999,10 +1999,10 @@ func qkvMultiBoundRightEnabled() bool {
 }
 
 func sharedLeftMatMulEnabled() bool {
-	if trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_SHARED_LEFT_MATMUL") {
+	if trainEnvFlagEnabled("EOS_TRAIN_DISABLE_SHARED_LEFT_MATMUL") {
 		return false
 	}
-	switch trainEnv("MANTA_TRAIN_SHARED_LEFT_MATMUL") {
+	switch trainEnv("EOS_TRAIN_SHARED_LEFT_MATMUL") {
 	case "0", "false", "FALSE", "no", "NO":
 		return false
 	default:
@@ -2011,10 +2011,10 @@ func sharedLeftMatMulEnabled() bool {
 }
 
 func concatenatedSharedLeftMatMulEnabled() bool {
-	if !sharedLeftMatMulEnabled() || trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_CONCAT_SHARED_LEFT_MATMUL") {
+	if !sharedLeftMatMulEnabled() || trainEnvFlagEnabled("EOS_TRAIN_DISABLE_CONCAT_SHARED_LEFT_MATMUL") {
 		return false
 	}
-	switch trainEnv("MANTA_TRAIN_CONCAT_SHARED_LEFT_MATMUL") {
+	switch trainEnv("EOS_TRAIN_CONCAT_SHARED_LEFT_MATMUL") {
 	case "0", "false", "FALSE", "no", "NO":
 		return false
 	default:
@@ -2023,10 +2023,10 @@ func concatenatedSharedLeftMatMulEnabled() bool {
 }
 
 func combinedAttentionVKGradMatMulEnabled() bool {
-	if trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_COMBINED_ATTENTION_VK_GRAD") {
+	if trainEnvFlagEnabled("EOS_TRAIN_DISABLE_COMBINED_ATTENTION_VK_GRAD") {
 		return false
 	}
-	switch trainEnv("MANTA_TRAIN_COMBINED_ATTENTION_VK_GRAD") {
+	switch trainEnv("EOS_TRAIN_COMBINED_ATTENTION_VK_GRAD") {
 	case "0", "false", "FALSE", "no", "NO":
 		return false
 	default:
@@ -2035,10 +2035,10 @@ func combinedAttentionVKGradMatMulEnabled() bool {
 }
 
 func accumulatedAttentionInputGradMatMulEnabled() bool {
-	if trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_ACCUMULATED_ATTENTION_INPUT_GRAD") {
+	if trainEnvFlagEnabled("EOS_TRAIN_DISABLE_ACCUMULATED_ATTENTION_INPUT_GRAD") {
 		return false
 	}
-	switch trainEnv("MANTA_TRAIN_ACCUMULATED_ATTENTION_INPUT_GRAD") {
+	switch trainEnv("EOS_TRAIN_ACCUMULATED_ATTENTION_INPUT_GRAD") {
 	case "0", "false", "FALSE", "no", "NO":
 		return false
 	default:
@@ -2047,10 +2047,10 @@ func accumulatedAttentionInputGradMatMulEnabled() bool {
 }
 
 func batchedBackwardEnabled() bool {
-	if trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_BATCHED_BACKWARD") {
+	if trainEnvFlagEnabled("EOS_TRAIN_DISABLE_BATCHED_BACKWARD") {
 		return false
 	}
-	switch trainEnv("MANTA_TRAIN_BATCHED_BACKWARD") {
+	switch trainEnv("EOS_TRAIN_BATCHED_BACKWARD") {
 	case "0", "false", "FALSE", "no", "NO":
 		return false
 	default:
@@ -2059,12 +2059,12 @@ func batchedBackwardEnabled() bool {
 }
 
 func fastGELUEnabled() bool {
-	return trainEnvFlagEnabled("MANTA_TRAIN_ENABLE_FAST_GELU")
+	return trainEnvFlagEnabled("EOS_TRAIN_ENABLE_FAST_GELU")
 }
 
 func activationAccelMaxElements() int {
 	limit := 1 << 20
-	if raw := trainEnv("MANTA_TRAIN_ACTIVATION_ACCEL_MAX_ELEMENTS"); raw != "" {
+	if raw := trainEnv("EOS_TRAIN_ACTIVATION_ACCEL_MAX_ELEMENTS"); raw != "" {
 		var parsed int
 		if _, err := fmt.Sscanf(raw, "%d", &parsed); err == nil {
 			if parsed <= 0 {
@@ -2353,10 +2353,10 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 	return nil
 }
 
-func trainerF32TensorValueType() mantaartifact.ValueType {
-	return mantaartifact.ValueType{
-		Kind: mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{
+func trainerF32TensorValueType() eosartifact.ValueType {
+	return eosartifact.ValueType{
+		Kind: eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{
 			DType: "f32",
 		},
 	}
@@ -3621,9 +3621,9 @@ func (t *EmbeddingTrainer) tryTrainerMatMul(lhsData []float32, lhsRows, lhsCols 
 			tensorF32View([]int{lhsRows, lhsCols}, lhsData),
 			tensorF32View([]int{rhsRows, rhsCols}, rhsData),
 		},
-		mantaartifact.ValueType{
-			Kind: mantaartifact.ValueTensor,
-			Tensor: &mantaartifact.TensorType{
+		eosartifact.ValueType{
+			Kind: eosartifact.ValueTensor,
+			Tensor: &eosartifact.TensorType{
 				DType: "f32",
 			},
 		},
@@ -3666,9 +3666,9 @@ func (t *EmbeddingTrainer) tryTrainerBatchedMatMulTranspose(lhsMatrices [][]floa
 			tensorF32View([]int{batches, lhsRows, lhsCols}, lhsBatch),
 			tensorF32View([]int{batches, rhsRows, rhsCols}, rhsBatch),
 		},
-		mantaartifact.ValueType{
-			Kind: mantaartifact.ValueTensor,
-			Tensor: &mantaartifact.TensorType{
+		eosartifact.ValueType{
+			Kind: eosartifact.ValueTensor,
+			Tensor: &eosartifact.TensorType{
 				DType: "f32",
 			},
 		},
@@ -3696,9 +3696,9 @@ func (t *EmbeddingTrainer) tryTrainerMatMulBoundLeft(lhsName string, lhs, rhs *b
 			result, err := t.forwardMatMul.RunMatMulWithBoundLeft(
 				lhsName,
 				rhs,
-				mantaartifact.ValueType{
-					Kind: mantaartifact.ValueTensor,
-					Tensor: &mantaartifact.TensorType{
+				eosartifact.ValueType{
+					Kind: eosartifact.ValueTensor,
+					Tensor: &eosartifact.TensorType{
 						DType: "f32",
 					},
 				},
@@ -3726,9 +3726,9 @@ func (t *EmbeddingTrainer) tryTrainerMatMulBoundRight(lhsData []float32, lhsRows
 			result, err := t.forwardMatMul.RunMatMulWithBoundRight(
 				tensorF32View([]int{lhsRows, lhsCols}, lhsData),
 				rhsName,
-				mantaartifact.ValueType{
-					Kind: mantaartifact.ValueTensor,
-					Tensor: &mantaartifact.TensorType{
+				eosartifact.ValueType{
+					Kind: eosartifact.ValueTensor,
+					Tensor: &eosartifact.TensorType{
 						DType: "f32",
 					},
 				},
@@ -3809,37 +3809,37 @@ func trainerMatMulAt(data []float32, rows, cols, row, col int, transpose bool) f
 	return data[row*cols+col]
 }
 
-func requireTrainableEmbeddingParam(mod *mantaartifact.Module, name string) (mantaartifact.Param, error) {
+func requireTrainableEmbeddingParam(mod *eosartifact.Module, name string) (eosartifact.Param, error) {
 	for _, param := range mod.Params {
 		if param.Name != name {
 			continue
 		}
-		if param.Type.Kind != mantaartifact.ValueTensor || param.Type.Tensor == nil {
-			return mantaartifact.Param{}, fmt.Errorf("param %q is not a tensor", name)
+		if param.Type.Kind != eosartifact.ValueTensor || param.Type.Tensor == nil {
+			return eosartifact.Param{}, fmt.Errorf("param %q is not a tensor", name)
 		}
 		if len(param.Type.Tensor.Shape) != 2 {
-			return mantaartifact.Param{}, fmt.Errorf("param %q rank = %d, want 2", name, len(param.Type.Tensor.Shape))
+			return eosartifact.Param{}, fmt.Errorf("param %q rank = %d, want 2", name, len(param.Type.Tensor.Shape))
 		}
 		if !param.Trainable {
-			return mantaartifact.Param{}, fmt.Errorf("param %q is not marked @trainable", name)
+			return eosartifact.Param{}, fmt.Errorf("param %q is not marked @trainable", name)
 		}
 		return param, nil
 	}
-	return mantaartifact.Param{}, fmt.Errorf("missing param %q", name)
+	return eosartifact.Param{}, fmt.Errorf("missing param %q", name)
 }
 
-func optionalTrainableEmbeddingParam(mod *mantaartifact.Module, name string) (mantaartifact.Param, bool, error) {
+func optionalTrainableEmbeddingParam(mod *eosartifact.Module, name string) (eosartifact.Param, bool, error) {
 	if name == "" {
-		return mantaartifact.Param{}, false, nil
+		return eosartifact.Param{}, false, nil
 	}
 	param, err := requireTrainableEmbeddingParam(mod, name)
 	if err != nil {
-		return mantaartifact.Param{}, false, err
+		return eosartifact.Param{}, false, err
 	}
 	return param, true, nil
 }
 
-func normalizedTrainConfig(cfg EmbeddingTrainConfig, params ...mantaartifact.Param) EmbeddingTrainConfig {
+func normalizedTrainConfig(cfg EmbeddingTrainConfig, params ...eosartifact.Param) EmbeddingTrainConfig {
 	if cfg.LearningRate == 0 {
 		cfg.LearningRate = 0.05
 	}
@@ -3924,7 +3924,7 @@ func effectiveGroupedLossWeight(loss string, weight float32) float32 {
 	}
 }
 
-func paramQuantBits(param mantaartifact.Param) int {
+func paramQuantBits(param eosartifact.Param) int {
 	if param.Type.Tensor == nil {
 		return 0
 	}
@@ -3952,11 +3952,11 @@ func zeroLikeMaster(t *backend.Tensor) *backend.Tensor {
 	return backend.NewTensorF32(t.Shape, make([]float32, len(t.F32)))
 }
 
-func forwardTensorForParam(param mantaartifact.Param, master *backend.Tensor, bits int) *backend.Tensor {
+func forwardTensorForParam(param eosartifact.Param, master *backend.Tensor, bits int) *backend.Tensor {
 	return refreshForwardTensorForParam(param, master, bits, nil)
 }
 
-func refreshForwardMatMulTensorForParam(param mantaartifact.Param, master *backend.Tensor, dst *backend.Tensor) *backend.Tensor {
+func refreshForwardMatMulTensorForParam(param eosartifact.Param, master *backend.Tensor, dst *backend.Tensor) *backend.Tensor {
 	if master == nil {
 		return nil
 	}
@@ -3979,7 +3979,7 @@ func refreshForwardMatMulTensorForParam(param mantaartifact.Param, master *backe
 	return dst
 }
 
-func refreshForwardTensorForParam(param mantaartifact.Param, master *backend.Tensor, bits int, dst *backend.Tensor) *backend.Tensor {
+func refreshForwardTensorForParam(param eosartifact.Param, master *backend.Tensor, bits int, dst *backend.Tensor) *backend.Tensor {
 	if master == nil {
 		return nil
 	}
@@ -4021,7 +4021,7 @@ func forwardMatMulHostData(rhs *backend.Tensor) []float32 {
 	}
 }
 
-func exportTensorForParam(param mantaartifact.Param, master *backend.Tensor) (*backend.Tensor, error) {
+func exportTensorForParam(param eosartifact.Param, master *backend.Tensor) (*backend.Tensor, error) {
 	if master == nil {
 		return nil, fmt.Errorf("missing master tensor for %q", param.Name)
 	}

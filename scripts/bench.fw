@@ -43,7 +43,7 @@ func hasGoMod(dir string) bool {
 }
 
 func findRoot() (string, error) {
-	let explicit = getenv("MANTA_BENCH_ROOT", "")
+	let explicit = getenv("EOS_BENCH_ROOT", "")
 	if hasGoMod(explicit) {
 		return explicit, nil
 	}
@@ -56,7 +56,7 @@ func findRoot() (string, error) {
 	if hasGoMod(cwd) {
 		return cwd, nil
 	}
-	return "", fmt.Errorf("could not find repo root; set MANTA_BENCH_ROOT")
+	return "", fmt.Errorf("could not find repo root; set EOS_BENCH_ROOT")
 }
 
 func copyMatching(pattern string, dst string) error {
@@ -88,23 +88,23 @@ func goBench(root string, pkg string, bench string, count string, benchtime stri
 func modelSmoke(root string, assets string) error {
 	out, err := os.MkdirTemp("", "manta-model-bench-*")
 	guard err == nil else return err
-	let modelName = getenv("MANTA_BENCH_MODEL_NAME", "manta-embed-v1")
+	let modelName = getenv("EOS_BENCH_MODEL_NAME", "manta-embed-v1")
 	err = copyMatching(filepath.Join(assets, modelName+".*"), out)
 	guard err == nil else return err
 
-	let epochs = getenv("MANTA_BENCH_MODEL_EPOCHS", "1")
-	let batch = getenv("MANTA_BENCH_MODEL_BATCH", "1024")
-	let lr = getenv("MANTA_BENCH_MODEL_LR", "0.005")
-	let temp = getenv("MANTA_BENCH_MODEL_TEMP", "0.05")
-	let evalEvery = getenv("MANTA_BENCH_MODEL_EVAL_EVERY", "4")
-	let train = getenv("MANTA_BENCH_MODEL_TRAIN", filepath.Join(assets, "train-mini.jsonl"))
-	let eval = getenv("MANTA_BENCH_MODEL_EVAL", filepath.Join(assets, "eval-mini.jsonl"))
+	let epochs = getenv("EOS_BENCH_MODEL_EPOCHS", "1")
+	let batch = getenv("EOS_BENCH_MODEL_BATCH", "1024")
+	let lr = getenv("EOS_BENCH_MODEL_LR", "0.005")
+	let temp = getenv("EOS_BENCH_MODEL_TEMP", "0.05")
+	let evalEvery = getenv("EOS_BENCH_MODEL_EVAL_EVERY", "4")
+	let train = getenv("EOS_BENCH_MODEL_TRAIN", filepath.Join(assets, "train-mini.jsonl"))
+	let eval = getenv("EOS_BENCH_MODEL_EVAL", filepath.Join(assets, "eval-mini.jsonl"))
 
 	step("Default model training smoke")
 	fmt.Println(f"output: {out}")
 	err = shell(root, "/usr/bin/time", []string{
 		"-v",
-		"go", "run", "./cmd/manta", "train-embed",
+		"go", "run", "./cmd/eos", "train-embed",
 		"--epochs", epochs,
 		"--batch-size", batch,
 		"--lr", lr,
@@ -116,7 +116,7 @@ func modelSmoke(root string, assets string) error {
 		eval,
 	})
 	guard err == nil else return err
-	return shell(root, "go", []string{"run", "./cmd/manta", "inspect", filepath.Join(out, modelName+".mll")})
+	return shell(root, "go", []string{"run", "./cmd/eos", "inspect", filepath.Join(out, modelName+".mll")})
 }
 
 func main() {
@@ -126,10 +126,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	let count = getenv("MANTA_BENCH_COUNT", "5")
-	let benchtime = getenv("MANTA_BENCH_TIME", "750ms")
-	let runtimeBench = getenv("MANTA_BENCH_RUNTIME", "BenchmarkAccumulateInfoNCEContrastiveGrads128x64")
-	let cudaBench = getenv("MANTA_BENCH_CUDA_REGEX", "BenchmarkCUDAContrastiveAccelerator256x64|BenchmarkCUDAContrastiveAccelerator128x512x64|BenchmarkHostContrastiveInfoNCE256x64|BenchmarkHostContrastiveInfoNCE128x512x64")
+	let count = getenv("EOS_BENCH_COUNT", "5")
+	let benchtime = getenv("EOS_BENCH_TIME", "750ms")
+	let runtimeBench = getenv("EOS_BENCH_RUNTIME", "BenchmarkAccumulateInfoNCEContrastiveGrads128x64")
+	let cudaBench = getenv("EOS_BENCH_CUDA_REGEX", "BenchmarkCUDAContrastiveAccelerator256x64|BenchmarkCUDAContrastiveAccelerator128x512x64|BenchmarkHostContrastiveInfoNCE256x64|BenchmarkHostContrastiveInfoNCE128x512x64")
 
 	let start = time.Now()
 	step("Go microbenchmarks")
@@ -139,7 +139,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if envEnabled("MANTA_BENCH_CUDA") {
+	if envEnabled("EOS_BENCH_CUDA") {
 		step("CUDA microbenchmarks")
 		err = goBench(root, "./runtime/backends/cuda", cudaBench, count, benchtime)
 		guard err == nil else {
@@ -148,7 +148,7 @@ func main() {
 		}
 	}
 
-	let assets = getenv("MANTA_BENCH_MODEL_ASSETS", "")
+	let assets = getenv("EOS_BENCH_MODEL_ASSETS", "")
 	if assets != "" {
 		err = modelSmoke(root, assets)
 		guard err == nil else {

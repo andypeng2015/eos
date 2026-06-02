@@ -6,14 +6,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/compiler"
-	mantaruntime "m31labs.dev/manta/runtime"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/compiler"
+	eosruntime "m31labs.dev/eos/runtime"
 )
 
 const DefaultEmbeddingModelName = "manta-embed-v1"
 
-// DefaultEmbeddingPackageConfig controls Manta's built-in default
+// DefaultEmbeddingPackageConfig controls Eos's built-in default
 // embedding-model package initialization.
 type DefaultEmbeddingPackageConfig struct {
 	Name               string
@@ -34,18 +34,18 @@ type DefaultEmbeddingPackageConfig struct {
 	TeacherTemperature float32
 }
 
-// InitDefaultEmbeddingPackage compiles Manta's default trainable embedding
+// InitDefaultEmbeddingPackage compiles Eos's default trainable embedding
 // shape and writes a native training package ready for train-corpus/train-embed.
-func InitDefaultEmbeddingPackage(path string, cfg DefaultEmbeddingPackageConfig) (mantaruntime.EmbeddingTrainPackagePaths, error) {
+func InitDefaultEmbeddingPackage(path string, cfg DefaultEmbeddingPackageConfig) (eosruntime.EmbeddingTrainPackagePaths, error) {
 	if path == "" {
-		return mantaruntime.EmbeddingTrainPackagePaths{}, fmt.Errorf("output artifact path is required")
+		return eosruntime.EmbeddingTrainPackagePaths{}, fmt.Errorf("output artifact path is required")
 	}
 	cfg = cfg.normalized()
 	if err := cfg.validate(); err != nil {
-		return mantaruntime.EmbeddingTrainPackagePaths{}, err
+		return eosruntime.EmbeddingTrainPackagePaths{}, err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return mantaruntime.EmbeddingTrainPackagePaths{}, err
+		return eosruntime.EmbeddingTrainPackagePaths{}, err
 	}
 
 	moduleName := moduleNameForModel(cfg.Name)
@@ -54,17 +54,17 @@ func InitDefaultEmbeddingPackage(path string, cfg DefaultEmbeddingPackageConfig)
 		Preset:     compiler.PresetEncoderTrainableQ8x2,
 	})
 	if err != nil {
-		return mantaruntime.EmbeddingTrainPackagePaths{}, err
+		return eosruntime.EmbeddingTrainPackagePaths{}, err
 	}
-	if err := mantaartifact.WriteFile(path, bundle.Artifact); err != nil {
-		return mantaruntime.EmbeddingTrainPackagePaths{}, err
+	if err := eosartifact.WriteFile(path, bundle.Artifact); err != nil {
+		return eosruntime.EmbeddingTrainPackagePaths{}, err
 	}
 
 	manifest := DefaultEmbeddingManifest(cfg)
-	if err := manifest.WriteFile(mantaruntime.DefaultEmbeddingManifestPath(path)); err != nil {
-		return mantaruntime.EmbeddingTrainPackagePaths{}, err
+	if err := manifest.WriteFile(eosruntime.DefaultEmbeddingManifestPath(path)); err != nil {
+		return eosruntime.EmbeddingTrainPackagePaths{}, err
 	}
-	return mantaruntime.InitializeEmbeddingTrainerPackageWithManifest(path, manifest, cfg.trainConfig(), mantaruntime.EmbeddingTrainInitOptions{
+	return eosruntime.InitializeEmbeddingTrainerPackageWithManifest(path, manifest, cfg.trainConfig(), eosruntime.EmbeddingTrainInitOptions{
 		Seed: cfg.Seed,
 		ShapeSizes: map[string]int{
 			"D": cfg.EmbeddingDim,
@@ -75,9 +75,9 @@ func InitDefaultEmbeddingPackage(path string, cfg DefaultEmbeddingPackageConfig)
 
 // DefaultEmbeddingManifest returns the serving/training contract for the
 // built-in default embedding model shape.
-func DefaultEmbeddingManifest(cfg DefaultEmbeddingPackageConfig) mantaruntime.EmbeddingManifest {
+func DefaultEmbeddingManifest(cfg DefaultEmbeddingPackageConfig) eosruntime.EmbeddingManifest {
 	cfg = cfg.normalized()
-	return mantaruntime.EmbeddingManifest{
+	return eosruntime.EmbeddingManifest{
 		Name:                  cfg.Name,
 		PooledEntry:           "embed_pooled",
 		BatchEntry:            "embed_pooled_batch",
@@ -97,7 +97,7 @@ func DefaultEmbeddingManifest(cfg DefaultEmbeddingPackageConfig) mantaruntime.Em
 		FFNResidual:           true,
 		FFNLayerNorm:          true,
 		ProjectionParam:       "projection",
-		Tokenizer: mantaruntime.TokenizerManifest{
+		Tokenizer: eosruntime.TokenizerManifest{
 			VocabSize:   cfg.VocabSize,
 			MaxSequence: cfg.MaxSequence,
 			PadID:       0,
@@ -185,8 +185,8 @@ func (cfg DefaultEmbeddingPackageConfig) validate() error {
 	return nil
 }
 
-func (cfg DefaultEmbeddingPackageConfig) trainConfig() mantaruntime.EmbeddingTrainConfig {
-	return mantaruntime.EmbeddingTrainConfig{
+func (cfg DefaultEmbeddingPackageConfig) trainConfig() eosruntime.EmbeddingTrainConfig {
+	return eosruntime.EmbeddingTrainConfig{
 		LearningRate:       cfg.LearningRate,
 		WeightDecay:        cfg.WeightDecay,
 		WeightBits:         cfg.WeightBits,

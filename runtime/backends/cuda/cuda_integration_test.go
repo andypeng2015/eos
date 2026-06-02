@@ -7,10 +7,10 @@ import (
 	"math"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/compiler"
-	mantaruntime "m31labs.dev/manta/runtime"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/compiler"
+	eosruntime "m31labs.dev/eos/runtime"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 func TestCUDADeviceExecutionTinyEmbed(t *testing.T) {
@@ -19,16 +19,16 @@ func TestCUDADeviceExecutionTinyEmbed(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 
-	rt := mantaruntime.New(New())
+	rt := eosruntime.New(New())
 	prog, err := rt.Load(
 		context.Background(),
 		bundle.Artifact,
-		mantaruntime.WithWeight("token_embedding", backend.NewTensorF16([]int{3, 2}, []float32{
+		eosruntime.WithWeight("token_embedding", backend.NewTensorF16([]int{3, 2}, []float32{
 			1, 0,
 			0, 1,
 			1, 1,
 		})),
-		mantaruntime.WithWeight("projection", backend.NewTensorF16([]int{2, 2}, []float32{
+		eosruntime.WithWeight("projection", backend.NewTensorF16([]int{2, 2}, []float32{
 			1, 0,
 			0, 1,
 		})),
@@ -67,16 +67,16 @@ func TestCUDADeviceExecutionUsesResidentMatMulParam(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 
-	rt := mantaruntime.New(New())
+	rt := eosruntime.New(New())
 	prog, err := rt.Load(
 		context.Background(),
 		bundle.Artifact,
-		mantaruntime.WithWeight("token_embedding", backend.NewTensorF16([]int{3, 2}, []float32{
+		eosruntime.WithWeight("token_embedding", backend.NewTensorF16([]int{3, 2}, []float32{
 			1, 0,
 			0, 1,
 			1, 1,
 		})),
-		mantaruntime.WithWeight("projection", backend.NewTensorF16([]int{2, 2}, []float32{
+		eosruntime.WithWeight("projection", backend.NewTensorF16([]int{2, 2}, []float32{
 			1, 0,
 			0, 1,
 		})),
@@ -115,11 +115,11 @@ func TestCUDADeviceExecutionTinyScore(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 
-	rt := mantaruntime.New(New())
+	rt := eosruntime.New(New())
 	prog, err := rt.Load(
 		context.Background(),
 		bundle.Artifact,
-		mantaruntime.WithWeight("docs", backend.NewTensorQ4([]int{2, 2}, []float32{
+		eosruntime.WithWeight("docs", backend.NewTensorQ4([]int{2, 2}, []float32{
 			1, 0,
 			0, 1,
 		})),
@@ -177,9 +177,9 @@ func TestCUDABoundQuantizedMatrixMatchesHostFakeQuantization(t *testing.T) {
 	if err := accelAny.BindMatrix("quant_rhs", rhs); err != nil {
 		t.Fatalf("bind quantized rhs: %v", err)
 	}
-	result, err := accelAny.RunMatMulWithBoundRight(lhs, "quant_rhs", mantaartifact.ValueType{
-		Kind: mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{
+	result, err := accelAny.RunMatMulWithBoundRight(lhs, "quant_rhs", eosartifact.ValueType{
+		Kind: eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{
 			DType: "f32",
 		},
 	}, false, false)
@@ -253,9 +253,9 @@ func TestCUDAMultiBoundRightMatMulUploadsLHSOnce(t *testing.T) {
 	if err := accelAny.BindMatrix("rhs_b", rhsB); err != nil {
 		t.Fatalf("bind rhs_b: %v", err)
 	}
-	results, err := multi.RunMatMulWithBoundRights(lhs, []string{"rhs_a", "rhs_b"}, mantaartifact.ValueType{
-		Kind: mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{
+	results, err := multi.RunMatMulWithBoundRights(lhs, []string{"rhs_a", "rhs_b"}, eosartifact.ValueType{
+		Kind: eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{
 			DType: "f32",
 		},
 	}, false, false)
@@ -331,9 +331,9 @@ func TestCUDAAccumulatedBoundRightMatMulDownloadsOnce(t *testing.T) {
 	if err := accelAny.BindMatrix("rhs_b", rhsB); err != nil {
 		t.Fatalf("bind rhs_b: %v", err)
 	}
-	result, err := accumulated.RunAccumulatedMatMulsWithBoundRights([]*backend.Tensor{lhsA, lhsB}, []string{"rhs_a", "rhs_b"}, mantaartifact.ValueType{
-		Kind: mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{
+	result, err := accumulated.RunAccumulatedMatMulsWithBoundRights([]*backend.Tensor{lhsA, lhsB}, []string{"rhs_a", "rhs_b"}, eosartifact.ValueType{
+		Kind: eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{
 			DType: "f32",
 		},
 	}, false, true)
@@ -410,9 +410,9 @@ func TestCUDASharedLeftMatMulUploadsLHSOnce(t *testing.T) {
 		1, 0,
 		0, 2,
 	})
-	results, err := shared.RunMatMulsWithSharedLeft(lhs, []*backend.Tensor{rhsA, rhsB}, mantaartifact.ValueType{
-		Kind: mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{
+	results, err := shared.RunMatMulsWithSharedLeft(lhs, []*backend.Tensor{rhsA, rhsB}, eosartifact.ValueType{
+		Kind: eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{
 			DType: "f32",
 		},
 	}, true, false)
@@ -471,9 +471,9 @@ func TestCUDAStridedBatchedMatMulMatchesHost(t *testing.T) {
 		0, 2,
 		1, -1,
 	})
-	result, err := accelAny.RunMatMul([]*backend.Tensor{lhs, rhs}, mantaartifact.ValueType{
-		Kind: mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{
+	result, err := accelAny.RunMatMul([]*backend.Tensor{lhs, rhs}, eosartifact.ValueType{
+		Kind: eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{
 			DType: "f32",
 		},
 	})
@@ -504,9 +504,9 @@ func TestCUDAStridedBatchedMatMulTransposeMatchesHost(t *testing.T) {
 	}
 	defer accelAny.Close()
 
-	outputType := mantaartifact.ValueType{
-		Kind: mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{
+	outputType := eosartifact.ValueType{
+		Kind: eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{
 			DType: "f32",
 		},
 	}

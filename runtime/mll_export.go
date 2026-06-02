@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"bytes"
@@ -11,8 +11,8 @@ import (
 	"sort"
 	"strconv"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 	mll "m31labs.dev/mll"
 )
 
@@ -26,9 +26,9 @@ func DefaultMLLPath(artifactPath string) string {
 	return defaultManifestPath(artifactPath, ".mll")
 }
 
-// ExportPackageToMLL exports a Manta artifact plus its sibling package
+// ExportPackageToMLL exports a Eos artifact plus its sibling package
 // files into a sealed MLL container. The resulting file keeps the current
-// Manta module JSON in a schemaless XMTA section while populating the
+// Eos module JSON in a schemaless XMTA section while populating the
 // closest matching MLL core sections.
 func ExportPackageToMLL(artifactPath, outPath string) (string, error) {
 	if artifactPath == "" {
@@ -38,7 +38,7 @@ func ExportPackageToMLL(artifactPath, outPath string) (string, error) {
 		outPath = DefaultMLLPath(artifactPath)
 	}
 
-	mod, err := mantaartifact.ReadFile(artifactPath)
+	mod, err := eosartifact.ReadFile(artifactPath)
 	if err != nil {
 		return "", err
 	}
@@ -58,7 +58,7 @@ func ExportPackageToMLL(artifactPath, outPath string) (string, error) {
 		return "", err
 	}
 
-	artifactJSON, err := mantaartifact.EncodeJSON(mod)
+	artifactJSON, err := eosartifact.EncodeJSON(mod)
 	if err != nil {
 		return "", err
 	}
@@ -77,7 +77,7 @@ func ExportPackageToMLL(artifactPath, outPath string) (string, error) {
 	return outPath, nil
 }
 
-func buildMLLExport(mod *mantaartifact.Module, artifactJSON []byte, jsonFiles map[string]json.RawMessage, packageKind PackageKind, weights map[string]*backend.Tensor, plan *MemoryPlan) ([]byte, error) {
+func buildMLLExport(mod *eosartifact.Module, artifactJSON []byte, jsonFiles map[string]json.RawMessage, packageKind PackageKind, weights map[string]*backend.Tensor, plan *MemoryPlan) ([]byte, error) {
 	if mod == nil {
 		return nil, fmt.Errorf("nil module")
 	}
@@ -87,7 +87,7 @@ func buildMLLExport(mod *mantaartifact.Module, artifactJSON []byte, jsonFiles ma
 		types:   mll.NewTypeBuilder(),
 		dims:    map[string]bool{},
 	}
-	// Reserve index 0 so Manta optional fields can safely use 0 as "absent".
+	// Reserve index 0 so Eos optional fields can safely use 0 as "absent".
 	state.strings.Intern("")
 
 	var (
@@ -237,7 +237,7 @@ func buildMLLExport(mod *mantaartifact.Module, artifactJSON []byte, jsonFiles ma
 
 	head := mll.HeadSection{
 		Name:        state.strings.Intern(mod.Name),
-		Description: state.strings.Intern("Manta sealed export"),
+		Description: state.strings.Intern("Eos sealed export"),
 		Metadata:    buildMLLHeadMetadata(state.strings, mod, packageKind, weights),
 	}
 
@@ -360,7 +360,7 @@ func buildMLLExport(mod *mantaartifact.Module, artifactJSON []byte, jsonFiles ma
 		})
 	}
 	sections = append(sections, mll.SectionInput{
-		Tag:           mantaartifact.MLLTagXMTA,
+		Tag:           eosartifact.MLLTagXMTA,
 		Body:          xmta,
 		Flags:         mll.SectionFlagSkippable | mll.SectionFlagSchemaless,
 		SchemaVersion: 1,
@@ -398,7 +398,7 @@ func verifyPackageManifestForMLL(artifactPath string) (PackageKind, error) {
 	return manifest.Kind, nil
 }
 
-func loadWeightsForMLLExport(artifactPath string, mod *mantaartifact.Module) (map[string]*backend.Tensor, error) {
+func loadWeightsForMLLExport(artifactPath string, mod *eosartifact.Module) (map[string]*backend.Tensor, error) {
 	weightPath := DefaultWeightFilePath(artifactPath)
 	if _, err := os.Stat(weightPath); err != nil {
 		if os.IsNotExist(err) {
@@ -416,7 +416,7 @@ func loadWeightsForMLLExport(artifactPath string, mod *mantaartifact.Module) (ma
 	return weightFile.Weights, nil
 }
 
-func loadMemoryPlanForMLLExport(artifactPath string, mod *mantaartifact.Module, weights map[string]*backend.Tensor) (*MemoryPlan, error) {
+func loadMemoryPlanForMLLExport(artifactPath string, mod *eosartifact.Module, weights map[string]*backend.Tensor) (*MemoryPlan, error) {
 	if len(weights) == 0 {
 		return nil, nil
 	}
@@ -628,9 +628,9 @@ func readOptionalMemoryPlanJSON(path string) (json.RawMessage, bool, error) {
 	return json.RawMessage(body), true, nil
 }
 
-func buildMLLExportMetadata(mod *mantaartifact.Module, artifactJSON []byte, jsonFiles map[string]json.RawMessage, packageKind PackageKind, logicalTensorDTypes map[string]string) ([]byte, error) {
-	meta := mantaartifact.MLLMetadata{
-		Version:       mantaartifact.MLLMetadataVersion,
+func buildMLLExportMetadata(mod *eosartifact.Module, artifactJSON []byte, jsonFiles map[string]json.RawMessage, packageKind PackageKind, logicalTensorDTypes map[string]string) ([]byte, error) {
+	meta := eosartifact.MLLMetadata{
+		Version:       eosartifact.MLLMetadataVersion,
 		ModuleName:    mod.Name,
 		ModuleVersion: mod.Version,
 		Artifact:      json.RawMessage(bytes.TrimSpace(artifactJSON)),
@@ -654,10 +654,10 @@ func buildMLLExportMetadata(mod *mantaartifact.Module, artifactJSON []byte, json
 	if len(logicalTensorDTypes) > 0 {
 		meta.LogicalTensorDType = logicalTensorDTypes
 	}
-	return mantaartifact.EncodeMLLMetadata(meta)
+	return eosartifact.EncodeMLLMetadata(meta)
 }
 
-func buildMLLHeadMetadata(strg *mll.StringTable, mod *mantaartifact.Module, packageKind PackageKind, weights map[string]*backend.Tensor) []mll.HeadMetadataEntry {
+func buildMLLHeadMetadata(strg *mll.StringTable, mod *eosartifact.Module, packageKind PackageKind, weights map[string]*backend.Tensor) []mll.HeadMetadataEntry {
 	items := []mll.HeadMetadataEntry{
 		headStringMeta(strg, "artifact_version", mod.Version),
 		headIntMeta(strg, "param_count", int64(len(mod.Params))),
@@ -710,15 +710,15 @@ func (s *mllExportState) internOptional(value string) uint32 {
 	return s.strings.Intern(value)
 }
 
-func (s *mllExportState) addValueTypeRef(name string, typ mantaartifact.ValueType) (mll.Ref, error) {
+func (s *mllExportState) addValueTypeRef(name string, typ eosartifact.ValueType) (mll.Ref, error) {
 	idx := uint32(len(s.types.Decls()))
 	nameIdx := s.strings.Intern(name)
 	switch typ.Kind {
-	case mantaartifact.ValueTensor:
+	case eosartifact.ValueTensor:
 		if typ.Tensor == nil {
 			return mll.Ref{}, fmt.Errorf("tensor payload is required")
 		}
-		dtype, err := mantaDTypeToMLL(typ.Tensor.DType)
+		dtype, err := eosDTypeToMLL(typ.Tensor.DType)
 		if err != nil {
 			return mll.Ref{}, err
 		}
@@ -727,9 +727,9 @@ func (s *mllExportState) addValueTypeRef(name string, typ mantaartifact.ValueTyp
 			return mll.Ref{}, err
 		}
 		s.types.AddTensorType(nameIdx, dtype, shape)
-	case mantaartifact.ValueKVCache:
+	case eosartifact.ValueKVCache:
 		s.types.AddKVCacheType(nameIdx, 0, 0, 0)
-	case mantaartifact.ValueCandidatePack:
+	case eosartifact.ValueCandidatePack:
 		rank := uint32(0)
 		if typ.CandidatePack != nil {
 			rank = uint32(len(typ.CandidatePack.Shape))
@@ -744,7 +744,7 @@ func (s *mllExportState) addValueTypeRef(name string, typ mantaartifact.ValueTyp
 func (s *mllExportState) addTensorTypeRef(name, dtype string, shape []string) (mll.Ref, error) {
 	idx := uint32(len(s.types.Decls()))
 	nameIdx := s.strings.Intern(name)
-	mllDType, err := mantaDTypeToMLL(dtype)
+	mllDType, err := eosDTypeToMLL(dtype)
 	if err != nil {
 		return mll.Ref{}, err
 	}
@@ -776,11 +776,11 @@ func (s *mllExportState) shape(shape []string) ([]mll.Dimension, error) {
 	return out, nil
 }
 
-func entryPointKindToMLL(kind mantaartifact.EntryPointKind) uint8 {
+func entryPointKindToMLL(kind eosartifact.EntryPointKind) uint8 {
 	switch kind {
-	case mantaartifact.EntryPointKernel:
+	case eosartifact.EntryPointKernel:
 		return mll.EntryKindKernel
-	case mantaartifact.EntryPointPipeline:
+	case eosartifact.EntryPointPipeline:
 		return mll.EntryKindPipeline
 	default:
 		return mll.EntryKindFunction
@@ -811,7 +811,7 @@ func residencyToMLL(residency MemoryResidency) uint8 {
 	}
 }
 
-func mantaDTypeToMLL(dtype string) (mll.DType, error) {
+func eosDTypeToMLL(dtype string) (mll.DType, error) {
 	switch dtype {
 	case "i32":
 		return mll.DTypeI32, nil
@@ -826,7 +826,7 @@ func mantaDTypeToMLL(dtype string) (mll.DType, error) {
 	case "q8":
 		return mll.DTypeQ8, nil
 	default:
-		return mll.DTypeInvalid, fmt.Errorf("unsupported Manta dtype %q", dtype)
+		return mll.DTypeInvalid, fmt.Errorf("unsupported Eos dtype %q", dtype)
 	}
 }
 
@@ -856,7 +856,7 @@ func encodeTensorStorage(t *backend.Tensor) (mll.DType, []byte, bool, error) {
 	case "f32":
 		return mll.DTypeF32, encodeFloat32Bytes(t.F32), false, nil
 	case "q4", "q8":
-		// Manta currently stores fake-quantized q4/q8 tensors as float32
+		// Eos currently stores fake-quantized q4/q8 tensors as float32
 		// values, so the first MLL export keeps the raw bytes honest and records
 		// the logical dtype in XMTA metadata.
 		return mll.DTypeF32, encodeFloat32Bytes(t.F32), true, nil

@@ -1,9 +1,9 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"fmt"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
+	eosartifact "m31labs.dev/eos/artifact/eos"
 )
 
 const EmbeddingTrainManifestVersion = "manta/train-manifest/v0alpha1"
@@ -35,7 +35,7 @@ func ReadEmbeddingTrainManifestFile(path string) (EmbeddingTrainManifest, error)
 
 // WriteFile writes the training manifest as an authored MLL container.
 func (m EmbeddingTrainManifest) WriteFile(path string) error {
-	return writeAuthoredManifestMLL(path, "train_manifest", EmbeddingTrainManifestVersion, m.nameOrDefault(), "Manta training manifest", m.mllValues())
+	return writeAuthoredManifestMLL(path, "train_manifest", EmbeddingTrainManifestVersion, m.nameOrDefault(), "Eos training manifest", m.mllValues())
 }
 
 func (m EmbeddingTrainManifest) normalized() EmbeddingTrainManifest {
@@ -44,7 +44,7 @@ func (m EmbeddingTrainManifest) normalized() EmbeddingTrainManifest {
 }
 
 // ValidateModule checks that a module satisfies the training contract.
-func (m EmbeddingTrainManifest) ValidateModule(mod *mantaartifact.Module) error {
+func (m EmbeddingTrainManifest) ValidateModule(mod *eosartifact.Module) error {
 	m = m.normalized()
 	if mod == nil {
 		return fmt.Errorf("nil module")
@@ -69,7 +69,7 @@ func (m EmbeddingTrainManifest) ValidateModule(mod *mantaartifact.Module) error 
 	return nil
 }
 
-func validateTrainableAttentionParams(mod *mantaartifact.Module, manifest EmbeddingManifest) error {
+func validateTrainableAttentionParams(mod *eosartifact.Module, manifest EmbeddingManifest) error {
 	names := []string{
 		manifest.AttentionQueryParam,
 		manifest.AttentionKeyParam,

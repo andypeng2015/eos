@@ -9,9 +9,9 @@ package main
 // as K=1 (bit-identical to single-positive InfoNCE).
 //
 // Usage:
-//   MANTA_REPO_ROOT=$PWD \
-//   MANTA_DATASET_ROOT=$PWD/datasets/manta-embed-v1/raw \
-//   MANTA_PRETRAIN_OUT=$PWD/datasets/manta-embed-v1/processed/pretrain-pairs.jsonl \
+//   EOS_REPO_ROOT=$PWD \
+//   EOS_DATASET_ROOT=$PWD/datasets/manta-embed-v1/raw \
+//   EOS_PRETRAIN_OUT=$PWD/datasets/manta-embed-v1/processed/pretrain-pairs.jsonl \
 //     ferrous-wheel run scripts/build_pretrain_pairs.fw
 
 import (
@@ -98,7 +98,7 @@ func pickRandomOtherBody(docs []beirDoc, excludeIdx int, rng *rand.Rand) string 
 }
 
 func main() {
-	root := getenv("MANTA_REPO_ROOT", "")
+	root := getenv("EOS_REPO_ROOT", "")
 	if root == "" {
 		cwd, err := os.Getwd()
 		guard err == nil else {
@@ -107,9 +107,9 @@ func main() {
 		}
 		root = cwd
 	}
-	let datasetRoot = getenv("MANTA_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1", "raw"))
-	let outPath = getenv("MANTA_PRETRAIN_OUT", filepath.Join(root, "datasets", "manta-embed-v1", "processed", "pretrain-pairs.jsonl"))
-	let seedStr = getenv("MANTA_PRETRAIN_SEED", "42")
+	let datasetRoot = getenv("EOS_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1", "raw"))
+	let outPath = getenv("EOS_PRETRAIN_OUT", filepath.Join(root, "datasets", "manta-embed-v1", "processed", "pretrain-pairs.jsonl"))
+	let seedStr = getenv("EOS_PRETRAIN_SEED", "42")
 	seed := int64(42)
 	_, scanErr := fmt.Sscan(seedStr, &seed)
 	if scanErr != nil {

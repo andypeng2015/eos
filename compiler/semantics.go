@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"m31labs.dev/manta/ir/hir"
-	"m31labs.dev/manta/syntax"
+	"m31labs.dev/eos/ir/hir"
+	"m31labs.dev/eos/syntax"
 )
 
 // DiagnosticsError reports one or more source-tied compiler diagnostics.

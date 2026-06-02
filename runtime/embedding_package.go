@@ -1,10 +1,10 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"context"
 	"os"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
+	eosartifact "m31labs.dev/eos/artifact/eos"
 )
 
 // EmbeddingPackagePaths names the files that make up a packaged embedding model.
@@ -38,7 +38,7 @@ func (rt *Runtime) LoadEmbeddingPackage(ctx context.Context, artifactPath string
 }
 
 func (rt *Runtime) tryLoadSealedEmbeddingPackage(ctx context.Context, path string) (*EmbeddingModel, bool, error) {
-	reader, meta, err := readSealedMantaMLL(path)
+	reader, meta, err := readSealedEosMLL(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, false, nil
@@ -103,7 +103,7 @@ func (rt *Runtime) LoadEmbeddingPackageWithPaths(ctx context.Context, paths Embe
 	if err != nil {
 		return nil, err
 	}
-	mod, err := mantaartifact.ReadFile(paths.ArtifactPath)
+	mod, err := eosartifact.ReadFile(paths.ArtifactPath)
 	if err != nil {
 		return nil, err
 	}

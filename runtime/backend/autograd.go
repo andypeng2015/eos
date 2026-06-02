@@ -5,7 +5,7 @@ import (
 	"math"
 	"slices"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
+	eosartifact "m31labs.dev/eos/artifact/eos"
 )
 
 // GradTensor is a runtime tensor value tracked by the reference reverse-mode
@@ -67,7 +67,7 @@ func BackwardWithGradient(output *GradTensor, grad *Tensor) error {
 	return nil
 }
 
-// GradRequest describes one reference-autograd execution of a Manta entrypoint.
+// GradRequest describes one reference-autograd execution of a Eos entrypoint.
 type GradRequest struct {
 	Entry           string
 	Inputs          map[string]*Tensor
@@ -85,10 +85,10 @@ type GradResult struct {
 	Trace          []TraceStep
 }
 
-// ExecuteAutograd runs a Manta pipeline through the reference reverse-mode path.
+// ExecuteAutograd runs a Eos pipeline through the reference reverse-mode path.
 // It is intentionally backend-independent; device backward kernels can reuse
 // the same op contracts while this path keeps correctness tests deterministic.
-func ExecuteAutograd(mod *mantaartifact.Module, req GradRequest) (GradResult, error) {
+func ExecuteAutograd(mod *eosartifact.Module, req GradRequest) (GradResult, error) {
 	if mod == nil {
 		return GradResult{}, fmt.Errorf("nil module")
 	}
@@ -138,7 +138,7 @@ func ExecuteAutograd(mod *mantaartifact.Module, req GradRequest) (GradResult, er
 			Inputs:  cloneStrings(step.Inputs),
 			Outputs: cloneStrings(step.Outputs),
 		})
-		if step.Kind == mantaartifact.StepReturn {
+		if step.Kind == eosartifact.StepReturn {
 			for _, name := range step.Outputs {
 				value, ok := env[name]
 				if !ok || value.Value == nil {
@@ -191,11 +191,11 @@ func ExecuteAutograd(mod *mantaartifact.Module, req GradRequest) (GradResult, er
 	return result, nil
 }
 
-func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor) ([]*GradTensor, error) {
+func executeAutogradStep(step eosartifact.Step, env map[string]*GradTensor) ([]*GradTensor, error) {
 	switch step.Kind {
-	case mantaartifact.StepReturn:
+	case eosartifact.StepReturn:
 		return nil, nil
-	case mantaartifact.StepAlias:
+	case eosartifact.StepAlias:
 		if len(step.Inputs) != 1 || len(step.Outputs) != 1 {
 			return nil, fmt.Errorf("alias expects 1 input and 1 output")
 		}
@@ -204,7 +204,7 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor) ([
 			return nil, err
 		}
 		return []*GradTensor{aliasGradTensor(input)}, nil
-	case mantaartifact.StepConv2D:
+	case eosartifact.StepConv2D:
 		if len(step.Inputs) < 2 || len(step.Outputs) != 1 {
 			return nil, fmt.Errorf("conv2d expects at least 2 inputs and 1 output")
 		}
@@ -217,7 +217,7 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor) ([
 			return nil, err
 		}
 		return []*GradTensor{out}, nil
-	case mantaartifact.StepConv2DTrans:
+	case eosartifact.StepConv2DTrans:
 		if len(step.Inputs) < 2 || len(step.Outputs) != 1 {
 			return nil, fmt.Errorf("conv2d_transpose expects at least 2 inputs and 1 output")
 		}
@@ -230,7 +230,7 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor) ([
 			return nil, err
 		}
 		return []*GradTensor{out}, nil
-	case mantaartifact.StepGDN, mantaartifact.StepIGDN:
+	case eosartifact.StepGDN, eosartifact.StepIGDN:
 		if len(step.Inputs) < 1 || len(step.Outputs) != 1 {
 			return nil, fmt.Errorf("%s expects at least 1 input and 1 output", step.Kind)
 		}
@@ -242,12 +242,12 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor) ([
 		if err != nil {
 			return nil, err
 		}
-		out, err := GDNGrad(input, beta, gamma, step.Kind == mantaartifact.StepIGDN)
+		out, err := GDNGrad(input, beta, gamma, step.Kind == eosartifact.StepIGDN)
 		if err != nil {
 			return nil, err
 		}
 		return []*GradTensor{out}, nil
-	case mantaartifact.StepTurboQEncode:
+	case eosartifact.StepTurboQEncode:
 		if len(step.Inputs) != 1 || len(step.Outputs) != 2 {
 			return nil, fmt.Errorf("turboquant_encode expects 1 input and 2 outputs")
 		}
@@ -260,7 +260,7 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor) ([
 			return nil, err
 		}
 		return []*GradTensor{coords, norms}, nil
-	case mantaartifact.StepTurboQDecode:
+	case eosartifact.StepTurboQDecode:
 		if len(step.Inputs) != 2 || len(step.Outputs) != 1 {
 			return nil, fmt.Errorf("turboquant_decode expects 2 inputs and 1 output")
 		}
@@ -277,7 +277,7 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor) ([
 			return nil, err
 		}
 		return []*GradTensor{out}, nil
-	case mantaartifact.StepCrossEntropy:
+	case eosartifact.StepCrossEntropy:
 		if len(step.Inputs) < 1 || len(step.Outputs) != 1 {
 			return nil, fmt.Errorf("cross_entropy_factorized expects at least 1 input and 1 output")
 		}
@@ -294,7 +294,7 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor) ([
 			return nil, err
 		}
 		return []*GradTensor{out}, nil
-	case mantaartifact.StepMSELoss:
+	case eosartifact.StepMSELoss:
 		if len(step.Inputs) != 2 || len(step.Outputs) != 1 {
 			return nil, fmt.Errorf("mse_loss expects 2 inputs and 1 output")
 		}
@@ -307,7 +307,7 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor) ([
 			return nil, err
 		}
 		return []*GradTensor{out}, nil
-	case mantaartifact.StepMSSSIMLoss:
+	case eosartifact.StepMSSSIMLoss:
 		if len(step.Inputs) != 2 || len(step.Outputs) != 1 {
 			return nil, fmt.Errorf("ms_ssim_loss expects 2 inputs and 1 output")
 		}
@@ -320,7 +320,7 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor) ([
 			return nil, err
 		}
 		return []*GradTensor{out}, nil
-	case mantaartifact.StepScalarAdd:
+	case eosartifact.StepScalarAdd:
 		inputs := make([]*GradTensor, 0, len(step.Inputs))
 		for _, name := range step.Inputs {
 			input, err := gradInput(env, name)
@@ -334,7 +334,7 @@ func executeAutogradStep(step mantaartifact.Step, env map[string]*GradTensor) ([
 			return nil, err
 		}
 		return []*GradTensor{out}, nil
-	case mantaartifact.StepRDLoss:
+	case eosartifact.StepRDLoss:
 		if len(step.Inputs) != 2 || len(step.Outputs) != 1 {
 			return nil, fmt.Errorf("rate_distortion_loss expects 2 inputs and 1 output")
 		}

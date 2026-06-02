@@ -1,11 +1,11 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"fmt"
 	"os"
 	"sort"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
+	eosartifact "m31labs.dev/eos/artifact/eos"
 	mll "m31labs.dev/mll"
 )
 
@@ -65,7 +65,7 @@ func encodeAuthoredManifestMLL(kind, version, name, description string, values m
 		name = kind
 	}
 	if description == "" {
-		description = "Manta authored manifest"
+		description = "Eos authored manifest"
 	}
 
 	keys := make([]string, 0, len(values)+2)
@@ -199,7 +199,7 @@ func readAuthoredManifestMLL(path, expectedKind, expectedVersion string) (author
 	if err != nil {
 		return authoredManifestDoc{}, err
 	}
-	if !mantaartifact.IsMLLBytes(data) {
+	if !eosartifact.IsMLLBytes(data) {
 		return authoredManifestDoc{}, fmt.Errorf("not an MLL manifest")
 	}
 	reader, err := mll.ReadBytes(data, mll.WithDigestVerification())

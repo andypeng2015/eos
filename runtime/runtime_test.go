@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"context"
@@ -7,42 +7,42 @@ import (
 	"strings"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/compiler"
-	"m31labs.dev/manta/runtime/backend"
-	"m31labs.dev/manta/runtime/backends/cuda"
-	"m31labs.dev/manta/runtime/backends/directml"
-	"m31labs.dev/manta/runtime/backends/metal"
-	"m31labs.dev/manta/runtime/backends/vulkan"
-	"m31labs.dev/manta/runtime/backends/webgpu"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/compiler"
+	"m31labs.dev/eos/runtime/backend"
+	"m31labs.dev/eos/runtime/backends/cuda"
+	"m31labs.dev/eos/runtime/backends/directml"
+	"m31labs.dev/eos/runtime/backends/metal"
+	"m31labs.dev/eos/runtime/backends/vulkan"
+	"m31labs.dev/eos/runtime/backends/webgpu"
 )
 
 type stubBackend struct {
-	kind         mantaartifact.BackendKind
+	kind         eosartifact.BackendKind
 	capabilities []string
 	loads        int
 }
 
-func (b *stubBackend) Kind() mantaartifact.BackendKind { return b.kind }
+func (b *stubBackend) Kind() eosartifact.BackendKind { return b.kind }
 
 func (b *stubBackend) Capabilities() []string {
 	return append([]string(nil), b.capabilities...)
 }
 
-func (b *stubBackend) CanLoad(mod *mantaartifact.Module) bool {
+func (b *stubBackend) CanLoad(mod *eosartifact.Module) bool {
 	return mod != nil && mod.SupportsBackend(b.kind)
 }
 
-func (b *stubBackend) Load(_ context.Context, _ *mantaartifact.Module, _ map[string]backend.WeightBinding) (backend.Executor, error) {
+func (b *stubBackend) Load(_ context.Context, _ *eosartifact.Module, _ map[string]backend.WeightBinding) (backend.Executor, error) {
 	b.loads++
 	return stubExecutor{kind: b.kind}, nil
 }
 
 type stubExecutor struct {
-	kind mantaartifact.BackendKind
+	kind eosartifact.BackendKind
 }
 
-func (e stubExecutor) Backend() mantaartifact.BackendKind { return e.kind }
+func (e stubExecutor) Backend() eosartifact.BackendKind { return e.kind }
 
 func (e stubExecutor) Run(_ context.Context, _ backend.Request) (backend.Result, error) {
 	return backend.Result{}, fmt.Errorf("stub executor does not run")
@@ -53,11 +53,11 @@ type cacheKeyStubBackend struct {
 	cacheKeys []string
 }
 
-func (b *cacheKeyStubBackend) Load(_ context.Context, _ *mantaartifact.Module, _ map[string]backend.WeightBinding) (backend.Executor, error) {
+func (b *cacheKeyStubBackend) Load(_ context.Context, _ *eosartifact.Module, _ map[string]backend.WeightBinding) (backend.Executor, error) {
 	return nil, fmt.Errorf("unexpected uncached load")
 }
 
-func (b *cacheKeyStubBackend) LoadWithCacheKey(_ context.Context, _ *mantaartifact.Module, _ map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
+func (b *cacheKeyStubBackend) LoadWithCacheKey(_ context.Context, _ *eosartifact.Module, _ map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
 	b.loads++
 	b.cacheKeys = append(b.cacheKeys, cacheKey)
 	return stubExecutor{kind: b.kind}, nil
@@ -109,18 +109,18 @@ func TestLoadFallsBackWhenBackendMissingCapabilities(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 
-	cudaOnly := &stubBackend{kind: mantaartifact.BackendCUDA}
+	cudaOnly := &stubBackend{kind: eosartifact.BackendCUDA}
 	metalCapable := &stubBackend{
-		kind:         mantaartifact.BackendMetal,
-		capabilities: []string{mantaartifact.CapabilityCandidatePack},
+		kind:         eosartifact.BackendMetal,
+		capabilities: []string{eosartifact.CapabilityCandidatePack},
 	}
 	rt := New(cudaOnly, metalCapable)
 	prog, err := rt.Load(context.Background(), bundle.Artifact, tinyRerankWeights()...)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if got := prog.Backend(); got != mantaartifact.BackendMetal {
-		t.Fatalf("backend = %q, want %q", got, mantaartifact.BackendMetal)
+	if got := prog.Backend(); got != eosartifact.BackendMetal {
+		t.Fatalf("backend = %q, want %q", got, eosartifact.BackendMetal)
 	}
 	if cudaOnly.loads != 0 {
 		t.Fatalf("unexpected CUDA load attempts = %d", cudaOnly.loads)
@@ -136,12 +136,12 @@ func TestLoadReportsMissingBackendCapabilities(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 
-	rt := New(&stubBackend{kind: mantaartifact.BackendCUDA}, &stubBackend{kind: mantaartifact.BackendMetal})
+	rt := New(&stubBackend{kind: eosartifact.BackendCUDA}, &stubBackend{kind: eosartifact.BackendMetal})
 	_, err = rt.Load(context.Background(), bundle.Artifact, tinyRerankWeights()...)
 	if err == nil {
 		t.Fatal("expected missing capability error")
 	}
-	if !strings.Contains(err.Error(), mantaartifact.CapabilityCandidatePack) {
+	if !strings.Contains(err.Error(), eosartifact.CapabilityCandidatePack) {
 		t.Fatalf("expected candidate_pack in error, got %v", err)
 	}
 }
@@ -153,7 +153,7 @@ func TestLoadFileAcceptsSerializedArtifact(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "tiny_embed.mll")
-	if err := mantaartifact.WriteFile(path, bundle.Artifact); err != nil {
+	if err := eosartifact.WriteFile(path, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
 
@@ -175,7 +175,7 @@ func TestLoadFileUsesSiblingPackageManifestCacheKey(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tiny_embed.mll")
-	if err := mantaartifact.WriteFile(path, bundle.Artifact); err != nil {
+	if err := eosartifact.WriteFile(path, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
 
@@ -190,7 +190,7 @@ func TestLoadFileUsesSiblingPackageManifestCacheKey(t *testing.T) {
 		t.Fatalf("write package manifest: %v", err)
 	}
 
-	backend := &cacheKeyStubBackend{stubBackend: stubBackend{kind: mantaartifact.BackendCUDA}}
+	backend := &cacheKeyStubBackend{stubBackend: stubBackend{kind: eosartifact.BackendCUDA}}
 	rt := New(backend)
 	loadOnce := func() error {
 		_, err := rt.LoadFile(context.Background(), path, tinyEmbedWeights()...)
@@ -293,7 +293,7 @@ func TestRunTinyEmbedEntryPoint(t *testing.T) {
 	if !ok {
 		t.Fatalf("missing embeddings output: %+v", result.Outputs)
 	}
-	if output.Type.Kind != mantaartifact.ValueTensor || output.Type.Tensor == nil {
+	if output.Type.Kind != eosartifact.ValueTensor || output.Type.Tensor == nil {
 		t.Fatalf("unexpected output type: %+v", output.Type)
 	}
 	if output.Type.Tensor.DType != "f16" {
@@ -351,13 +351,13 @@ func TestPortableGPUBackendsLoadMLLArtifactsWithHostFallback(t *testing.T) {
 	cases := []struct {
 		name      string
 		rt        *Runtime
-		backend   mantaartifact.BackendKind
+		backend   eosartifact.BackendKind
 		entry     string
 		launchAPI string
 	}{
-		{name: "vulkan", rt: New(vulkan.New()), backend: mantaartifact.BackendVulkan, entry: "l2_normalize_vulkan", launchAPI: "vkCmdDispatch"},
-		{name: "directml", rt: New(directml.New()), backend: mantaartifact.BackendDirectML, entry: "l2_normalize_directml", launchAPI: "IDMLCommandRecorder::RecordDispatch"},
-		{name: "webgpu", rt: New(webgpu.New()), backend: mantaartifact.BackendWebGPU, entry: "l2_normalize_webgpu", launchAPI: "GPUComputePassEncoder.dispatchWorkgroups"},
+		{name: "vulkan", rt: New(vulkan.New()), backend: eosartifact.BackendVulkan, entry: "l2_normalize_vulkan", launchAPI: "vkCmdDispatch"},
+		{name: "directml", rt: New(directml.New()), backend: eosartifact.BackendDirectML, entry: "l2_normalize_directml", launchAPI: "IDMLCommandRecorder::RecordDispatch"},
+		{name: "webgpu", rt: New(webgpu.New()), backend: eosartifact.BackendWebGPU, entry: "l2_normalize_webgpu", launchAPI: "GPUComputePassEncoder.dispatchWorkgroups"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -506,7 +506,7 @@ func TestRunTinyScoreEntryPoint(t *testing.T) {
 	if output.Producer != "kernel:cosine" {
 		t.Fatalf("output producer = %q, want kernel:cosine", output.Producer)
 	}
-	if output.Type.Kind != mantaartifact.ValueTensor || output.Type.Tensor == nil || output.Type.Tensor.DType != "f32" {
+	if output.Type.Kind != eosartifact.ValueTensor || output.Type.Tensor == nil || output.Type.Tensor.DType != "f32" {
 		t.Fatalf("unexpected output type: %+v", output.Type)
 	}
 	tensor, ok := output.Data.(*backend.Tensor)
@@ -577,10 +577,10 @@ func TestRunTinyRerankEntryPoint(t *testing.T) {
 	if got := len(result.Trace); got != 4 {
 		t.Fatalf("trace len = %d, want 4", got)
 	}
-	if result.Trace[1].Kind != mantaartifact.StepTopK {
+	if result.Trace[1].Kind != eosartifact.StepTopK {
 		t.Fatalf("trace[1].kind = %q, want topk", result.Trace[1].Kind)
 	}
-	if result.Trace[2].Kind != mantaartifact.StepGather {
+	if result.Trace[2].Kind != eosartifact.StepGather {
 		t.Fatalf("trace[2].kind = %q, want gather", result.Trace[2].Kind)
 	}
 }
@@ -619,7 +619,7 @@ func TestRunTinySelectEntryPoint(t *testing.T) {
 	if got := len(result.Trace); got != 4 {
 		t.Fatalf("trace len = %d, want 4", got)
 	}
-	if result.Trace[2].Kind != mantaartifact.StepGather {
+	if result.Trace[2].Kind != eosartifact.StepGather {
 		t.Fatalf("trace[2].kind = %q, want gather", result.Trace[2].Kind)
 	}
 }
@@ -672,7 +672,7 @@ func TestRunTinyRetrieveEntryPoint(t *testing.T) {
 	if got := len(result.Trace); got != 5 {
 		t.Fatalf("trace len = %d, want 5", got)
 	}
-	if result.Trace[3].Kind != mantaartifact.StepGather {
+	if result.Trace[3].Kind != eosartifact.StepGather {
 		t.Fatalf("trace[3].kind = %q, want gather", result.Trace[3].Kind)
 	}
 }
@@ -696,7 +696,7 @@ func TestRunTinyEmbedEntryPointOnMetal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if got := prog.Backend(); got != mantaartifact.BackendMetal {
+	if got := prog.Backend(); got != eosartifact.BackendMetal {
 		t.Fatalf("backend = %q, want metal", got)
 	}
 	output := result.Outputs["embeddings"]
@@ -1165,7 +1165,7 @@ func TestRunTinyPackedCandidatesEntryPoint(t *testing.T) {
 	}
 
 	output := result.Outputs["candidates"]
-	if output.Type.Kind != mantaartifact.ValueCandidatePack || output.Type.CandidatePack == nil {
+	if output.Type.Kind != eosartifact.ValueCandidatePack || output.Type.CandidatePack == nil {
 		t.Fatalf("output kind = %+v, want candidate_pack", output.Type)
 	}
 	pack, ok := output.Data.(*backend.CandidatePack)
@@ -1277,7 +1277,7 @@ pipeline rerank_candidates_packed_batch(queries: f16[Q, D], docs: q4[Q, N, D], c
 	}
 
 	output := result.Outputs["result"]
-	if output.Type.Kind != mantaartifact.ValueCandidatePack || output.Type.CandidatePack == nil {
+	if output.Type.Kind != eosartifact.ValueCandidatePack || output.Type.CandidatePack == nil {
 		t.Fatalf("output kind = %+v, want candidate_pack", output.Type)
 	}
 	pack := output.Data.(*backend.CandidatePack)
@@ -1554,7 +1554,7 @@ pipeline identity(x: f16[T, D]) -> f16[T, D] {
 	if got := len(result.Trace); got != 3 {
 		t.Fatalf("trace len = %d, want 3", got)
 	}
-	if result.Trace[0].Kind != mantaartifact.StepAlias || result.Trace[1].Kind != mantaartifact.StepAlias {
+	if result.Trace[0].Kind != eosartifact.StepAlias || result.Trace[1].Kind != eosartifact.StepAlias {
 		t.Fatalf("expected alias trace steps, got %+v", result.Trace)
 	}
 }
@@ -1592,42 +1592,42 @@ func tinyRerankWeights() []LoadOption {
 	}
 }
 
-func newLazyStagedParamModule() *mantaartifact.Module {
-	mod := mantaartifact.NewModule("lazy_params")
-	valueType := mantaartifact.ValueType{
-		Kind: mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{
+func newLazyStagedParamModule() *eosartifact.Module {
+	mod := eosartifact.NewModule("lazy_params")
+	valueType := eosartifact.ValueType{
+		Kind: eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{
 			DType: "f16",
 			Shape: []string{"T", "D"},
 		},
 	}
-	mod.Params = []mantaartifact.Param{
+	mod.Params = []eosartifact.Param{
 		{Name: "used", Type: valueType, Binding: "used"},
 		{Name: "unused", Type: valueType, Binding: "unused"},
 	}
-	mod.EntryPoints = []mantaartifact.EntryPoint{
+	mod.EntryPoints = []eosartifact.EntryPoint{
 		{
 			Name: "serve",
-			Kind: mantaartifact.EntryPointPipeline,
-			Outputs: []mantaartifact.ValueBinding{
+			Kind: eosartifact.EntryPointPipeline,
+			Outputs: []eosartifact.ValueBinding{
 				{Name: "result", Type: valueType},
 			},
 		},
 	}
-	mod.Buffers = []mantaartifact.Buffer{
+	mod.Buffers = []eosartifact.Buffer{
 		{Name: "result", DType: "f16", Shape: []string{"T", "D"}},
 	}
-	mod.Steps = []mantaartifact.Step{
+	mod.Steps = []eosartifact.Step{
 		{
 			Entry:   "serve",
-			Kind:    mantaartifact.StepAlias,
+			Kind:    eosartifact.StepAlias,
 			Name:    "forward_used",
 			Inputs:  []string{"used"},
 			Outputs: []string{"result"},
 		},
 		{
 			Entry:   "serve",
-			Kind:    mantaartifact.StepReturn,
+			Kind:    eosartifact.StepReturn,
 			Name:    "return_result",
 			Outputs: []string{"result"},
 		},

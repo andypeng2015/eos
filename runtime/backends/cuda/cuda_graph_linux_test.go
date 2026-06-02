@@ -5,8 +5,8 @@ package cuda
 import (
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 // TestCUDAGraphCaptureReplayMatchesDirect retires the cuBLAS-in-graph risk:
@@ -28,7 +28,7 @@ func TestCUDAGraphCaptureReplayMatchesDirect(t *testing.T) {
 
 // TestCUDAGraphBoundRightMatMulMatchesNonGraph verifies the production wiring:
 // the bound-right GEMM batch must produce identical results with CUDA-graph
-// capture/replay enabled (MANTA_CUDA_GRAPH) as without it. Two successive LHS
+// capture/replay enabled (EOS_CUDA_GRAPH) as without it. Two successive LHS
 // inputs of the same shape exercise both the capture path (first call) and the
 // replay path (second call, cache hit) against fresh input data.
 func TestCUDAGraphBoundRightMatMulMatchesNonGraph(t *testing.T) {
@@ -47,7 +47,7 @@ func TestCUDAGraphBoundRightMatMulMatchesNonGraph(t *testing.T) {
 		t.Fatalf("bind w1: %v", err)
 	}
 
-	outType := mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f32"}}
+	outType := eosartifact.ValueType{Kind: eosartifact.ValueTensor, Tensor: &eosartifact.TensorType{DType: "f32"}}
 	names := []string{"w0", "w1"}
 	lhsA := &backend.Tensor{DType: "f32", Shape: []int{2, 2}, F32: []float32{1.0, -0.5, 0.25, 0.75}}
 	lhsB := &backend.Tensor{DType: "f32", Shape: []int{2, 2}, F32: []float32{0.3, 0.6, -0.2, 0.9}}
@@ -66,18 +66,18 @@ func TestCUDAGraphBoundRightMatMulMatchesNonGraph(t *testing.T) {
 		return outs, nil
 	}
 
-	prev := mantaCudaGraphEnabled
-	defer func() { mantaCudaGraphEnabled = prev }()
+	prev := eosCudaGraphEnabled
+	defer func() { eosCudaGraphEnabled = prev }()
 
 	// Reference: graph disabled.
-	mantaCudaGraphEnabled = false
+	eosCudaGraphEnabled = false
 	ref, err := run()
 	if err != nil {
 		t.Fatalf("reference (non-graph) run: %v", err)
 	}
 
 	// Graph enabled: first LHS captures per shape, second LHS replays.
-	mantaCudaGraphEnabled = true
+	eosCudaGraphEnabled = true
 	got, err := run()
 	if err != nil {
 		t.Fatalf("graph run: %v", err)

@@ -49,7 +49,7 @@ func hasRepoRoot(dir string) bool {
 }
 
 func findRoot() (string, error) {
-	let explicit = os.Getenv("MANTA_REPO_ROOT")
+	let explicit = os.Getenv("EOS_REPO_ROOT")
 	if hasRepoRoot(explicit) {
 		return filepath.Abs(explicit)
 	}
@@ -62,7 +62,7 @@ func findRoot() (string, error) {
 	if hasRepoRoot(cwd) {
 		return filepath.Abs(cwd)
 	}
-	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
 }
 
 func step(label string) {
@@ -284,9 +284,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	runID := getenv("MANTA_SPARSE_BENCH_RUN_ID", "sparse-attention-"+time.Now().UTC().Format("20060102T150405Z"))
-	runRoot := getenv("MANTA_SPARSE_BENCH_RUN_ROOT", filepath.Join(root, "runs"))
-	runDir, err := filepath.Abs(getenv("MANTA_SPARSE_BENCH_RUN_DIR", filepath.Join(runRoot, runID)))
+	runID := getenv("EOS_SPARSE_BENCH_RUN_ID", "sparse-attention-"+time.Now().UTC().Format("20060102T150405Z"))
+	runRoot := getenv("EOS_SPARSE_BENCH_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir, err := filepath.Abs(getenv("EOS_SPARSE_BENCH_RUN_DIR", filepath.Join(runRoot, runID)))
 	guard err == nil else {
 		fmt.Println(f"failed to resolve run dir: {err}")
 		os.Exit(1)
@@ -301,19 +301,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	keyLens := getenv("MANTA_SPARSE_BENCH_KEY_LENS", "4096,8192,16384,32768,65536")
-	queryDim := getenv("MANTA_SPARSE_BENCH_QUERY_DIM", "64")
-	valueDim := getenv("MANTA_SPARSE_BENCH_VALUE_DIM", "64")
-	topK := getenv("MANTA_SPARSE_BENCH_TOP_K", "64")
-	routeTopBlocks := getenv("MANTA_SPARSE_BENCH_ROUTE_TOP_BLOCKS", "2")
-	bits := getenv("MANTA_SPARSE_BENCH_BITS", "4")
-	maxScoreFraction := getenv("MANTA_SPARSE_BENCH_MAX_SCORE_FRACTION", "0.25")
-	maxTurboKVMiB := getenv("MANTA_SPARSE_BENCH_MAX_TURBO_KV_MIB", "512")
-	benchRegex := getenv("MANTA_SPARSE_BENCH_REGEX", "BenchmarkCUDASparseAttentionSweep|BenchmarkCUDATurboSparseAttentionSweep")
-	benchTime := getenv("MANTA_SPARSE_BENCH_TIME", "200ms")
-	benchCount := getenv("MANTA_SPARSE_BENCH_COUNT", "3")
-	exactBenchKeyLens := getenv("MANTA_SPARSE_BENCH_EXACT_KEY_LENS", "1024,4096")
-	routedBenchKeyLens := getenv("MANTA_SPARSE_BENCH_ROUTED_KEY_LENS", "1024,4096,16384")
+	keyLens := getenv("EOS_SPARSE_BENCH_KEY_LENS", "4096,8192,16384,32768,65536")
+	queryDim := getenv("EOS_SPARSE_BENCH_QUERY_DIM", "64")
+	valueDim := getenv("EOS_SPARSE_BENCH_VALUE_DIM", "64")
+	topK := getenv("EOS_SPARSE_BENCH_TOP_K", "64")
+	routeTopBlocks := getenv("EOS_SPARSE_BENCH_ROUTE_TOP_BLOCKS", "2")
+	bits := getenv("EOS_SPARSE_BENCH_BITS", "4")
+	maxScoreFraction := getenv("EOS_SPARSE_BENCH_MAX_SCORE_FRACTION", "0.25")
+	maxTurboKVMiB := getenv("EOS_SPARSE_BENCH_MAX_TURBO_KV_MIB", "512")
+	benchRegex := getenv("EOS_SPARSE_BENCH_REGEX", "BenchmarkCUDASparseAttentionSweep|BenchmarkCUDATurboSparseAttentionSweep")
+	benchTime := getenv("EOS_SPARSE_BENCH_TIME", "200ms")
+	benchCount := getenv("EOS_SPARSE_BENCH_COUNT", "3")
+	exactBenchKeyLens := getenv("EOS_SPARSE_BENCH_EXACT_KEY_LENS", "1024,4096")
+	routedBenchKeyLens := getenv("EOS_SPARSE_BENCH_ROUTED_KEY_LENS", "1024,4096,16384")
 
 	planTSV := filepath.Join(runDir, "sparse-attention-plan.tsv")
 	planJSON := filepath.Join(runDir, "sparse-attention-plan.json")
@@ -321,16 +321,16 @@ func main() {
 	benchText := filepath.Join(runDir, "sparse-attention-bench.txt")
 	benchSummary := filepath.Join(runDir, "sparse-attention-bench-summary.tsv")
 	scalingSummary := filepath.Join(runDir, "sparse-attention-scaling.tsv")
-	maxRoutedTimeAlphaRaw := getenv("MANTA_SPARSE_BENCH_MAX_ROUTED_TIME_ALPHA", "0.95")
+	maxRoutedTimeAlphaRaw := getenv("EOS_SPARSE_BENCH_MAX_ROUTED_TIME_ALPHA", "0.95")
 	maxRoutedTimeAlpha, err := strconv.ParseFloat(maxRoutedTimeAlphaRaw, 64)
 	guard err == nil else {
-		fmt.Println(f"failed to parse MANTA_SPARSE_BENCH_MAX_ROUTED_TIME_ALPHA: {err}")
+		fmt.Println(f"failed to parse EOS_SPARSE_BENCH_MAX_ROUTED_TIME_ALPHA: {err}")
 		os.Exit(1)
 	}
 
 	step("Sparse attention preflight")
 	err = shellCapture(root, planTSV, "go", []string{
-		"run", "./cmd/manta", "plan-sparse-attention",
+		"run", "./cmd/eos", "plan-sparse-attention",
 		"--key-lens", keyLens,
 		"--query-dim", queryDim,
 		"--value-dim", valueDim,
@@ -357,13 +357,13 @@ func main() {
 		"-count", benchCount,
 	}
 	benchEnv := []string{
-		"MANTA_CUDA_SPARSE_BENCH_EXACT_KEY_LENS=" + exactBenchKeyLens,
-		"MANTA_CUDA_SPARSE_BENCH_ROUTED_KEY_LENS=" + routedBenchKeyLens,
-		"MANTA_CUDA_SPARSE_BENCH_QUERY_DIM=" + queryDim,
-		"MANTA_CUDA_SPARSE_BENCH_VALUE_DIM=" + valueDim,
-		"MANTA_CUDA_SPARSE_BENCH_TOP_K=" + topK,
-		"MANTA_CUDA_SPARSE_BENCH_BITS=" + bits,
-		"MANTA_CUDA_SPARSE_BENCH_ROUTE_TOP_BLOCKS=" + routeTopBlocks,
+		"EOS_CUDA_SPARSE_BENCH_EXACT_KEY_LENS=" + exactBenchKeyLens,
+		"EOS_CUDA_SPARSE_BENCH_ROUTED_KEY_LENS=" + routedBenchKeyLens,
+		"EOS_CUDA_SPARSE_BENCH_QUERY_DIM=" + queryDim,
+		"EOS_CUDA_SPARSE_BENCH_VALUE_DIM=" + valueDim,
+		"EOS_CUDA_SPARSE_BENCH_TOP_K=" + topK,
+		"EOS_CUDA_SPARSE_BENCH_BITS=" + bits,
+		"EOS_CUDA_SPARSE_BENCH_ROUTE_TOP_BLOCKS=" + routeTopBlocks,
 	}
 	jsonArgs := append(append([]string{}, benchArgs...), "-json")
 	err = shellCaptureEnv(root, benchJSONL, "go", jsonArgs, benchEnv)

@@ -22,13 +22,13 @@ import (
 	"strconv"
 	"strings"
 
-	mantaruntime "m31labs.dev/manta/runtime"
-	"m31labs.dev/manta/runtime/backend"
-	"m31labs.dev/manta/runtime/backends/cuda"
-	"m31labs.dev/manta/runtime/backends/directml"
-	"m31labs.dev/manta/runtime/backends/metal"
-	"m31labs.dev/manta/runtime/backends/vulkan"
-	"m31labs.dev/manta/runtime/backends/webgpu"
+	eosruntime "m31labs.dev/eos/runtime"
+	"m31labs.dev/eos/runtime/backend"
+	"m31labs.dev/eos/runtime/backends/cuda"
+	"m31labs.dev/eos/runtime/backends/directml"
+	"m31labs.dev/eos/runtime/backends/metal"
+	"m31labs.dev/eos/runtime/backends/vulkan"
+	"m31labs.dev/eos/runtime/backends/webgpu"
 )
 
 func tensorRows(t *backend.Tensor, wantRows int) ([][]float32, error) {
@@ -78,7 +78,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	corpusPath, queriesPath, qrelsPath := mantaruntime.BEIRRetrievalPaths(datasetDir, split)
+	corpusPath, queriesPath, qrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, split)
 
 	docs, err := readDocs(corpusPath)
 	must(err, "read corpus")
@@ -93,7 +93,7 @@ func main() {
 	fmt.Printf("queries:     %d (keeping only those in qrels)\n", len(queries))
 	fmt.Printf("qrels:       %d queries with %d relevant pairs\n", countQueries(qrels), countPairs(qrels))
 
-	rt := mantaruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+	rt := eosruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
 	model, err := rt.LoadEmbeddingPackage(context.Background(), artifact)
 	must(err, "load model")
 

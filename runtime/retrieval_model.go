@@ -1,11 +1,11 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"context"
 	"fmt"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 const RetrievalManifestVersion = "manta/retrieval-manifest/v0alpha1"
@@ -52,11 +52,11 @@ func ResolveRetrievalManifestPath(artifactPath string) string {
 
 // WriteFile writes the retrieval manifest as an authored MLL container.
 func (m RetrievalManifest) WriteFile(path string) error {
-	return writeAuthoredManifestMLL(path, "retrieval_manifest", RetrievalManifestVersion, m.nameOrDefault(), "Manta retrieval manifest", m.mllValues())
+	return writeAuthoredManifestMLL(path, "retrieval_manifest", RetrievalManifestVersion, m.nameOrDefault(), "Eos retrieval manifest", m.mllValues())
 }
 
 // LoadRetrieval loads a retrieval module with a validated serving manifest.
-func (rt *Runtime) LoadRetrieval(ctx context.Context, mod *mantaartifact.Module, manifest RetrievalManifest, opts ...LoadOption) (*RetrievalModel, error) {
+func (rt *Runtime) LoadRetrieval(ctx context.Context, mod *eosartifact.Module, manifest RetrievalManifest, opts ...LoadOption) (*RetrievalModel, error) {
 	manifest = manifest.normalized()
 	if err := manifest.ValidateModule(mod); err != nil {
 		return nil, err
@@ -70,7 +70,7 @@ func (rt *Runtime) LoadRetrieval(ctx context.Context, mod *mantaartifact.Module,
 
 // LoadRetrievalFile reads a .mll artifact and loads it as a retrieval model.
 func (rt *Runtime) LoadRetrievalFile(ctx context.Context, artifactPath string, manifest RetrievalManifest, opts ...LoadOption) (*RetrievalModel, error) {
-	mod, err := mantaartifact.ReadFile(artifactPath)
+	mod, err := eosartifact.ReadFile(artifactPath)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +166,7 @@ func (m *RetrievalModel) Manifest() RetrievalManifest {
 }
 
 // Backend reports the selected backend.
-func (m *RetrievalModel) Backend() mantaartifact.BackendKind {
+func (m *RetrievalModel) Backend() eosartifact.BackendKind {
 	if m == nil || m.program == nil {
 		return ""
 	}
@@ -243,7 +243,7 @@ func (m RetrievalManifest) normalized() RetrievalManifest {
 }
 
 // ValidateModule checks that a module satisfies the retrieval serving contract.
-func (m RetrievalManifest) ValidateModule(mod *mantaartifact.Module) error {
+func (m RetrievalManifest) ValidateModule(mod *eosartifact.Module) error {
 	if mod == nil {
 		return fmt.Errorf("nil module")
 	}
@@ -271,7 +271,7 @@ func (m *RetrievalModel) validateCandidateResult(result CandidateResult, batched
 	return nil
 }
 
-func validateRetrievalEntry(mod *mantaartifact.Module, entryName, queryInput string, queryRank int, docsInput string, docsRank int, idsInput string, idsRank int, queryDType, docsDType, idsDType, outputName string, outputRank int) error {
+func validateRetrievalEntry(mod *eosartifact.Module, entryName, queryInput string, queryRank int, docsInput string, docsRank int, idsInput string, idsRank int, queryDType, docsDType, idsDType, outputName string, outputRank int) error {
 	entry, err := findEntryPoint(mod, entryName)
 	if err != nil {
 		return err
@@ -280,7 +280,7 @@ func validateRetrievalEntry(mod *mantaartifact.Module, entryName, queryInput str
 	if err != nil {
 		return err
 	}
-	if query.Type.Kind != mantaartifact.ValueTensor || query.Type.Tensor == nil {
+	if query.Type.Kind != eosartifact.ValueTensor || query.Type.Tensor == nil {
 		return fmt.Errorf("entrypoint %q input %q is not a tensor", entryName, queryInput)
 	}
 	if queryDType != "" && query.Type.Tensor.DType != queryDType {
@@ -293,7 +293,7 @@ func validateRetrievalEntry(mod *mantaartifact.Module, entryName, queryInput str
 	if err != nil {
 		return err
 	}
-	if docs.Type.Kind != mantaartifact.ValueTensor || docs.Type.Tensor == nil {
+	if docs.Type.Kind != eosartifact.ValueTensor || docs.Type.Tensor == nil {
 		return fmt.Errorf("entrypoint %q input %q is not a tensor", entryName, docsInput)
 	}
 	if docsDType != "" && docs.Type.Tensor.DType != docsDType {
@@ -306,7 +306,7 @@ func validateRetrievalEntry(mod *mantaartifact.Module, entryName, queryInput str
 	if err != nil {
 		return err
 	}
-	if ids.Type.Kind != mantaartifact.ValueTensor || ids.Type.Tensor == nil {
+	if ids.Type.Kind != eosartifact.ValueTensor || ids.Type.Tensor == nil {
 		return fmt.Errorf("entrypoint %q input %q is not a tensor", entryName, idsInput)
 	}
 	if idsDType != "" && ids.Type.Tensor.DType != idsDType {
@@ -322,7 +322,7 @@ func validateRetrievalEntry(mod *mantaartifact.Module, entryName, queryInput str
 	if outputName != "" && output.Name != outputName {
 		return fmt.Errorf("entrypoint %q output %q does not match manifest %q", entryName, output.Name, outputName)
 	}
-	if output.Type.Kind != mantaartifact.ValueCandidatePack || output.Type.CandidatePack == nil {
+	if output.Type.Kind != eosartifact.ValueCandidatePack || output.Type.CandidatePack == nil {
 		return fmt.Errorf("entrypoint %q output %q is not a candidate_pack", entryName, output.Name)
 	}
 	if got := len(output.Type.CandidatePack.Shape); got != outputRank {

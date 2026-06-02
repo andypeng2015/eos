@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"encoding/json"
@@ -6,8 +6,8 @@ import (
 	"os"
 	"sort"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 	mll "m31labs.dev/mll"
 )
 
@@ -112,7 +112,7 @@ func ReadEmbeddingTrainCheckpointFile(path string) (EmbeddingTrainCheckpoint, er
 	if err != nil {
 		return EmbeddingTrainCheckpoint{}, err
 	}
-	if !mantaartifact.IsMLLBytes(data) {
+	if !eosartifact.IsMLLBytes(data) {
 		return EmbeddingTrainCheckpoint{}, fmt.Errorf("checkpoint %q is not an MLL file", path)
 	}
 	return decodeEmbeddingCheckpointMLL(data)
@@ -184,7 +184,7 @@ func encodeEmbeddingCheckpointMLL(c EmbeddingTrainCheckpoint) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		typeIdx := typeBuilder.AddTensorType(strg.Intern("entry:"+name), mustMantaDTypeToMLL(tensor.DType), shape)
+		typeIdx := typeBuilder.AddTensorType(strg.Intern("entry:"+name), mustEosDTypeToMLL(tensor.DType), shape)
 		outputs = append(outputs, mll.ValueBinding{
 			NameIdx: strg.Intern(name),
 			TypeRef: mll.Ref{Tag: mll.TagTYPE, Index: typeIdx},
@@ -207,7 +207,7 @@ func encodeEmbeddingCheckpointMLL(c EmbeddingTrainCheckpoint) ([]byte, error) {
 
 	head := mll.HeadSection{
 		Name:        strg.Intern(nonEmptyCheckpointName(c.Manifest.Name)),
-		Description: strg.Intern("Manta training checkpoint"),
+		Description: strg.Intern("Eos training checkpoint"),
 		Generation:  uint64(c.Step),
 		Metadata: []mll.HeadMetadataEntry{
 			headStringMeta(strg, "checkpoint_version", c.Version),
@@ -434,8 +434,8 @@ func nonEmptyCheckpointName(name string) string {
 	return "manta-train-checkpoint"
 }
 
-func mustMantaDTypeToMLL(dtype string) mll.DType {
-	value, err := mantaDTypeToMLL(dtype)
+func mustEosDTypeToMLL(dtype string) mll.DType {
+	value, err := eosDTypeToMLL(dtype)
 	if err != nil {
 		return mll.DTypeF32
 	}
@@ -527,7 +527,7 @@ func (c EmbeddingTrainCheckpoint) Validate() error {
 }
 
 // NewEmbeddingTrainerFromCheckpoint restores a trainer from a checkpoint and module contract.
-func NewEmbeddingTrainerFromCheckpoint(mod *mantaartifact.Module, checkpoint EmbeddingTrainCheckpoint) (*EmbeddingTrainer, error) {
+func NewEmbeddingTrainerFromCheckpoint(mod *eosartifact.Module, checkpoint EmbeddingTrainCheckpoint) (*EmbeddingTrainer, error) {
 	if err := checkpoint.Validate(); err != nil {
 		return nil, err
 	}
@@ -668,14 +668,14 @@ func validateCheckpointAttention(c EmbeddingTrainCheckpoint) error {
 	return nil
 }
 
-func requireTrainableParamByName(mod *mantaartifact.Module, name string) (mantaartifact.Param, error) {
+func requireTrainableParamByName(mod *eosartifact.Module, name string) (eosartifact.Param, error) {
 	if mod == nil {
-		return mantaartifact.Param{}, fmt.Errorf("nil module")
+		return eosartifact.Param{}, fmt.Errorf("nil module")
 	}
 	for _, param := range mod.Params {
 		if param.Name == name {
 			return param, nil
 		}
 	}
-	return mantaartifact.Param{}, fmt.Errorf("missing param %q", name)
+	return eosartifact.Param{}, fmt.Errorf("missing param %q", name)
 }

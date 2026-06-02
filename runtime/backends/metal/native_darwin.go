@@ -14,11 +14,11 @@ package metal
 typedef struct {
 	void* device;
 	void* queue;
-} MantaMetalRuntime;
+} EosMetalRuntime;
 
 typedef struct {
 	void* pipeline;
-} MantaMetalKernel;
+} EosMetalKernel;
 
 static char* manta_dup_cstr(const char* s) {
 	if (s == NULL) {
@@ -53,7 +53,7 @@ static char* manta_dup_ns_error(const char* prefix, NSError* error) {
 	return manta_dup_format(prefix, [desc UTF8String]);
 }
 
-static int mantaMetalRuntimeCreate(MantaMetalRuntime** out, char** err) {
+static int eosMetalRuntimeCreate(EosMetalRuntime** out, char** err) {
 	@autoreleasepool {
 		id<MTLDevice> device = MTLCreateSystemDefaultDevice();
 		if (device == nil) {
@@ -65,7 +65,7 @@ static int mantaMetalRuntimeCreate(MantaMetalRuntime** out, char** err) {
 			*err = manta_dup_format("newCommandQueue", "failed");
 			return 1;
 		}
-		MantaMetalRuntime* rt = (MantaMetalRuntime*)malloc(sizeof(MantaMetalRuntime));
+		EosMetalRuntime* rt = (EosMetalRuntime*)malloc(sizeof(EosMetalRuntime));
 		if (rt == NULL) {
 			*err = manta_dup_format("malloc", "failed to allocate runtime");
 			return 1;
@@ -77,7 +77,7 @@ static int mantaMetalRuntimeCreate(MantaMetalRuntime** out, char** err) {
 	}
 }
 
-static void mantaMetalRuntimeDestroy(MantaMetalRuntime* rt) {
+static void eosMetalRuntimeDestroy(EosMetalRuntime* rt) {
 	if (rt == NULL) {
 		return;
 	}
@@ -90,7 +90,7 @@ static void mantaMetalRuntimeDestroy(MantaMetalRuntime* rt) {
 	free(rt);
 }
 
-static int mantaMetalCompileKernel(MantaMetalRuntime* rt, const char* src, const char* entry, MantaMetalKernel** out, char** err) {
+static int eosMetalCompileKernel(EosMetalRuntime* rt, const char* src, const char* entry, EosMetalKernel** out, char** err) {
 	@autoreleasepool {
 		id<MTLDevice> device = (__bridge id<MTLDevice>)rt->device;
 		NSString* source = [NSString stringWithUTF8String:src];
@@ -115,7 +115,7 @@ static int mantaMetalCompileKernel(MantaMetalRuntime* rt, const char* src, const
 			*err = manta_dup_ns_error("newComputePipelineStateWithFunction", nsErr);
 			return 1;
 		}
-		MantaMetalKernel* kernel = (MantaMetalKernel*)malloc(sizeof(MantaMetalKernel));
+		EosMetalKernel* kernel = (EosMetalKernel*)malloc(sizeof(EosMetalKernel));
 		if (kernel == NULL) {
 			*err = manta_dup_format("malloc", "failed to allocate kernel");
 			return 1;
@@ -126,7 +126,7 @@ static int mantaMetalCompileKernel(MantaMetalRuntime* rt, const char* src, const
 	}
 }
 
-static void mantaMetalKernelDestroy(MantaMetalKernel* kernel) {
+static void eosMetalKernelDestroy(EosMetalKernel* kernel) {
 	if (kernel == NULL) {
 		return;
 	}
@@ -136,7 +136,7 @@ static void mantaMetalKernelDestroy(MantaMetalKernel* kernel) {
 	free(kernel);
 }
 
-static int mantaMetalLaunchRowWise(MantaMetalRuntime* rt, MantaMetalKernel* kernel, const float* in0, float* out0, int rows, int cols, int threadgroupSize, char** err) {
+static int eosMetalLaunchRowWise(EosMetalRuntime* rt, EosMetalKernel* kernel, const float* in0, float* out0, int rows, int cols, int threadgroupSize, char** err) {
 	@autoreleasepool {
 		id<MTLDevice> device = (__bridge id<MTLDevice>)rt->device;
 		id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)rt->queue;
@@ -181,7 +181,7 @@ static int mantaMetalLaunchRowWise(MantaMetalRuntime* rt, MantaMetalKernel* kern
 	}
 }
 
-static int mantaMetalLaunchElementWise(MantaMetalRuntime* rt, MantaMetalKernel* kernel, const float* lhs, const float* rhs, float* out0, int elements, int threadgroupSize, char** err) {
+static int eosMetalLaunchElementWise(EosMetalRuntime* rt, EosMetalKernel* kernel, const float* lhs, const float* rhs, float* out0, int elements, int threadgroupSize, char** err) {
 	@autoreleasepool {
 		id<MTLDevice> device = (__bridge id<MTLDevice>)rt->device;
 		id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)rt->queue;
@@ -225,7 +225,7 @@ static int mantaMetalLaunchElementWise(MantaMetalRuntime* rt, MantaMetalKernel* 
 	}
 }
 
-static int mantaMetalLaunchUnary(MantaMetalRuntime* rt, MantaMetalKernel* kernel, const float* in0, float* out0, int elements, int threadgroupSize, char** err) {
+static int eosMetalLaunchUnary(EosMetalRuntime* rt, EosMetalKernel* kernel, const float* in0, float* out0, int elements, int threadgroupSize, char** err) {
 	@autoreleasepool {
 		id<MTLDevice> device = (__bridge id<MTLDevice>)rt->device;
 		id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)rt->queue;
@@ -267,7 +267,7 @@ static int mantaMetalLaunchUnary(MantaMetalRuntime* rt, MantaMetalKernel* kernel
 	}
 }
 
-static int mantaMetalLaunchScore(MantaMetalRuntime* rt, MantaMetalKernel* kernel, const float* query, const float* docs, float* out0, int rows, int cols, int threadgroupSize, char** err) {
+static int eosMetalLaunchScore(EosMetalRuntime* rt, EosMetalKernel* kernel, const float* query, const float* docs, float* out0, int rows, int cols, int threadgroupSize, char** err) {
 	@autoreleasepool {
 		id<MTLDevice> device = (__bridge id<MTLDevice>)rt->device;
 		id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)rt->queue;
@@ -315,7 +315,7 @@ static int mantaMetalLaunchScore(MantaMetalRuntime* rt, MantaMetalKernel* kernel
 	}
 }
 
-static int mantaMetalMatMulMPS(MantaMetalRuntime* rt, const float* lhs, const float* rhs, float* out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, char** err) {
+static int eosMetalMatMulMPS(EosMetalRuntime* rt, const float* lhs, const float* rhs, float* out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, char** err) {
 	@autoreleasepool {
 		id<MTLDevice> device = (__bridge id<MTLDevice>)rt->device;
 		id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)rt->queue;
@@ -389,7 +389,7 @@ static int mantaMetalMatMulMPS(MantaMetalRuntime* rt, const float* lhs, const fl
 	}
 }
 
-static void mantaMetalFreeCString(char* s) {
+static void eosMetalFreeCString(char* s) {
 	if (s != NULL) {
 		free(s);
 	}
@@ -402,16 +402,16 @@ import (
 	"fmt"
 	"unsafe"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 type deviceRuntime struct {
-	ptr *C.MantaMetalRuntime
+	ptr *C.EosMetalRuntime
 }
 
 type deviceKernel struct {
-	ptr       *C.MantaMetalKernel
+	ptr       *C.EosMetalKernel
 	shapeKind metalShapeKind
 }
 
@@ -426,9 +426,9 @@ const (
 )
 
 func newDeviceRuntime() (*deviceRuntime, error) {
-	var rt *C.MantaMetalRuntime
+	var rt *C.EosMetalRuntime
 	var errStr *C.char
-	if C.mantaMetalRuntimeCreate(&rt, &errStr) != 0 {
+	if C.eosMetalRuntimeCreate(&rt, &errStr) != 0 {
 		return nil, cStringError(errStr)
 	}
 	return &deviceRuntime{ptr: rt}, nil
@@ -438,11 +438,11 @@ func (rt *deviceRuntime) close() {
 	if rt == nil || rt.ptr == nil {
 		return
 	}
-	C.mantaMetalRuntimeDestroy(rt.ptr)
+	C.eosMetalRuntimeDestroy(rt.ptr)
 	rt.ptr = nil
 }
 
-func (rt *deviceRuntime) attachDeviceExecution(prog *backend.NativeKernelProgram, kernel mantaartifact.Kernel) error {
+func (rt *deviceRuntime) attachDeviceExecution(prog *backend.NativeKernelProgram, kernel eosartifact.Kernel) error {
 	shapeKind := classifyMetalKernel(kernel)
 	if shapeKind == metalShapeUnsupported {
 		prog.LaunchConfig["device_execution"] = false
@@ -468,15 +468,15 @@ func (rt *deviceRuntime) compileKernel(compiled backend.CompiledKernel, shapeKin
 	defer C.free(unsafe.Pointer(src))
 	defer C.free(unsafe.Pointer(entry))
 
-	var kernel *C.MantaMetalKernel
+	var kernel *C.EosMetalKernel
 	var errStr *C.char
-	if C.mantaMetalCompileKernel(rt.ptr, src, entry, &kernel, &errStr) != 0 {
+	if C.eosMetalCompileKernel(rt.ptr, src, entry, &kernel, &errStr) != 0 {
 		return nil, cStringError(errStr)
 	}
 	return &deviceKernel{ptr: kernel, shapeKind: shapeKind}, nil
 }
 
-func (rt *deviceRuntime) runKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runKernel(deviceKernel *deviceKernel, kernel eosartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	switch deviceKernel.shapeKind {
 	case metalShapeRowWise:
 		return rt.runRowWiseKernel(deviceKernel, kernel, prog, inputs)
@@ -491,7 +491,7 @@ func (rt *deviceRuntime) runKernel(deviceKernel *deviceKernel, kernel mantaartif
 	}
 }
 
-func (rt *deviceRuntime) runRowWiseKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runRowWiseKernel(deviceKernel *deviceKernel, kernel eosartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	if len(inputs) != 1 {
 		return nil, fmt.Errorf("kernel %q expected 1 input for row-wise launch, got %d", kernel.Name, len(inputs))
 	}
@@ -516,13 +516,13 @@ func (rt *deviceRuntime) runRowWiseKernel(deviceKernel *deviceKernel, kernel man
 		outPtr = (*C.float)(unsafe.Pointer(&outHost[0]))
 	}
 	var errStr *C.char
-	if C.mantaMetalLaunchRowWise(rt.ptr, deviceKernel.ptr, inPtr, outPtr, C.int(rows), C.int(cols), tg, &errStr) != 0 {
+	if C.eosMetalLaunchRowWise(rt.ptr, deviceKernel.ptr, inPtr, outPtr, C.int(rows), C.int(cols), tg, &errStr) != 0 {
 		return nil, cStringError(errStr)
 	}
 	return []*backend.Tensor{newOutputTensor(kernel, outShape, outHost)}, nil
 }
 
-func (rt *deviceRuntime) runElementWiseKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runElementWiseKernel(deviceKernel *deviceKernel, kernel eosartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	if len(inputs) != 2 {
 		return nil, fmt.Errorf("kernel %q expected 2 inputs for element-wise launch, got %d", kernel.Name, len(inputs))
 	}
@@ -545,13 +545,13 @@ func (rt *deviceRuntime) runElementWiseKernel(deviceKernel *deviceKernel, kernel
 		outPtr = (*C.float)(unsafe.Pointer(&outHost[0]))
 	}
 	var errStr *C.char
-	if C.mantaMetalLaunchElementWise(rt.ptr, deviceKernel.ptr, lhsPtr, rhsPtr, outPtr, C.int(elements), tg, &errStr) != 0 {
+	if C.eosMetalLaunchElementWise(rt.ptr, deviceKernel.ptr, lhsPtr, rhsPtr, outPtr, C.int(elements), tg, &errStr) != 0 {
 		return nil, cStringError(errStr)
 	}
 	return []*backend.Tensor{newOutputTensor(kernel, append([]int(nil), lhs.Shape...), outHost)}, nil
 }
 
-func (rt *deviceRuntime) runUnaryKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runUnaryKernel(deviceKernel *deviceKernel, kernel eosartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	if len(inputs) != 1 {
 		return nil, fmt.Errorf("kernel %q expected 1 input for unary launch, got %d", kernel.Name, len(inputs))
 	}
@@ -570,13 +570,13 @@ func (rt *deviceRuntime) runUnaryKernel(deviceKernel *deviceKernel, kernel manta
 		outPtr = (*C.float)(unsafe.Pointer(&outHost[0]))
 	}
 	var errStr *C.char
-	if C.mantaMetalLaunchUnary(rt.ptr, deviceKernel.ptr, inPtr, outPtr, C.int(elements), tg, &errStr) != 0 {
+	if C.eosMetalLaunchUnary(rt.ptr, deviceKernel.ptr, inPtr, outPtr, C.int(elements), tg, &errStr) != 0 {
 		return nil, cStringError(errStr)
 	}
 	return []*backend.Tensor{newOutputTensor(kernel, append([]int(nil), in.Shape...), outHost)}, nil
 }
 
-func (rt *deviceRuntime) runScoreKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runScoreKernel(deviceKernel *deviceKernel, kernel eosartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	if len(inputs) != 2 {
 		return nil, fmt.Errorf("kernel %q expected 2 inputs for score launch, got %d", kernel.Name, len(inputs))
 	}
@@ -600,13 +600,13 @@ func (rt *deviceRuntime) runScoreKernel(deviceKernel *deviceKernel, kernel manta
 		outPtr = (*C.float)(unsafe.Pointer(&outHost[0]))
 	}
 	var errStr *C.char
-	if C.mantaMetalLaunchScore(rt.ptr, deviceKernel.ptr, queryPtr, docsPtr, outPtr, C.int(rows), C.int(cols), tg, &errStr) != 0 {
+	if C.eosMetalLaunchScore(rt.ptr, deviceKernel.ptr, queryPtr, docsPtr, outPtr, C.int(rows), C.int(cols), tg, &errStr) != 0 {
 		return nil, cStringError(errStr)
 	}
 	return []*backend.Tensor{newOutputTensor(kernel, []int{rows}, outHost)}, nil
 }
 
-func classifyMetalKernel(kernel mantaartifact.Kernel) metalShapeKind {
+func classifyMetalKernel(kernel eosartifact.Kernel) metalShapeKind {
 	if len(kernel.Body) < 2 {
 		return metalShapeUnsupported
 	}
@@ -624,7 +624,7 @@ func classifyMetalKernel(kernel mantaartifact.Kernel) metalShapeKind {
 	}
 }
 
-func newOutputTensor(kernel mantaartifact.Kernel, shape []int, data []float32) *backend.Tensor {
+func newOutputTensor(kernel eosartifact.Kernel, shape []int, data []float32) *backend.Tensor {
 	dtype := "f16"
 	if len(kernel.Outputs) > 0 && kernel.Outputs[0].Type.Tensor != nil && kernel.Outputs[0].Type.Tensor.DType != "" {
 		dtype = kernel.Outputs[0].Type.Tensor.DType
@@ -641,15 +641,15 @@ func cStringError(value *C.char) error {
 	if value == nil {
 		return fmt.Errorf("metal error")
 	}
-	defer C.mantaMetalFreeCString(value)
+	defer C.eosMetalFreeCString(value)
 	return errors.New(C.GoString(value))
 }
 
-func (rt *deviceRuntime) runMatMul(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMul(inputs []*backend.Tensor, outputType eosartifact.ValueType) (backend.StepDispatchResult, error) {
 	return rt.runMatMulWithTranspose(inputs, outputType, false, false)
 }
 
-func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	if len(inputs) != 2 {
 		return backend.StepDispatchResult{}, fmt.Errorf("matmul expects 2 inputs, got %d", len(inputs))
 	}
@@ -680,7 +680,7 @@ func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, output
 			lhsRows, lhsCols = matrixShape(inputs[0])
 			rhsRows, rhsCols = matrixShape(inputs[1])
 		}
-		if C.mantaMetalMatMulMPS(rt.ptr, lhsPtr, rhsPtr, outPtr, C.int(lhsRows), C.int(lhsCols), C.int(rhsRows), C.int(rhsCols), boolToCInt(transposeLeft), boolToCInt(transposeRight), &errStr) != 0 {
+		if C.eosMetalMatMulMPS(rt.ptr, lhsPtr, rhsPtr, outPtr, C.int(lhsRows), C.int(lhsCols), C.int(rhsRows), C.int(rhsCols), boolToCInt(transposeLeft), boolToCInt(transposeRight), &errStr) != 0 {
 			return backend.StepDispatchResult{}, cStringError(errStr)
 		}
 	} else {
@@ -708,7 +708,7 @@ func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, output
 				outPtr = (*C.float)(unsafe.Pointer(&outSlice[0]))
 			}
 			var errStr *C.char
-			if C.mantaMetalMatMulMPS(rt.ptr, lhsPtr, rhsPtr, outPtr, C.int(lhsRows), C.int(lhsCols), C.int(rhsRows), C.int(rhsCols), boolToCInt(transposeLeft), boolToCInt(transposeRight), &errStr) != 0 {
+			if C.eosMetalMatMulMPS(rt.ptr, lhsPtr, rhsPtr, outPtr, C.int(lhsRows), C.int(lhsCols), C.int(rhsRows), C.int(rhsCols), boolToCInt(transposeLeft), boolToCInt(transposeRight), &errStr) != 0 {
 				return backend.StepDispatchResult{}, cStringError(errStr)
 			}
 		}
@@ -733,7 +733,7 @@ func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, output
 func metalBuiltinMatMulCompiledKernel() backend.CompiledKernel {
 	return backend.CompiledKernel{
 		Name:       "__builtin_matmul",
-		Backend:    mantaartifact.BackendMetal,
+		Backend:    eosartifact.BackendMetal,
 		Entry:      "mps_matrix_multiplication",
 		Source:     "library:mps_matrix_multiplication",
 		SourceHash: "library:mps_matrix_multiplication",
@@ -844,7 +844,7 @@ func boolToCInt(v bool) C.int {
 	return 0
 }
 
-func newStepOutputTensor(outputType mantaartifact.ValueType, shape []int, data []float32) *backend.Tensor {
+func newStepOutputTensor(outputType eosartifact.ValueType, shape []int, data []float32) *backend.Tensor {
 	dtype := "f16"
 	if outputType.Tensor != nil && outputType.Tensor.DType != "" {
 		dtype = outputType.Tensor.DType

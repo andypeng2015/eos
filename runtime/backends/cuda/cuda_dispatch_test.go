@@ -3,8 +3,8 @@ package cuda
 import (
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 func TestSupportsBuiltinGDNRequiresNCHWAndParameters(t *testing.T) {
@@ -39,7 +39,7 @@ func TestPlansBuiltinConvImageSteps(t *testing.T) {
 	input := backend.NewTensorF32([]int{1, 2, 4, 4}, make([]float32, 32))
 	weight := backend.NewTensorF32([]int{3, 2, 3, 3}, make([]float32, 54))
 	bias := backend.NewTensorF32([]int{3}, []float32{0.1, 0.2, 0.3})
-	step := mantaartifact.Step{Kind: mantaartifact.StepConv2D, Attributes: map[string]string{"stride": "2", "padding": "1"}}
+	step := eosartifact.Step{Kind: eosartifact.StepConv2D, Attributes: map[string]string{"stride": "2", "padding": "1"}}
 	cfg, ok := planBuiltinConv2D(step, []*backend.Tensor{input, weight, bias})
 	if !ok {
 		t.Fatal("valid NCHW/OIHW conv2d should be supported")
@@ -53,7 +53,7 @@ func TestPlansBuiltinConvImageSteps(t *testing.T) {
 
 	transWeight := backend.NewTensorF32([]int{2, 3, 3, 3}, make([]float32, 54))
 	transBias := backend.NewTensorF32([]int{3}, []float32{0.1, 0.2, 0.3})
-	transStep := mantaartifact.Step{Kind: mantaartifact.StepConv2DTrans, Attributes: map[string]string{"stride": "2", "padding": "1", "output_padding": "1"}}
+	transStep := eosartifact.Step{Kind: eosartifact.StepConv2DTrans, Attributes: map[string]string{"stride": "2", "padding": "1", "output_padding": "1"}}
 	transCfg, ok := planBuiltinConv2DTranspose(transStep, []*backend.Tensor{input, transWeight, transBias})
 	if !ok {
 		t.Fatal("valid NCHW/IOHW conv2d_transpose should be supported")
@@ -96,7 +96,7 @@ func TestSupportsBuiltinMirageScalarLossSteps(t *testing.T) {
 func TestPlansBuiltinCrossEntropyMirageLayouts(t *testing.T) {
 	codes := backend.NewTensorQ4([]int{1, 2, 1, 2}, []float32{0, 1, 2, 3})
 	globalLogits := backend.NewTensorF32([]int{16}, make([]float32, 16))
-	step := mantaartifact.Step{Kind: mantaartifact.StepCrossEntropy, Attributes: map[string]string{"bits": "4"}}
+	step := eosartifact.Step{Kind: eosartifact.StepCrossEntropy, Attributes: map[string]string{"bits": "4"}}
 	plan, ok := planBuiltinCrossEntropy(step, []*backend.Tensor{codes, globalLogits})
 	if !ok {
 		t.Fatal("global categorical logits should be supported")
@@ -127,7 +127,7 @@ func TestPlansBuiltinCrossEntropyMirageLayouts(t *testing.T) {
 
 	normCodes := backend.NewTensorQNorm([]int{1, 1, 2}, []float32{128, 129})
 	normParams := backend.NewTensorF32([]int{1, 2, 1, 2}, []float32{0, 0.1, 0.2, 0.3})
-	normStep := mantaartifact.Step{Kind: mantaartifact.StepCrossEntropy, Attributes: map[string]string{"distribution": "log_normal", "sigma_parameter": "softplus"}}
+	normStep := eosartifact.Step{Kind: eosartifact.StepCrossEntropy, Attributes: map[string]string{"distribution": "log_normal", "sigma_parameter": "softplus"}}
 	plan, ok = planBuiltinCrossEntropy(normStep, []*backend.Tensor{normCodes, normParams})
 	if !ok {
 		t.Fatal("log-normal q_norm params should be supported")

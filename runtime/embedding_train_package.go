@@ -1,9 +1,9 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"os"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
+	eosartifact "m31labs.dev/eos/artifact/eos"
 )
 
 // EmbeddingTrainPackagePaths names the files that make up a packaged native-training embedder.
@@ -56,7 +56,7 @@ func LoadEmbeddingTrainerPackageWithPaths(paths EmbeddingTrainPackagePaths) (*Em
 			}
 		}
 	}
-	mod, err := mantaartifact.ReadFile(paths.ArtifactPath)
+	mod, err := eosartifact.ReadFile(paths.ArtifactPath)
 	if err != nil {
 		return nil, err
 	}

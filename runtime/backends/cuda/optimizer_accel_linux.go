@@ -13,8 +13,8 @@ import (
 	"math"
 	"time"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 const optimizerKernelSource = `
@@ -72,7 +72,7 @@ type residentOptimizerState struct {
 }
 
 func init() {
-	backend.RegisterOptimizerAccelerator(mantaartifact.BackendCUDA, NewOptimizerAccelerator)
+	backend.RegisterOptimizerAccelerator(eosartifact.BackendCUDA, NewOptimizerAccelerator)
 }
 
 func NewOptimizerAccelerator() (backend.OptimizerAccelerator, error) {
@@ -91,8 +91,8 @@ func NewOptimizerAccelerator() (backend.OptimizerAccelerator, error) {
 	return &optimizerAccelerator{device: device, kernel: kernel, resident: map[string]residentOptimizerState{}}, nil
 }
 
-func (a *optimizerAccelerator) Backend() mantaartifact.BackendKind {
-	return mantaartifact.BackendCUDA
+func (a *optimizerAccelerator) Backend() eosartifact.BackendKind {
+	return eosartifact.BackendCUDA
 }
 
 func (a *optimizerAccelerator) Stats() backend.OptimizerAcceleratorStats {

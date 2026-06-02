@@ -1,10 +1,10 @@
-package mantaruntime
+package eosruntime
 
 import (
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
-func newTrainerContrastiveAccelerator() (backend.ContrastiveAccelerator, mantaartifact.BackendKind, error) {
-	return backend.NewPreferredContrastiveAccelerator(mantaartifact.BackendCUDA, mantaartifact.BackendMetal)
+func newTrainerContrastiveAccelerator() (backend.ContrastiveAccelerator, eosartifact.BackendKind, error) {
+	return backend.NewPreferredContrastiveAccelerator(eosartifact.BackendCUDA, eosartifact.BackendMetal)
 }

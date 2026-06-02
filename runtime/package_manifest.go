@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"bytes"
@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
+	eosartifact "m31labs.dev/eos/artifact/eos"
 	mll "m31labs.dev/mll"
 )
 
@@ -112,7 +112,7 @@ func ReadPackageManifestFile(path string) (PackageManifest, error) {
 	if err != nil {
 		return PackageManifest{}, err
 	}
-	if !mantaartifact.IsMLLBytes(data) {
+	if !eosartifact.IsMLLBytes(data) {
 		return PackageManifest{}, fmt.Errorf("package manifest %q is not an MLL file", path)
 	}
 	return decodePackageManifestMLL(data)
@@ -128,7 +128,7 @@ func encodePackageManifestMLL(manifest PackageManifest) ([]byte, error) {
 
 	head := mll.HeadSection{
 		Name:        strg.Intern("manta-package-manifest"),
-		Description: strg.Intern("Manta package manifest"),
+		Description: strg.Intern("Eos package manifest"),
 		Metadata: []mll.HeadMetadataEntry{
 			headStringMeta(strg, manifestVersionKey, manifest.Version),
 			headStringMeta(strg, "package_kind", string(manifest.Kind)),
@@ -393,7 +393,7 @@ func decodePackageManifestMLL(data []byte) (PackageManifest, error) {
 	return manifest, nil
 }
 
-func BuildPackageManifest(kind PackageKind, mod *mantaartifact.Module, files map[string]string) (PackageManifest, error) {
+func BuildPackageManifest(kind PackageKind, mod *eosartifact.Module, files map[string]string) (PackageManifest, error) {
 	if mod == nil {
 		return PackageManifest{}, fmt.Errorf("nil module")
 	}
@@ -435,7 +435,7 @@ func RebuildSiblingPackageManifest(artifactPath string) (PackageManifest, string
 	if err != nil {
 		return PackageManifest{}, "", err
 	}
-	mod, err := mantaartifact.ReadFile(artifactPath)
+	mod, err := eosartifact.ReadFile(artifactPath)
 	if err != nil {
 		return PackageManifest{}, "", err
 	}

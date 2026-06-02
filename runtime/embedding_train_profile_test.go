@@ -1,11 +1,11 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"path/filepath"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 func TestDefaultEmbeddingTrainProfilePath(t *testing.T) {
@@ -107,7 +107,7 @@ func TestEmbeddingTrainerFitCapturesProfileDelta(t *testing.T) {
 	}
 	fake := &countingMatMulAccelerator{}
 	trainer.forwardMatMul = fake
-	trainer.forwardBackend = mantaartifact.BackendCUDA
+	trainer.forwardBackend = eosartifact.BackendCUDA
 
 	summary, err := trainer.FitContrastive(tinyEmbeddingContrastiveDataset(), tinyEmbeddingContrastiveDataset(), EmbeddingTrainRunConfig{
 		Epochs:      2,

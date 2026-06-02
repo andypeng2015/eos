@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sync"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 type cachedLoad struct {
@@ -34,7 +34,7 @@ func New() *Backend {
 
 // SetExternalDevice adopts an externally-owned WebGPU device (a syscall/js
 // GPUDevice value on wasm, e.g. from GoSX's jsgpu.Device.NativeDevice()) so
-// Manta inference shares the renderer's device instead of requesting its own.
+// Eos inference shares the renderer's device instead of requesting its own.
 // Pass nil to clear. Takes effect on the next uncached Load.
 func (b *Backend) SetExternalDevice(handle any) {
 	if b == nil {
@@ -47,36 +47,36 @@ func (b *Backend) SetExternalDevice(handle any) {
 
 var _ backend.DeviceInjector = (*Backend)(nil)
 
-func (b *Backend) Kind() mantaartifact.BackendKind {
-	return mantaartifact.BackendWebGPU
+func (b *Backend) Kind() eosartifact.BackendKind {
+	return eosartifact.BackendWebGPU
 }
 
 func (b *Backend) Capabilities() []string {
 	return []string{
-		mantaartifact.CapabilityCandidatePack,
-		mantaartifact.CapabilityKVCache,
-		mantaartifact.CapabilityMaskedMeanPool,
-		mantaartifact.CapabilityHostFallback,
-		mantaartifact.CapabilityImageOps,
-		mantaartifact.CapabilityTrainingLosses,
-		mantaartifact.CapabilityTurboQuant,
-		mantaartifact.CapabilitySparseAttention,
+		eosartifact.CapabilityCandidatePack,
+		eosartifact.CapabilityKVCache,
+		eosartifact.CapabilityMaskedMeanPool,
+		eosartifact.CapabilityHostFallback,
+		eosartifact.CapabilityImageOps,
+		eosartifact.CapabilityTrainingLosses,
+		eosartifact.CapabilityTurboQuant,
+		eosartifact.CapabilitySparseAttention,
 	}
 }
 
-func (b *Backend) CanLoad(mod *mantaartifact.Module) bool {
-	return b != nil && mod != nil && mod.SupportsBackend(mantaartifact.BackendWebGPU)
+func (b *Backend) CanLoad(mod *eosartifact.Module) bool {
+	return b != nil && mod != nil && mod.SupportsBackend(eosartifact.BackendWebGPU)
 }
 
-func (b *Backend) Load(ctx context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding) (backend.Executor, error) {
+func (b *Backend) Load(ctx context.Context, mod *eosartifact.Module, weights map[string]backend.WeightBinding) (backend.Executor, error) {
 	return b.load(ctx, mod, weights, "")
 }
 
-func (b *Backend) LoadWithCacheKey(ctx context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
+func (b *Backend) LoadWithCacheKey(ctx context.Context, mod *eosartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
 	return b.load(ctx, mod, weights, cacheKey)
 }
 
-func (b *Backend) load(ctx context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
+func (b *Backend) load(ctx context.Context, mod *eosartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
 	if b == nil {
 		return nil, fmt.Errorf("nil WebGPU backend")
 	}
@@ -85,7 +85,7 @@ func (b *Backend) load(ctx context.Context, mod *mantaartifact.Module, weights m
 			return &executor{module: mod, weights: weights, compiled: cached.compiled, native: cached.native, device: cached.device}, nil
 		}
 	}
-	compiled, err := backend.CompileVariants(mod, mantaartifact.BackendWebGPU)
+	compiled, err := backend.CompileVariants(mod, eosartifact.BackendWebGPU)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +100,7 @@ func (b *Backend) load(ctx context.Context, mod *mantaartifact.Module, weights m
 	}
 	native := map[string]backend.NativeKernelProgram{}
 	for _, kernel := range mod.Kernels {
-		prog, err := backend.CompileNativeKernelProgram(mantaartifact.BackendWebGPU, kernel, compiled[kernel.Name])
+		prog, err := backend.CompileNativeKernelProgram(eosartifact.BackendWebGPU, kernel, compiled[kernel.Name])
 		if err != nil {
 			return nil, err
 		}
@@ -137,22 +137,22 @@ func (b *Backend) storeCachedLoad(cacheKey string, cached cachedLoad) {
 }
 
 type executor struct {
-	module   *mantaartifact.Module
+	module   *eosartifact.Module
 	weights  map[string]backend.WeightBinding
 	compiled map[string]backend.CompiledKernel
 	native   map[string]backend.NativeKernelProgram
 	device   *deviceRuntime
 }
 
-func (e *executor) Backend() mantaartifact.BackendKind {
-	return mantaartifact.BackendWebGPU
+func (e *executor) Backend() eosartifact.BackendKind {
+	return eosartifact.BackendWebGPU
 }
 
 func (e *executor) Run(ctx context.Context, req backend.Request) (backend.Result, error) {
-	return backend.ExecuteSymbolic(ctx, e.module, e.weights, e.compiled, e.dispatchKernel, e.dispatchStep, mantaartifact.BackendWebGPU, req)
+	return backend.ExecuteSymbolic(ctx, e.module, e.weights, e.compiled, e.dispatchKernel, e.dispatchStep, eosartifact.BackendWebGPU, req)
 }
 
-func (e *executor) dispatchKernel(_ context.Context, kernel mantaartifact.Kernel, inputs []*backend.Tensor) (backend.KernelDispatchResult, error) {
+func (e *executor) dispatchKernel(_ context.Context, kernel eosartifact.Kernel, inputs []*backend.Tensor) (backend.KernelDispatchResult, error) {
 	prog, ok := e.native[kernel.Name]
 	if !ok {
 		return backend.KernelDispatchResult{}, fmt.Errorf("WebGPU kernel %q is not compiled", kernel.Name)
@@ -173,7 +173,7 @@ func (e *executor) dispatchKernel(_ context.Context, kernel mantaartifact.Kernel
 	}, nil
 }
 
-func (e *executor) dispatchStep(ctx context.Context, step mantaartifact.Step, _ mantaartifact.ValueType, inputs []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
+func (e *executor) dispatchStep(ctx context.Context, step eosartifact.Step, _ eosartifact.ValueType, inputs []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
 	kernel, ok := BuiltinForStep(step.Kind)
 	if !ok {
 		return backend.StepDispatchResult{}, false, nil
@@ -196,9 +196,9 @@ func (e *executor) dispatchStep(ctx context.Context, step mantaartifact.Step, _ 
 	}, true, nil
 }
 
-func runBuiltinReference(step mantaartifact.Step, inputs []*backend.Tensor) ([]*backend.Tensor, bool, error) {
+func runBuiltinReference(step eosartifact.Step, inputs []*backend.Tensor) ([]*backend.Tensor, bool, error) {
 	switch step.Kind {
-	case mantaartifact.StepConv2D:
+	case eosartifact.StepConv2D:
 		if len(inputs) < 2 || len(inputs) > 3 || inputs[0] == nil || inputs[1] == nil {
 			return nil, false, nil
 		}
@@ -208,7 +208,7 @@ func runBuiltinReference(step mantaartifact.Step, inputs []*backend.Tensor) ([]*
 		}
 		out, err := backend.Conv2DReference(inputs[0], inputs[1], bias, step.Attributes)
 		return []*backend.Tensor{out}, true, err
-	case mantaartifact.StepConv2DTrans:
+	case eosartifact.StepConv2DTrans:
 		if len(inputs) < 2 || len(inputs) > 3 || inputs[0] == nil || inputs[1] == nil {
 			return nil, false, nil
 		}
@@ -218,7 +218,7 @@ func runBuiltinReference(step mantaartifact.Step, inputs []*backend.Tensor) ([]*
 		}
 		out, err := backend.Conv2DTransposeReference(inputs[0], inputs[1], bias, step.Attributes)
 		return []*backend.Tensor{out}, true, err
-	case mantaartifact.StepGDN, mantaartifact.StepIGDN:
+	case eosartifact.StepGDN, eosartifact.StepIGDN:
 		if len(inputs) < 1 || len(inputs) > 3 || inputs[0] == nil {
 			return nil, false, nil
 		}
@@ -229,9 +229,9 @@ func runBuiltinReference(step mantaartifact.Step, inputs []*backend.Tensor) ([]*
 		if len(inputs) > 2 {
 			gamma = inputs[2]
 		}
-		out, err := backend.GDNReference(inputs[0], beta, gamma, step.Kind == mantaartifact.StepIGDN)
+		out, err := backend.GDNReference(inputs[0], beta, gamma, step.Kind == eosartifact.StepIGDN)
 		return []*backend.Tensor{out}, true, err
-	case mantaartifact.StepTurboQDecode:
+	case eosartifact.StepTurboQDecode:
 		if len(inputs) != 2 || inputs[0] == nil || inputs[1] == nil {
 			return nil, false, nil
 		}

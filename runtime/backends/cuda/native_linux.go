@@ -21,12 +21,12 @@ typedef struct {
 	int primary_ctx;
 	cublasHandle_t blas;
 	CUstream stream;
-} MantaCudaRuntime;
+} EosCudaRuntime;
 
 typedef struct {
 	CUmodule module;
 	CUfunction function;
-} MantaCudaKernel;
+} EosCudaKernel;
 
 static char* manta_dup_cstr(const char* s) {
 	if (s == NULL) {
@@ -106,8 +106,8 @@ static char* manta_dup_cublas_error(const char* prefix, cublasStatus_t status) {
 	return manta_dup_format(prefix, manta_cublas_status_name(status));
 }
 
-static int mantaCudaRuntimeCreate(MantaCudaRuntime** out, char** err) {
-	MantaCudaRuntime* rt = NULL;
+static int eosCudaRuntimeCreate(EosCudaRuntime** out, char** err) {
+	EosCudaRuntime* rt = NULL;
 	CUdevice device = 0;
 	CUcontext ctx = NULL;
 	int major = 0;
@@ -152,7 +152,7 @@ static int mantaCudaRuntimeCreate(MantaCudaRuntime** out, char** err) {
 		*err = manta_dup_cublas_error("cublasCreate", blasRes);
 		return 1;
 	}
-	rt = (MantaCudaRuntime*)malloc(sizeof(MantaCudaRuntime));
+	rt = (EosCudaRuntime*)malloc(sizeof(EosCudaRuntime));
 	if (rt == NULL) {
 		cublasDestroy(blas);
 		cuDevicePrimaryCtxRelease(device);
@@ -191,7 +191,7 @@ static int mantaCudaRuntimeCreate(MantaCudaRuntime** out, char** err) {
 	return 0;
 }
 
-static void mantaCudaRuntimeDestroy(MantaCudaRuntime* rt) {
+static void eosCudaRuntimeDestroy(EosCudaRuntime* rt) {
 	if (rt == NULL) {
 		return;
 	}
@@ -214,14 +214,14 @@ static void mantaCudaRuntimeDestroy(MantaCudaRuntime* rt) {
 	free(rt);
 }
 
-static int mantaCudaCompileKernel(MantaCudaRuntime* rt, const char* src, const char* entry, MantaCudaKernel** out, char** log, char** err) {
+static int eosCudaCompileKernel(EosCudaRuntime* rt, const char* src, const char* entry, EosCudaKernel** out, char** log, char** err) {
 	nvrtcProgram program;
 	nvrtcResult nvRes;
 	size_t logSize = 0;
 	size_t ptxSize = 0;
 	char arch[64];
 	char* ptx = NULL;
-	MantaCudaKernel* kernel = NULL;
+	EosCudaKernel* kernel = NULL;
 	CUmodule module = NULL;
 	CUfunction function = NULL;
 
@@ -286,7 +286,7 @@ static int mantaCudaCompileKernel(MantaCudaRuntime* rt, const char* src, const c
 		return 1;
 	}
 
-	kernel = (MantaCudaKernel*)malloc(sizeof(MantaCudaKernel));
+	kernel = (EosCudaKernel*)malloc(sizeof(EosCudaKernel));
 	if (kernel == NULL) {
 		cuModuleUnload(module);
 		*err = manta_dup_format("malloc", "failed to allocate kernel");
@@ -298,7 +298,7 @@ static int mantaCudaCompileKernel(MantaCudaRuntime* rt, const char* src, const c
 	return 0;
 }
 
-static void mantaCudaKernelDestroy(MantaCudaKernel* kernel) {
+static void eosCudaKernelDestroy(EosCudaKernel* kernel) {
 	if (kernel == NULL) {
 		return;
 	}
@@ -308,7 +308,7 @@ static void mantaCudaKernelDestroy(MantaCudaKernel* kernel) {
 	free(kernel);
 }
 
-static int mantaCudaMemAlloc(MantaCudaRuntime* rt, CUdeviceptr* out, size_t bytes, char** err) {
+static int eosCudaMemAlloc(EosCudaRuntime* rt, CUdeviceptr* out, size_t bytes, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
 		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
@@ -322,7 +322,7 @@ static int mantaCudaMemAlloc(MantaCudaRuntime* rt, CUdeviceptr* out, size_t byte
 	return 0;
 }
 
-static int mantaCudaMemFree(MantaCudaRuntime* rt, CUdeviceptr ptr, char** err) {
+static int eosCudaMemFree(EosCudaRuntime* rt, CUdeviceptr ptr, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
 		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
@@ -336,7 +336,7 @@ static int mantaCudaMemFree(MantaCudaRuntime* rt, CUdeviceptr ptr, char** err) {
 	return 0;
 }
 
-static int mantaCudaMemcpyHtoD(MantaCudaRuntime* rt, CUdeviceptr dst, const void* src, size_t bytes, char** err) {
+static int eosCudaMemcpyHtoD(EosCudaRuntime* rt, CUdeviceptr dst, const void* src, size_t bytes, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
 		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
@@ -350,7 +350,7 @@ static int mantaCudaMemcpyHtoD(MantaCudaRuntime* rt, CUdeviceptr dst, const void
 	return 0;
 }
 
-static int mantaCudaMemcpyDtoH(MantaCudaRuntime* rt, void* dst, CUdeviceptr src, size_t bytes, char** err) {
+static int eosCudaMemcpyDtoH(EosCudaRuntime* rt, void* dst, CUdeviceptr src, size_t bytes, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
 		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
@@ -364,7 +364,7 @@ static int mantaCudaMemcpyDtoH(MantaCudaRuntime* rt, void* dst, CUdeviceptr src,
 	return 0;
 }
 
-static int mantaCudaSynchronize(MantaCudaRuntime* rt, char** err) {
+static int eosCudaSynchronize(EosCudaRuntime* rt, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
 		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
@@ -378,7 +378,7 @@ static int mantaCudaSynchronize(MantaCudaRuntime* rt, char** err) {
 	return 0;
 }
 
-static int mantaCudaReadFloat32(MantaCudaRuntime* rt, CUdeviceptr src, int elementIndex, float* out, char** err) {
+static int eosCudaReadFloat32(EosCudaRuntime* rt, CUdeviceptr src, int elementIndex, float* out, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
 		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
@@ -393,7 +393,7 @@ static int mantaCudaReadFloat32(MantaCudaRuntime* rt, CUdeviceptr src, int eleme
 	return 0;
 }
 
-static int mantaCudaBlasIsamax(MantaCudaRuntime* rt, CUdeviceptr src, int elements, int* outIndex, char** err) {
+static int eosCudaBlasIsamax(EosCudaRuntime* rt, CUdeviceptr src, int elements, int* outIndex, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
 		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
@@ -408,7 +408,7 @@ static int mantaCudaBlasIsamax(MantaCudaRuntime* rt, CUdeviceptr src, int elemen
 	return 0;
 }
 
-static int mantaCudaLaunch1D(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, void** args, char** err) {
+static int eosCudaLaunch1D(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, void** args, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
 		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
@@ -427,142 +427,142 @@ static int mantaCudaLaunch1D(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsi
 	return 0;
 }
 
-static int mantaCudaLaunchRowWise(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr in0, CUdeviceptr out0, int rows, int cols, char** err) {
+static int eosCudaLaunchRowWise(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr in0, CUdeviceptr out0, int rows, int cols, char** err) {
 	void* args[] = {&in0, &out0, &rows, &cols};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchElementWise(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int elements, char** err) {
+static int eosCudaLaunchElementWise(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int elements, char** err) {
 	void* args[] = {&lhs, &rhs, &out0, &elements};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchUnary(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr in0, CUdeviceptr out0, int elements, char** err) {
+static int eosCudaLaunchUnary(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr in0, CUdeviceptr out0, int elements, char** err) {
 	void* args[] = {&in0, &out0, &elements};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchScore(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr docs, CUdeviceptr out0, int rows, int cols, char** err) {
+static int eosCudaLaunchScore(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr docs, CUdeviceptr out0, int rows, int cols, char** err) {
 	void* args[] = {&query, &docs, &out0, &rows, &cols};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchOptimizerUpdate(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr param, CUdeviceptr mom1, CUdeviceptr mom2, CUdeviceptr grad, int elements, int mode, float learningRate, float weightDecay, float beta1, float beta2, float corr1, float corr2, float epsilon, float scale, char** err) {
+static int eosCudaLaunchOptimizerUpdate(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr param, CUdeviceptr mom1, CUdeviceptr mom2, CUdeviceptr grad, int elements, int mode, float learningRate, float weightDecay, float beta1, float beta2, float corr1, float corr2, float epsilon, float scale, char** err) {
 	void* args[] = {&param, &mom1, &mom2, &grad, &elements, &mode, &learningRate, &weightDecay, &beta1, &beta2, &corr1, &corr2, &epsilon, &scale};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchSoftmaxBackwardRows(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr gradOut, CUdeviceptr probs, CUdeviceptr out0, int rows, int cols, char** err) {
+static int eosCudaLaunchSoftmaxBackwardRows(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr gradOut, CUdeviceptr probs, CUdeviceptr out0, int rows, int cols, char** err) {
 	void* args[] = {&gradOut, &probs, &out0, &rows, &cols};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchSoftmaxForwardRows(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr data, int rows, int cols, char** err) {
+static int eosCudaLaunchSoftmaxForwardRows(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr data, int rows, int cols, char** err) {
 	void* args[] = {&data, &rows, &cols};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchGeluForward(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr src, CUdeviceptr dst, int elements, char** err) {
+static int eosCudaLaunchGeluForward(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr src, CUdeviceptr dst, int elements, char** err) {
 	void* args[] = {&src, &dst, &elements};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchLayerNormForwardRows(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr src, CUdeviceptr dst, int rows, int cols, char** err) {
+static int eosCudaLaunchLayerNormForwardRows(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr src, CUdeviceptr dst, int rows, int cols, char** err) {
 	void* args[] = {&src, &dst, &rows, &cols};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchResidualAdd(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr a, CUdeviceptr b, CUdeviceptr out0, int elements, char** err) {
+static int eosCudaLaunchResidualAdd(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr a, CUdeviceptr b, CUdeviceptr out0, int elements, char** err) {
 	void* args[] = {&a, &b, &out0, &elements};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchLayerNormBackwardRows(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr gradOut, CUdeviceptr normalized, CUdeviceptr pre, CUdeviceptr out0, int rows, int cols, char** err) {
+static int eosCudaLaunchLayerNormBackwardRows(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr gradOut, CUdeviceptr normalized, CUdeviceptr pre, CUdeviceptr out0, int rows, int cols, char** err) {
 	void* args[] = {&gradOut, &normalized, &pre, &out0, &rows, &cols};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchQuantizeInPlace(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr data, int elements, float levels, float scale, char** err) {
+static int eosCudaLaunchQuantizeInPlace(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr data, int elements, float levels, float scale, char** err) {
 	void* args[] = {&data, &elements, &levels, &scale};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchGDN(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr input, CUdeviceptr beta, CUdeviceptr gamma, CUdeviceptr out0, int elements, int channels, int height, int width, int inverse, char** err) {
+static int eosCudaLaunchGDN(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr input, CUdeviceptr beta, CUdeviceptr gamma, CUdeviceptr out0, int elements, int channels, int height, int width, int inverse, char** err) {
 	void* args[] = {&input, &beta, &gamma, &out0, &elements, &channels, &height, &width, &inverse};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchConv2D(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr input, CUdeviceptr weight, CUdeviceptr bias, CUdeviceptr out0, int elements, int inChannels, int inHeight, int inWidth, int outChannels, int outHeight, int outWidth, int inPerGroup, int outPerGroup, int kernelH, int kernelW, int strideH, int strideW, int padH, int padW, int dilationH, int dilationW, int hasBias, char** err) {
+static int eosCudaLaunchConv2D(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr input, CUdeviceptr weight, CUdeviceptr bias, CUdeviceptr out0, int elements, int inChannels, int inHeight, int inWidth, int outChannels, int outHeight, int outWidth, int inPerGroup, int outPerGroup, int kernelH, int kernelW, int strideH, int strideW, int padH, int padW, int dilationH, int dilationW, int hasBias, char** err) {
 	void* args[] = {&input, &weight, &bias, &out0, &elements, &inChannels, &inHeight, &inWidth, &outChannels, &outHeight, &outWidth, &inPerGroup, &outPerGroup, &kernelH, &kernelW, &strideH, &strideW, &padH, &padW, &dilationH, &dilationW, &hasBias};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchConv2DTranspose(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr input, CUdeviceptr weight, CUdeviceptr bias, CUdeviceptr out0, int elements, int inChannels, int inHeight, int inWidth, int outChannels, int outHeight, int outWidth, int inPerGroup, int outPerGroup, int kernelH, int kernelW, int strideH, int strideW, int padH, int padW, int dilationH, int dilationW, int hasBias, char** err) {
+static int eosCudaLaunchConv2DTranspose(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr input, CUdeviceptr weight, CUdeviceptr bias, CUdeviceptr out0, int elements, int inChannels, int inHeight, int inWidth, int outChannels, int outHeight, int outWidth, int inPerGroup, int outPerGroup, int kernelH, int kernelW, int strideH, int strideW, int padH, int padW, int dilationH, int dilationW, int hasBias, char** err) {
 	void* args[] = {&input, &weight, &bias, &out0, &elements, &inChannels, &inHeight, &inWidth, &outChannels, &outHeight, &outWidth, &inPerGroup, &outPerGroup, &kernelH, &kernelW, &strideH, &strideW, &padH, &padW, &dilationH, &dilationW, &hasBias};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchTurboQEncode(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr input, CUdeviceptr coords, CUdeviceptr norms, CUdeviceptr scratchWork, CUdeviceptr scratchRotated, CUdeviceptr perm, CUdeviceptr signs1, CUdeviceptr signs2, CUdeviceptr centroids, CUdeviceptr boundaries, int vectors, int channels, int height, int width, int levels, char** err) {
+static int eosCudaLaunchTurboQEncode(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr input, CUdeviceptr coords, CUdeviceptr norms, CUdeviceptr scratchWork, CUdeviceptr scratchRotated, CUdeviceptr perm, CUdeviceptr signs1, CUdeviceptr signs2, CUdeviceptr centroids, CUdeviceptr boundaries, int vectors, int channels, int height, int width, int levels, char** err) {
 	void* args[] = {&input, &coords, &norms, &scratchWork, &scratchRotated, &perm, &signs1, &signs2, &centroids, &boundaries, &vectors, &channels, &height, &width, &levels};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchTurboQDecode(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr coords, CUdeviceptr norms, CUdeviceptr out0, CUdeviceptr scratchWork, CUdeviceptr scratchRotated, CUdeviceptr perm, CUdeviceptr signs1, CUdeviceptr signs2, CUdeviceptr centroids, int vectors, int channels, int height, int width, int levels, char** err) {
+static int eosCudaLaunchTurboQDecode(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr coords, CUdeviceptr norms, CUdeviceptr out0, CUdeviceptr scratchWork, CUdeviceptr scratchRotated, CUdeviceptr perm, CUdeviceptr signs1, CUdeviceptr signs2, CUdeviceptr centroids, int vectors, int channels, int height, int width, int levels, char** err) {
 	void* args[] = {&coords, &norms, &out0, &scratchWork, &scratchRotated, &perm, &signs1, &signs2, &centroids, &vectors, &channels, &height, &width, &levels};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchSparseAttention(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr key, CUdeviceptr value, CUdeviceptr out0, int rank, int kvLayout, int batches, int queryLen, int keyLen, int queryDim, int valueDim, int topK, char** err) {
+static int eosCudaLaunchSparseAttention(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr key, CUdeviceptr value, CUdeviceptr out0, int rank, int kvLayout, int batches, int queryLen, int keyLen, int queryDim, int valueDim, int topK, char** err) {
 	void* args[] = {&query, &key, &value, &out0, &rank, &kvLayout, &batches, &queryLen, &keyLen, &queryDim, &valueDim, &topK};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchTurboSparseAttention(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr keyCoords, CUdeviceptr keyNorms, CUdeviceptr valueCoords, CUdeviceptr valueNorms, CUdeviceptr out0, CUdeviceptr keyScratchWork, CUdeviceptr keyScratchDecoded, CUdeviceptr valueScratchWork, CUdeviceptr valueScratchDecoded, CUdeviceptr keyPerm, CUdeviceptr keySigns1, CUdeviceptr keySigns2, CUdeviceptr keyCentroids, CUdeviceptr valuePerm, CUdeviceptr valueSigns1, CUdeviceptr valueSigns2, CUdeviceptr valueCentroids, int rank, int batches, int queryLen, int keyLen, int queryDim, int valueDim, int topK, int keyLevels, int valueLevels, int routeBlockSize, int routeTopBlocks, char** err) {
+static int eosCudaLaunchTurboSparseAttention(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr keyCoords, CUdeviceptr keyNorms, CUdeviceptr valueCoords, CUdeviceptr valueNorms, CUdeviceptr out0, CUdeviceptr keyScratchWork, CUdeviceptr keyScratchDecoded, CUdeviceptr valueScratchWork, CUdeviceptr valueScratchDecoded, CUdeviceptr keyPerm, CUdeviceptr keySigns1, CUdeviceptr keySigns2, CUdeviceptr keyCentroids, CUdeviceptr valuePerm, CUdeviceptr valueSigns1, CUdeviceptr valueSigns2, CUdeviceptr valueCentroids, int rank, int batches, int queryLen, int keyLen, int queryDim, int valueDim, int topK, int keyLevels, int valueLevels, int routeBlockSize, int routeTopBlocks, char** err) {
 	void* args[] = {&query, &keyCoords, &keyNorms, &valueCoords, &valueNorms, &out0, &keyScratchWork, &keyScratchDecoded, &valueScratchWork, &valueScratchDecoded, &keyPerm, &keySigns1, &keySigns2, &keyCentroids, &valuePerm, &valueSigns1, &valueSigns2, &valueCentroids, &rank, &batches, &queryLen, &keyLen, &queryDim, &valueDim, &topK, &keyLevels, &valueLevels, &routeBlockSize, &routeTopBlocks};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchMSEPartials(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr partials, int elements, char** err) {
+static int eosCudaLaunchMSEPartials(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr partials, int elements, char** err) {
 	void* args[] = {&lhs, &rhs, &partials, &elements};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchMSSSIMPartials(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr partials, int elements, char** err) {
+static int eosCudaLaunchMSSSIMPartials(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr partials, int elements, char** err) {
 	void* args[] = {&lhs, &rhs, &partials, &elements};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchScalarSum(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr values, CUdeviceptr out0, int count, char** err) {
+static int eosCudaLaunchScalarSum(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr values, CUdeviceptr out0, int count, char** err) {
 	void* args[] = {&values, &out0, &count};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchRDLoss(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr distortion, CUdeviceptr rate, CUdeviceptr out0, float lambda, char** err) {
+static int eosCudaLaunchRDLoss(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr distortion, CUdeviceptr rate, CUdeviceptr out0, float lambda, char** err) {
 	void* args[] = {&distortion, &rate, &out0, &lambda};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchCrossEntropyPartials(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr codes, CUdeviceptr logits, CUdeviceptr partials, int elements, int mode, int layout, int levels, int bits, int codeRank, int codeN, int codeC, int codeH, int codeW, int logitsLen, int logitsN, int logitsC, int logitsH, int logitsW, int sigmaMode, char** err) {
+static int eosCudaLaunchCrossEntropyPartials(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr codes, CUdeviceptr logits, CUdeviceptr partials, int elements, int mode, int layout, int levels, int bits, int codeRank, int codeN, int codeC, int codeH, int codeW, int logitsLen, int logitsN, int logitsC, int logitsH, int logitsW, int sigmaMode, char** err) {
 	void* args[] = {&codes, &logits, &partials, &elements, &mode, &layout, &levels, &bits, &codeRank, &codeN, &codeC, &codeH, &codeW, &logitsLen, &logitsN, &logitsC, &logitsH, &logitsW, &sigmaMode};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchContrastiveScores(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr positive, CUdeviceptr queryNorms, CUdeviceptr positiveNorms, CUdeviceptr scores, int queryRows, int candidateRows, int width, char** err) {
+static int eosCudaLaunchContrastiveScores(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr positive, CUdeviceptr queryNorms, CUdeviceptr positiveNorms, CUdeviceptr scores, int queryRows, int candidateRows, int width, char** err) {
 	void* args[] = {&query, &positive, &queryNorms, &positiveNorms, &scores, &queryRows, &candidateRows, &width};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchInfoNCEScales(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr scores, CUdeviceptr targetIndexes, CUdeviceptr scales, CUdeviceptr rowLoss, CUdeviceptr rowScore, int queryRows, int candidateRows, float temperature, char** err) {
+static int eosCudaLaunchInfoNCEScales(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr scores, CUdeviceptr targetIndexes, CUdeviceptr scales, CUdeviceptr rowLoss, CUdeviceptr rowScore, int queryRows, int candidateRows, float temperature, char** err) {
 	void* args[] = {&scores, &targetIndexes, &scales, &rowLoss, &rowScore, &queryRows, &candidateRows, &temperature};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaLaunchContrastiveGrad(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr positive, CUdeviceptr queryNorms, CUdeviceptr positiveNorms, CUdeviceptr scores, CUdeviceptr scales, CUdeviceptr queryGrads, CUdeviceptr positiveGrads, int queryRows, int candidateRows, int width, char** err) {
+static int eosCudaLaunchContrastiveGrad(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr query, CUdeviceptr positive, CUdeviceptr queryNorms, CUdeviceptr positiveNorms, CUdeviceptr scores, CUdeviceptr scales, CUdeviceptr queryGrads, CUdeviceptr positiveGrads, int queryRows, int candidateRows, int width, char** err) {
 	void* args[] = {&query, &positive, &queryNorms, &positiveNorms, &scores, &scales, &queryGrads, &positiveGrads, &queryRows, &candidateRows, &width};
-	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
-static int mantaCudaMatMulCublasWithBetaNoSync(MantaCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, float betaValue, char** err) {
+static int eosCudaMatMulCublasWithBetaNoSync(EosCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, float betaValue, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
 		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
@@ -604,18 +604,18 @@ static int mantaCudaMatMulCublasWithBetaNoSync(MantaCudaRuntime* rt, CUdeviceptr
 	return 0;
 }
 
-static int mantaCudaMatMulCublasWithBeta(MantaCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, float betaValue, char** err) {
-	if (mantaCudaMatMulCublasWithBetaNoSync(rt, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, transposeLeft, transposeRight, betaValue, err) != 0) {
+static int eosCudaMatMulCublasWithBeta(EosCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, float betaValue, char** err) {
+	if (eosCudaMatMulCublasWithBetaNoSync(rt, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, transposeLeft, transposeRight, betaValue, err) != 0) {
 		return 1;
 	}
-	return mantaCudaSynchronize(rt, err);
+	return eosCudaSynchronize(rt, err);
 }
 
-static int mantaCudaMatMulCublas(MantaCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, char** err) {
-	return mantaCudaMatMulCublasWithBeta(rt, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, transposeLeft, transposeRight, 0.0f, err);
+static int eosCudaMatMulCublas(EosCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, char** err) {
+	return eosCudaMatMulCublasWithBeta(rt, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, transposeLeft, transposeRight, 0.0f, err);
 }
 
-static int mantaCudaMatMulCublasStridedBatched(MantaCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int batches, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, char** err) {
+static int eosCudaMatMulCublasStridedBatched(EosCudaRuntime* rt, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int batches, int lhsRows, int lhsCols, int rhsRows, int rhsCols, int transposeLeft, int transposeRight, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
 		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
@@ -673,7 +673,7 @@ static int mantaCudaMatMulCublasStridedBatched(MantaCudaRuntime* rt, CUdeviceptr
 	return 0;
 }
 
-static void mantaCudaFreeCString(char* s) {
+static void eosCudaFreeCString(char* s) {
 	if (s != NULL) {
 		free(s);
 	}
@@ -682,14 +682,14 @@ static void mantaCudaFreeCString(char* s) {
 typedef struct {
 	CUgraph graph;
 	CUgraphExec exec;
-} MantaCudaGraph;
+} EosCudaGraph;
 
-// mantaCudaBeginCapture puts the runtime's (non-default) stream into
+// eosCudaBeginCapture puts the runtime's (non-default) stream into
 // thread-local capture mode. Subsequent stream work — kernel launches and
 // cuBLAS GEMMs, both already bound to rt->stream — is recorded into a graph
 // instead of executing. cuBLAS workspace for every GEMM shape MUST be warmed
 // up before capture begins; allocations are illegal during capture.
-static int mantaCudaBeginCapture(MantaCudaRuntime* rt, char** err) {
+static int eosCudaBeginCapture(EosCudaRuntime* rt, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
 		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
@@ -703,9 +703,9 @@ static int mantaCudaBeginCapture(MantaCudaRuntime* rt, char** err) {
 	return 0;
 }
 
-// mantaCudaEndCapture ends capture, instantiates the recorded graph into an
+// eosCudaEndCapture ends capture, instantiates the recorded graph into an
 // executable graph, and returns both (the graph is retained for teardown).
-static int mantaCudaEndCapture(MantaCudaRuntime* rt, MantaCudaGraph** out, char** err) {
+static int eosCudaEndCapture(EosCudaRuntime* rt, EosCudaGraph** out, char** err) {
 	CUgraph graph = NULL;
 	CUresult cuRes = cuStreamEndCapture(rt->stream, &graph);
 	if (cuRes != CUDA_SUCCESS) {
@@ -719,7 +719,7 @@ static int mantaCudaEndCapture(MantaCudaRuntime* rt, MantaCudaGraph** out, char*
 		*err = manta_dup_cu_error("cuGraphInstantiate", cuRes);
 		return 1;
 	}
-	MantaCudaGraph* g = (MantaCudaGraph*)malloc(sizeof(MantaCudaGraph));
+	EosCudaGraph* g = (EosCudaGraph*)malloc(sizeof(EosCudaGraph));
 	if (g == NULL) {
 		cuGraphExecDestroy(exec);
 		cuGraphDestroy(graph);
@@ -732,10 +732,10 @@ static int mantaCudaEndCapture(MantaCudaRuntime* rt, MantaCudaGraph** out, char*
 	return 0;
 }
 
-// mantaCudaGraphLaunch replays a captured graph and synchronizes once. The
+// eosCudaGraphLaunch replays a captured graph and synchronizes once. The
 // graph references the device pointers recorded at capture time, so replay
 // recomputes against whatever those (stable) buffers currently hold.
-static int mantaCudaGraphLaunch(MantaCudaRuntime* rt, MantaCudaGraph* g, char** err) {
+static int eosCudaGraphLaunch(EosCudaRuntime* rt, EosCudaGraph* g, char** err) {
 	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
 	if (cuRes != CUDA_SUCCESS) {
 		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
@@ -754,7 +754,7 @@ static int mantaCudaGraphLaunch(MantaCudaRuntime* rt, MantaCudaGraph* g, char** 
 	return 0;
 }
 
-static void mantaCudaGraphDestroy(MantaCudaGraph* g) {
+static void eosCudaGraphDestroy(EosCudaGraph* g) {
 	if (g == NULL) {
 		return;
 	}
@@ -777,8 +777,8 @@ import (
 	"time"
 	"unsafe"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 	turboquant "m31labs.dev/turboquant"
 )
 
@@ -1162,7 +1162,7 @@ extern "C" __global__ void manta_turboq_decode(
 `
 
 const sparseAttentionKernelSource = `
-#define MANTA_SPARSE_ATTENTION_MAX_TOPK 128
+#define EOS_SPARSE_ATTENTION_MAX_TOPK 128
 
 static __device__ float manta_sparse_attention_score(
     const float* query,
@@ -1218,13 +1218,13 @@ extern "C" __global__ void manta_sparse_attention_forward(
     if (row >= totalRows) {
         return;
     }
-    if (topK > MANTA_SPARSE_ATTENTION_MAX_TOPK) {
+    if (topK > EOS_SPARSE_ATTENTION_MAX_TOPK) {
         return;
     }
     int batch = rank == 3 ? row / queryLen : 0;
     int queryRow = rank == 3 ? row - batch * queryLen : row;
-    int selected[MANTA_SPARSE_ATTENTION_MAX_TOPK];
-    float selectedScores[MANTA_SPARSE_ATTENTION_MAX_TOPK];
+    int selected[EOS_SPARSE_ATTENTION_MAX_TOPK];
+    float selectedScores[EOS_SPARSE_ATTENTION_MAX_TOPK];
     int selectedCount = 0;
     for (int pick = 0; pick < topK; ++pick) {
         int bestIndex = -1;
@@ -1281,8 +1281,8 @@ extern "C" __global__ void manta_sparse_attention_forward(
 `
 
 const turboSparseAttentionKernelSource = turboQKernelSource + `
-#define MANTA_TURBO_SPARSE_ATTENTION_MAX_TOPK 128
-#define MANTA_TURBO_SPARSE_ATTENTION_MAX_ROUTE_BLOCKS 128
+#define EOS_TURBO_SPARSE_ATTENTION_MAX_TOPK 128
+#define EOS_TURBO_SPARSE_ATTENTION_MAX_ROUTE_BLOCKS 128
 
 static __device__ bool manta_turbo_sparse_attention_better(float lhsScore, int lhsIndex, float rhsScore, int rhsIndex) {
     if (lhsScore > rhsScore) {
@@ -1395,7 +1395,7 @@ extern "C" __global__ void manta_turbo_sparse_attention_forward(
     if (row >= totalRows) {
         return;
     }
-    if (topK <= 0 || topK > MANTA_TURBO_SPARSE_ATTENTION_MAX_TOPK) {
+    if (topK <= 0 || topK > EOS_TURBO_SPARSE_ATTENTION_MAX_TOPK) {
         return;
     }
     int batch = rank == 3 ? row / queryLen : 0;
@@ -1411,19 +1411,19 @@ extern "C" __global__ void manta_turbo_sparse_attention_forward(
         if (routeTopBlocks > blockCount) {
             routeTopBlocks = blockCount;
         }
-        if (routeTopBlocks <= 0 || routeTopBlocks > MANTA_TURBO_SPARSE_ATTENTION_MAX_ROUTE_BLOCKS) {
+        if (routeTopBlocks <= 0 || routeTopBlocks > EOS_TURBO_SPARSE_ATTENTION_MAX_ROUTE_BLOCKS) {
             return;
         }
     }
     float* keyWork = keyScratchWork + row * queryDim;
     float* decodedKey = keyScratchDecoded + row * queryDim;
 
-    int selected[MANTA_TURBO_SPARSE_ATTENTION_MAX_TOPK];
-    float selectedScores[MANTA_TURBO_SPARSE_ATTENTION_MAX_TOPK];
+    int selected[EOS_TURBO_SPARSE_ATTENTION_MAX_TOPK];
+    float selectedScores[EOS_TURBO_SPARSE_ATTENTION_MAX_TOPK];
     int selectedCount = 0;
     if (routed) {
-        int selectedBlocks[MANTA_TURBO_SPARSE_ATTENTION_MAX_ROUTE_BLOCKS];
-        float selectedBlockScores[MANTA_TURBO_SPARSE_ATTENTION_MAX_ROUTE_BLOCKS];
+        int selectedBlocks[EOS_TURBO_SPARSE_ATTENTION_MAX_ROUTE_BLOCKS];
+        float selectedBlockScores[EOS_TURBO_SPARSE_ATTENTION_MAX_ROUTE_BLOCKS];
         int selectedBlockCount = 0;
         for (int block = 0; block < blockCount; ++block) {
             int start = block * routeBlockSize;
@@ -1856,7 +1856,7 @@ extern "C" __global__ void manta_cross_entropy_partials(
 `
 
 type deviceRuntime struct {
-	ptr                *C.MantaCudaRuntime
+	ptr                *C.EosCudaRuntime
 	residentMatrices   map[string]residentMatrix
 	matMulScratch      map[string]deviceScratchBuffer
 	quantizeKernel     *auxKernel
@@ -1889,12 +1889,12 @@ type deviceScratchBuffer struct {
 }
 
 type deviceKernel struct {
-	ptr       *C.MantaCudaKernel
+	ptr       *C.EosCudaKernel
 	shapeKind cudaShapeKind
 }
 
 type auxKernel struct {
-	ptr *C.MantaCudaKernel
+	ptr *C.EosCudaKernel
 }
 
 type cudaShapeKind int
@@ -1908,9 +1908,9 @@ const (
 )
 
 func newDeviceRuntime() (*deviceRuntime, error) {
-	var rt *C.MantaCudaRuntime
+	var rt *C.EosCudaRuntime
 	var errStr *C.char
-	if C.mantaCudaRuntimeCreate(&rt, &errStr) != 0 {
+	if C.eosCudaRuntimeCreate(&rt, &errStr) != 0 {
 		return nil, cStringError(errStr)
 	}
 	return &deviceRuntime{ptr: rt, residentMatrices: map[string]residentMatrix{}, matMulScratch: map[string]deviceScratchBuffer{}, graphCache: map[string]*cudaGraph{}}, nil
@@ -1958,7 +1958,7 @@ func (rt *deviceRuntime) close() {
 		g.destroy()
 		delete(rt.graphCache, sig)
 	}
-	C.mantaCudaRuntimeDestroy(rt.ptr)
+	C.eosCudaRuntimeDestroy(rt.ptr)
 	rt.ptr = nil
 }
 
@@ -1987,7 +1987,7 @@ func (rt *deviceRuntime) recordMatMulRun(start time.Time, uploadedBytes, downloa
 	rt.matMulStats.RunNanos += time.Since(start).Nanoseconds()
 }
 
-func (rt *deviceRuntime) attachDeviceExecution(prog *backend.NativeKernelProgram, kernel mantaartifact.Kernel) error {
+func (rt *deviceRuntime) attachDeviceExecution(prog *backend.NativeKernelProgram, kernel eosartifact.Kernel) error {
 	shapeKind := classifyCUDAKernel(kernel)
 	if shapeKind == cudaShapeUnsupported {
 		prog.LaunchConfig["device_execution"] = false
@@ -2013,10 +2013,10 @@ func (rt *deviceRuntime) compileKernel(compiled backend.CompiledKernel, shapeKin
 	defer C.free(unsafe.Pointer(src))
 	defer C.free(unsafe.Pointer(entry))
 
-	var kernel *C.MantaCudaKernel
+	var kernel *C.EosCudaKernel
 	var logStr *C.char
 	var errStr *C.char
-	rc := C.mantaCudaCompileKernel(rt.ptr, src, entry, &kernel, &logStr, &errStr)
+	rc := C.eosCudaCompileKernel(rt.ptr, src, entry, &kernel, &logStr, &errStr)
 	logText := cStringValue(logStr)
 	if rc != 0 {
 		err := cStringError(errStr)
@@ -2034,10 +2034,10 @@ func (rt *deviceRuntime) compileAuxKernel(source, entry string) (*auxKernel, err
 	defer C.free(unsafe.Pointer(src))
 	defer C.free(unsafe.Pointer(cEntry))
 
-	var kernel *C.MantaCudaKernel
+	var kernel *C.EosCudaKernel
 	var logStr *C.char
 	var errStr *C.char
-	rc := C.mantaCudaCompileKernel(rt.ptr, src, cEntry, &kernel, &logStr, &errStr)
+	rc := C.eosCudaCompileKernel(rt.ptr, src, cEntry, &kernel, &logStr, &errStr)
 	logText := cStringValue(logStr)
 	if rc != 0 {
 		err := cStringError(errStr)
@@ -2053,10 +2053,10 @@ func (rt *deviceRuntime) destroyAuxKernel(kernel *auxKernel) {
 	if kernel == nil || kernel.ptr == nil {
 		return
 	}
-	C.mantaCudaKernelDestroy(kernel.ptr)
+	C.eosCudaKernelDestroy(kernel.ptr)
 }
 
-func (rt *deviceRuntime) runKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runKernel(deviceKernel *deviceKernel, kernel eosartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	switch deviceKernel.shapeKind {
 	case cudaShapeRowWise:
 		return rt.runRowWiseKernel(deviceKernel, kernel, prog, inputs)
@@ -2071,7 +2071,7 @@ func (rt *deviceRuntime) runKernel(deviceKernel *deviceKernel, kernel mantaartif
 	}
 }
 
-func (rt *deviceRuntime) runRowWiseKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runRowWiseKernel(deviceKernel *deviceKernel, kernel eosartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	if len(inputs) != 1 {
 		return nil, fmt.Errorf("kernel %q expected 1 input for row-wise launch, got %d", kernel.Name, len(inputs))
 	}
@@ -2112,7 +2112,7 @@ func (rt *deviceRuntime) runRowWiseKernel(deviceKernel *deviceKernel, kernel man
 	return []*backend.Tensor{newOutputTensor(kernel, outShape, outHost)}, nil
 }
 
-func (rt *deviceRuntime) runElementWiseKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runElementWiseKernel(deviceKernel *deviceKernel, kernel eosartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	if len(inputs) != 2 {
 		return nil, fmt.Errorf("kernel %q expected 2 inputs for element-wise launch, got %d", kernel.Name, len(inputs))
 	}
@@ -2150,7 +2150,7 @@ func (rt *deviceRuntime) runElementWiseKernel(deviceKernel *deviceKernel, kernel
 	return []*backend.Tensor{newOutputTensor(kernel, append([]int(nil), lhs.Shape...), outHost)}, nil
 }
 
-func (rt *deviceRuntime) runUnaryKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runUnaryKernel(deviceKernel *deviceKernel, kernel eosartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	if len(inputs) != 1 {
 		return nil, fmt.Errorf("kernel %q expected 1 input for unary launch, got %d", kernel.Name, len(inputs))
 	}
@@ -2182,7 +2182,7 @@ func (rt *deviceRuntime) runUnaryKernel(deviceKernel *deviceKernel, kernel manta
 	return []*backend.Tensor{newOutputTensor(kernel, append([]int(nil), in.Shape...), outHost)}, nil
 }
 
-func (rt *deviceRuntime) runScoreKernel(deviceKernel *deviceKernel, kernel mantaartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+func (rt *deviceRuntime) runScoreKernel(deviceKernel *deviceKernel, kernel eosartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
 	if len(inputs) != 2 {
 		return nil, fmt.Errorf("kernel %q expected 2 inputs for score launch, got %d", kernel.Name, len(inputs))
 	}
@@ -2222,7 +2222,7 @@ func (rt *deviceRuntime) runScoreKernel(deviceKernel *deviceKernel, kernel manta
 	return []*backend.Tensor{newOutputTensor(kernel, []int{rows}, outHost)}, nil
 }
 
-func classifyCUDAKernel(kernel mantaartifact.Kernel) cudaShapeKind {
+func classifyCUDAKernel(kernel eosartifact.Kernel) cudaShapeKind {
 	if len(kernel.Body) < 2 {
 		return cudaShapeUnsupported
 	}
@@ -2240,7 +2240,7 @@ func classifyCUDAKernel(kernel mantaartifact.Kernel) cudaShapeKind {
 	}
 }
 
-func newOutputTensor(kernel mantaartifact.Kernel, shape []int, data []float32) *backend.Tensor {
+func newOutputTensor(kernel eosartifact.Kernel, shape []int, data []float32) *backend.Tensor {
 	dtype := "f16"
 	if len(kernel.Outputs) > 0 && kernel.Outputs[0].Type.Tensor != nil && kernel.Outputs[0].Type.Tensor.DType != "" {
 		dtype = kernel.Outputs[0].Type.Tensor.DType
@@ -2257,7 +2257,7 @@ func (rt *deviceRuntime) allocFloat32(elements int) (C.CUdeviceptr, error) {
 	var ptr C.CUdeviceptr
 	var errStr *C.char
 	bytes := C.size_t(elements * 4)
-	if C.mantaCudaMemAlloc(rt.ptr, &ptr, bytes, &errStr) != 0 {
+	if C.eosCudaMemAlloc(rt.ptr, &ptr, bytes, &errStr) != 0 {
 		return 0, cStringError(errStr)
 	}
 	return ptr, nil
@@ -2317,7 +2317,7 @@ func (rt *deviceRuntime) copyFloat32ToBuffer(ptr C.CUdeviceptr, data []float32) 
 		src = unsafe.Pointer(&data[0])
 	}
 	var errStr *C.char
-	if C.mantaCudaMemcpyHtoD(rt.ptr, ptr, src, C.size_t(len(data)*4), &errStr) != 0 {
+	if C.eosCudaMemcpyHtoD(rt.ptr, ptr, src, C.size_t(len(data)*4), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -2328,7 +2328,7 @@ func (rt *deviceRuntime) downloadFloat32(dst []float32, src C.CUdeviceptr) error
 		return nil
 	}
 	var errStr *C.char
-	if C.mantaCudaMemcpyDtoH(rt.ptr, unsafe.Pointer(&dst[0]), src, C.size_t(len(dst)*4), &errStr) != 0 {
+	if C.eosCudaMemcpyDtoH(rt.ptr, unsafe.Pointer(&dst[0]), src, C.size_t(len(dst)*4), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -2337,7 +2337,7 @@ func (rt *deviceRuntime) downloadFloat32(dst []float32, src C.CUdeviceptr) error
 func (rt *deviceRuntime) readFloat32At(src C.CUdeviceptr, elementIndex int) (float32, error) {
 	var out C.float
 	var errStr *C.char
-	if C.mantaCudaReadFloat32(rt.ptr, src, C.int(elementIndex), &out, &errStr) != 0 {
+	if C.eosCudaReadFloat32(rt.ptr, src, C.int(elementIndex), &out, &errStr) != 0 {
 		return 0, cStringError(errStr)
 	}
 	return float32(out), nil
@@ -2349,7 +2349,7 @@ func (rt *deviceRuntime) maxAbsFloat32(src C.CUdeviceptr, elements int) (float32
 	}
 	var index C.int
 	var errStr *C.char
-	if C.mantaCudaBlasIsamax(rt.ptr, src, C.int(elements), &index, &errStr) != 0 {
+	if C.eosCudaBlasIsamax(rt.ptr, src, C.int(elements), &index, &errStr) != 0 {
 		return 0, cStringError(errStr)
 	}
 	if index <= 0 {
@@ -2557,7 +2557,7 @@ func (rt *deviceRuntime) ensureCrossEntropyKernel() (*auxKernel, error) {
 	return kernel, nil
 }
 
-func (rt *deviceRuntime) runGDNStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, inverse bool) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runGDNStep(inputs []*backend.Tensor, outputType eosartifact.ValueType, inverse bool) (backend.StepDispatchResult, error) {
 	if rt == nil || rt.ptr == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
 	}
@@ -2630,7 +2630,7 @@ func (rt *deviceRuntime) runGDNStep(inputs []*backend.Tensor, outputType mantaar
 	}, nil
 }
 
-func (rt *deviceRuntime) runConv2DStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaConv2DConfig) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runConv2DStep(inputs []*backend.Tensor, outputType eosartifact.ValueType, cfg cudaConv2DConfig) (backend.StepDispatchResult, error) {
 	if rt == nil || rt.ptr == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
 	}
@@ -2681,7 +2681,7 @@ func (rt *deviceRuntime) runConv2DStep(inputs []*backend.Tensor, outputType mant
 	return cudaConvStepResult(outputType, "__builtin_cuda_conv2d", "conv2d", outShape, outHost, cfgMetadata(cfg)), nil
 }
 
-func (rt *deviceRuntime) runConv2DTransposeStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaConv2DTransposeConfig) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runConv2DTransposeStep(inputs []*backend.Tensor, outputType eosartifact.ValueType, cfg cudaConv2DTransposeConfig) (backend.StepDispatchResult, error) {
 	if rt == nil || rt.ptr == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
 	}
@@ -2732,7 +2732,7 @@ func (rt *deviceRuntime) runConv2DTransposeStep(inputs []*backend.Tensor, output
 	return cudaConvStepResult(outputType, "__builtin_cuda_conv2d_transpose", "conv2d_transpose", outShape, outHost, cfgTransposeMetadata(cfg)), nil
 }
 
-func (rt *deviceRuntime) runTurboQEncodeStep(inputs []*backend.Tensor, _ mantaartifact.ValueType, cfg cudaTurboQConfig) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runTurboQEncodeStep(inputs []*backend.Tensor, _ eosartifact.ValueType, cfg cudaTurboQConfig) (backend.StepDispatchResult, error) {
 	if rt == nil || rt.ptr == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
 	}
@@ -2797,7 +2797,7 @@ func (rt *deviceRuntime) runTurboQEncodeStep(inputs []*backend.Tensor, _ mantaar
 	return turboQEncodeStepResult(cfg, coordsShape, coordsHost, normShape, normsHost), nil
 }
 
-func (rt *deviceRuntime) runTurboQDecodeStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaTurboQConfig) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runTurboQDecodeStep(inputs []*backend.Tensor, outputType eosartifact.ValueType, cfg cudaTurboQConfig) (backend.StepDispatchResult, error) {
 	if rt == nil || rt.ptr == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
 	}
@@ -2856,7 +2856,7 @@ func (rt *deviceRuntime) runTurboQDecodeStep(inputs []*backend.Tensor, outputTyp
 	return turboQDecodeStepResult(outputType, cfg, outShape, outHost), nil
 }
 
-func (rt *deviceRuntime) runSparseAttentionStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaSparseAttentionConfig) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runSparseAttentionStep(inputs []*backend.Tensor, outputType eosartifact.ValueType, cfg cudaSparseAttentionConfig) (backend.StepDispatchResult, error) {
 	if rt == nil || rt.ptr == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
 	}
@@ -2904,7 +2904,7 @@ func (rt *deviceRuntime) runSparseAttentionStep(inputs []*backend.Tensor, output
 	return sparseAttentionStepResult(outputType, cfg, outShape, outHost), nil
 }
 
-func (rt *deviceRuntime) runTurboSparseAttentionStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, cfg cudaTurboSparseAttentionConfig) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runTurboSparseAttentionStep(inputs []*backend.Tensor, outputType eosartifact.ValueType, cfg cudaTurboSparseAttentionConfig) (backend.StepDispatchResult, error) {
 	if rt == nil || rt.ptr == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
 	}
@@ -2997,7 +2997,7 @@ func (rt *deviceRuntime) runTurboSparseAttentionStep(inputs []*backend.Tensor, o
 	return turboSparseAttentionStepResult(outputType, cfg, outShape, outHost), nil
 }
 
-func (rt *deviceRuntime) runMSELossStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMSELossStep(inputs []*backend.Tensor, outputType eosartifact.ValueType) (backend.StepDispatchResult, error) {
 	if rt == nil || rt.ptr == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
 	}
@@ -3043,7 +3043,7 @@ func (rt *deviceRuntime) runMSELossStep(inputs []*backend.Tensor, outputType man
 	return cudaScalarStepResult(outputType, "__builtin_cuda_mse_loss", "mse_loss", "cuda_reduction", value), nil
 }
 
-func (rt *deviceRuntime) runMSSSIMLossStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMSSSIMLossStep(inputs []*backend.Tensor, outputType eosartifact.ValueType) (backend.StepDispatchResult, error) {
 	if rt == nil || rt.ptr == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
 	}
@@ -3097,7 +3097,7 @@ func (rt *deviceRuntime) runMSSSIMLossStep(inputs []*backend.Tensor, outputType 
 	return cudaScalarStepResult(outputType, "__builtin_cuda_ms_ssim_loss", "ms_ssim_loss", "cuda_reduction", value), nil
 }
 
-func (rt *deviceRuntime) runScalarAddStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runScalarAddStep(inputs []*backend.Tensor, outputType eosartifact.ValueType) (backend.StepDispatchResult, error) {
 	if rt == nil || rt.ptr == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
 	}
@@ -3135,7 +3135,7 @@ func (rt *deviceRuntime) runScalarAddStep(inputs []*backend.Tensor, outputType m
 	return cudaScalarStepResult(outputType, "__builtin_cuda_scalar_add", "scalar_add", "cuda_scalar", out[0]), nil
 }
 
-func (rt *deviceRuntime) runRDLossStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, lambda float32) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runRDLossStep(inputs []*backend.Tensor, outputType eosartifact.ValueType, lambda float32) (backend.StepDispatchResult, error) {
 	if rt == nil || rt.ptr == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
 	}
@@ -3176,7 +3176,7 @@ func (rt *deviceRuntime) runRDLossStep(inputs []*backend.Tensor, outputType mant
 	return result, nil
 }
 
-func (rt *deviceRuntime) runCrossEntropyStep(inputs []*backend.Tensor, outputType mantaartifact.ValueType, plan cudaCrossEntropyPlan) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runCrossEntropyStep(inputs []*backend.Tensor, outputType eosartifact.ValueType, plan cudaCrossEntropyPlan) (backend.StepDispatchResult, error) {
 	if rt == nil || rt.ptr == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda runtime is not initialized")
 	}
@@ -3274,7 +3274,7 @@ func (rt *deviceRuntime) quantizeBufferInPlace(ptr C.CUdeviceptr, elements, bits
 	block := uint(128)
 	grid := uint((elements + int(block) - 1) / int(block))
 	var errStr *C.char
-	if C.mantaCudaLaunchQuantizeInPlace(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), ptr, C.int(elements), C.float(levels), C.float(scale), &errStr) != 0 {
+	if C.eosCudaLaunchQuantizeInPlace(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), ptr, C.int(elements), C.float(levels), C.float(scale), &errStr) != 0 {
 		return false, cStringError(errStr)
 	}
 	return true, nil
@@ -3299,23 +3299,23 @@ func (rt *deviceRuntime) freeBuffer(ptr C.CUdeviceptr) error {
 		return nil
 	}
 	var errStr *C.char
-	if C.mantaCudaMemFree(rt.ptr, ptr, &errStr) != 0 {
+	if C.eosCudaMemFree(rt.ptr, ptr, &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
 }
 
-func (rt *deviceRuntime) launchRowWise(kernel *C.MantaCudaKernel, grid, block C.uint, in0, out0 C.CUdeviceptr, rows, cols C.int) error {
+func (rt *deviceRuntime) launchRowWise(kernel *C.EosCudaKernel, grid, block C.uint, in0, out0 C.CUdeviceptr, rows, cols C.int) error {
 	var errStr *C.char
-	if C.mantaCudaLaunchRowWise(rt.ptr, kernel, grid, block, in0, out0, rows, cols, &errStr) != 0 {
+	if C.eosCudaLaunchRowWise(rt.ptr, kernel, grid, block, in0, out0, rows, cols, &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
 }
 
-func (rt *deviceRuntime) launchElementWise(kernel *C.MantaCudaKernel, grid, block C.uint, lhs, rhs, out0 C.CUdeviceptr, elements C.int) error {
+func (rt *deviceRuntime) launchElementWise(kernel *C.EosCudaKernel, grid, block C.uint, lhs, rhs, out0 C.CUdeviceptr, elements C.int) error {
 	var errStr *C.char
-	if C.mantaCudaLaunchElementWise(rt.ptr, kernel, grid, block, lhs, rhs, out0, elements, &errStr) != 0 {
+	if C.eosCudaLaunchElementWise(rt.ptr, kernel, grid, block, lhs, rhs, out0, elements, &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3333,7 +3333,7 @@ func (rt *deviceRuntime) launchGDN(kernel *auxKernel, grid, block uint, input, b
 		return fmt.Errorf("cuda gdn kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchGDN(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), input, beta, gamma, out0, C.int(elements), C.int(channels), C.int(height), C.int(width), C.int(inverse), &errStr) != 0 {
+	if C.eosCudaLaunchGDN(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), input, beta, gamma, out0, C.int(elements), C.int(channels), C.int(height), C.int(width), C.int(inverse), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3348,7 +3348,7 @@ func (rt *deviceRuntime) launchConv2D(kernel *auxKernel, grid, block uint, input
 		hasBias = 1
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchConv2D(
+	if C.eosCudaLaunchConv2D(
 		rt.ptr,
 		kernel.ptr,
 		C.uint(grid),
@@ -3391,7 +3391,7 @@ func (rt *deviceRuntime) launchConv2DTranspose(kernel *auxKernel, grid, block ui
 		hasBias = 1
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchConv2DTranspose(
+	if C.eosCudaLaunchConv2DTranspose(
 		rt.ptr,
 		kernel.ptr,
 		C.uint(grid),
@@ -3433,7 +3433,7 @@ func (rt *deviceRuntime) launchTurboQEncode(kernel *auxKernel, grid, block uint,
 		return fmt.Errorf("cuda turboquant spec is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchTurboQEncode(
+	if C.eosCudaLaunchTurboQEncode(
 		rt.ptr,
 		kernel.ptr,
 		C.uint(grid),
@@ -3468,7 +3468,7 @@ func (rt *deviceRuntime) launchTurboQDecode(kernel *auxKernel, grid, block uint,
 		return fmt.Errorf("cuda turboquant spec is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchTurboQDecode(
+	if C.eosCudaLaunchTurboQDecode(
 		rt.ptr,
 		kernel.ptr,
 		C.uint(grid),
@@ -3499,7 +3499,7 @@ func (rt *deviceRuntime) launchSparseAttention(kernel *auxKernel, grid, block ui
 		return fmt.Errorf("cuda sparse_attention kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchSparseAttention(
+	if C.eosCudaLaunchSparseAttention(
 		rt.ptr,
 		kernel.ptr,
 		C.uint(grid),
@@ -3531,7 +3531,7 @@ func (rt *deviceRuntime) launchTurboSparseAttention(kernel *auxKernel, grid, blo
 		return fmt.Errorf("cuda turbo_sparse_attention specs are not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchTurboSparseAttention(
+	if C.eosCudaLaunchTurboSparseAttention(
 		rt.ptr,
 		kernel.ptr,
 		C.uint(grid),
@@ -3577,7 +3577,7 @@ func (rt *deviceRuntime) launchMSEPartials(kernel *auxKernel, grid, block uint, 
 		return fmt.Errorf("cuda mse_loss kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchMSEPartials(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), lhs, rhs, partials, C.int(elements), &errStr) != 0 {
+	if C.eosCudaLaunchMSEPartials(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), lhs, rhs, partials, C.int(elements), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3588,7 +3588,7 @@ func (rt *deviceRuntime) launchMSSSIMPartials(kernel *auxKernel, grid, block uin
 		return fmt.Errorf("cuda ms_ssim_loss kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchMSSSIMPartials(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), lhs, rhs, partials, C.int(elements), &errStr) != 0 {
+	if C.eosCudaLaunchMSSSIMPartials(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), lhs, rhs, partials, C.int(elements), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3599,7 +3599,7 @@ func (rt *deviceRuntime) launchScalarSum(kernel *auxKernel, grid, block uint, va
 		return fmt.Errorf("cuda scalar_add kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchScalarSum(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), values, out0, C.int(count), &errStr) != 0 {
+	if C.eosCudaLaunchScalarSum(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), values, out0, C.int(count), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3610,7 +3610,7 @@ func (rt *deviceRuntime) launchRDLoss(kernel *auxKernel, grid, block uint, disto
 		return fmt.Errorf("cuda rate_distortion_loss kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchRDLoss(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), distortion, rate, out0, C.float(lambda), &errStr) != 0 {
+	if C.eosCudaLaunchRDLoss(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), distortion, rate, out0, C.float(lambda), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3621,7 +3621,7 @@ func (rt *deviceRuntime) launchCrossEntropyPartials(kernel *auxKernel, grid, blo
 		return fmt.Errorf("cuda cross_entropy kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchCrossEntropyPartials(
+	if C.eosCudaLaunchCrossEntropyPartials(
 		rt.ptr,
 		kernel.ptr,
 		C.uint(grid),
@@ -3652,17 +3652,17 @@ func (rt *deviceRuntime) launchCrossEntropyPartials(kernel *auxKernel, grid, blo
 	return nil
 }
 
-func (rt *deviceRuntime) launchUnary(kernel *C.MantaCudaKernel, grid, block C.uint, in0, out0 C.CUdeviceptr, elements C.int) error {
+func (rt *deviceRuntime) launchUnary(kernel *C.EosCudaKernel, grid, block C.uint, in0, out0 C.CUdeviceptr, elements C.int) error {
 	var errStr *C.char
-	if C.mantaCudaLaunchUnary(rt.ptr, kernel, grid, block, in0, out0, elements, &errStr) != 0 {
+	if C.eosCudaLaunchUnary(rt.ptr, kernel, grid, block, in0, out0, elements, &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
 }
 
-func (rt *deviceRuntime) launchScore(kernel *C.MantaCudaKernel, grid, block C.uint, query, docs, out0 C.CUdeviceptr, rows, cols C.int) error {
+func (rt *deviceRuntime) launchScore(kernel *C.EosCudaKernel, grid, block C.uint, query, docs, out0 C.CUdeviceptr, rows, cols C.int) error {
 	var errStr *C.char
-	if C.mantaCudaLaunchScore(rt.ptr, kernel, grid, block, query, docs, out0, rows, cols, &errStr) != 0 {
+	if C.eosCudaLaunchScore(rt.ptr, kernel, grid, block, query, docs, out0, rows, cols, &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3673,7 +3673,7 @@ func (rt *deviceRuntime) launchOptimizerUpdate(kernel *auxKernel, grid, block ui
 		return fmt.Errorf("cuda optimizer kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchOptimizerUpdate(
+	if C.eosCudaLaunchOptimizerUpdate(
 		rt.ptr,
 		kernel.ptr,
 		C.uint(grid),
@@ -3704,7 +3704,7 @@ func (rt *deviceRuntime) launchAuxSoftmaxBackwardRows(kernel *auxKernel, grid, b
 		return fmt.Errorf("cuda auxiliary softmax backward kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchSoftmaxBackwardRows(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), gradOut, probs, out0, C.int(rows), C.int(cols), &errStr) != 0 {
+	if C.eosCudaLaunchSoftmaxBackwardRows(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), gradOut, probs, out0, C.int(rows), C.int(cols), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3717,7 +3717,7 @@ func (rt *deviceRuntime) launchAuxSoftmaxForwardRows(kernel *auxKernel, grid, bl
 		return fmt.Errorf("cuda auxiliary softmax forward kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchSoftmaxForwardRows(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), data, C.int(rows), C.int(cols), &errStr) != 0 {
+	if C.eosCudaLaunchSoftmaxForwardRows(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), data, C.int(rows), C.int(cols), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3729,7 +3729,7 @@ func (rt *deviceRuntime) launchAuxGeluForward(kernel *auxKernel, grid, block uin
 		return fmt.Errorf("cuda auxiliary gelu forward kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchGeluForward(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), src, dst, C.int(elements), &errStr) != 0 {
+	if C.eosCudaLaunchGeluForward(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), src, dst, C.int(elements), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3741,7 +3741,7 @@ func (rt *deviceRuntime) launchAuxLayerNormForwardRows(kernel *auxKernel, grid, 
 		return fmt.Errorf("cuda auxiliary layernorm forward kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchLayerNormForwardRows(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), src, dst, C.int(rows), C.int(cols), &errStr) != 0 {
+	if C.eosCudaLaunchLayerNormForwardRows(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), src, dst, C.int(rows), C.int(cols), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3753,7 +3753,7 @@ func (rt *deviceRuntime) launchAuxResidualAdd(kernel *auxKernel, grid, block uin
 		return fmt.Errorf("cuda auxiliary residual add kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchResidualAdd(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), a, b, out0, C.int(elements), &errStr) != 0 {
+	if C.eosCudaLaunchResidualAdd(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), a, b, out0, C.int(elements), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3764,7 +3764,7 @@ func (rt *deviceRuntime) launchAuxLayerNormBackwardRows(kernel *auxKernel, grid,
 		return fmt.Errorf("cuda auxiliary layernorm backward kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchLayerNormBackwardRows(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), gradOut, normalized, pre, out0, C.int(rows), C.int(cols), &errStr) != 0 {
+	if C.eosCudaLaunchLayerNormBackwardRows(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), gradOut, normalized, pre, out0, C.int(rows), C.int(cols), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3775,7 +3775,7 @@ func (rt *deviceRuntime) launchAuxContrastiveScores(kernel *auxKernel, grid, blo
 		return fmt.Errorf("cuda auxiliary contrastive score kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchContrastiveScores(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), query, positive, queryNorms, positiveNorms, scores, C.int(queryRows), C.int(candidateRows), C.int(width), &errStr) != 0 {
+	if C.eosCudaLaunchContrastiveScores(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), query, positive, queryNorms, positiveNorms, scores, C.int(queryRows), C.int(candidateRows), C.int(width), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3786,7 +3786,7 @@ func (rt *deviceRuntime) launchAuxInfoNCEScales(kernel *auxKernel, grid, block u
 		return fmt.Errorf("cuda auxiliary infonce scale kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchInfoNCEScales(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), scores, targetIndexes, scales, rowLoss, rowScore, C.int(queryRows), C.int(candidateRows), C.float(temperature), &errStr) != 0 {
+	if C.eosCudaLaunchInfoNCEScales(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), scores, targetIndexes, scales, rowLoss, rowScore, C.int(queryRows), C.int(candidateRows), C.float(temperature), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3797,7 +3797,7 @@ func (rt *deviceRuntime) launchAuxContrastiveGrad(kernel *auxKernel, grid, block
 		return fmt.Errorf("cuda auxiliary contrastive grad kernel is not initialized")
 	}
 	var errStr *C.char
-	if C.mantaCudaLaunchContrastiveGrad(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), query, positive, queryNorms, positiveNorms, scores, scales, queryGrads, positiveGrads, C.int(queryRows), C.int(candidateRows), C.int(width), &errStr) != 0 {
+	if C.eosCudaLaunchContrastiveGrad(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), query, positive, queryNorms, positiveNorms, scores, scales, queryGrads, positiveGrads, C.int(queryRows), C.int(candidateRows), C.int(width), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3817,7 +3817,7 @@ func (rt *deviceRuntime) matMulCublasWithBeta(lhs, rhs, out0 C.CUdeviceptr, lhsR
 	if transposeRight {
 		right = 1
 	}
-	if C.mantaCudaMatMulCublasWithBeta(rt.ptr, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, left, right, C.float(beta), &errStr) != 0 {
+	if C.eosCudaMatMulCublasWithBeta(rt.ptr, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, left, right, C.float(beta), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3833,7 +3833,7 @@ func (rt *deviceRuntime) matMulCublasWithBetaNoSync(lhs, rhs, out0 C.CUdeviceptr
 	if transposeRight {
 		right = 1
 	}
-	if C.mantaCudaMatMulCublasWithBetaNoSync(rt.ptr, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, left, right, C.float(beta), &errStr) != 0 {
+	if C.eosCudaMatMulCublasWithBetaNoSync(rt.ptr, lhs, rhs, out0, lhsRows, lhsCols, rhsRows, rhsCols, left, right, C.float(beta), &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3849,7 +3849,7 @@ func (rt *deviceRuntime) matMulCublasStridedBatched(lhs, rhs, out0 C.CUdeviceptr
 	if transposeRight {
 		right = 1
 	}
-	if C.mantaCudaMatMulCublasStridedBatched(rt.ptr, lhs, rhs, out0, batches, lhsRows, lhsCols, rhsRows, rhsCols, left, right, &errStr) != 0 {
+	if C.eosCudaMatMulCublasStridedBatched(rt.ptr, lhs, rhs, out0, batches, lhsRows, lhsCols, rhsRows, rhsCols, left, right, &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3860,19 +3860,19 @@ func cStringValue(value *C.char) string {
 		return ""
 	}
 	out := C.GoString(value)
-	C.mantaCudaFreeCString(value)
+	C.eosCudaFreeCString(value)
 	return out
 }
 
-// mantaCudaGraphEnabled gates CUDA-graph capture/replay of stable, repeated
-// GEMM regions. Read once from MANTA_CUDA_GRAPH=1 so the default path is
+// eosCudaGraphEnabled gates CUDA-graph capture/replay of stable, repeated
+// GEMM regions. Read once from EOS_CUDA_GRAPH=1 so the default path is
 // unchanged. Capture/replay requires stable device pointers (resident weights
 // + named scratch); see project_manta_cuda_graph.
-var mantaCudaGraphEnabled = os.Getenv("MANTA_CUDA_GRAPH") == "1"
+var eosCudaGraphEnabled = os.Getenv("EOS_CUDA_GRAPH") == "1"
 
 // cudaGraph wraps an instantiated, replayable CUDA graph.
 type cudaGraph struct {
-	ptr *C.MantaCudaGraph
+	ptr *C.EosCudaGraph
 }
 
 // beginCapture puts rt's stream into capture mode. Warm up cuBLAS workspace
@@ -3880,7 +3880,7 @@ type cudaGraph struct {
 // capture.
 func (rt *deviceRuntime) beginCapture() error {
 	var errStr *C.char
-	if C.mantaCudaBeginCapture(rt.ptr, &errStr) != 0 {
+	if C.eosCudaBeginCapture(rt.ptr, &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3888,9 +3888,9 @@ func (rt *deviceRuntime) beginCapture() error {
 
 // endCapture ends capture and instantiates the recorded graph.
 func (rt *deviceRuntime) endCapture() (*cudaGraph, error) {
-	var g *C.MantaCudaGraph
+	var g *C.EosCudaGraph
 	var errStr *C.char
-	if C.mantaCudaEndCapture(rt.ptr, &g, &errStr) != 0 {
+	if C.eosCudaEndCapture(rt.ptr, &g, &errStr) != 0 {
 		return nil, cStringError(errStr)
 	}
 	return &cudaGraph{ptr: g}, nil
@@ -3902,7 +3902,7 @@ func (rt *deviceRuntime) launchGraph(g *cudaGraph) error {
 		return errors.New("cuda: launch of nil graph")
 	}
 	var errStr *C.char
-	if C.mantaCudaGraphLaunch(rt.ptr, g.ptr, &errStr) != 0 {
+	if C.eosCudaGraphLaunch(rt.ptr, g.ptr, &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -3912,7 +3912,7 @@ func (g *cudaGraph) destroy() {
 	if g == nil || g.ptr == nil {
 		return
 	}
-	C.mantaCudaGraphDestroy(g.ptr)
+	C.eosCudaGraphDestroy(g.ptr)
 	g.ptr = nil
 }
 
@@ -4329,13 +4329,13 @@ func cStringError(value *C.char) error {
 	if value == nil {
 		return fmt.Errorf("cuda error")
 	}
-	defer C.mantaCudaFreeCString(value)
+	defer C.eosCudaFreeCString(value)
 	return errors.New(C.GoString(value))
 }
 
 func (rt *deviceRuntime) synchronize() error {
 	var errStr *C.char
-	if C.mantaCudaSynchronize(rt.ptr, &errStr) != 0 {
+	if C.eosCudaSynchronize(rt.ptr, &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil
@@ -4357,7 +4357,7 @@ func cudaEnv(name string) string {
 	return ""
 }
 
-func (rt *deviceRuntime) runMatMul(inputs []*backend.Tensor, outputType mantaartifact.ValueType) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMul(inputs []*backend.Tensor, outputType eosartifact.ValueType) (backend.StepDispatchResult, error) {
 	return rt.runMatMulWithTranspose(inputs, outputType, false, false)
 }
 
@@ -4446,7 +4446,7 @@ func (rt *deviceRuntime) unbindMatMulRight(name string) error {
 	return nil
 }
 
-func (rt *deviceRuntime) runMatMulWithBoundRights(lhs *backend.Tensor, rightNames []string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMulWithBoundRights(lhs *backend.Tensor, rightNames []string, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
 	if lhs == nil {
 		return nil, fmt.Errorf("cuda matmul lhs is nil")
 	}
@@ -4548,7 +4548,7 @@ func (rt *deviceRuntime) runMatMulWithBoundRights(lhs *backend.Tensor, rightName
 		return nil
 	}
 
-	if mantaCudaGraphEnabled {
+	if eosCudaGraphEnabled {
 		// Key the captured graph by the exact operands (device pointers) and
 		// shapes it records, so any scratch reallocation or shape change is a
 		// natural cache miss that forces a fresh capture.
@@ -4594,7 +4594,7 @@ func (rt *deviceRuntime) runMatMulWithBoundRights(lhs *backend.Tensor, rightName
 	return results, nil
 }
 
-func (rt *deviceRuntime) runAccumulatedMatMulsWithBoundRights(lhsInputs []*backend.Tensor, rightNames []string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runAccumulatedMatMulsWithBoundRights(lhsInputs []*backend.Tensor, rightNames []string, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	if len(lhsInputs) == 0 {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda accumulated matmul requires at least one lhs input")
 	}
@@ -4678,7 +4678,7 @@ func (rt *deviceRuntime) runAccumulatedMatMulsWithBoundRights(lhsInputs []*backe
 	if err != nil {
 		return backend.StepDispatchResult{}, err
 	}
-	singleSync := !cudaEnvFlagEnabled("MANTA_CUDA_DISABLE_ACCUMULATED_MATMUL_SINGLE_SYNC")
+	singleSync := !cudaEnvFlagEnabled("EOS_CUDA_DISABLE_ACCUMULATED_MATMUL_SINGLE_SYNC")
 	bindings := make([]string, len(plans))
 	for i, plan := range plans {
 		runUploadedBytes += plan.uploadedBytes
@@ -4733,7 +4733,7 @@ func (rt *deviceRuntime) runAccumulatedMatMulsWithBoundRights(lhsInputs []*backe
 	}, nil
 }
 
-func (rt *deviceRuntime) runMatMulsWithSharedLeft(lhs *backend.Tensor, rhsInputs []*backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMulsWithSharedLeft(lhs *backend.Tensor, rhsInputs []*backend.Tensor, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) ([]backend.StepDispatchResult, error) {
 	if lhs == nil {
 		return nil, fmt.Errorf("cuda matmul lhs is nil")
 	}
@@ -4882,7 +4882,7 @@ func (rt *deviceRuntime) runMatMulsWithSharedLeft(lhs *backend.Tensor, rhsInputs
 	return results, nil
 }
 
-func (rt *deviceRuntime) runMatMulWithBoundRight(lhs *backend.Tensor, rightName string, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMulWithBoundRight(lhs *backend.Tensor, rightName string, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	if lhs == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda matmul lhs is nil")
 	}
@@ -4946,7 +4946,7 @@ func (rt *deviceRuntime) runMatMulWithBoundRight(lhs *backend.Tensor, rightName 
 	}, nil
 }
 
-func (rt *deviceRuntime) runMatMulWithBoundLeft(leftName string, rhs *backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMulWithBoundLeft(leftName string, rhs *backend.Tensor, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	if rhs == nil {
 		return backend.StepDispatchResult{}, fmt.Errorf("cuda matmul rhs is nil")
 	}
@@ -5010,7 +5010,7 @@ func (rt *deviceRuntime) runMatMulWithBoundLeft(leftName string, rhs *backend.Te
 	}, nil
 }
 
-func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, outputType mantaartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
+func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) (backend.StepDispatchResult, error) {
 	if len(inputs) != 2 {
 		return backend.StepDispatchResult{}, fmt.Errorf("matmul expects 2 inputs, got %d", len(inputs))
 	}
@@ -5100,7 +5100,7 @@ func (rt *deviceRuntime) runMatMulWithTranspose(inputs []*backend.Tensor, output
 func cudaBuiltinMatMulCompiledKernel() backend.CompiledKernel {
 	return backend.CompiledKernel{
 		Name:       "__builtin_matmul",
-		Backend:    mantaartifact.BackendCUDA,
+		Backend:    eosartifact.BackendCUDA,
 		Entry:      "cublas_sgemm",
 		Source:     "library:cublas_sgemm",
 		SourceHash: "library:cublas_sgemm",
@@ -5216,7 +5216,7 @@ func sameIntSlice(a, b []int) bool {
 	return true
 }
 
-func newStepOutputTensor(outputType mantaartifact.ValueType, shape []int, data []float32) *backend.Tensor {
+func newStepOutputTensor(outputType eosartifact.ValueType, shape []int, data []float32) *backend.Tensor {
 	dtype := "f16"
 	if outputType.Tensor != nil && outputType.Tensor.DType != "" {
 		dtype = outputType.Tensor.DType
@@ -5329,7 +5329,7 @@ func turboQEncodeStepResult(cfg cudaTurboQConfig, coordsShape []int, coords []fl
 	}
 }
 
-func turboQDecodeStepResult(outputType mantaartifact.ValueType, cfg cudaTurboQConfig, shape []int, data []float32) backend.StepDispatchResult {
+func turboQDecodeStepResult(outputType eosartifact.ValueType, cfg cudaTurboQConfig, shape []int, data []float32) backend.StepDispatchResult {
 	return backend.StepDispatchResult{
 		Outputs:      []*backend.Tensor{newStepOutputTensor(outputType, shape, data)},
 		VariantEntry: "__builtin_cuda_turboquant_decode",
@@ -5371,7 +5371,7 @@ func sparseAttentionOutputShape(cfg cudaSparseAttentionConfig) []int {
 	return []int{cfg.queryLen, cfg.valueDim}
 }
 
-func sparseAttentionStepResult(outputType mantaartifact.ValueType, cfg cudaSparseAttentionConfig, shape []int, data []float32) backend.StepDispatchResult {
+func sparseAttentionStepResult(outputType eosartifact.ValueType, cfg cudaSparseAttentionConfig, shape []int, data []float32) backend.StepDispatchResult {
 	plan := backend.PlanSparseAttention(backend.SparseAttentionPlanInput{
 		QueryLen: cfg.queryLen,
 		KeyLen:   cfg.keyLen,
@@ -5397,7 +5397,7 @@ func sparseAttentionStepResult(outputType mantaartifact.ValueType, cfg cudaSpars
 	}
 }
 
-func turboSparseAttentionStepResult(outputType mantaartifact.ValueType, cfg cudaTurboSparseAttentionConfig, shape []int, data []float32) backend.StepDispatchResult {
+func turboSparseAttentionStepResult(outputType eosartifact.ValueType, cfg cudaTurboSparseAttentionConfig, shape []int, data []float32) backend.StepDispatchResult {
 	plan := backend.PlanSparseAttention(backend.SparseAttentionPlanInput{
 		QueryLen:       cfg.sparse.queryLen,
 		KeyLen:         cfg.sparse.keyLen,
@@ -5438,7 +5438,7 @@ func turboSparseAttentionStepResult(outputType mantaartifact.ValueType, cfg cuda
 	return result
 }
 
-func cudaConvStepResult(outputType mantaartifact.ValueType, variant, op string, shape []int, data []float32, extra map[string]any) backend.StepDispatchResult {
+func cudaConvStepResult(outputType eosartifact.ValueType, variant, op string, shape []int, data []float32, extra map[string]any) backend.StepDispatchResult {
 	metadata := map[string]any{
 		"dispatch_mode":    "backend_step",
 		"device_execution": true,
@@ -5511,7 +5511,7 @@ func msSSIMLossFromMoments(sumA, sumB, sumAA, sumBB, sumAB float64, elements int
 	return loss
 }
 
-func cudaScalarStepResult(outputType mantaartifact.ValueType, variant, op, launchAPI string, value float32) backend.StepDispatchResult {
+func cudaScalarStepResult(outputType eosartifact.ValueType, variant, op, launchAPI string, value float32) backend.StepDispatchResult {
 	return backend.StepDispatchResult{
 		Outputs:      []*backend.Tensor{newStepOutputTensor(outputType, []int{1}, []float32{value})},
 		VariantEntry: variant,

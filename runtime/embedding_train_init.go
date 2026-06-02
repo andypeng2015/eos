@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"fmt"
@@ -6,8 +6,8 @@ import (
 	"math/rand"
 	"strconv"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 // EmbeddingTrainInitOptions controls training-package initialization from an artifact.
@@ -27,7 +27,7 @@ func InitializeEmbeddingTrainerPackage(artifactPath string, opts EmbeddingTrainI
 
 // InitializeEmbeddingTrainerPackageWithManifest initializes a training package from an explicit embedding manifest and trainer config.
 func InitializeEmbeddingTrainerPackageWithManifest(artifactPath string, manifest EmbeddingManifest, cfg EmbeddingTrainConfig, opts EmbeddingTrainInitOptions) (EmbeddingTrainPackagePaths, error) {
-	mod, err := mantaartifact.ReadFile(artifactPath)
+	mod, err := eosartifact.ReadFile(artifactPath)
 	if err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
@@ -50,7 +50,7 @@ func InitializeEmbeddingTrainerPackageWithManifest(artifactPath string, manifest
 	return trainer.WriteTrainingPackage(artifactPath)
 }
 
-func initializedTrainingWeights(mod *mantaartifact.Module, tokenizer TokenizerManifest, opts EmbeddingTrainInitOptions) (map[string]*backend.Tensor, error) {
+func initializedTrainingWeights(mod *eosartifact.Module, tokenizer TokenizerManifest, opts EmbeddingTrainInitOptions) (map[string]*backend.Tensor, error) {
 	if mod == nil {
 		return nil, fmt.Errorf("nil module")
 	}
@@ -61,7 +61,7 @@ func initializedTrainingWeights(mod *mantaartifact.Module, tokenizer TokenizerMa
 	rng := rand.New(rand.NewSource(seed))
 	weights := make(map[string]*backend.Tensor, len(mod.Params))
 	for _, param := range mod.Params {
-		if param.Type.Kind != mantaartifact.ValueTensor || param.Type.Tensor == nil {
+		if param.Type.Kind != eosartifact.ValueTensor || param.Type.Tensor == nil {
 			return nil, fmt.Errorf("param %q is not a tensor weight", param.Name)
 		}
 		shape, err := resolveTrainingInitShape(param.Type.Tensor.Shape, tokenizer, opts.ShapeSizes)

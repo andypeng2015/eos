@@ -34,18 +34,18 @@ func usage() {
 	fmt.Println(`Run a hard-negative manta-embed-v1 multi-seed candidate sweep.
 
 Required:
-  MANTA_TRAIN_JSONL=/path/to/train-pairs-or-train-hard-negatives.jsonl
-  MANTA_EVAL_JSONL=/path/to/eval.jsonl
-  MANTA_HARD_EVAL_JSONL=/path/to/hard-eval.jsonl
-  MANTA_THRESHOLDS_ENV=/path/to/thresholds.env
+  EOS_TRAIN_JSONL=/path/to/train-pairs-or-train-hard-negatives.jsonl
+  EOS_EVAL_JSONL=/path/to/eval.jsonl
+  EOS_HARD_EVAL_JSONL=/path/to/hard-eval.jsonl
+  EOS_THRESHOLDS_ENV=/path/to/thresholds.env
 
 Run:
-  MANTA_REPO_ROOT=$PWD ferrous-wheel run scripts/sweep_manta_embed_v1_candidates.fw
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/sweep_manta_embed_v1_candidates.fw
 
 Optional:
-  MANTA_SWEEP_SEEDS=1,2,3
-  MANTA_SWEEP_RUN_ROOT=$PWD/runs/manta-embed-v1-sweep-20260414
-  MANTA_HARD_NEGATIVES_PER_QUERY=1`)
+  EOS_SWEEP_SEEDS=1,2,3
+  EOS_SWEEP_RUN_ROOT=$PWD/runs/manta-embed-v1-sweep-20260414
+  EOS_HARD_NEGATIVES_PER_QUERY=1`)
 }
 
 func getenv(name string, fallback string) string {
@@ -80,7 +80,7 @@ func hasRepoRoot(dir string) bool {
 }
 
 func findRoot() (string, error) {
-	explicit := os.Getenv("MANTA_REPO_ROOT")
+	explicit := os.Getenv("EOS_REPO_ROOT")
 	if hasRepoRoot(explicit) {
 		return filepath.Abs(explicit)
 	}
@@ -93,19 +93,19 @@ func findRoot() (string, error) {
 	if hasRepoRoot(cwd) {
 		return filepath.Abs(cwd)
 	}
-	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
 }
 
 func prepareConfig(root string) (sweepConfig, error) {
-	for _, name := range []string{"MANTA_TRAIN_JSONL", "MANTA_EVAL_JSONL", "MANTA_HARD_EVAL_JSONL", "MANTA_THRESHOLDS_ENV"} {
+	for _, name := range []string{"EOS_TRAIN_JSONL", "EOS_EVAL_JSONL", "EOS_HARD_EVAL_JSONL", "EOS_THRESHOLDS_ENV"} {
 		value := os.Getenv(name)
 		guard value != "" else return sweepConfig{}, fmt.Errorf("%s is required", name)
 		_, err := os.Stat(value)
 		guard err == nil else return sweepConfig{}, fmt.Errorf("%s does not exist: %s", name, value)
 	}
-	seeds := splitList(getenv("MANTA_SWEEP_SEEDS", "1,2,3"))
-	guard len(seeds) > 0 else return sweepConfig{}, fmt.Errorf("MANTA_SWEEP_SEEDS is empty")
-	runRoot, err := filepath.Abs(getenv("MANTA_SWEEP_RUN_ROOT", filepath.Join(root, "runs", "manta-embed-v1-sweep-"+time.Now().UTC().Format("20060102T150405Z"))))
+	seeds := splitList(getenv("EOS_SWEEP_SEEDS", "1,2,3"))
+	guard len(seeds) > 0 else return sweepConfig{}, fmt.Errorf("EOS_SWEEP_SEEDS is empty")
+	runRoot, err := filepath.Abs(getenv("EOS_SWEEP_RUN_ROOT", filepath.Join(root, "runs", "manta-embed-v1-sweep-"+time.Now().UTC().Format("20060102T150405Z"))))
 	guard err == nil else return sweepConfig{}, err
 	err = os.MkdirAll(runRoot, 0o755)
 	guard err == nil else return sweepConfig{}, err
@@ -142,14 +142,14 @@ func runSeed(cfg sweepConfig, seed string) error {
 	cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
 	cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
 	cmd.Env = append(os.Environ(),
-		"MANTA_REPO_ROOT="+cfg.Root,
-		"MANTA_RUN_ROOT="+cfg.RunRoot,
-		"MANTA_RUN_ID="+runID,
-		"MANTA_INIT_SEED="+seed,
-		"MANTA_HARD_NEGATIVE_TRAIN=1",
-		"MANTA_PAIRWISE_TRAIN=0",
-		"MANTA_HARD_NEGATIVES_PER_QUERY="+getenv("MANTA_HARD_NEGATIVES_PER_QUERY", "1"),
-		"MANTA_RETRIEVAL_EVAL="+getenv("MANTA_RETRIEVAL_EVAL", "1"),
+		"EOS_REPO_ROOT="+cfg.Root,
+		"EOS_RUN_ROOT="+cfg.RunRoot,
+		"EOS_RUN_ID="+runID,
+		"EOS_INIT_SEED="+seed,
+		"EOS_HARD_NEGATIVE_TRAIN=1",
+		"EOS_PAIRWISE_TRAIN=0",
+		"EOS_HARD_NEGATIVES_PER_QUERY="+getenv("EOS_HARD_NEGATIVES_PER_QUERY", "1"),
+		"EOS_RETRIEVAL_EVAL="+getenv("EOS_RETRIEVAL_EVAL", "1"),
 	)
 	err = cmd.Run()
 	status := "pass"

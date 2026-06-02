@@ -6,8 +6,8 @@ import (
 	"math"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 func TestCUDAMirageScalarLossSteps(t *testing.T) {
@@ -83,7 +83,7 @@ func TestCUDACrossEntropyStepMatchesHostMirageLayouts(t *testing.T) {
 	outputType := scalarF32ValueType()
 	globalCodes := backend.NewTensorQ2([]int{4}, []float32{0, 1, 2, 3})
 	globalLogits := backend.NewTensorF32([]int{4}, []float32{0, 0.5, 1, -0.5})
-	globalStep := mantaartifact.Step{Kind: mantaartifact.StepCrossEntropy, Attributes: map[string]string{"bits": "2"}}
+	globalStep := eosartifact.Step{Kind: eosartifact.StepCrossEntropy, Attributes: map[string]string{"bits": "2"}}
 	globalPlan, ok := planBuiltinCrossEntropy(globalStep, []*backend.Tensor{globalCodes, globalLogits})
 	if !ok {
 		t.Fatal("global categorical cross entropy should be planned")
@@ -103,7 +103,7 @@ func TestCUDACrossEntropyStepMatchesHostMirageLayouts(t *testing.T) {
 			}
 		}
 	}
-	alphabetStep := mantaartifact.Step{Kind: mantaartifact.StepCrossEntropy, Attributes: map[string]string{"bits": "2", "logits_layout": "nchw_alphabet"}}
+	alphabetStep := eosartifact.Step{Kind: eosartifact.StepCrossEntropy, Attributes: map[string]string{"bits": "2", "logits_layout": "nchw_alphabet"}}
 	alphabetPlan, ok := planBuiltinCrossEntropy(alphabetStep, []*backend.Tensor{alphabetCodes, alphabetLogits})
 	if !ok {
 		t.Fatal("NCHW alphabet cross entropy should be planned")
@@ -121,7 +121,7 @@ func TestCUDACrossEntropyStepMatchesHostMirageLayouts(t *testing.T) {
 		0.6, -0.4, 0.1,
 		-0.3, 0.2, -0.2,
 	})
-	bitStep := mantaartifact.Step{Kind: mantaartifact.StepCrossEntropy, Attributes: map[string]string{"bits": "2", "factorization": "bit-plane", "logits_layout": "nchw_alphabet"}}
+	bitStep := eosartifact.Step{Kind: eosartifact.StepCrossEntropy, Attributes: map[string]string{"bits": "2", "factorization": "bit-plane", "logits_layout": "nchw_alphabet"}}
 	bitPlan, ok := planBuiltinCrossEntropy(bitStep, []*backend.Tensor{bitCodes, bitLogits})
 	if !ok {
 		t.Fatal("NCHW bit-plane cross entropy should be planned")
@@ -137,7 +137,7 @@ func TestCUDACrossEntropyStepMatchesHostMirageLayouts(t *testing.T) {
 		-1, 0, 1,
 		0.5, 1, -0.5,
 	})
-	normStep := mantaartifact.Step{Kind: mantaartifact.StepCrossEntropy, Attributes: map[string]string{"distribution": "log_normal", "sigma_parameter": "softplus"}}
+	normStep := eosartifact.Step{Kind: eosartifact.StepCrossEntropy, Attributes: map[string]string{"distribution": "log_normal", "sigma_parameter": "softplus"}}
 	normPlan, ok := planBuiltinCrossEntropy(normStep, []*backend.Tensor{normCodes, normParams})
 	if !ok {
 		t.Fatal("log-normal cross entropy should be planned")
@@ -149,10 +149,10 @@ func TestCUDACrossEntropyStepMatchesHostMirageLayouts(t *testing.T) {
 	assertScalarClose(t, norm.Outputs[0], expectedLogNormal(normCodes, normParams), 0.002)
 }
 
-func scalarF32ValueType() mantaartifact.ValueType {
-	return mantaartifact.ValueType{
-		Kind:   mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{DType: "f32"},
+func scalarF32ValueType() eosartifact.ValueType {
+	return eosartifact.ValueType{
+		Kind:   eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{DType: "f32"},
 	}
 }
 

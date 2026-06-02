@@ -82,57 +82,57 @@ func usage() {
 	fmt.Println(`Train and package a production candidate for manta-embed-v1.
 
 Required input mode, choose one:
-  MANTA_CORPUS=/path/to/corpus.txt
-  MANTA_TRAIN_JSONL=/path/to/train.jsonl MANTA_EVAL_JSONL=/path/to/eval.jsonl
+  EOS_CORPUS=/path/to/corpus.txt
+  EOS_TRAIN_JSONL=/path/to/train.jsonl EOS_EVAL_JSONL=/path/to/eval.jsonl
 
 Production holdout:
-  MANTA_HARD_EVAL_JSONL=/path/to/hard-eval.jsonl
-  MANTA_THRESHOLDS_ENV=/path/to/thresholds.env
+  EOS_HARD_EVAL_JSONL=/path/to/hard-eval.jsonl
+  EOS_THRESHOLDS_ENV=/path/to/thresholds.env
 
 The workflow refuses /tmp inputs and dirty repositories by default. Override only for
 local smoke checks:
-  MANTA_ALLOW_TMP=1 MANTA_ALLOW_DIRTY=1 MANTA_ALLOW_NO_HARD_EVAL=1
+  EOS_ALLOW_TMP=1 EOS_ALLOW_DIRTY=1 EOS_ALLOW_NO_HARD_EVAL=1
 
 Run:
-  MANTA_REPO_ROOT=$PWD ferrous-wheel run scripts/train_manta_embed_v1_candidate.fw
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/train_manta_embed_v1_candidate.fw
 
 Common knobs:
-  MANTA_REPO_ROOT=/path/to/manta
-  MANTA_RUN_ROOT=/data/manta/runs
-  MANTA_RUN_ID=manta-embed-v1-20260412
-  MANTA_ENCODER_REPEATS=2
-  MANTA_INITIAL_ARTIFACT=/path/to/previous-stage/manta-embed-v1.mll
-  MANTA_EPOCHS=3
-  MANTA_BATCH_SIZE=1024
-  MANTA_LR=0.005
-  MANTA_CONTRASTIVE_LOSS=infonce
-  MANTA_GROUPED_LOSS_WEIGHT=0.25
-  MANTA_TEMPERATURE=0.05
-  MANTA_SELECT_METRIC=mrr
-  MANTA_EVAL_EVERY_STEPS=0
-  MANTA_RESTORE_BEST=false
-  MANTA_PRETOKENIZE_JSONL=0
-  MANTA_NO_TOKENIZER=1
-  MANTA_PACKAGE_TOKENIZER=/path/to/tokenizer.mll
-  MANTA_PAIRWISE_TRAIN=1
-  MANTA_HARD_NEGATIVE_TRAIN=1
-  MANTA_HARD_NEGATIVES_PER_QUERY=1
-  MANTA_HARD_NEGATIVE_SOURCE_WEIGHTS=scifact=1,nfcorpus=2,fiqa=2
-  MANTA_TRAIN_ENABLE_FAST_GELU=1
-  MANTA_QUALITY_TARGET=retrieval
-  MANTA_GATE_BM25_BASELINE=1
-  MANTA_MIN_MRR=0.90
-  MANTA_MIN_TOP1=0.85
-  MANTA_MIN_TOP5=0.95
-  MANTA_MIN_TOP10=0.98
-  MANTA_MAX_MEAN_RANK=1.50
-  MANTA_MIN_AUC=0.70
-  MANTA_MIN_THRESHOLD_ACCURACY=0.65
-  MANTA_GATE_BM25_BASELINE=1
-  MANTA_MIN_TRAIN_PAIRS_PER_SEC=120000
-  MANTA_MAX_MATMUL_RUNS=400000
-  MANTA_MAX_MATMUL_RUN_UPLOAD_MB=950000
-  MANTA_MAX_MATMUL_RUN_DOWNLOAD_MB=485000`)
+  EOS_REPO_ROOT=/path/to/manta
+  EOS_RUN_ROOT=/data/manta/runs
+  EOS_RUN_ID=manta-embed-v1-20260412
+  EOS_ENCODER_REPEATS=2
+  EOS_INITIAL_ARTIFACT=/path/to/previous-stage/manta-embed-v1.mll
+  EOS_EPOCHS=3
+  EOS_BATCH_SIZE=1024
+  EOS_LR=0.005
+  EOS_CONTRASTIVE_LOSS=infonce
+  EOS_GROUPED_LOSS_WEIGHT=0.25
+  EOS_TEMPERATURE=0.05
+  EOS_SELECT_METRIC=mrr
+  EOS_EVAL_EVERY_STEPS=0
+  EOS_RESTORE_BEST=false
+  EOS_PRETOKENIZE_JSONL=0
+  EOS_NO_TOKENIZER=1
+  EOS_PACKAGE_TOKENIZER=/path/to/tokenizer.mll
+  EOS_PAIRWISE_TRAIN=1
+  EOS_HARD_NEGATIVE_TRAIN=1
+  EOS_HARD_NEGATIVES_PER_QUERY=1
+  EOS_HARD_NEGATIVE_SOURCE_WEIGHTS=scifact=1,nfcorpus=2,fiqa=2
+  EOS_TRAIN_ENABLE_FAST_GELU=1
+  EOS_QUALITY_TARGET=retrieval
+  EOS_GATE_BM25_BASELINE=1
+  EOS_MIN_MRR=0.90
+  EOS_MIN_TOP1=0.85
+  EOS_MIN_TOP5=0.95
+  EOS_MIN_TOP10=0.98
+  EOS_MAX_MEAN_RANK=1.50
+  EOS_MIN_AUC=0.70
+  EOS_MIN_THRESHOLD_ACCURACY=0.65
+  EOS_GATE_BM25_BASELINE=1
+  EOS_MIN_TRAIN_PAIRS_PER_SEC=120000
+  EOS_MAX_MATMUL_RUNS=400000
+  EOS_MAX_MATMUL_RUN_UPLOAD_MB=950000
+  EOS_MAX_MATMUL_RUN_DOWNLOAD_MB=485000`)
 }
 
 func getenv(name string, fallback string) string {
@@ -170,7 +170,7 @@ func hasRepoRoot(dir string) bool {
 }
 
 func findRoot() (string, error) {
-	let explicit = os.Getenv("MANTA_REPO_ROOT")
+	let explicit = os.Getenv("EOS_REPO_ROOT")
 	if hasRepoRoot(explicit) {
 		return filepath.Abs(explicit)
 	}
@@ -183,7 +183,7 @@ func findRoot() (string, error) {
 	if hasRepoRoot(cwd) {
 		return filepath.Abs(cwd)
 	}
-	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
 }
 
 func requireFile(path string, label string) (string, error) {
@@ -197,11 +197,11 @@ func requireFile(path string, label string) (string, error) {
 }
 
 func rejectTmpPath(label string, path string) error {
-	if envEnabled("MANTA_ALLOW_TMP") {
+	if envEnabled("EOS_ALLOW_TMP") {
 		return nil
 	}
 	if strings.HasPrefix(path, "/tmp/") || strings.HasPrefix(path, "/var/tmp/") {
-		return fmt.Errorf("%s is under a temporary directory: %s (set MANTA_ALLOW_TMP=1 only for local smoke checks)", label, path)
+		return fmt.Errorf("%s is under a temporary directory: %s (set EOS_ALLOW_TMP=1 only for local smoke checks)", label, path)
 	}
 	return nil
 }
@@ -217,12 +217,12 @@ func commandOutput(dir string, name string, args []string) (string, error) {
 }
 
 func requireCleanRepo(root string) error {
-	if envEnabled("MANTA_ALLOW_DIRTY") {
+	if envEnabled("EOS_ALLOW_DIRTY") {
 		return nil
 	}
 	out, err := commandOutput(root, "git", []string{"status", "--porcelain"})
 	guard err == nil else return err
-	guard out == "" else return fmt.Errorf("repository has uncommitted changes; commit them or set MANTA_ALLOW_DIRTY=1 for a local smoke")
+	guard out == "" else return fmt.Errorf("repository has uncommitted changes; commit them or set EOS_ALLOW_DIRTY=1 for a local smoke")
 	return nil
 }
 
@@ -241,7 +241,7 @@ func loadThresholdEnv(path string) error {
 		guard ok else return fmt.Errorf("%s:%d: expected KEY=VALUE", path, i+1)
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
-		guard strings.HasPrefix(key, "MANTA_") else return fmt.Errorf("%s:%d: threshold key must start with MANTA_: %s", path, i+1, key)
+		guard strings.HasPrefix(key, "EOS_") else return fmt.Errorf("%s:%d: threshold key must start with EOS_: %s", path, i+1, key)
 		if os.Getenv(key) == "" {
 			err = os.Setenv(key, value)
 			guard err == nil else return err
@@ -283,26 +283,26 @@ func hasAnyEnv(names []string) bool {
 
 func hasQualityGateThresholds() bool {
 	return hasAnyEnv([]string{
-		"MANTA_MIN_MRR",
-		"MANTA_MIN_TOP1",
-		"MANTA_MIN_TOP5",
-		"MANTA_MIN_TOP10",
-		"MANTA_MAX_MEAN_RANK",
-		"MANTA_MIN_AUC",
-		"MANTA_MIN_THRESHOLD_ACCURACY",
-		"MANTA_MIN_SCORE_MARGIN",
-		"MANTA_MIN_PAIR_ACCURACY",
-		"MANTA_MAX_LOSS",
+		"EOS_MIN_MRR",
+		"EOS_MIN_TOP1",
+		"EOS_MIN_TOP5",
+		"EOS_MIN_TOP10",
+		"EOS_MAX_MEAN_RANK",
+		"EOS_MIN_AUC",
+		"EOS_MIN_THRESHOLD_ACCURACY",
+		"EOS_MIN_SCORE_MARGIN",
+		"EOS_MIN_PAIR_ACCURACY",
+		"EOS_MAX_LOSS",
 	})
 }
 
 func hasEfficiencyGateThresholds() bool {
 	return hasAnyEnv([]string{
-		"MANTA_MIN_TRAIN_PAIRS_PER_SEC",
-		"MANTA_MIN_OPTIMIZER_STEPS_PER_SEC",
-		"MANTA_MAX_MATMUL_RUNS",
-		"MANTA_MAX_MATMUL_RUN_UPLOAD_MB",
-		"MANTA_MAX_MATMUL_RUN_DOWNLOAD_MB",
+		"EOS_MIN_TRAIN_PAIRS_PER_SEC",
+		"EOS_MIN_OPTIMIZER_STEPS_PER_SEC",
+		"EOS_MAX_MATMUL_RUNS",
+		"EOS_MAX_MATMUL_RUN_UPLOAD_MB",
+		"EOS_MAX_MATMUL_RUN_DOWNLOAD_MB",
 	})
 }
 
@@ -321,14 +321,14 @@ func runMetricsDiagnosis(cfg candidateConfig, label string, logName string, metr
 
 func runRetrievalEval(cfg candidateConfig) error {
 	args := []string{
-		"MANTA_REPO_ROOT=" + cfg.Root,
-		"MANTA_EVAL_ARTIFACT=" + cfg.SealedArtifact,
-		"MANTA_EVAL_RUN_ROOT=" + filepath.Join(cfg.RunDir, "retrieval"),
+		"EOS_REPO_ROOT=" + cfg.Root,
+		"EOS_EVAL_ARTIFACT=" + cfg.SealedArtifact,
+		"EOS_EVAL_RUN_ROOT=" + filepath.Join(cfg.RunDir, "retrieval"),
 	}
 	if cfg.ThresholdsEnv != "" {
-		args = append(args, "MANTA_THRESHOLDS_ENV="+cfg.ThresholdsEnv)
+		args = append(args, "EOS_THRESHOLDS_ENV="+cfg.ThresholdsEnv)
 	}
-	for _, name := range []string{"MANTA_DATASET_ROOT", "MANTA_EVAL_DATASETS", "MANTA_EVAL_SPLIT", "MANTA_EVAL_BATCH_SIZE", "MANTA_EVAL_TOP_K", "MANTA_EVAL_MAX_DOCS", "MANTA_EVAL_MAX_QUERIES", "MANTA_EVAL_BM25_BASELINE", "MANTA_GATE_BM25_BASELINE", "MANTA_GATE_BM25_METRIC", "MANTA_GATE_BM25_MIN_RATIO"} {
+	for _, name := range []string{"EOS_DATASET_ROOT", "EOS_EVAL_DATASETS", "EOS_EVAL_SPLIT", "EOS_EVAL_BATCH_SIZE", "EOS_EVAL_TOP_K", "EOS_EVAL_MAX_DOCS", "EOS_EVAL_MAX_QUERIES", "EOS_EVAL_BM25_BASELINE", "EOS_GATE_BM25_BASELINE", "EOS_GATE_BM25_METRIC", "EOS_GATE_BM25_MIN_RATIO"} {
 		if value, ok := retrievalEvalEnvValue(cfg, name); ok {
 			args = append(args, name+"="+value)
 		}
@@ -345,13 +345,13 @@ func retrievalEvalEnvValue(cfg candidateConfig, name string) (string, bool) {
 		return "", false
 	}
 	switch name {
-	case "MANTA_EVAL_BM25_BASELINE":
+	case "EOS_EVAL_BM25_BASELINE":
 		return "1", true
-	case "MANTA_GATE_BM25_BASELINE":
+	case "EOS_GATE_BM25_BASELINE":
 		return "1", true
-	case "MANTA_GATE_BM25_METRIC":
+	case "EOS_GATE_BM25_METRIC":
 		return "ndcg_at_10", true
-	case "MANTA_GATE_BM25_MIN_RATIO":
+	case "EOS_GATE_BM25_MIN_RATIO":
 		return "1.0", true
 	}
 	return "", false
@@ -425,7 +425,7 @@ func writeArtifactSHA256(cfg candidateConfig) error {
 func writeSelectedEnvironment(cfg candidateConfig) error {
 	lines := []string{}
 	for _, env := range os.Environ() {
-		if strings.HasPrefix(env, "MANTA_") ||
+		if strings.HasPrefix(env, "EOS_") ||
 			strings.HasPrefix(env, "CUDA") ||
 			strings.HasPrefix(env, "CUBLAS") ||
 			strings.HasPrefix(env, "CGO_") ||
@@ -547,7 +547,7 @@ func writeManifest(cfg candidateConfig, status string) error {
 		cfg.EncoderRepeats,
 		cfg.InitSeed,
 		jsonString(cfg.TrainMode),
-		jsonBool(envEnabled("MANTA_PAIRWISE_TRAIN") || cfg.PairwiseTrain == "1" || strings.ToLower(cfg.PairwiseTrain) == "true"),
+		jsonBool(envEnabled("EOS_PAIRWISE_TRAIN") || cfg.PairwiseTrain == "1" || strings.ToLower(cfg.PairwiseTrain) == "true"),
 		jsonBool(hardNegativeTrainEnabled(cfg)),
 		cfg.HardNegativesPerQuery,
 		jsonString(cfg.HardNegativeSourceWeights),
@@ -630,10 +630,10 @@ func copyPackageForEval(cfg candidateConfig, name string) (string, error) {
 }
 
 func prepareConfig(root string) (candidateConfig, error) {
-	let modelName = getenv("MANTA_MODEL_NAME", "manta-embed-v1")
-	let runID = getenv("MANTA_RUN_ID", modelName+"-"+time.Now().UTC().Format("20060102T150405Z"))
-	let runRoot = getenv("MANTA_RUN_ROOT", filepath.Join(root, "runs"))
-	runDir, err := filepath.Abs(getenv("MANTA_RUN_DIR", filepath.Join(runRoot, runID)))
+	let modelName = getenv("EOS_MODEL_NAME", "manta-embed-v1")
+	let runID = getenv("EOS_RUN_ID", modelName+"-"+time.Now().UTC().Format("20060102T150405Z"))
+	let runRoot = getenv("EOS_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir, err := filepath.Abs(getenv("EOS_RUN_DIR", filepath.Join(runRoot, runID)))
 	guard err == nil else return candidateConfig{}, err
 	err = rejectTmpPath("run directory", runDir)
 	guard err == nil else return candidateConfig{}, err
@@ -647,9 +647,9 @@ func prepareConfig(root string) (candidateConfig, error) {
 	err = os.MkdirAll(filepath.Join(runDir, "profiles"), 0o755)
 	guard err == nil else return candidateConfig{}, err
 
-	thresholdsEnv := os.Getenv("MANTA_THRESHOLDS_ENV")
+	thresholdsEnv := os.Getenv("EOS_THRESHOLDS_ENV")
 	if thresholdsEnv != "" {
-		thresholdsEnv, err = requireFile(thresholdsEnv, "MANTA_THRESHOLDS_ENV")
+		thresholdsEnv, err = requireFile(thresholdsEnv, "EOS_THRESHOLDS_ENV")
 		guard err == nil else return candidateConfig{}, err
 		err = rejectTmpPath("thresholds env", thresholdsEnv)
 		guard err == nil else return candidateConfig{}, err
@@ -666,50 +666,50 @@ func prepareConfig(root string) (candidateConfig, error) {
 		LogDir:              filepath.Join(runDir, "logs"),
 		DatasetSHAFile:      filepath.Join(runDir, "datasets.sha256"),
 		ArtifactSHAFile:     filepath.Join(runDir, "artifacts.sha256"),
-		DirtyAllowed:        envEnabled("MANTA_ALLOW_DIRTY"),
-		VocabSize:           getenv("MANTA_VOCAB_SIZE", "2454"),
-		MaxSeq:              getenv("MANTA_MAX_SEQ", "256"),
-		EmbeddingDim:        getenv("MANTA_EMBEDDING_DIM", "128"),
-		HiddenDim:           getenv("MANTA_HIDDEN_DIM", "256"),
-		EncoderRepeats:      getenv("MANTA_ENCODER_REPEATS", "2"),
-		InitSeed:            getenv("MANTA_INIT_SEED", "1"),
-		WeightBits:          getenv("MANTA_WEIGHT_BITS", "8"),
-		Epochs:              getenv("MANTA_EPOCHS", "3"),
-		BatchSize:           getenv("MANTA_BATCH_SIZE", "1024"),
-		LR:                  getenv("MANTA_LR", "0.005"),
-		ContrastiveLoss:     getenv("MANTA_CONTRASTIVE_LOSS", "infonce"),
-		GroupedLossWeight:   getenv("MANTA_GROUPED_LOSS_WEIGHT", "0"),
-		Temperature:         getenv("MANTA_TEMPERATURE", "0.05"),
-		TeacherLossWeight:   getenv("MANTA_TEACHER_LOSS_WEIGHT", "0"),
-		TeacherTemperature:  getenv("MANTA_TEACHER_TEMPERATURE", "1"),
-		TeacherSourceTemperatures: getenv("MANTA_TEACHER_SOURCE_TEMPERATURES", ""),
-		TeacherScoreNormalization: getenv("MANTA_TEACHER_SCORE_NORMALIZATION", ""),
-		EvalEvery:           getenv("MANTA_EVAL_EVERY", "1"),
-		EvalEverySteps:      getenv("MANTA_EVAL_EVERY_STEPS", "0"),
-		Patience:            getenv("MANTA_PATIENCE", "3"),
-		RestoreBest:         getenv("MANTA_RESTORE_BEST", "true"),
-		MinDelta:            getenv("MANTA_MIN_DELTA", "0"),
-		SelectMetric:        getenv("MANTA_SELECT_METRIC", "score_margin"),
-		PairwiseTrain:       getenv("MANTA_PAIRWISE_TRAIN", "0"),
-		HardNegativeTrain:   getenv("MANTA_HARD_NEGATIVE_TRAIN", "0"),
-		HardNegativesPerQuery: getenv("MANTA_HARD_NEGATIVES_PER_QUERY", "1"),
-		HardNegativeSourceWeights: getenv("MANTA_HARD_NEGATIVE_SOURCE_WEIGHTS", ""),
-		MinFreq:             getenv("MANTA_MIN_FREQ", "1"),
-		MinChars:            getenv("MANTA_MIN_CHARS", "20"),
-		MaxPairs:            getenv("MANTA_MAX_PAIRS", "0"),
-		EvalPairs:           getenv("MANTA_EVAL_PAIRS", "512"),
-		ProgressEvery:       getenv("MANTA_PROGRESS_EVERY", "0"),
-		LengthBucketBatches: getenv("MANTA_LENGTH_BUCKET_BATCHES", "1"),
-		ActivationAccel:     getenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", "1"),
-		FastGELU:            getenv("MANTA_TRAIN_ENABLE_FAST_GELU", "1"),
-		QualityTarget:       strings.ToLower(strings.TrimSpace(getenv("MANTA_QUALITY_TARGET", "retrieval"))),
+		DirtyAllowed:        envEnabled("EOS_ALLOW_DIRTY"),
+		VocabSize:           getenv("EOS_VOCAB_SIZE", "2454"),
+		MaxSeq:              getenv("EOS_MAX_SEQ", "256"),
+		EmbeddingDim:        getenv("EOS_EMBEDDING_DIM", "128"),
+		HiddenDim:           getenv("EOS_HIDDEN_DIM", "256"),
+		EncoderRepeats:      getenv("EOS_ENCODER_REPEATS", "2"),
+		InitSeed:            getenv("EOS_INIT_SEED", "1"),
+		WeightBits:          getenv("EOS_WEIGHT_BITS", "8"),
+		Epochs:              getenv("EOS_EPOCHS", "3"),
+		BatchSize:           getenv("EOS_BATCH_SIZE", "1024"),
+		LR:                  getenv("EOS_LR", "0.005"),
+		ContrastiveLoss:     getenv("EOS_CONTRASTIVE_LOSS", "infonce"),
+		GroupedLossWeight:   getenv("EOS_GROUPED_LOSS_WEIGHT", "0"),
+		Temperature:         getenv("EOS_TEMPERATURE", "0.05"),
+		TeacherLossWeight:   getenv("EOS_TEACHER_LOSS_WEIGHT", "0"),
+		TeacherTemperature:  getenv("EOS_TEACHER_TEMPERATURE", "1"),
+		TeacherSourceTemperatures: getenv("EOS_TEACHER_SOURCE_TEMPERATURES", ""),
+		TeacherScoreNormalization: getenv("EOS_TEACHER_SCORE_NORMALIZATION", ""),
+		EvalEvery:           getenv("EOS_EVAL_EVERY", "1"),
+		EvalEverySteps:      getenv("EOS_EVAL_EVERY_STEPS", "0"),
+		Patience:            getenv("EOS_PATIENCE", "3"),
+		RestoreBest:         getenv("EOS_RESTORE_BEST", "true"),
+		MinDelta:            getenv("EOS_MIN_DELTA", "0"),
+		SelectMetric:        getenv("EOS_SELECT_METRIC", "score_margin"),
+		PairwiseTrain:       getenv("EOS_PAIRWISE_TRAIN", "0"),
+		HardNegativeTrain:   getenv("EOS_HARD_NEGATIVE_TRAIN", "0"),
+		HardNegativesPerQuery: getenv("EOS_HARD_NEGATIVES_PER_QUERY", "1"),
+		HardNegativeSourceWeights: getenv("EOS_HARD_NEGATIVE_SOURCE_WEIGHTS", ""),
+		MinFreq:             getenv("EOS_MIN_FREQ", "1"),
+		MinChars:            getenv("EOS_MIN_CHARS", "20"),
+		MaxPairs:            getenv("EOS_MAX_PAIRS", "0"),
+		EvalPairs:           getenv("EOS_EVAL_PAIRS", "512"),
+		ProgressEvery:       getenv("EOS_PROGRESS_EVERY", "0"),
+		LengthBucketBatches: getenv("EOS_LENGTH_BUCKET_BATCHES", "1"),
+		ActivationAccel:     getenv("EOS_TRAIN_ENABLE_ACTIVATION_ACCEL", "1"),
+		FastGELU:            getenv("EOS_TRAIN_ENABLE_FAST_GELU", "1"),
+		QualityTarget:       strings.ToLower(strings.TrimSpace(getenv("EOS_QUALITY_TARGET", "retrieval"))),
 		MantaBin:            filepath.Join(runDir, "bin", "manta"),
 		Artifact:            filepath.Join(runDir, modelName+".mll"),
 		SealedArtifact:      filepath.Join(runDir, modelName+".sealed.mll"),
 		TrainMetricsJSON:    filepath.Join(runDir, "train.metrics.json"),
 		FinalEvalMetricsJSON: filepath.Join(runDir, "final-eval.metrics.json"),
 		HardEvalMetricsJSON:  filepath.Join(runDir, "hard-eval.metrics.json"),
-		NoTokenizer:          envEnabled("MANTA_NO_TOKENIZER"),
+		NoTokenizer:          envEnabled("EOS_NO_TOKENIZER"),
 	}
 
 	err = os.WriteFile(cfg.DatasetSHAFile, []byte(""), 0o644)
@@ -720,25 +720,25 @@ func prepareConfig(root string) (candidateConfig, error) {
 	err = requireCleanRepo(root)
 	guard err == nil else return candidateConfig{}, err
 
-	cfg.Corpus = os.Getenv("MANTA_CORPUS")
-	cfg.TrainJSONL = os.Getenv("MANTA_TRAIN_JSONL")
-	cfg.EvalJSONL = os.Getenv("MANTA_EVAL_JSONL")
-	cfg.HardEvalJSONL = os.Getenv("MANTA_HARD_EVAL_JSONL")
-	cfg.TokenizerPath = os.Getenv("MANTA_TOKENIZER")
-	cfg.PackageTokenizerPath = os.Getenv("MANTA_PACKAGE_TOKENIZER")
-	cfg.TokenizerCorpus = os.Getenv("MANTA_TOKENIZER_CORPUS")
+	cfg.Corpus = os.Getenv("EOS_CORPUS")
+	cfg.TrainJSONL = os.Getenv("EOS_TRAIN_JSONL")
+	cfg.EvalJSONL = os.Getenv("EOS_EVAL_JSONL")
+	cfg.HardEvalJSONL = os.Getenv("EOS_HARD_EVAL_JSONL")
+	cfg.TokenizerPath = os.Getenv("EOS_TOKENIZER")
+	cfg.PackageTokenizerPath = os.Getenv("EOS_PACKAGE_TOKENIZER")
+	cfg.TokenizerCorpus = os.Getenv("EOS_TOKENIZER_CORPUS")
 	cfg.ThresholdsEnv = thresholdsEnv
-	guard cfg.QualityTarget == "pairwise" || cfg.QualityTarget == "retrieval" || cfg.QualityTarget == "both" else return candidateConfig{}, fmt.Errorf("MANTA_QUALITY_TARGET must be pairwise, retrieval, or both")
-	guard !(pairwiseTrainEnabled(cfg) && hardNegativeTrainEnabled(cfg)) else return candidateConfig{}, fmt.Errorf("choose MANTA_PAIRWISE_TRAIN or MANTA_HARD_NEGATIVE_TRAIN, not both")
-	guard !(cfg.NoTokenizer && cfg.TokenizerPath != "") else return candidateConfig{}, fmt.Errorf("set either MANTA_NO_TOKENIZER or MANTA_TOKENIZER, not both")
-	guard !(cfg.NoTokenizer && cfg.TokenizerCorpus != "") else return candidateConfig{}, fmt.Errorf("set either MANTA_NO_TOKENIZER or MANTA_TOKENIZER_CORPUS, not both")
-	guard !(cfg.NoTokenizer && envEnabled("MANTA_PRETOKENIZE_JSONL")) else return candidateConfig{}, fmt.Errorf("set either MANTA_NO_TOKENIZER or MANTA_PRETOKENIZE_JSONL, not both")
-	guard !(retrievalQualityTarget(cfg) && cfg.NoTokenizer && cfg.PackageTokenizerPath == "") else return candidateConfig{}, fmt.Errorf("MANTA_QUALITY_TARGET=%s with MANTA_NO_TOKENIZER requires MANTA_PACKAGE_TOKENIZER so the sealed .mll can embed raw retrieval text", cfg.QualityTarget)
+	guard cfg.QualityTarget == "pairwise" || cfg.QualityTarget == "retrieval" || cfg.QualityTarget == "both" else return candidateConfig{}, fmt.Errorf("EOS_QUALITY_TARGET must be pairwise, retrieval, or both")
+	guard !(pairwiseTrainEnabled(cfg) && hardNegativeTrainEnabled(cfg)) else return candidateConfig{}, fmt.Errorf("choose EOS_PAIRWISE_TRAIN or EOS_HARD_NEGATIVE_TRAIN, not both")
+	guard !(cfg.NoTokenizer && cfg.TokenizerPath != "") else return candidateConfig{}, fmt.Errorf("set either EOS_NO_TOKENIZER or EOS_TOKENIZER, not both")
+	guard !(cfg.NoTokenizer && cfg.TokenizerCorpus != "") else return candidateConfig{}, fmt.Errorf("set either EOS_NO_TOKENIZER or EOS_TOKENIZER_CORPUS, not both")
+	guard !(cfg.NoTokenizer && envEnabled("EOS_PRETOKENIZE_JSONL")) else return candidateConfig{}, fmt.Errorf("set either EOS_NO_TOKENIZER or EOS_PRETOKENIZE_JSONL, not both")
+	guard !(retrievalQualityTarget(cfg) && cfg.NoTokenizer && cfg.PackageTokenizerPath == "") else return candidateConfig{}, fmt.Errorf("EOS_QUALITY_TARGET=%s with EOS_NO_TOKENIZER requires EOS_PACKAGE_TOKENIZER so the sealed .mll can embed raw retrieval text", cfg.QualityTarget)
 
 	if cfg.Corpus != "" {
-		guard cfg.TrainJSONL == "" && cfg.EvalJSONL == "" else return candidateConfig{}, fmt.Errorf("choose MANTA_CORPUS or MANTA_TRAIN_JSONL/MANTA_EVAL_JSONL, not both")
-		guard !hardNegativeTrainEnabled(cfg) else return candidateConfig{}, fmt.Errorf("MANTA_HARD_NEGATIVE_TRAIN requires prepared labeled-pair JSONL, not MANTA_CORPUS")
-		cfg.Corpus, err = requireFile(cfg.Corpus, "MANTA_CORPUS")
+		guard cfg.TrainJSONL == "" && cfg.EvalJSONL == "" else return candidateConfig{}, fmt.Errorf("choose EOS_CORPUS or EOS_TRAIN_JSONL/EOS_EVAL_JSONL, not both")
+		guard !hardNegativeTrainEnabled(cfg) else return candidateConfig{}, fmt.Errorf("EOS_HARD_NEGATIVE_TRAIN requires prepared labeled-pair JSONL, not EOS_CORPUS")
+		cfg.Corpus, err = requireFile(cfg.Corpus, "EOS_CORPUS")
 		guard err == nil else return candidateConfig{}, err
 		err = rejectTmpPath("corpus", cfg.Corpus)
 		guard err == nil else return candidateConfig{}, err
@@ -746,9 +746,9 @@ func prepareConfig(root string) (candidateConfig, error) {
 		err = appendSHA256(cfg.DatasetSHAFile, cfg.Corpus)
 		guard err == nil else return candidateConfig{}, err
 	} else {
-		cfg.TrainJSONL, err = requireFile(cfg.TrainJSONL, "MANTA_TRAIN_JSONL")
+		cfg.TrainJSONL, err = requireFile(cfg.TrainJSONL, "EOS_TRAIN_JSONL")
 		guard err == nil else return candidateConfig{}, err
-		cfg.EvalJSONL, err = requireFile(cfg.EvalJSONL, "MANTA_EVAL_JSONL")
+		cfg.EvalJSONL, err = requireFile(cfg.EvalJSONL, "EOS_EVAL_JSONL")
 		guard err == nil else return candidateConfig{}, err
 		err = rejectTmpPath("train dataset", cfg.TrainJSONL)
 		guard err == nil else return candidateConfig{}, err
@@ -762,18 +762,18 @@ func prepareConfig(root string) (candidateConfig, error) {
 	}
 
 	if cfg.HardEvalJSONL != "" {
-		cfg.HardEvalJSONL, err = requireFile(cfg.HardEvalJSONL, "MANTA_HARD_EVAL_JSONL")
+		cfg.HardEvalJSONL, err = requireFile(cfg.HardEvalJSONL, "EOS_HARD_EVAL_JSONL")
 		guard err == nil else return candidateConfig{}, err
 		err = rejectTmpPath("hard eval dataset", cfg.HardEvalJSONL)
 		guard err == nil else return candidateConfig{}, err
 		err = appendSHA256(cfg.DatasetSHAFile, cfg.HardEvalJSONL)
 		guard err == nil else return candidateConfig{}, err
-	} else if !envEnabled("MANTA_ALLOW_NO_HARD_EVAL") {
-		return candidateConfig{}, fmt.Errorf("MANTA_HARD_EVAL_JSONL is required for a production candidate (set MANTA_ALLOW_NO_HARD_EVAL=1 only for local smoke checks)")
+	} else if !envEnabled("EOS_ALLOW_NO_HARD_EVAL") {
+		return candidateConfig{}, fmt.Errorf("EOS_HARD_EVAL_JSONL is required for a production candidate (set EOS_ALLOW_NO_HARD_EVAL=1 only for local smoke checks)")
 	}
 
 	if cfg.TokenizerPath != "" {
-		cfg.TokenizerPath, err = requireFile(cfg.TokenizerPath, "MANTA_TOKENIZER")
+		cfg.TokenizerPath, err = requireFile(cfg.TokenizerPath, "EOS_TOKENIZER")
 		guard err == nil else return candidateConfig{}, err
 		err = rejectTmpPath("tokenizer", cfg.TokenizerPath)
 		guard err == nil else return candidateConfig{}, err
@@ -784,7 +784,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		cfg.PackageTokenizerPath = cfg.TokenizerPath
 	}
 	if cfg.PackageTokenizerPath != "" {
-		cfg.PackageTokenizerPath, err = requireFile(cfg.PackageTokenizerPath, "MANTA_PACKAGE_TOKENIZER")
+		cfg.PackageTokenizerPath, err = requireFile(cfg.PackageTokenizerPath, "EOS_PACKAGE_TOKENIZER")
 		guard err == nil else return candidateConfig{}, err
 		err = rejectTmpPath("package tokenizer", cfg.PackageTokenizerPath)
 		guard err == nil else return candidateConfig{}, err
@@ -792,8 +792,8 @@ func prepareConfig(root string) (candidateConfig, error) {
 		guard err == nil else return candidateConfig{}, err
 	}
 	if cfg.TokenizerCorpus != "" {
-		guard cfg.TokenizerPath == "" else return candidateConfig{}, fmt.Errorf("set either MANTA_TOKENIZER or MANTA_TOKENIZER_CORPUS, not both")
-		cfg.TokenizerCorpus, err = requireFile(cfg.TokenizerCorpus, "MANTA_TOKENIZER_CORPUS")
+		guard cfg.TokenizerPath == "" else return candidateConfig{}, fmt.Errorf("set either EOS_TOKENIZER or EOS_TOKENIZER_CORPUS, not both")
+		cfg.TokenizerCorpus, err = requireFile(cfg.TokenizerCorpus, "EOS_TOKENIZER_CORPUS")
 		guard err == nil else return candidateConfig{}, err
 		err = rejectTmpPath("tokenizer corpus", cfg.TokenizerCorpus)
 		guard err == nil else return candidateConfig{}, err
@@ -826,7 +826,7 @@ func trainCommonArgs(cfg candidateConfig) []string {
 		"--select-metric", cfg.SelectMetric,
 		"--progress-every", cfg.ProgressEvery,
 	}
-	if envEnabled("MANTA_LENGTH_BUCKET_BATCHES") || cfg.LengthBucketBatches == "1" || strings.ToLower(cfg.LengthBucketBatches) == "true" {
+	if envEnabled("EOS_LENGTH_BUCKET_BATCHES") || cfg.LengthBucketBatches == "1" || strings.ToLower(cfg.LengthBucketBatches) == "true" {
 		args = append(args, "--length-bucket-batches")
 	}
 	if cfg.TeacherSourceTemperatures != "" {
@@ -839,11 +839,11 @@ func trainCommonArgs(cfg candidateConfig) []string {
 }
 
 func pairwiseTrainEnabled(cfg candidateConfig) bool {
-	return envEnabled("MANTA_PAIRWISE_TRAIN") || cfg.PairwiseTrain == "1" || strings.ToLower(cfg.PairwiseTrain) == "true"
+	return envEnabled("EOS_PAIRWISE_TRAIN") || cfg.PairwiseTrain == "1" || strings.ToLower(cfg.PairwiseTrain) == "true"
 }
 
 func hardNegativeTrainEnabled(cfg candidateConfig) bool {
-	return envEnabled("MANTA_HARD_NEGATIVE_TRAIN") || cfg.HardNegativeTrain == "1" || strings.ToLower(cfg.HardNegativeTrain) == "true"
+	return envEnabled("EOS_HARD_NEGATIVE_TRAIN") || cfg.HardNegativeTrain == "1" || strings.ToLower(cfg.HardNegativeTrain) == "true"
 }
 
 func pairwiseQualityTarget(cfg candidateConfig) bool {
@@ -855,19 +855,19 @@ func retrievalQualityTarget(cfg candidateConfig) bool {
 }
 
 func applyCandidateRuntimeEnv(cfg candidateConfig) {
-	if !envEnabled("MANTA_TRAIN_DISABLE_ACTIVATION_ACCEL") && cfg.ActivationAccel != "" {
-		os.Setenv("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL", cfg.ActivationAccel)
+	if !envEnabled("EOS_TRAIN_DISABLE_ACTIVATION_ACCEL") && cfg.ActivationAccel != "" {
+		os.Setenv("EOS_TRAIN_ENABLE_ACTIVATION_ACCEL", cfg.ActivationAccel)
 	}
-	if envEnabled("MANTA_TRAIN_DISABLE_FAST_GELU") {
-		os.Setenv("MANTA_TRAIN_ENABLE_FAST_GELU", "0")
+	if envEnabled("EOS_TRAIN_DISABLE_FAST_GELU") {
+		os.Setenv("EOS_TRAIN_ENABLE_FAST_GELU", "0")
 	} else if cfg.FastGELU != "" {
-		os.Setenv("MANTA_TRAIN_ENABLE_FAST_GELU", cfg.FastGELU)
+		os.Setenv("EOS_TRAIN_ENABLE_FAST_GELU", cfg.FastGELU)
 	}
 }
 
 func runCandidate(cfg candidateConfig) (candidateConfig, error) {
-	if !envEnabled("MANTA_SKIP_TESTS") {
-		err := runCmd(cfg, "Go package gate", "go-test.log", "go", []string{"test", "./cmd/manta", "./runtime", "./models", "-count=1"})
+	if !envEnabled("EOS_SKIP_TESTS") {
+		err := runCmd(cfg, "Go package gate", "go-test.log", "go", []string{"test", "./cmd/eos", "./runtime", "./models", "-count=1"})
 		guard err == nil else return cfg, err
 	}
 	applyCandidateRuntimeEnv(cfg)
@@ -876,10 +876,10 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	err = writeManifest(cfg, "started")
 	guard err == nil else return cfg, err
 
-	err = runCmd(cfg, "Build manta CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.MantaBin, "./cmd/manta"})
+	err = runCmd(cfg, "Build manta CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.MantaBin, "./cmd/eos"})
 	guard err == nil else return cfg, err
 
-	let initialArtifact = os.Getenv("MANTA_INITIAL_ARTIFACT")
+	let initialArtifact = os.Getenv("EOS_INITIAL_ARTIFACT")
 	if initialArtifact != "" {
 		step("Copy pretrained artifact as starting point")
 		fmt.Println(f"+ cp -a {initialArtifact} {cfg.Artifact}")
@@ -929,7 +929,7 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	if cfg.TrainMode == "prepared_jsonl" && trainTokenizer == "" && tokenizerForEval != "" {
 		trainTokenizer = tokenizerForEval
 	}
-	if cfg.TrainMode == "prepared_jsonl" && tokenizerForEval != "" && envEnabled("MANTA_PRETOKENIZE_JSONL") {
+	if cfg.TrainMode == "prepared_jsonl" && tokenizerForEval != "" && envEnabled("EOS_PRETOKENIZE_JSONL") {
 		trainTokenizeMode := "contrastive"
 		if pairwiseTrainEnabled(cfg) {
 			trainTokenizeMode = "pair"
@@ -1119,7 +1119,7 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	guard err == nil else return cfg, err
 	guard strings.Contains(string(sealedData), "package verify: OK") else return cfg, fmt.Errorf("sealed package verification did not pass")
 
-	if envEnabled("MANTA_RETRIEVAL_EVAL") || retrievalQualityTarget(cfg) {
+	if envEnabled("EOS_RETRIEVAL_EVAL") || retrievalQualityTarget(cfg) {
 		err = runRetrievalEval(cfg)
 		guard err == nil else return cfg, err
 	}

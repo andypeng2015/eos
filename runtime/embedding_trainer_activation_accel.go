@@ -1,8 +1,8 @@
-package mantaruntime
+package eosruntime
 
 import (
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 type trainerActivationAccelMode struct {
@@ -11,12 +11,12 @@ type trainerActivationAccelMode struct {
 }
 
 func trainerActivationAccelModeFromEnv() trainerActivationAccelMode {
-	if trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_ACTIVATION_ACCEL") {
+	if trainEnvFlagEnabled("EOS_TRAIN_DISABLE_ACTIVATION_ACCEL") {
 		return trainerActivationAccelMode{}
 	}
-	full := trainEnvFlagEnabled("MANTA_TRAIN_ENABLE_ACTIVATION_ACCEL")
-	softmax := full || trainEnvFlagEnabled("MANTA_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL")
-	if trainEnvFlagEnabled("MANTA_TRAIN_DISABLE_SOFTMAX_BACKWARD_ACCEL") {
+	full := trainEnvFlagEnabled("EOS_TRAIN_ENABLE_ACTIVATION_ACCEL")
+	softmax := full || trainEnvFlagEnabled("EOS_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL")
+	if trainEnvFlagEnabled("EOS_TRAIN_DISABLE_SOFTMAX_BACKWARD_ACCEL") {
 		softmax = false
 	}
 	return trainerActivationAccelMode{
@@ -25,12 +25,12 @@ func trainerActivationAccelModeFromEnv() trainerActivationAccelMode {
 	}
 }
 
-func newTrainerActivationAccelerator() (backend.ActivationAccelerator, mantaartifact.BackendKind, trainerActivationAccelMode, error) {
+func newTrainerActivationAccelerator() (backend.ActivationAccelerator, eosartifact.BackendKind, trainerActivationAccelMode, error) {
 	mode := trainerActivationAccelModeFromEnv()
 	if !mode.fullBackward && !mode.softmaxBackward {
 		return nil, "", mode, nil
 	}
-	accel, backendKind, err := backend.NewPreferredActivationAccelerator(mantaartifact.BackendCUDA, mantaartifact.BackendMetal)
+	accel, backendKind, err := backend.NewPreferredActivationAccelerator(eosartifact.BackendCUDA, eosartifact.BackendMetal)
 	return accel, backendKind, mode, err
 }
 

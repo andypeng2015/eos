@@ -1,10 +1,10 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"path/filepath"
 	"testing"
 
-	"m31labs.dev/manta/compiler"
+	"m31labs.dev/eos/compiler"
 )
 
 func TestDefaultEmbeddingTrainManifestPath(t *testing.T) {

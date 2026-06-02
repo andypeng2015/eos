@@ -1,16 +1,16 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 	mll "m31labs.dev/mll"
 )
 
-// EmbeddingTrainProfileVersion identifies the serialized Manta training-profile schema.
+// EmbeddingTrainProfileVersion identifies the serialized Eos training-profile schema.
 const EmbeddingTrainProfileVersion = "manta/embed-train-profile/v0alpha1"
 
 var tagXTPR = [4]byte{'X', 'T', 'P', 'R'}
@@ -19,10 +19,10 @@ var tagXTPR = [4]byte{'X', 'T', 'P', 'R'}
 type EmbeddingTrainProfile struct {
 	Version            string                              `json:"version"`
 	Step               int                                 `json:"step"`
-	ForwardBackend     mantaartifact.BackendKind           `json:"forward_backend,omitempty"`
-	OptimizerBackend   mantaartifact.BackendKind           `json:"optimizer_backend,omitempty"`
-	ActivationBackend  mantaartifact.BackendKind           `json:"activation_backend,omitempty"`
-	ContrastiveBackend mantaartifact.BackendKind           `json:"contrastive_backend,omitempty"`
+	ForwardBackend     eosartifact.BackendKind             `json:"forward_backend,omitempty"`
+	OptimizerBackend   eosartifact.BackendKind             `json:"optimizer_backend,omitempty"`
+	ActivationBackend  eosartifact.BackendKind             `json:"activation_backend,omitempty"`
+	ContrastiveBackend eosartifact.BackendKind             `json:"contrastive_backend,omitempty"`
 	ForwardResidency   EmbeddingForwardResidencyStats      `json:"forward_residency"`
 	Optimizer          backend.OptimizerAcceleratorStats   `json:"optimizer"`
 	Activation         backend.ActivationAcceleratorStats  `json:"activation"`
@@ -66,7 +66,7 @@ func ReadEmbeddingTrainProfileFile(path string) (EmbeddingTrainProfile, error) {
 	if err != nil {
 		return EmbeddingTrainProfile{}, err
 	}
-	if !mantaartifact.IsMLLBytes(data) {
+	if !eosartifact.IsMLLBytes(data) {
 		return EmbeddingTrainProfile{}, fmt.Errorf("training profile %q is not an MLL file", path)
 	}
 	return decodeEmbeddingTrainProfileMLL(data)
@@ -77,7 +77,7 @@ func encodeEmbeddingTrainProfileMLL(profile EmbeddingTrainProfile) ([]byte, erro
 	strg.Intern("")
 	head := mll.HeadSection{
 		Name:        strg.Intern("manta-train-profile"),
-		Description: strg.Intern("Manta training profile"),
+		Description: strg.Intern("Eos training profile"),
 		Generation:  uint64(profile.Step),
 		Metadata: []mll.HeadMetadataEntry{
 			headStringMeta(strg, "profile_version", profile.Version),

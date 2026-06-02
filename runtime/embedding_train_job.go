@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"fmt"
@@ -144,7 +144,7 @@ func TrainEmbeddingPackageFromContrastiveFiles(artifactPath, trainPath, evalPath
 	return summary, paths, nil
 }
 
-// TrainEmbeddingPackageFromTextContrastiveFiles reloads a packaged trainer, tokenizes text-pair JSONL with a Manta tokenizer file,
+// TrainEmbeddingPackageFromTextContrastiveFiles reloads a packaged trainer, tokenizes text-pair JSONL with a Eos tokenizer file,
 // fits it, and writes the updated package back.
 func TrainEmbeddingPackageFromTextContrastiveFiles(artifactPath, tokenizerPath, trainPath, evalPath string, cfg EmbeddingTrainRunConfig) (EmbeddingTrainRunSummary, EmbeddingTrainPackagePaths, error) {
 	trainer, err := LoadEmbeddingTrainerPackage(artifactPath)

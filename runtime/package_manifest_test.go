@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"context"
@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/compiler"
-	"m31labs.dev/manta/runtime/backend"
-	"m31labs.dev/manta/runtime/backends/cuda"
-	"m31labs.dev/manta/runtime/backends/metal"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/compiler"
+	"m31labs.dev/eos/runtime/backend"
+	"m31labs.dev/eos/runtime/backends/cuda"
+	"m31labs.dev/eos/runtime/backends/metal"
 )
 
 func TestDefaultPackageManifestPath(t *testing.T) {
@@ -33,7 +33,7 @@ func TestPackageManifestRoundTripAndVerify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if err := mantaartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
+	if err := eosartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
 	if err := tinyEmbeddingManifest().WriteFile(manifestPath); err != nil {
@@ -100,7 +100,7 @@ func TestPackageManifestRoundTripAndVerifyWithTokenizer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if err := mantaartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
+	if err := eosartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
 	if err := tinyEmbeddingManifest().WriteFile(manifestPath); err != nil {

@@ -1,4 +1,4 @@
-package manta_test
+package eos_test
 
 import (
 	"os/exec"

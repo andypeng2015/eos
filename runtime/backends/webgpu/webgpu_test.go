@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	mantaruntime "m31labs.dev/manta/runtime"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	eosruntime "m31labs.dev/eos/runtime"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 func TestMirageDecodeBuiltinWGSLKernels(t *testing.T) {
@@ -15,7 +15,7 @@ func TestMirageDecodeBuiltinWGSLKernels(t *testing.T) {
 	if len(kernels) != 5 {
 		t.Fatalf("kernel count = %d want 5", len(kernels))
 	}
-	seen := map[mantaartifact.StepKind]bool{}
+	seen := map[eosartifact.StepKind]bool{}
 	for _, kernel := range kernels {
 		seen[kernel.StepKind] = true
 		if kernel.Entry == "" {
@@ -41,12 +41,12 @@ func TestMirageDecodeBuiltinWGSLKernels(t *testing.T) {
 			t.Fatalf("%s launch_api = %v", kernel.Entry, meta["launch_api"])
 		}
 	}
-	for _, kind := range []mantaartifact.StepKind{
-		mantaartifact.StepConv2D,
-		mantaartifact.StepConv2DTrans,
-		mantaartifact.StepGDN,
-		mantaartifact.StepIGDN,
-		mantaartifact.StepTurboQDecode,
+	for _, kind := range []eosartifact.StepKind{
+		eosartifact.StepConv2D,
+		eosartifact.StepConv2DTrans,
+		eosartifact.StepGDN,
+		eosartifact.StepIGDN,
+		eosartifact.StepTurboQDecode,
 	} {
 		if !seen[kind] {
 			t.Fatalf("missing builtin for %s", kind)
@@ -55,28 +55,28 @@ func TestMirageDecodeBuiltinWGSLKernels(t *testing.T) {
 }
 
 func TestWebGPUDispatchesMirageBuiltinWithWGSLMetadata(t *testing.T) {
-	mod := mantaartifact.NewModule("webgpu_conv")
-	mod.Params = []mantaartifact.Param{
+	mod := eosartifact.NewModule("webgpu_conv")
+	mod.Params = []eosartifact.Param{
 		{Name: "w", Binding: "weights/w", Type: webgpuTensorType("f16", []string{"1", "1", "2", "2"})},
 		{Name: "b", Binding: "weights/b", Type: webgpuTensorType("f16", []string{"1"})},
 	}
-	mod.EntryPoints = []mantaartifact.EntryPoint{{
+	mod.EntryPoints = []eosartifact.EntryPoint{{
 		Name: "conv",
-		Kind: mantaartifact.EntryPointPipeline,
-		Inputs: []mantaartifact.ValueBinding{
+		Kind: eosartifact.EntryPointPipeline,
+		Inputs: []eosartifact.ValueBinding{
 			{Name: "x", Type: webgpuTensorType("f16", []string{"1", "1", "2", "2"})},
 		},
-		Outputs: []mantaartifact.ValueBinding{{Name: "y", Type: webgpuTensorType("f16", []string{"1", "1", "1", "1"})}},
+		Outputs: []eosartifact.ValueBinding{{Name: "y", Type: webgpuTensorType("f16", []string{"1", "1", "1", "1"})}},
 	}}
-	mod.Buffers = []mantaartifact.Buffer{{Name: "y", DType: "f16", Shape: []string{"1", "1", "1", "1"}}}
-	mod.Steps = []mantaartifact.Step{
-		{Entry: "conv", Kind: mantaartifact.StepConv2D, Name: "conv", Inputs: []string{"x", "w", "b"}, Outputs: []string{"y"}},
-		{Entry: "conv", Kind: mantaartifact.StepReturn, Name: "return", Outputs: []string{"y"}},
+	mod.Buffers = []eosartifact.Buffer{{Name: "y", DType: "f16", Shape: []string{"1", "1", "1", "1"}}}
+	mod.Steps = []eosartifact.Step{
+		{Entry: "conv", Kind: eosartifact.StepConv2D, Name: "conv", Inputs: []string{"x", "w", "b"}, Outputs: []string{"y"}},
+		{Entry: "conv", Kind: eosartifact.StepReturn, Name: "return", Outputs: []string{"y"}},
 	}
 
-	prog, err := mantaruntime.New(New()).Load(context.Background(), mod,
-		mantaruntime.WithWeight("w", backend.NewTensorF16([]int{1, 1, 2, 2}, []float32{1, 0, 0, 1})),
-		mantaruntime.WithWeight("b", backend.NewTensorF16([]int{1}, []float32{0.5})),
+	prog, err := eosruntime.New(New()).Load(context.Background(), mod,
+		eosruntime.WithWeight("w", backend.NewTensorF16([]int{1, 1, 2, 2}, []float32{1, 0, 0, 1})),
+		eosruntime.WithWeight("b", backend.NewTensorF16([]int{1}, []float32{0.5})),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +93,7 @@ func TestWebGPUDispatchesMirageBuiltinWithWGSLMetadata(t *testing.T) {
 	if tensor.F32[0] != 5.5 {
 		t.Fatalf("conv output = %v want 5.5", tensor.F32[0])
 	}
-	kernel, ok := BuiltinForStep(mantaartifact.StepConv2D)
+	kernel, ok := BuiltinForStep(eosartifact.StepConv2D)
 	if !ok {
 		t.Fatal("missing conv2d builtin")
 	}
@@ -117,9 +117,9 @@ func TestWebGPUDispatchesMirageBuiltinWithWGSLMetadata(t *testing.T) {
 	}
 }
 
-func webgpuTensorType(dtype string, shape []string) mantaartifact.ValueType {
-	return mantaartifact.ValueType{
-		Kind:   mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{DType: dtype, Shape: append([]string(nil), shape...)},
+func webgpuTensorType(dtype string, shape []string) eosartifact.ValueType {
+	return eosartifact.ValueType{
+		Kind:   eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{DType: dtype, Shape: append([]string(nil), shape...)},
 	}
 }

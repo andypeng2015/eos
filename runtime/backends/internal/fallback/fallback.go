@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sync"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 type cachedLoad struct {
@@ -17,7 +17,7 @@ type cachedLoad struct {
 // Backend is a backend-owned host fallback executor for newly added GPU APIs
 // while their device runtimes are still being implemented.
 type Backend struct {
-	kind        mantaartifact.BackendKind
+	kind        eosartifact.BackendKind
 	label       string
 	mu          sync.Mutex
 	loadCache   map[string]cachedLoad
@@ -25,11 +25,11 @@ type Backend struct {
 	cacheMisses int
 }
 
-func New(kind mantaartifact.BackendKind, label string) *Backend {
+func New(kind eosartifact.BackendKind, label string) *Backend {
 	return &Backend{kind: kind, label: label, loadCache: map[string]cachedLoad{}}
 }
 
-func (b *Backend) Kind() mantaartifact.BackendKind {
+func (b *Backend) Kind() eosartifact.BackendKind {
 	if b == nil {
 		return ""
 	}
@@ -38,30 +38,30 @@ func (b *Backend) Kind() mantaartifact.BackendKind {
 
 func (b *Backend) Capabilities() []string {
 	return []string{
-		mantaartifact.CapabilityCandidatePack,
-		mantaartifact.CapabilityKVCache,
-		mantaartifact.CapabilityMaskedMeanPool,
-		mantaartifact.CapabilityHostFallback,
-		mantaartifact.CapabilityImageOps,
-		mantaartifact.CapabilityTrainingLosses,
-		mantaartifact.CapabilityTurboQuant,
-		mantaartifact.CapabilitySparseAttention,
+		eosartifact.CapabilityCandidatePack,
+		eosartifact.CapabilityKVCache,
+		eosartifact.CapabilityMaskedMeanPool,
+		eosartifact.CapabilityHostFallback,
+		eosartifact.CapabilityImageOps,
+		eosartifact.CapabilityTrainingLosses,
+		eosartifact.CapabilityTurboQuant,
+		eosartifact.CapabilitySparseAttention,
 	}
 }
 
-func (b *Backend) CanLoad(mod *mantaartifact.Module) bool {
+func (b *Backend) CanLoad(mod *eosartifact.Module) bool {
 	return b != nil && mod != nil && mod.SupportsBackend(b.kind)
 }
 
-func (b *Backend) Load(ctx context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding) (backend.Executor, error) {
+func (b *Backend) Load(ctx context.Context, mod *eosartifact.Module, weights map[string]backend.WeightBinding) (backend.Executor, error) {
 	return b.load(ctx, mod, weights, "")
 }
 
-func (b *Backend) LoadWithCacheKey(ctx context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
+func (b *Backend) LoadWithCacheKey(ctx context.Context, mod *eosartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
 	return b.load(ctx, mod, weights, cacheKey)
 }
 
-func (b *Backend) load(_ context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
+func (b *Backend) load(_ context.Context, mod *eosartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
 	if b == nil {
 		return nil, fmt.Errorf("nil fallback backend")
 	}
@@ -113,15 +113,15 @@ func (b *Backend) storeCachedLoad(cacheKey string, cached cachedLoad) {
 }
 
 type executor struct {
-	kind     mantaartifact.BackendKind
+	kind     eosartifact.BackendKind
 	label    string
-	module   *mantaartifact.Module
+	module   *eosartifact.Module
 	weights  map[string]backend.WeightBinding
 	compiled map[string]backend.CompiledKernel
 	native   map[string]backend.NativeKernelProgram
 }
 
-func (e *executor) Backend() mantaartifact.BackendKind {
+func (e *executor) Backend() eosartifact.BackendKind {
 	return e.kind
 }
 
@@ -129,7 +129,7 @@ func (e *executor) Run(ctx context.Context, req backend.Request) (backend.Result
 	return backend.ExecuteSymbolic(ctx, e.module, e.weights, e.compiled, e.dispatchKernel, e.dispatchStep, e.kind, req)
 }
 
-func (e *executor) dispatchKernel(_ context.Context, kernel mantaartifact.Kernel, inputs []*backend.Tensor) (backend.KernelDispatchResult, error) {
+func (e *executor) dispatchKernel(_ context.Context, kernel eosartifact.Kernel, inputs []*backend.Tensor) (backend.KernelDispatchResult, error) {
 	prog, ok := e.native[kernel.Name]
 	if !ok {
 		return backend.KernelDispatchResult{}, fmt.Errorf("%s kernel %q is not compiled", e.label, kernel.Name)
@@ -150,7 +150,7 @@ func (e *executor) dispatchKernel(_ context.Context, kernel mantaartifact.Kernel
 	}, nil
 }
 
-func (e *executor) dispatchStep(context.Context, mantaartifact.Step, mantaartifact.ValueType, []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
+func (e *executor) dispatchStep(context.Context, eosartifact.Step, eosartifact.ValueType, []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
 	return backend.StepDispatchResult{}, false, nil
 }
 

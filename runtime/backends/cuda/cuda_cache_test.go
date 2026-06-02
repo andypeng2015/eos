@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"m31labs.dev/manta/compiler"
-	mantaruntime "m31labs.dev/manta/runtime"
-	"m31labs.dev/manta/runtime/backend"
+	"m31labs.dev/eos/compiler"
+	eosruntime "m31labs.dev/eos/runtime"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 func TestLoadWithCacheKeyReusesCompiledLoad(t *testing.T) {
@@ -67,29 +67,29 @@ func TestRuntimeLoadUsesPackageManifestCacheKey(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 
-	manifest := mantaruntime.PackageManifest{
-		Version:         mantaruntime.PackageManifestVersion,
-		Kind:            mantaruntime.PackageEmbedding,
+	manifest := eosruntime.PackageManifest{
+		Version:         eosruntime.PackageManifestVersion,
+		Kind:            eosruntime.PackageEmbedding,
 		ModuleName:      bundle.Artifact.Name,
 		ArtifactVersion: bundle.Artifact.Version,
-		Files: []mantaruntime.PackageManifestFile{
+		Files: []eosruntime.PackageManifestFile{
 			{Role: "artifact", Path: "tiny_embed.mll", SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Bytes: 1},
 		},
 	}
 
 	b := New()
-	rt := mantaruntime.New(b)
+	rt := eosruntime.New(b)
 	loadOnce := func() error {
 		_, err := rt.Load(
 			context.Background(),
 			bundle.Artifact,
-			mantaruntime.WithPackageManifest(manifest),
-			mantaruntime.WithWeight("token_embedding", backend.NewTensorF16([]int{3, 2}, []float32{
+			eosruntime.WithPackageManifest(manifest),
+			eosruntime.WithWeight("token_embedding", backend.NewTensorF16([]int{3, 2}, []float32{
 				1, 0,
 				0, 1,
 				1, 1,
 			})),
-			mantaruntime.WithWeight("projection", backend.NewTensorF16([]int{2, 2}, []float32{
+			eosruntime.WithWeight("projection", backend.NewTensorF16([]int{2, 2}, []float32{
 				1, 0,
 				0, 1,
 			})),

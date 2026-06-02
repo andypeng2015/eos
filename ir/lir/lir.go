@@ -1,6 +1,6 @@
 package lir
 
-import mantaartifact "m31labs.dev/manta/artifact/manta"
+import eosartifact "m31labs.dev/eos/artifact/eos"
 
 // Plan is the scheduled executable IR.
 type Plan struct {
@@ -8,7 +8,7 @@ type Plan struct {
 	Buffers []Buffer
 	Kernels []Kernel
 	Params  []Param
-	Steps   []mantaartifact.Step
+	Steps   []eosartifact.Step
 }
 
 // Buffer is a scheduled storage object.

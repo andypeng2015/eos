@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sync"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 type cachedLoad struct {
@@ -29,46 +29,46 @@ func New() *Backend {
 }
 
 // Kind reports the backend identity.
-func (b *Backend) Kind() mantaartifact.BackendKind {
-	return mantaartifact.BackendMetal
+func (b *Backend) Kind() eosartifact.BackendKind {
+	return eosartifact.BackendMetal
 }
 
 // Capabilities reports the runtime features the Metal backend supports.
 func (b *Backend) Capabilities() []string {
 	return []string{
-		mantaartifact.CapabilityCandidatePack,
-		mantaartifact.CapabilityKVCache,
-		mantaartifact.CapabilityMaskedMeanPool,
-		mantaartifact.CapabilityHostFallback,
-		mantaartifact.CapabilityDeviceExecution,
-		mantaartifact.CapabilityImageOps,
-		mantaartifact.CapabilityTrainingLosses,
-		mantaartifact.CapabilityTurboQuant,
-		mantaartifact.CapabilitySparseAttention,
+		eosartifact.CapabilityCandidatePack,
+		eosartifact.CapabilityKVCache,
+		eosartifact.CapabilityMaskedMeanPool,
+		eosartifact.CapabilityHostFallback,
+		eosartifact.CapabilityDeviceExecution,
+		eosartifact.CapabilityImageOps,
+		eosartifact.CapabilityTrainingLosses,
+		eosartifact.CapabilityTurboQuant,
+		eosartifact.CapabilitySparseAttention,
 	}
 }
 
 // CanLoad reports whether the module allows Metal execution.
-func (b *Backend) CanLoad(mod *mantaartifact.Module) bool {
-	return mod != nil && mod.SupportsBackend(mantaartifact.BackendMetal)
+func (b *Backend) CanLoad(mod *eosartifact.Module) bool {
+	return mod != nil && mod.SupportsBackend(eosartifact.BackendMetal)
 }
 
 // Load prepares a Metal executor stub.
-func (b *Backend) Load(_ context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding) (backend.Executor, error) {
+func (b *Backend) Load(_ context.Context, mod *eosartifact.Module, weights map[string]backend.WeightBinding) (backend.Executor, error) {
 	return b.load(context.Background(), mod, weights, "")
 }
 
-func (b *Backend) LoadWithCacheKey(ctx context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
+func (b *Backend) LoadWithCacheKey(ctx context.Context, mod *eosartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
 	return b.load(ctx, mod, weights, cacheKey)
 }
 
-func (b *Backend) load(_ context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
+func (b *Backend) load(_ context.Context, mod *eosartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
 	if cacheKey != "" {
 		if cached, ok := b.cachedLoad(cacheKey); ok {
 			return &executor{module: mod, weights: weights, compiled: cached.compiled, native: cached.native, device: cached.device}, nil
 		}
 	}
-	compiled, err := backend.CompileVariants(mod, mantaartifact.BackendMetal)
+	compiled, err := backend.CompileVariants(mod, eosartifact.BackendMetal)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +78,7 @@ func (b *Backend) load(_ context.Context, mod *mantaartifact.Module, weights map
 	}
 	native := map[string]backend.NativeKernelProgram{}
 	for _, kernel := range mod.Kernels {
-		prog, err := backend.CompileNativeKernelProgram(mantaartifact.BackendMetal, kernel, compiled[kernel.Name])
+		prog, err := backend.CompileNativeKernelProgram(eosartifact.BackendMetal, kernel, compiled[kernel.Name])
 		if err != nil {
 			if device != nil {
 				device.close()
@@ -118,22 +118,22 @@ func (b *Backend) storeCachedLoad(cacheKey string, cached cachedLoad) {
 }
 
 type executor struct {
-	module   *mantaartifact.Module
+	module   *eosartifact.Module
 	weights  map[string]backend.WeightBinding
 	compiled map[string]backend.CompiledKernel
 	native   map[string]backend.NativeKernelProgram
 	device   *deviceRuntime
 }
 
-func (e *executor) Backend() mantaartifact.BackendKind {
-	return mantaartifact.BackendMetal
+func (e *executor) Backend() eosartifact.BackendKind {
+	return eosartifact.BackendMetal
 }
 
 func (e *executor) Run(ctx context.Context, req backend.Request) (backend.Result, error) {
-	return backend.ExecuteSymbolic(ctx, e.module, e.weights, e.compiled, e.dispatchKernel, e.dispatchStep, mantaartifact.BackendMetal, req)
+	return backend.ExecuteSymbolic(ctx, e.module, e.weights, e.compiled, e.dispatchKernel, e.dispatchStep, eosartifact.BackendMetal, req)
 }
 
-func (e *executor) dispatchKernel(_ context.Context, kernel mantaartifact.Kernel, inputs []*backend.Tensor) (backend.KernelDispatchResult, error) {
+func (e *executor) dispatchKernel(_ context.Context, kernel eosartifact.Kernel, inputs []*backend.Tensor) (backend.KernelDispatchResult, error) {
 	prog, ok := e.native[kernel.Name]
 	if !ok {
 		return backend.KernelDispatchResult{}, fmt.Errorf("Metal kernel %q is not compiled", kernel.Name)
@@ -160,9 +160,9 @@ func (e *executor) dispatchKernel(_ context.Context, kernel mantaartifact.Kernel
 	}, nil
 }
 
-func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outputType mantaartifact.ValueType, inputs []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
+func (e *executor) dispatchStep(_ context.Context, step eosartifact.Step, outputType eosartifact.ValueType, inputs []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
 	switch step.Kind {
-	case mantaartifact.StepMatMul:
+	case eosartifact.StepMatMul:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
 		}
@@ -202,7 +202,7 @@ func supportsBuiltinMatMul(inputs []*backend.Tensor) bool {
 	}
 }
 
-func shouldFallbackScoreKernel(kernel mantaartifact.Kernel, inputs []*backend.Tensor) bool {
+func shouldFallbackScoreKernel(kernel eosartifact.Kernel, inputs []*backend.Tensor) bool {
 	if len(kernel.Body) == 0 {
 		return false
 	}

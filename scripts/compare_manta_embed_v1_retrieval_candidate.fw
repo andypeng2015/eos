@@ -92,20 +92,20 @@ func usage() {
 	fmt.Println(`Compare a Manta retrieval scoreboard against a baseline alignment summary.
 
 Required:
-  MANTA_COMPARE_BASELINE_SUMMARY_JSON=/path/to/retrieval-alignment-summary.json
-  MANTA_COMPARE_CANDIDATE_SCOREBOARD_JSON=/path/to/scoreboard.json
+  EOS_COMPARE_BASELINE_SUMMARY_JSON=/path/to/retrieval-alignment-summary.json
+  EOS_COMPARE_CANDIDATE_SCOREBOARD_JSON=/path/to/scoreboard.json
 
 Optional:
-  MANTA_COMPARE_DATASETS=scifact,nfcorpus,fiqa
-  MANTA_COMPARE_SUMMARY_TSV=/path/to/retrieval-comparison-summary.tsv
-  MANTA_COMPARE_SUMMARY_JSON=/path/to/retrieval-comparison-summary.json
-  MANTA_COMPARE_GATE_CANDIDATE=1
-  MANTA_COMPARE_FAIL_ON_GATE=0
-  MANTA_COMPARE_MIN_MACRO_NDCG_DELTA=0.0005
-  MANTA_COMPARE_MAX_DATASET_NDCG_REGRESSION=0.001
-  MANTA_COMPARE_MIN_DATASET_NDCG_RATIO=0.98
-  MANTA_COMPARE_MAX_DATASET_RECALL_AT_100_REGRESSION=0.004
-  MANTA_COMPARE_MIN_DATASET_RECALL_AT_100_RATIO=0.96`)
+  EOS_COMPARE_DATASETS=scifact,nfcorpus,fiqa
+  EOS_COMPARE_SUMMARY_TSV=/path/to/retrieval-comparison-summary.tsv
+  EOS_COMPARE_SUMMARY_JSON=/path/to/retrieval-comparison-summary.json
+  EOS_COMPARE_GATE_CANDIDATE=1
+  EOS_COMPARE_FAIL_ON_GATE=0
+  EOS_COMPARE_MIN_MACRO_NDCG_DELTA=0.0005
+  EOS_COMPARE_MAX_DATASET_NDCG_REGRESSION=0.001
+  EOS_COMPARE_MIN_DATASET_NDCG_RATIO=0.98
+  EOS_COMPARE_MAX_DATASET_RECALL_AT_100_REGRESSION=0.004
+  EOS_COMPARE_MIN_DATASET_RECALL_AT_100_RATIO=0.96`)
 }
 
 func getenv(name string, fallback string) string {
@@ -159,29 +159,29 @@ func requireFile(path string, label string) (string, error) {
 }
 
 func prepareConfig() (compareConfig, error) {
-	baseline, err := requireFile(os.Getenv("MANTA_COMPARE_BASELINE_SUMMARY_JSON"), "MANTA_COMPARE_BASELINE_SUMMARY_JSON")
+	baseline, err := requireFile(os.Getenv("EOS_COMPARE_BASELINE_SUMMARY_JSON"), "EOS_COMPARE_BASELINE_SUMMARY_JSON")
 	guard err == nil else return compareConfig{}, err
-	candidate, err := requireFile(os.Getenv("MANTA_COMPARE_CANDIDATE_SCOREBOARD_JSON"), "MANTA_COMPARE_CANDIDATE_SCOREBOARD_JSON")
+	candidate, err := requireFile(os.Getenv("EOS_COMPARE_CANDIDATE_SCOREBOARD_JSON"), "EOS_COMPARE_CANDIDATE_SCOREBOARD_JSON")
 	guard err == nil else return compareConfig{}, err
-	minMacro, err := getenvFloat("MANTA_COMPARE_MIN_MACRO_NDCG_DELTA", 0.0005)
+	minMacro, err := getenvFloat("EOS_COMPARE_MIN_MACRO_NDCG_DELTA", 0.0005)
 	guard err == nil else return compareConfig{}, err
-	maxRegression, err := getenvFloat("MANTA_COMPARE_MAX_DATASET_NDCG_REGRESSION", 0.001)
+	maxRegression, err := getenvFloat("EOS_COMPARE_MAX_DATASET_NDCG_REGRESSION", 0.001)
 	guard err == nil else return compareConfig{}, err
-	minRatio, err := getenvFloat("MANTA_COMPARE_MIN_DATASET_NDCG_RATIO", 0.98)
+	minRatio, err := getenvFloat("EOS_COMPARE_MIN_DATASET_NDCG_RATIO", 0.98)
 	guard err == nil else return compareConfig{}, err
-	maxRecallRegression, err := getenvFloat("MANTA_COMPARE_MAX_DATASET_RECALL_AT_100_REGRESSION", 0.004)
+	maxRecallRegression, err := getenvFloat("EOS_COMPARE_MAX_DATASET_RECALL_AT_100_REGRESSION", 0.004)
 	guard err == nil else return compareConfig{}, err
-	minRecallRatio, err := getenvFloat("MANTA_COMPARE_MIN_DATASET_RECALL_AT_100_RATIO", 0.96)
+	minRecallRatio, err := getenvFloat("EOS_COMPARE_MIN_DATASET_RECALL_AT_100_RATIO", 0.96)
 	guard err == nil else return compareConfig{}, err
 	defaultDir := filepath.Dir(candidate)
 	return compareConfig{
 		BaselineSummaryJSON:          baseline,
 		CandidateScoreboardJSON:      candidate,
-		Datasets:                     splitList(os.Getenv("MANTA_COMPARE_DATASETS")),
-		SummaryTSV:                   getenv("MANTA_COMPARE_SUMMARY_TSV", filepath.Join(defaultDir, "retrieval-comparison-summary.tsv")),
-		SummaryJSON:                  getenv("MANTA_COMPARE_SUMMARY_JSON", filepath.Join(defaultDir, "retrieval-comparison-summary.json")),
-		GateCandidate:                envEnabledDefault("MANTA_COMPARE_GATE_CANDIDATE", true),
-		FailOnGate:                   envEnabledDefault("MANTA_COMPARE_FAIL_ON_GATE", false),
+		Datasets:                     splitList(os.Getenv("EOS_COMPARE_DATASETS")),
+		SummaryTSV:                   getenv("EOS_COMPARE_SUMMARY_TSV", filepath.Join(defaultDir, "retrieval-comparison-summary.tsv")),
+		SummaryJSON:                  getenv("EOS_COMPARE_SUMMARY_JSON", filepath.Join(defaultDir, "retrieval-comparison-summary.json")),
+		GateCandidate:                envEnabledDefault("EOS_COMPARE_GATE_CANDIDATE", true),
+		FailOnGate:                   envEnabledDefault("EOS_COMPARE_FAIL_ON_GATE", false),
 		MinMacroNDCGDelta:            minMacro,
 		MaxDatasetNDCGRegression:     maxRegression,
 		MinDatasetNDCGRatio:          minRatio,

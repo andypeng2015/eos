@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	mantaruntime "m31labs.dev/manta/runtime"
+	eosruntime "m31labs.dev/eos/runtime"
 )
 
 func TestInitDefaultEmbeddingPackageCreatesTrainablePackage(t *testing.T) {
@@ -34,7 +34,7 @@ func TestInitDefaultEmbeddingPackageCreatesTrainablePackage(t *testing.T) {
 			t.Fatalf("expected package file %q: %v", candidate, err)
 		}
 	}
-	manifest, err := mantaruntime.ReadEmbeddingManifestFile(paths.EmbeddingManifestPath)
+	manifest, err := eosruntime.ReadEmbeddingManifestFile(paths.EmbeddingManifestPath)
 	if err != nil {
 		t.Fatalf("read embedding manifest: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestInitDefaultEmbeddingPackageCreatesTrainablePackage(t *testing.T) {
 	if manifest.Tokenizer.PadID != 0 || manifest.Tokenizer.BOSID != 1 || manifest.Tokenizer.EOSID != 2 || manifest.Tokenizer.UnknownID != 3 {
 		t.Fatalf("unexpected tokenizer ids: %+v", manifest.Tokenizer)
 	}
-	checkpoint, err := mantaruntime.ReadEmbeddingTrainCheckpointFile(paths.CheckpointPath)
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(paths.CheckpointPath)
 	if err != nil {
 		t.Fatalf("read checkpoint: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestInitDefaultEmbeddingPackageCreatesTrainablePackage(t *testing.T) {
 	if checkpoint.Config.Temperature != 0.05 {
 		t.Fatalf("temperature = %f, want 0.05", checkpoint.Config.Temperature)
 	}
-	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+	if _, err := eosruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("load training package: %v", err)
 	}
 }
@@ -78,7 +78,7 @@ func TestInitDefaultEmbeddingPackageHonorsEncoderRepeats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("init default embedding package: %v", err)
 	}
-	manifest, err := mantaruntime.ReadEmbeddingManifestFile(paths.EmbeddingManifestPath)
+	manifest, err := eosruntime.ReadEmbeddingManifestFile(paths.EmbeddingManifestPath)
 	if err != nil {
 		t.Fatalf("read embedding manifest: %v", err)
 	}

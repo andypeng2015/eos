@@ -1,4 +1,4 @@
-package manta
+package eos
 
 import (
 	"os"
@@ -149,7 +149,7 @@ func TestMirageV1ArtifactSurfaceRoundTrip(t *testing.T) {
 				{Backend: BackendCUDA, Entry: "conv2d_cuda", Source: "extern \"C\" __global__ void conv2d_cuda() {}"},
 				{Backend: BackendMetal, Entry: "conv2d_metal", Source: "kernel void conv2d_metal() {}"},
 				{Backend: BackendVulkan, Entry: "conv2d_vulkan", Source: "void conv2d_vulkan() {}"},
-				{Backend: BackendDirectML, Entry: "conv2d_directml", Source: "manta_directml_graph conv2d_directml() {}"},
+				{Backend: BackendDirectML, Entry: "conv2d_directml", Source: "eos_directml_graph conv2d_directml() {}"},
 				{Backend: BackendWebGPU, Entry: "conv2d_webgpu", Source: "@compute @workgroup_size(8, 8) fn conv2d_webgpu() {}"},
 			},
 		},

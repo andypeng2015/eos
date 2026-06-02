@@ -1,27 +1,27 @@
-# Manta
+# Eos
 
-Manta is an inference-first GPU language and runtime stack. It compiles `.manta` source into backend-neutral `.mll` execution plans for GPU-accelerated embedding, reranking, retrieval-time scoring, and decode-time inference. Write the model-facing compute once, then run it through CUDA, Metal, Vulkan, DirectML, or WebGPU with the same artifact and the same entrypoint contract.
+Eos is an inference-first GPU language and runtime stack. It compiles `.eos` source into backend-neutral `.mll` execution plans for GPU-accelerated embedding, reranking, retrieval-time scoring, and decode-time inference. Write the model-facing compute once, then run it through CUDA, Metal, Vulkan, DirectML, or WebGPU with the same artifact and the same entrypoint contract.
 
 - **Inference-first product surface** with `kernel` and `pipeline` abstractions
 - **Three-level IR pipeline**: HIR (typed) -> MIR (semantic) -> LIR (scheduled)
 - **Portable artifact format** (`.mll`): compile once, deploy anywhere
 - **Portable backend surface**: CUDA, Metal, Vulkan, DirectML, and WebGPU variants from the same source
 - **First-class KV cache**: `kv_cache` type with `kv_read`/`kv_write` for autoregressive decoding
-- **TurboQuant-native direction**: Manta is designed to consume and emit quantized tensors and quantized vectors without repacking through a separate framework
+- **TurboQuant-native direction**: Eos is designed to consume and emit quantized tensors and quantized vectors without repacking through a separate framework
 - **Schedule hints**: `tile`, `vector_width`, `subgroup`, memory classes -- backend-neutral, lowered late
 - **Hybrid runtime**: backend-native execution where promoted kernels exist, host reference execution where they do not yet
-- **Go-authored tree-sitter grammar**: Manta source parsing is backed by gotreesitter, while the compiler keeps its source-oriented AST
+- **Go-authored tree-sitter grammar**: Eos source parsing is backed by gotreesitter, while the compiler keeps its source-oriented AST
 - **Pure Go toolchain**: no Python, no C++ build dependencies
 
 ## Product direction
 
-The near-term target is an inference-first product surface for embedding, reranking, retrieval-time scoring, decode, and CorkScrewDB integration. Manta also owns the native training path needed to produce those default artifacts, so model authors do not need to train in Python, export through another format, and deploy through a separate runtime.
+The near-term target is an inference-first product surface for embedding, reranking, retrieval-time scoring, decode, and CorkScrewDB integration. Eos also owns the native training path needed to produce those default artifacts, so model authors do not need to train in Python, export through another format, and deploy through a separate runtime.
 
 The credible long-context wedge is the best local long-context embedder: consumer-GPU trainable, compressed for local serving, sealed as `.mll`, and strong on long-document retrieval. The target and scorecard are tracked in [docs/local-long-context-embedder-wedge.md](docs/local-long-context-embedder-wedge.md), with lower-level sparse attention success criteria in [docs/consumer-subquadratic-gpu-spec.md](docs/consumer-subquadratic-gpu-spec.md).
 
 ## Agent Skill
 
-Agents working with Manta should use the [using-manta](https://github.com/odvcencio/m31labs-skills/blob/main/skills/using-manta/SKILL.md) skill.
+Agents working with Eos should use the [using-manta](https://github.com/odvcencio/m31labs-skills/blob/main/skills/using-manta/SKILL.md) skill.
 
 Current embedder work is focused on retrieval-aligned training, not pairwise-only wins. The alignment harness now supports source-aware hard-negative scheduling, promotion gates over full retrieval scoreboards, recall@100 guardrails, grouped hard-negative InfoNCE, hybrid InfoNCE, and teacher-score distillation over mined candidate groups. The current nDCG best is the teacher-distilled hybrid follow-up with grouped weight `0.05`, teacher weight `0.20`, LR `0.000010`, NF-biased model-hard mining, and `nfcorpus=3` source bias during training; macro nDCG@10 improves from `0.145568` to `0.147862` against the previous best while staying inside the nDCG and recall@100 floors.
 
@@ -36,11 +36,11 @@ That means the language and runtime should bias toward:
 
 ## Training A CorkScrew Embedding
 
-The default CorkScrew embedding model is intended to be born from this repository's own pipeline: local BEIR data, Manta-native training, Manta retrieval evaluation, sealed `.mll` export, and optional CorkScrew asset installation.
+The default CorkScrew embedding model is intended to be born from this repository's own pipeline: local BEIR data, Eos-native training, Eos retrieval evaluation, sealed `.mll` export, and optional CorkScrew asset installation.
 
 ```bash
-MANTA_REPO_ROOT=$PWD \
-MANTA_INSTALL_CORKSCREW=1 \
+EOS_REPO_ROOT=$PWD \
+EOS_INSTALL_CORKSCREW=1 \
 ferrous-wheel run scripts/train_manta_embed_v1_shipping_pipeline.fw
 ```
 
@@ -49,14 +49,14 @@ The shipping pipeline trains a mixed pretraining + BEIR Stage A model, mines mod
 ## Install
 
 ```bash
-go install github.com/odvcencio/manta/cmd/manta@latest
+go install github.com/odvcencio/eos/cmd/eos@latest
 ```
 
 ## Quick Start
 
-Write a `.manta` source file:
+Write a `.eos` source file:
 
-```manta
+```eos
 param token_embedding: f16[V, D] @weight("weights/token_embedding")
 param projection: f16[D, E] @weight("weights/projection")
 
@@ -74,18 +74,18 @@ pipeline embed(tokens: i32[T]) -> f16[T, E] {
 Compile and run:
 
 ```bash
-manta compile embed.manta embed.mll
-manta run embed.mll embed
+eos compile embed.eos embed.mll
+eos run embed.mll embed
 ```
 
 Or use the built-in demo:
 
 ```bash
-manta demo tiny_embed
-manta demo tiny_decode
-manta demo tiny_score
-manta demo tiny_rerank
-manta demo tiny_select
+eos demo tiny_embed
+eos demo tiny_decode
+eos demo tiny_score
+eos demo tiny_rerank
+eos demo tiny_select
 ```
 
 ## Language
@@ -94,13 +94,13 @@ manta demo tiny_select
 
 **Parameters** bind external weights with shape and dtype:
 
-```manta
+```eos
 param wq: f16[D, D] @weight("weights/wq")
 ```
 
 **Kernels** define fused compute regions:
 
-```manta
+```eos
 kernel l2_normalize(x: f16[T, E]) -> f16[T, E] {
     return normalize(x)
 }
@@ -108,7 +108,7 @@ kernel l2_normalize(x: f16[T, E]) -> f16[T, E] {
 
 **Pipelines** orchestrate steps including intrinsics, kernel calls, and KV cache operations:
 
-```manta
+```eos
 pipeline decode_step(x: f16[T, D], cache: kv_cache) -> f16[T, D] {
     let q = @matmul(x, wq)
     let q2 = rope(q)
@@ -132,7 +132,7 @@ pipeline decode_step(x: f16[T, D], cache: kv_cache) -> f16[T, D] {
 
 Dimensions are symbolic (`T`, `D`, `V`, `E`) and resolved at load time.
 
-Quantized inference dtypes such as `q4[...]` and `q8[...]` are part of the active Manta surface. The current bootstrap runtime can consume them directly for quantized scoring paths, and the next step is richer TurboQuant block-format coverage.
+Quantized inference dtypes such as `q4[...]` and `q8[...]` are part of the active Eos surface. The current bootstrap runtime can consume them directly for quantized scoring paths, and the next step is richer TurboQuant block-format coverage.
 
 ### Operations
 
@@ -165,7 +165,7 @@ Quantized inference dtypes such as `q4[...]` and `q8[...]` are part of the activ
 
 ### Statements
 
-```manta
+```eos
 let result = @matmul(x, w)    // local binding
 return softmax(result)         // return value
 kv_write(cache, value)         // expression statement (side effect)
@@ -174,7 +174,7 @@ kv_write(cache, value)         // expression statement (side effect)
 ## Compilation Pipeline
 
 ```
-.manta source
+.eos source
   |  Parse (gotreesitter grammar)
   v
 Syntax AST
@@ -215,7 +215,7 @@ These map to thread blocks, threadgroups, workgroups, or backend graph dispatche
 
 ## Artifact Format
 
-The `.mll` artifact carries a Manta execution plan:
+The `.mll` artifact carries a Eos execution plan:
 
 ```json
 {
@@ -249,14 +249,14 @@ Artifacts are validated on load: all referenced buffers, kernels, and entry poin
 
 ```go
 import (
-    mantaartifact "github.com/odvcencio/manta/artifact/manta"
-    "github.com/odvcencio/manta/runtime"
-    "github.com/odvcencio/manta/runtime/backend"
-    "github.com/odvcencio/manta/runtime/backends/cuda"
-    "github.com/odvcencio/manta/runtime/backends/directml"
-    "github.com/odvcencio/manta/runtime/backends/metal"
-    "github.com/odvcencio/manta/runtime/backends/vulkan"
-    "github.com/odvcencio/manta/runtime/backends/webgpu"
+    eosartifact "github.com/odvcencio/eos/artifact/eos"
+    "github.com/odvcencio/eos/runtime"
+    "github.com/odvcencio/eos/runtime/backend"
+    "github.com/odvcencio/eos/runtime/backends/cuda"
+    "github.com/odvcencio/eos/runtime/backends/directml"
+    "github.com/odvcencio/eos/runtime/backends/metal"
+    "github.com/odvcencio/eos/runtime/backends/vulkan"
+    "github.com/odvcencio/eos/runtime/backends/webgpu"
 )
 
 rt := runtime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
@@ -276,19 +276,19 @@ output := result.Outputs["embeddings"]
 
 The runtime tries each backend in registration order. The first backend that can load the module is selected. Weight bindings are validated against the module's parameter declarations.
 
-For promoted kernel classes, the runtime can compile and launch backend-native kernels. Where a kernel shape has not been promoted yet, the backend still owns execution but may fall back to the host reference path. This keeps the runtime honest while Manta grows.
+For promoted kernel classes, the runtime can compile and launch backend-native kernels. Where a kernel shape has not been promoted yet, the backend still owns execution but may fall back to the host reference path. This keeps the runtime honest while Eos grows.
 
 ### Backend interface
 
 ```go
 type Backend interface {
-    Kind() mantaartifact.BackendKind
-    CanLoad(mod *mantaartifact.Module) bool
-    Load(ctx context.Context, mod *mantaartifact.Module, weights map[string]WeightBinding) (Executor, error)
+    Kind() eosartifact.BackendKind
+    CanLoad(mod *eosartifact.Module) bool
+    Load(ctx context.Context, mod *eosartifact.Module, weights map[string]WeightBinding) (Executor, error)
 }
 
 type Executor interface {
-    Backend() mantaartifact.BackendKind
+    Backend() eosartifact.BackendKind
     Run(ctx context.Context, req Request) (Result, error)
 }
 ```
@@ -311,7 +311,7 @@ Outputs also carry backend launch metadata such as the selected kernel entry, la
 
 ## Deployment targets
 
-Manta is being shaped around two concrete deployment targets:
+Eos is being shaped around two concrete deployment targets:
 
 1. standalone inference binaries written in Go
 2. CorkScrewDB as a runtime host for embedding, reranking, and quantized vector-aware scoring
@@ -331,23 +331,23 @@ and eventually:
 ## CLI
 
 ```
-manta compile <source.manta> [output.mll]             Compile .manta source to a Manta artifact
-manta init-model [flags] <artifact.mll>             Create the default quantized embedding training package
-manta train-corpus [flags] <artifact.mll> <corpus>  Train tokenizer, mine pairs, and fit the embedder
-manta tokenize-embed <artifact.mll> <text> <tokens> Convert text JSONL to reusable token JSONL
-manta train-embed [flags] <artifact.mll> <train>    Fit an initialized package on token or text JSONL
-manta train-embed --eval-only <artifact.mll> <eval> Evaluate a package without optimizer steps
-manta train-embed --no-tokenizer <artifact.mll> <tokens> Force token JSONL beside a tokenizer
-manta eval-retrieval [flags] <artifact.mll> <beir>  Score BEIR-style retrieval with Manta embeddings
-manta eval-retrieval-bm25 [flags] <beir>            Score the same retrieval files with BM25
-manta compare-train-metrics <current> [baseline]    Summarize training metrics JSON and deltas
-manta diagnose-train-metrics <metrics.json>        Explain backend use and transfer pressure
-manta gate-train-metrics [flags] <metrics.json>    Enforce quality and efficiency thresholds
-manta export-mll <artifact.mll> [output.mll]        Seal an artifact package into a weight-carrying MLL file
-manta inspect <artifact.mll>                        Inspect and verify an artifact package
-manta run <artifact.mll> [entry]                    Load and execute an artifact entry point
-manta demo [tiny_embed|tiny_decode|tiny_score]      Run a built-in preset module
-manta version                                      Print version
+eos compile <source.eos> [output.mll]             Compile .eos source to a Eos artifact
+eos init-model [flags] <artifact.mll>             Create the default quantized embedding training package
+eos train-corpus [flags] <artifact.mll> <corpus>  Train tokenizer, mine pairs, and fit the embedder
+eos tokenize-embed <artifact.mll> <text> <tokens> Convert text JSONL to reusable token JSONL
+eos train-embed [flags] <artifact.mll> <train>    Fit an initialized package on token or text JSONL
+eos train-embed --eval-only <artifact.mll> <eval> Evaluate a package without optimizer steps
+eos train-embed --no-tokenizer <artifact.mll> <tokens> Force token JSONL beside a tokenizer
+eos eval-retrieval [flags] <artifact.mll> <beir>  Score BEIR-style retrieval with Eos embeddings
+eos eval-retrieval-bm25 [flags] <beir>            Score the same retrieval files with BM25
+eos compare-train-metrics <current> [baseline]    Summarize training metrics JSON and deltas
+eos diagnose-train-metrics <metrics.json>        Explain backend use and transfer pressure
+eos gate-train-metrics [flags] <metrics.json>    Enforce quality and efficiency thresholds
+eos export-mll <artifact.mll> [output.mll]        Seal an artifact package into a weight-carrying MLL file
+eos inspect <artifact.mll>                        Inspect and verify an artifact package
+eos run <artifact.mll> [entry]                    Load and execute an artifact entry point
+eos demo [tiny_embed|tiny_decode|tiny_score]      Run a built-in preset module
+eos version                                      Print version
 ```
 
 Before a candidate run, use `ferrous-wheel run scripts/verify_manta_production.fw` to preflight the local `.mll` training, eval-only, sealed export, and inspect path.
@@ -368,24 +368,24 @@ The compiler, IR pipeline, artifact format, semantic analysis, runtime, and CLI 
 ## Development
 
 ```bash
-CGO_ENABLED=0 go test ./artifact/manta ./cmd/manta ./compiler ./models ./runtime/backend ./runtime/backends/metal ./runtime/backends/vulkan ./runtime/backends/directml ./runtime/backends/webgpu ./syntax
-go build ./cmd/manta/
+CGO_ENABLED=0 go test ./artifact/eos ./cmd/eos ./compiler ./models ./runtime/backend ./runtime/backends/metal ./runtime/backends/vulkan ./runtime/backends/directml ./runtime/backends/webgpu ./syntax
+go build ./cmd/eos/
 ```
 
 CUDA-backed runtime tests require a working CUDA device and should be run separately from the no-cgo public gate.
 
 ## Benchmarks
 
-Manta keeps reproducible perf checks as Ferrous Wheel workflows.
+Eos keeps reproducible perf checks as Ferrous Wheel workflows.
 
 ```bash
-MANTA_BENCH_ROOT=$PWD ferrous-wheel run scripts/bench.fw
-MANTA_BENCH_ROOT=$PWD MANTA_BENCH_CUDA=1 ferrous-wheel run scripts/bench.fw
-MANTA_BENCH_ROOT=$PWD MANTA_BENCH_MODEL_ASSETS=/path/to/assets/manta-embed-v1 ferrous-wheel run scripts/bench.fw
+EOS_BENCH_ROOT=$PWD ferrous-wheel run scripts/bench.fw
+EOS_BENCH_ROOT=$PWD EOS_BENCH_CUDA=1 ferrous-wheel run scripts/bench.fw
+EOS_BENCH_ROOT=$PWD EOS_BENCH_MODEL_ASSETS=/path/to/assets/manta-embed-v1 ferrous-wheel run scripts/bench.fw
 ```
 
 Current `manta-embed-v1` CUDA smoke: `845.15` train examples/s and `865437.87` train pairs/s on batch `1024`, with the promoted grouped CUDA training path enabled by default. See `docs/benchmarks.md` for the full profile and the next perf targets.
 
 ## License
 
-Manta is open source under the Apache License, Version 2.0. See `LICENSE` and `NOTICE`.
+Eos is open source under the Apache License, Version 2.0. See `LICENSE` and `NOTICE`.

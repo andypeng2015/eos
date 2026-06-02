@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"sync"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 type cachedLoad struct {
@@ -32,46 +32,46 @@ func New() *Backend {
 }
 
 // Kind reports the backend identity.
-func (b *Backend) Kind() mantaartifact.BackendKind {
-	return mantaartifact.BackendCUDA
+func (b *Backend) Kind() eosartifact.BackendKind {
+	return eosartifact.BackendCUDA
 }
 
 // Capabilities reports the runtime features the CUDA backend supports.
 func (b *Backend) Capabilities() []string {
 	return []string{
-		mantaartifact.CapabilityCandidatePack,
-		mantaartifact.CapabilityKVCache,
-		mantaartifact.CapabilityMaskedMeanPool,
-		mantaartifact.CapabilityHostFallback,
-		mantaartifact.CapabilityDeviceExecution,
-		mantaartifact.CapabilityImageOps,
-		mantaartifact.CapabilityTrainingLosses,
-		mantaartifact.CapabilityTurboQuant,
-		mantaartifact.CapabilitySparseAttention,
+		eosartifact.CapabilityCandidatePack,
+		eosartifact.CapabilityKVCache,
+		eosartifact.CapabilityMaskedMeanPool,
+		eosartifact.CapabilityHostFallback,
+		eosartifact.CapabilityDeviceExecution,
+		eosartifact.CapabilityImageOps,
+		eosartifact.CapabilityTrainingLosses,
+		eosartifact.CapabilityTurboQuant,
+		eosartifact.CapabilitySparseAttention,
 	}
 }
 
 // CanLoad reports whether the module allows CUDA execution.
-func (b *Backend) CanLoad(mod *mantaartifact.Module) bool {
-	return mod != nil && mod.SupportsBackend(mantaartifact.BackendCUDA)
+func (b *Backend) CanLoad(mod *eosartifact.Module) bool {
+	return mod != nil && mod.SupportsBackend(eosartifact.BackendCUDA)
 }
 
 // Load prepares a CUDA executor stub.
-func (b *Backend) Load(_ context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding) (backend.Executor, error) {
+func (b *Backend) Load(_ context.Context, mod *eosartifact.Module, weights map[string]backend.WeightBinding) (backend.Executor, error) {
 	return b.load(context.Background(), mod, weights, "")
 }
 
-func (b *Backend) LoadWithCacheKey(ctx context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
+func (b *Backend) LoadWithCacheKey(ctx context.Context, mod *eosartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
 	return b.load(ctx, mod, weights, cacheKey)
 }
 
-func (b *Backend) load(_ context.Context, mod *mantaartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
+func (b *Backend) load(_ context.Context, mod *eosartifact.Module, weights map[string]backend.WeightBinding, cacheKey string) (backend.Executor, error) {
 	if cacheKey != "" {
 		if cached, ok := b.cachedLoad(cacheKey); ok {
 			return &executor{module: mod, weights: weights, compiled: cached.compiled, native: cached.native, device: cached.device, residentMatMulParams: cloneBoolMap(cached.residentMatMulParams)}, nil
 		}
 	}
-	compiled, err := backend.CompileVariants(mod, mantaartifact.BackendCUDA)
+	compiled, err := backend.CompileVariants(mod, eosartifact.BackendCUDA)
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +81,7 @@ func (b *Backend) load(_ context.Context, mod *mantaartifact.Module, weights map
 	}
 	native := map[string]backend.NativeKernelProgram{}
 	for _, kernel := range mod.Kernels {
-		prog, err := backend.CompileNativeKernelProgram(mantaartifact.BackendCUDA, kernel, compiled[kernel.Name])
+		prog, err := backend.CompileNativeKernelProgram(eosartifact.BackendCUDA, kernel, compiled[kernel.Name])
 		if err != nil {
 			if device != nil {
 				device.close()
@@ -127,7 +127,7 @@ func (b *Backend) storeCachedLoad(cacheKey string, cached cachedLoad) {
 	b.loadCache[cacheKey] = cached
 }
 
-func bindResidentMatMulParams(mod *mantaartifact.Module, weights map[string]backend.WeightBinding, device *deviceRuntime) (map[string]bool, error) {
+func bindResidentMatMulParams(mod *eosartifact.Module, weights map[string]backend.WeightBinding, device *deviceRuntime) (map[string]bool, error) {
 	if mod == nil || device == nil {
 		return nil, nil
 	}
@@ -135,7 +135,7 @@ func bindResidentMatMulParams(mod *mantaartifact.Module, weights map[string]back
 	if len(candidates) == 0 {
 		return nil, nil
 	}
-	params := make(map[string]mantaartifact.Param, len(mod.Params))
+	params := make(map[string]eosartifact.Param, len(mod.Params))
 	for _, param := range mod.Params {
 		params[param.Name] = param
 	}
@@ -169,14 +169,14 @@ func bindResidentMatMulParams(mod *mantaartifact.Module, weights map[string]back
 	return resident, nil
 }
 
-func matMulParamInputs(mod *mantaartifact.Module) map[string]bool {
+func matMulParamInputs(mod *eosartifact.Module) map[string]bool {
 	params := make(map[string]bool, len(mod.Params))
 	for _, param := range mod.Params {
 		params[param.Name] = true
 	}
 	out := map[string]bool{}
 	for _, step := range mod.Steps {
-		if step.Kind != mantaartifact.StepMatMul {
+		if step.Kind != eosartifact.StepMatMul {
 			continue
 		}
 		for _, input := range step.Inputs {
@@ -208,7 +208,7 @@ func cloneBoolMap(in map[string]bool) map[string]bool {
 }
 
 type executor struct {
-	module               *mantaartifact.Module
+	module               *eosartifact.Module
 	weights              map[string]backend.WeightBinding
 	compiled             map[string]backend.CompiledKernel
 	native               map[string]backend.NativeKernelProgram
@@ -216,8 +216,8 @@ type executor struct {
 	residentMatMulParams map[string]bool
 }
 
-func (e *executor) Backend() mantaartifact.BackendKind {
-	return mantaartifact.BackendCUDA
+func (e *executor) Backend() eosartifact.BackendKind {
+	return eosartifact.BackendCUDA
 }
 
 func (e *executor) Run(ctx context.Context, req backend.Request) (backend.Result, error) {
@@ -225,7 +225,7 @@ func (e *executor) Run(ctx context.Context, req backend.Request) (backend.Result
 	if e.device != nil {
 		before = e.device.matMulStatsSnapshot()
 	}
-	result, err := backend.ExecuteSymbolic(ctx, e.module, e.weights, e.compiled, e.dispatchKernel, e.dispatchStep, mantaartifact.BackendCUDA, req)
+	result, err := backend.ExecuteSymbolic(ctx, e.module, e.weights, e.compiled, e.dispatchKernel, e.dispatchStep, eosartifact.BackendCUDA, req)
 	if err != nil {
 		return backend.Result{}, err
 	}
@@ -241,7 +241,7 @@ func (e *executor) Run(ctx context.Context, req backend.Request) (backend.Result
 	return result, nil
 }
 
-func (e *executor) dispatchKernel(_ context.Context, kernel mantaartifact.Kernel, inputs []*backend.Tensor) (backend.KernelDispatchResult, error) {
+func (e *executor) dispatchKernel(_ context.Context, kernel eosartifact.Kernel, inputs []*backend.Tensor) (backend.KernelDispatchResult, error) {
 	prog, ok := e.native[kernel.Name]
 	if !ok {
 		return backend.KernelDispatchResult{}, fmt.Errorf("CUDA kernel %q is not compiled", kernel.Name)
@@ -268,9 +268,9 @@ func (e *executor) dispatchKernel(_ context.Context, kernel mantaartifact.Kernel
 	}, nil
 }
 
-func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outputType mantaartifact.ValueType, inputs []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
+func (e *executor) dispatchStep(_ context.Context, step eosartifact.Step, outputType eosartifact.ValueType, inputs []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
 	switch step.Kind {
-	case mantaartifact.StepMatMul:
+	case eosartifact.StepMatMul:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
 		}
@@ -298,7 +298,7 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 			return backend.StepDispatchResult{}, false, err
 		}
 		return result, true, nil
-	case mantaartifact.StepConv2D:
+	case eosartifact.StepConv2D:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
 		}
@@ -311,7 +311,7 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 			return backend.StepDispatchResult{}, false, err
 		}
 		return result, true, nil
-	case mantaartifact.StepConv2DTrans:
+	case eosartifact.StepConv2DTrans:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
 		}
@@ -324,7 +324,7 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 			return backend.StepDispatchResult{}, false, err
 		}
 		return result, true, nil
-	case mantaartifact.StepTurboQEncode:
+	case eosartifact.StepTurboQEncode:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
 		}
@@ -337,7 +337,7 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 			return backend.StepDispatchResult{}, false, err
 		}
 		return result, true, nil
-	case mantaartifact.StepTurboQDecode:
+	case eosartifact.StepTurboQDecode:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
 		}
@@ -350,7 +350,7 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 			return backend.StepDispatchResult{}, false, err
 		}
 		return result, true, nil
-	case mantaartifact.StepSparseAttention:
+	case eosartifact.StepSparseAttention:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
 		}
@@ -363,7 +363,7 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 			return backend.StepDispatchResult{}, false, err
 		}
 		return result, true, nil
-	case mantaartifact.StepTurboSparseAttention:
+	case eosartifact.StepTurboSparseAttention:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
 		}
@@ -376,19 +376,19 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 			return backend.StepDispatchResult{}, false, err
 		}
 		return result, true, nil
-	case mantaartifact.StepGDN, mantaartifact.StepIGDN:
+	case eosartifact.StepGDN, eosartifact.StepIGDN:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
 		}
 		if !supportsBuiltinGDN(inputs) {
 			return backend.StepDispatchResult{}, false, nil
 		}
-		result, err := e.device.runGDNStep(inputs, outputType, step.Kind == mantaartifact.StepIGDN)
+		result, err := e.device.runGDNStep(inputs, outputType, step.Kind == eosartifact.StepIGDN)
 		if err != nil {
 			return backend.StepDispatchResult{}, false, err
 		}
 		return result, true, nil
-	case mantaartifact.StepMSELoss:
+	case eosartifact.StepMSELoss:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
 		}
@@ -400,7 +400,7 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 			return backend.StepDispatchResult{}, false, err
 		}
 		return result, true, nil
-	case mantaartifact.StepMSSSIMLoss:
+	case eosartifact.StepMSSSIMLoss:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
 		}
@@ -412,7 +412,7 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 			return backend.StepDispatchResult{}, false, err
 		}
 		return result, true, nil
-	case mantaartifact.StepScalarAdd:
+	case eosartifact.StepScalarAdd:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
 		}
@@ -424,7 +424,7 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 			return backend.StepDispatchResult{}, false, err
 		}
 		return result, true, nil
-	case mantaartifact.StepRDLoss:
+	case eosartifact.StepRDLoss:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
 		}
@@ -437,7 +437,7 @@ func (e *executor) dispatchStep(_ context.Context, step mantaartifact.Step, outp
 			return backend.StepDispatchResult{}, false, err
 		}
 		return result, true, nil
-	case mantaartifact.StepCrossEntropy:
+	case eosartifact.StepCrossEntropy:
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
 		}
@@ -542,7 +542,7 @@ type cudaConv2DTransposeConfig struct {
 	hasBias     bool
 }
 
-func planBuiltinConv2D(step mantaartifact.Step, inputs []*backend.Tensor) (cudaConv2DConfig, bool) {
+func planBuiltinConv2D(step eosartifact.Step, inputs []*backend.Tensor) (cudaConv2DConfig, bool) {
 	if len(inputs) < 2 || len(inputs) > 3 || inputs[0] == nil || inputs[1] == nil {
 		return cudaConv2DConfig{}, false
 	}
@@ -597,7 +597,7 @@ func planBuiltinConv2D(step mantaartifact.Step, inputs []*backend.Tensor) (cudaC
 	}, true
 }
 
-func planBuiltinConv2DTranspose(step mantaartifact.Step, inputs []*backend.Tensor) (cudaConv2DTransposeConfig, bool) {
+func planBuiltinConv2DTranspose(step eosartifact.Step, inputs []*backend.Tensor) (cudaConv2DTransposeConfig, bool) {
 	if len(inputs) < 2 || len(inputs) > 3 || inputs[0] == nil || inputs[1] == nil {
 		return cudaConv2DTransposeConfig{}, false
 	}
@@ -694,7 +694,7 @@ type cudaTurboSparseAttentionConfig struct {
 	routeTopBlocks int
 }
 
-func planBuiltinTurboQEncode(step mantaartifact.Step, inputs []*backend.Tensor) (cudaTurboQConfig, bool) {
+func planBuiltinTurboQEncode(step eosartifact.Step, inputs []*backend.Tensor) (cudaTurboQConfig, bool) {
 	if len(inputs) != 1 || inputs[0] == nil {
 		return cudaTurboQConfig{}, false
 	}
@@ -719,7 +719,7 @@ func planBuiltinTurboQEncode(step mantaartifact.Step, inputs []*backend.Tensor) 
 	}, true
 }
 
-func planBuiltinTurboQDecode(step mantaartifact.Step, inputs []*backend.Tensor) (cudaTurboQConfig, bool) {
+func planBuiltinTurboQDecode(step eosartifact.Step, inputs []*backend.Tensor) (cudaTurboQConfig, bool) {
 	if len(inputs) != 2 || inputs[0] == nil || inputs[1] == nil {
 		return cudaTurboQConfig{}, false
 	}
@@ -747,7 +747,7 @@ func planBuiltinTurboQDecode(step mantaartifact.Step, inputs []*backend.Tensor) 
 	}, true
 }
 
-func planBuiltinSparseAttention(step mantaartifact.Step, inputs []*backend.Tensor) (cudaSparseAttentionConfig, bool) {
+func planBuiltinSparseAttention(step eosartifact.Step, inputs []*backend.Tensor) (cudaSparseAttentionConfig, bool) {
 	if len(inputs) != 3 || inputs[0] == nil || inputs[1] == nil || inputs[2] == nil {
 		return cudaSparseAttentionConfig{}, false
 	}
@@ -806,7 +806,7 @@ func planBuiltinSparseAttention(step mantaartifact.Step, inputs []*backend.Tenso
 	return cudaSparseAttentionConfig{}, false
 }
 
-func planBuiltinTurboSparseAttention(step mantaartifact.Step, inputs []*backend.Tensor) (cudaTurboSparseAttentionConfig, bool) {
+func planBuiltinTurboSparseAttention(step eosartifact.Step, inputs []*backend.Tensor) (cudaTurboSparseAttentionConfig, bool) {
 	if len(inputs) != 5 || inputs[0] == nil || inputs[1] == nil || inputs[2] == nil || inputs[3] == nil || inputs[4] == nil {
 		return cudaTurboSparseAttentionConfig{}, false
 	}
@@ -997,7 +997,7 @@ type cudaCrossEntropyPlan struct {
 	sigmaMode cudaSigmaMode
 }
 
-func planBuiltinCrossEntropy(step mantaartifact.Step, inputs []*backend.Tensor) (cudaCrossEntropyPlan, bool) {
+func planBuiltinCrossEntropy(step eosartifact.Step, inputs []*backend.Tensor) (cudaCrossEntropyPlan, bool) {
 	if len(inputs) < 1 || inputs[0] == nil {
 		return cudaCrossEntropyPlan{}, false
 	}
@@ -1202,7 +1202,7 @@ func stepAttrInt64(attrs map[string]string, key string, fallback int64) int64 {
 	return value
 }
 
-func shouldFallbackScoreKernel(kernel mantaartifact.Kernel, inputs []*backend.Tensor) bool {
+func shouldFallbackScoreKernel(kernel eosartifact.Kernel, inputs []*backend.Tensor) bool {
 	if len(kernel.Body) == 0 {
 		return false
 	}

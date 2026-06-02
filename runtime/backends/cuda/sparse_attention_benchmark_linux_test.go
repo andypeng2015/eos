@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 func BenchmarkCUDASparseAttentionSweep(b *testing.B) {
@@ -24,7 +24,7 @@ func BenchmarkCUDASparseAttentionSweep(b *testing.B) {
 	}
 	defer rt.close()
 
-	cases, err := sparseAttentionBenchCasesFromEnv("MANTA_CUDA_SPARSE_BENCH_EXACT_KEY_LENS", "1024,4096")
+	cases, err := sparseAttentionBenchCasesFromEnv("EOS_CUDA_SPARSE_BENCH_EXACT_KEY_LENS", "1024,4096")
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func BenchmarkCUDASparseAttentionSweep(b *testing.B) {
 		b.Run(tc.name("exact-f16"), func(b *testing.B) {
 			query, key, value := syntheticSparseAttentionTensors(1, tc.KeyLen, tc.QueryDim, tc.ValueDim)
 			attrs := map[string]string{"top_k": strconv.Itoa(tc.TopK)}
-			step := mantaartifact.Step{Kind: mantaartifact.StepSparseAttention, Attributes: attrs}
+			step := eosartifact.Step{Kind: eosartifact.StepSparseAttention, Attributes: attrs}
 			cfg, ok := planBuiltinSparseAttention(step, []*backend.Tensor{query, key, value})
 			if !ok {
 				b.Fatalf("sparse_attention benchmark config rejected: %+v", tc)
@@ -71,7 +71,7 @@ func BenchmarkCUDATurboSparseAttentionSweep(b *testing.B) {
 	}
 	defer rt.close()
 
-	cases, err := sparseAttentionBenchCasesFromEnv("MANTA_CUDA_SPARSE_BENCH_ROUTED_KEY_LENS", "1024,4096,16384")
+	cases, err := sparseAttentionBenchCasesFromEnv("EOS_CUDA_SPARSE_BENCH_ROUTED_KEY_LENS", "1024,4096,16384")
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func BenchmarkCUDATurboSparseAttentionSweep(b *testing.B) {
 				b.Fatalf("encode value: %v", err)
 			}
 			inputs := []*backend.Tensor{query, keyCoords, keyNorms, valueCoords, valueNorms}
-			step := mantaartifact.Step{Kind: mantaartifact.StepTurboSparseAttention, Attributes: attrs}
+			step := eosartifact.Step{Kind: eosartifact.StepTurboSparseAttention, Attributes: attrs}
 			cfg, ok := planBuiltinTurboSparseAttention(step, inputs)
 			if !ok {
 				b.Fatalf("turbo_sparse_attention benchmark config rejected: %+v", tc)
@@ -145,14 +145,14 @@ type sparseAttentionBenchCase struct {
 }
 
 func TestSparseAttentionBenchCasesFromEnv(t *testing.T) {
-	t.Setenv("MANTA_CUDA_SPARSE_BENCH_TEST_KEY_LENS", "256,1024")
-	t.Setenv("MANTA_CUDA_SPARSE_BENCH_QUERY_DIM", "32")
-	t.Setenv("MANTA_CUDA_SPARSE_BENCH_VALUE_DIM", "48")
-	t.Setenv("MANTA_CUDA_SPARSE_BENCH_TOP_K", "0")
-	t.Setenv("MANTA_CUDA_SPARSE_BENCH_BITS", "8")
-	t.Setenv("MANTA_CUDA_SPARSE_BENCH_ROUTE_TOP_BLOCKS", "4")
+	t.Setenv("EOS_CUDA_SPARSE_BENCH_TEST_KEY_LENS", "256,1024")
+	t.Setenv("EOS_CUDA_SPARSE_BENCH_QUERY_DIM", "32")
+	t.Setenv("EOS_CUDA_SPARSE_BENCH_VALUE_DIM", "48")
+	t.Setenv("EOS_CUDA_SPARSE_BENCH_TOP_K", "0")
+	t.Setenv("EOS_CUDA_SPARSE_BENCH_BITS", "8")
+	t.Setenv("EOS_CUDA_SPARSE_BENCH_ROUTE_TOP_BLOCKS", "4")
 
-	cases, err := sparseAttentionBenchCasesFromEnv("MANTA_CUDA_SPARSE_BENCH_TEST_KEY_LENS", "")
+	cases, err := sparseAttentionBenchCasesFromEnv("EOS_CUDA_SPARSE_BENCH_TEST_KEY_LENS", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,34 +176,34 @@ func sparseAttentionBenchCasesFromEnv(keyLensEnv, fallbackKeyLens string) ([]spa
 	if err != nil {
 		return nil, err
 	}
-	queryDim, err := sparseAttentionBenchIntEnv("MANTA_CUDA_SPARSE_BENCH_QUERY_DIM", 64)
+	queryDim, err := sparseAttentionBenchIntEnv("EOS_CUDA_SPARSE_BENCH_QUERY_DIM", 64)
 	if err != nil {
 		return nil, err
 	}
-	valueDim, err := sparseAttentionBenchIntEnv("MANTA_CUDA_SPARSE_BENCH_VALUE_DIM", 64)
+	valueDim, err := sparseAttentionBenchIntEnv("EOS_CUDA_SPARSE_BENCH_VALUE_DIM", 64)
 	if err != nil {
 		return nil, err
 	}
-	topK, err := sparseAttentionBenchIntEnv("MANTA_CUDA_SPARSE_BENCH_TOP_K", 0)
+	topK, err := sparseAttentionBenchIntEnv("EOS_CUDA_SPARSE_BENCH_TOP_K", 0)
 	if err != nil {
 		return nil, err
 	}
-	bits, err := sparseAttentionBenchIntEnv("MANTA_CUDA_SPARSE_BENCH_BITS", 4)
+	bits, err := sparseAttentionBenchIntEnv("EOS_CUDA_SPARSE_BENCH_BITS", 4)
 	if err != nil {
 		return nil, err
 	}
 	if bits != 2 && bits != 4 && bits != 8 {
-		return nil, fmt.Errorf("MANTA_CUDA_SPARSE_BENCH_BITS must be 2, 4, or 8")
+		return nil, fmt.Errorf("EOS_CUDA_SPARSE_BENCH_BITS must be 2, 4, or 8")
 	}
-	routeTopBlocks, err := sparseAttentionBenchIntEnv("MANTA_CUDA_SPARSE_BENCH_ROUTE_TOP_BLOCKS", 2)
+	routeTopBlocks, err := sparseAttentionBenchIntEnv("EOS_CUDA_SPARSE_BENCH_ROUTE_TOP_BLOCKS", 2)
 	if err != nil {
 		return nil, err
 	}
 	if queryDim <= 0 || valueDim <= 0 {
-		return nil, fmt.Errorf("MANTA_CUDA_SPARSE_BENCH_QUERY_DIM and MANTA_CUDA_SPARSE_BENCH_VALUE_DIM must be positive")
+		return nil, fmt.Errorf("EOS_CUDA_SPARSE_BENCH_QUERY_DIM and EOS_CUDA_SPARSE_BENCH_VALUE_DIM must be positive")
 	}
 	if routeTopBlocks <= 0 {
-		return nil, fmt.Errorf("MANTA_CUDA_SPARSE_BENCH_ROUTE_TOP_BLOCKS must be positive")
+		return nil, fmt.Errorf("EOS_CUDA_SPARSE_BENCH_ROUTE_TOP_BLOCKS must be positive")
 	}
 	cases := make([]sparseAttentionBenchCase, 0, len(keyLens))
 	for _, keyLen := range keyLens {
@@ -271,10 +271,10 @@ func sparseAttentionBenchIntListEnv(name, fallback string) ([]int, error) {
 	return values, nil
 }
 
-func sparseAttentionBenchOutputType() mantaartifact.ValueType {
-	return mantaartifact.ValueType{
-		Kind:   mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{DType: "f16"},
+func sparseAttentionBenchOutputType() eosartifact.ValueType {
+	return eosartifact.ValueType{
+		Kind:   eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{DType: "f16"},
 	}
 }
 

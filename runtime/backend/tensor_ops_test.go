@@ -5,12 +5,12 @@ import (
 	"math"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
+	eosartifact "m31labs.dev/eos/artifact/eos"
 )
 
 func TestMaterializeValueTensor(t *testing.T) {
 	value, err := MaterializeValue(
-		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f16", Shape: []string{"T", "D"}}},
+		eosartifact.ValueType{Kind: eosartifact.ValueTensor, Tensor: &eosartifact.TensorType{DType: "f16", Shape: []string{"T", "D"}}},
 		NewTensorF16([]int{2, 2}, []float32{1, 2, 3, 4}),
 	)
 	if err != nil {
@@ -27,7 +27,7 @@ func TestMaterializeValueTensor(t *testing.T) {
 
 func TestMaterializeValueTensorI64(t *testing.T) {
 	value, err := MaterializeValue(
-		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "i64", Shape: []string{"T"}}},
+		eosartifact.ValueType{Kind: eosartifact.ValueTensor, Tensor: &eosartifact.TensorType{DType: "i64", Shape: []string{"T"}}},
 		NewTensorI64([]int{3}, []int64{101, 202, 303}),
 	)
 	if err != nil {
@@ -44,7 +44,7 @@ func TestMaterializeValueTensorI64(t *testing.T) {
 
 func TestMaterializeValueCandidatePack(t *testing.T) {
 	value, err := MaterializeValue(
-		mantaartifact.ValueType{Kind: mantaartifact.ValueCandidatePack, CandidatePack: &mantaartifact.CandidatePackType{Shape: []string{"K", "D"}}},
+		eosartifact.ValueType{Kind: eosartifact.ValueCandidatePack, CandidatePack: &eosartifact.CandidatePackType{Shape: []string{"K", "D"}}},
 		NewCandidatePack(
 			NewTensorI64([]int{2}, []int64{1001, 3003}),
 			NewTensorF32([]int{2}, []float32{1, 0.70710677}),
@@ -66,7 +66,7 @@ func TestMaterializeValueCandidatePack(t *testing.T) {
 func TestMaterializeValueWithBindingsBindsSymbols(t *testing.T) {
 	bindings := map[string]int{}
 	_, concrete, err := MaterializeValueWithBindings(
-		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f16", Shape: []string{"T", "D"}}},
+		eosartifact.ValueType{Kind: eosartifact.ValueTensor, Tensor: &eosartifact.TensorType{DType: "f16", Shape: []string{"T", "D"}}},
 		NewTensorF16([]int{2, 4}, []float32{1, 2, 3, 4, 5, 6, 7, 8}),
 		bindings,
 	)
@@ -84,7 +84,7 @@ func TestMaterializeValueWithBindingsBindsSymbols(t *testing.T) {
 func TestMaterializeValueWithBindingsRejectsMismatch(t *testing.T) {
 	bindings := map[string]int{"D": 2}
 	_, _, err := MaterializeValueWithBindings(
-		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f16", Shape: []string{"T", "D"}}},
+		eosartifact.ValueType{Kind: eosartifact.ValueTensor, Tensor: &eosartifact.TensorType{DType: "f16", Shape: []string{"T", "D"}}},
 		NewTensorF16([]int{2, 3}, []float32{1, 2, 3, 4, 5, 6}),
 		bindings,
 	)
@@ -97,7 +97,7 @@ func TestPreviewValueWithBindingsReusesTensorPointer(t *testing.T) {
 	bindings := map[string]int{}
 	input := NewTensorF16([]int{2, 2}, []float32{1, 2, 3, 4})
 	value, concrete, err := PreviewValueWithBindings(
-		mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f16", Shape: []string{"T", "D"}}},
+		eosartifact.ValueType{Kind: eosartifact.ValueTensor, Tensor: &eosartifact.TensorType{DType: "f16", Shape: []string{"T", "D"}}},
 		input,
 		bindings,
 	)
@@ -204,29 +204,29 @@ func TestMatmulTensorBatchedRHS(t *testing.T) {
 }
 
 func TestExecuteSymbolicDispatchesImageStep(t *testing.T) {
-	mod := mantaartifact.NewModule("image_dispatch")
-	mod.EntryPoints = []mantaartifact.EntryPoint{{
+	mod := eosartifact.NewModule("image_dispatch")
+	mod.EntryPoints = []eosartifact.EntryPoint{{
 		Name: "conv",
-		Kind: mantaartifact.EntryPointPipeline,
-		Inputs: []mantaartifact.ValueBinding{
+		Kind: eosartifact.EntryPointPipeline,
+		Inputs: []eosartifact.ValueBinding{
 			{Name: "x", Type: tensorValueType("f16", []string{"1", "1", "2", "2"})},
 			{Name: "w", Type: tensorValueType("f16", []string{"1", "1", "2", "2"})},
 			{Name: "b", Type: tensorValueType("f16", []string{"1"})},
 		},
-		Outputs: []mantaartifact.ValueBinding{
+		Outputs: []eosartifact.ValueBinding{
 			{Name: "y", Type: tensorValueType("f16", []string{"1", "1", "1", "1"})},
 		},
 	}}
-	mod.Buffers = []mantaartifact.Buffer{{Name: "y", DType: "f16", Shape: []string{"1", "1", "1", "1"}}}
-	mod.Steps = []mantaartifact.Step{
-		{Entry: "conv", Kind: mantaartifact.StepConv2D, Name: "conv2d", Inputs: []string{"x", "w", "b"}, Outputs: []string{"y"}},
-		{Entry: "conv", Kind: mantaartifact.StepReturn, Name: "return", Outputs: []string{"y"}},
+	mod.Buffers = []eosartifact.Buffer{{Name: "y", DType: "f16", Shape: []string{"1", "1", "1", "1"}}}
+	mod.Steps = []eosartifact.Step{
+		{Entry: "conv", Kind: eosartifact.StepConv2D, Name: "conv2d", Inputs: []string{"x", "w", "b"}, Outputs: []string{"y"}},
+		{Entry: "conv", Kind: eosartifact.StepReturn, Name: "return", Outputs: []string{"y"}},
 	}
 	if err := mod.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	dispatch := func(_ context.Context, step mantaartifact.Step, outputType mantaartifact.ValueType, inputs []*Tensor) (StepDispatchResult, bool, error) {
-		if step.Kind != mantaartifact.StepConv2D {
+	dispatch := func(_ context.Context, step eosartifact.Step, outputType eosartifact.ValueType, inputs []*Tensor) (StepDispatchResult, bool, error) {
+		if step.Kind != eosartifact.StepConv2D {
 			return StepDispatchResult{}, false, nil
 		}
 		if len(inputs) != 3 {
@@ -241,7 +241,7 @@ func TestExecuteSymbolicDispatchesImageStep(t *testing.T) {
 			Metadata:     map[string]any{"dispatch_mode": "test_device"},
 		}, true, nil
 	}
-	result, err := ExecuteSymbolic(context.Background(), mod, nil, nil, nil, dispatch, mantaartifact.BackendCUDA, Request{
+	result, err := ExecuteSymbolic(context.Background(), mod, nil, nil, nil, dispatch, eosartifact.BackendCUDA, Request{
 		Entry: "conv",
 		Inputs: map[string]any{
 			"x": NewTensorF16([]int{1, 1, 2, 2}, []float32{1, 2, 3, 4}),
@@ -265,31 +265,31 @@ func TestExecuteSymbolicDispatchesImageStep(t *testing.T) {
 }
 
 func TestExecuteSymbolicDispatchesMultiOutputImageStep(t *testing.T) {
-	mod := mantaartifact.NewModule("turboquant_dispatch")
-	mod.EntryPoints = []mantaartifact.EntryPoint{{
+	mod := eosartifact.NewModule("turboquant_dispatch")
+	mod.EntryPoints = []eosartifact.EntryPoint{{
 		Name: "quantize",
-		Kind: mantaartifact.EntryPointPipeline,
-		Inputs: []mantaartifact.ValueBinding{
+		Kind: eosartifact.EntryPointPipeline,
+		Inputs: []eosartifact.ValueBinding{
 			{Name: "y", Type: tensorValueType("f16", []string{"1", "2", "1", "1"})},
 		},
-		Outputs: []mantaartifact.ValueBinding{
+		Outputs: []eosartifact.ValueBinding{
 			{Name: "coords", Type: tensorValueType("q2", []string{"1", "2", "1", "1"})},
 			{Name: "norms", Type: tensorValueType("q_norm", []string{"1", "1", "1"})},
 		},
 	}}
-	mod.Buffers = []mantaartifact.Buffer{
+	mod.Buffers = []eosartifact.Buffer{
 		{Name: "coords", DType: "q2", Shape: []string{"1", "2", "1", "1"}},
 		{Name: "norms", DType: "q_norm", Shape: []string{"1", "1", "1"}},
 	}
-	mod.Steps = []mantaartifact.Step{
-		{Entry: "quantize", Kind: mantaartifact.StepTurboQEncode, Name: "quantize", Inputs: []string{"y"}, Outputs: []string{"coords", "norms"}, Attributes: map[string]string{"bits": "2"}},
-		{Entry: "quantize", Kind: mantaartifact.StepReturn, Name: "return", Outputs: []string{"coords", "norms"}},
+	mod.Steps = []eosartifact.Step{
+		{Entry: "quantize", Kind: eosartifact.StepTurboQEncode, Name: "quantize", Inputs: []string{"y"}, Outputs: []string{"coords", "norms"}, Attributes: map[string]string{"bits": "2"}},
+		{Entry: "quantize", Kind: eosartifact.StepReturn, Name: "return", Outputs: []string{"coords", "norms"}},
 	}
 	if err := mod.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	dispatch := func(_ context.Context, step mantaartifact.Step, _ mantaartifact.ValueType, inputs []*Tensor) (StepDispatchResult, bool, error) {
-		if step.Kind != mantaartifact.StepTurboQEncode {
+	dispatch := func(_ context.Context, step eosartifact.Step, _ eosartifact.ValueType, inputs []*Tensor) (StepDispatchResult, bool, error) {
+		if step.Kind != eosartifact.StepTurboQEncode {
 			return StepDispatchResult{}, false, nil
 		}
 		if len(inputs) != 1 {
@@ -304,7 +304,7 @@ func TestExecuteSymbolicDispatchesMultiOutputImageStep(t *testing.T) {
 			Metadata:     map[string]any{"dispatch_mode": "test_device"},
 		}, true, nil
 	}
-	result, err := ExecuteSymbolic(context.Background(), mod, nil, nil, nil, dispatch, mantaartifact.BackendCUDA, Request{
+	result, err := ExecuteSymbolic(context.Background(), mod, nil, nil, nil, dispatch, eosartifact.BackendCUDA, Request{
 		Entry:  "quantize",
 		Inputs: map[string]any{"y": NewTensorF16([]int{1, 2, 1, 1}, []float32{1, 2})},
 	})
@@ -712,9 +712,9 @@ func TestGatherTensorRank2SharedWithRank2Indices(t *testing.T) {
 		0, 2,
 		1, 0,
 	})
-	out, err := gatherTensor(table, indices, mantaartifact.ValueType{
-		Kind: mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{
+	out, err := gatherTensor(table, indices, eosartifact.ValueType{
+		Kind: eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{
 			DType: "f16",
 			Shape: []string{"B", "T", "D"},
 		},
@@ -1002,10 +1002,10 @@ func assertTensorI64(t *testing.T, tensor *Tensor, wantShape []int, want []int64
 	}
 }
 
-func tensorValueType(dtype string, shape []string) mantaartifact.ValueType {
-	return mantaartifact.ValueType{
-		Kind:   mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{DType: dtype, Shape: append([]string(nil), shape...)},
+func tensorValueType(dtype string, shape []string) eosartifact.ValueType {
+	return eosartifact.ValueType{
+		Kind:   eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{DType: dtype, Shape: append([]string(nil), shape...)},
 	}
 }
 

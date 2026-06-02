@@ -111,39 +111,39 @@ func usage() {
 	fmt.Println(`Run one retrieval-alignment round for manta-embed-v1.
 
 Required:
-  MANTA_ALIGN_INITIAL_ARTIFACT=/path/to/manta-embed-v1.sealed.mll
+  EOS_ALIGN_INITIAL_ARTIFACT=/path/to/manta-embed-v1.sealed.mll
 
 Run:
-  MANTA_REPO_ROOT=$PWD ferrous-wheel run scripts/run_manta_embed_v1_retrieval_alignment_round.fw
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/run_manta_embed_v1_retrieval_alignment_round.fw
 
 Defaults:
-  MANTA_DATASET_ROOT=$PWD/datasets/manta-embed-v1
-  MANTA_ALIGN_DATASETS=scifact,nfcorpus,fiqa
-  MANTA_ALIGN_SCORE_BASELINE=1
-  MANTA_ALIGN_MINE_MODEL_HARD_NEGATIVES=1
-  MANTA_ALIGN_TRAIN_CANDIDATE=1
-  MANTA_ALIGN_SCORE_CANDIDATE=1
-  MANTA_ALIGN_MODEL_HARD_MAX_EXAMPLES=6000
-  MANTA_ALIGN_MODEL_HARD_DATASET_WEIGHTS=
-  MANTA_ALIGN_MODEL_HARD_NEGATIVES=3
-  MANTA_ALIGN_MODEL_HARD_CANDIDATE_TOP_K=200
-  MANTA_ALIGN_CANDIDATE_EPOCHS=1
-  MANTA_ALIGN_CANDIDATE_BATCH_SIZE=64
-  MANTA_ALIGN_CANDIDATE_HARD_NEGATIVES=1
-  MANTA_ALIGN_CANDIDATE_SOURCE_WEIGHTS=
-  MANTA_ALIGN_CANDIDATE_CONTRASTIVE_LOSS=infonce
-  MANTA_ALIGN_CANDIDATE_GROUPED_LOSS_WEIGHT=0.25
-  MANTA_ALIGN_CANDIDATE_TEACHER_LOSS_WEIGHT=0
-  MANTA_ALIGN_CANDIDATE_TEACHER_TEMPERATURE=1
-  MANTA_ALIGN_CANDIDATE_LR=0.0003
-  MANTA_ALIGN_GATE_CANDIDATE=0
-  MANTA_ALIGN_MIN_MACRO_NDCG_DELTA=0
-  MANTA_ALIGN_MAX_DATASET_NDCG_REGRESSION=0
-  MANTA_ALIGN_MIN_DATASET_NDCG_RATIO=0
-  MANTA_ALIGN_MAX_DATASET_RECALL_AT_100_REGRESSION=0
-  MANTA_ALIGN_MIN_DATASET_RECALL_AT_100_RATIO=0
-  MANTA_ALIGN_MAX_DOCS=0
-  MANTA_ALIGN_MAX_QUERIES=0`)
+  EOS_DATASET_ROOT=$PWD/datasets/manta-embed-v1
+  EOS_ALIGN_DATASETS=scifact,nfcorpus,fiqa
+  EOS_ALIGN_SCORE_BASELINE=1
+  EOS_ALIGN_MINE_MODEL_HARD_NEGATIVES=1
+  EOS_ALIGN_TRAIN_CANDIDATE=1
+  EOS_ALIGN_SCORE_CANDIDATE=1
+  EOS_ALIGN_MODEL_HARD_MAX_EXAMPLES=6000
+  EOS_ALIGN_MODEL_HARD_DATASET_WEIGHTS=
+  EOS_ALIGN_MODEL_HARD_NEGATIVES=3
+  EOS_ALIGN_MODEL_HARD_CANDIDATE_TOP_K=200
+  EOS_ALIGN_CANDIDATE_EPOCHS=1
+  EOS_ALIGN_CANDIDATE_BATCH_SIZE=64
+  EOS_ALIGN_CANDIDATE_HARD_NEGATIVES=1
+  EOS_ALIGN_CANDIDATE_SOURCE_WEIGHTS=
+  EOS_ALIGN_CANDIDATE_CONTRASTIVE_LOSS=infonce
+  EOS_ALIGN_CANDIDATE_GROUPED_LOSS_WEIGHT=0.25
+  EOS_ALIGN_CANDIDATE_TEACHER_LOSS_WEIGHT=0
+  EOS_ALIGN_CANDIDATE_TEACHER_TEMPERATURE=1
+  EOS_ALIGN_CANDIDATE_LR=0.0003
+  EOS_ALIGN_GATE_CANDIDATE=0
+  EOS_ALIGN_MIN_MACRO_NDCG_DELTA=0
+  EOS_ALIGN_MAX_DATASET_NDCG_REGRESSION=0
+  EOS_ALIGN_MIN_DATASET_NDCG_RATIO=0
+  EOS_ALIGN_MAX_DATASET_RECALL_AT_100_REGRESSION=0
+  EOS_ALIGN_MIN_DATASET_RECALL_AT_100_RATIO=0
+  EOS_ALIGN_MAX_DOCS=0
+  EOS_ALIGN_MAX_QUERIES=0`)
 }
 
 func getenv(name string, fallback string) string {
@@ -190,7 +190,7 @@ func hasRepoRoot(dir string) bool {
 }
 
 func findRoot() (string, error) {
-	explicit := os.Getenv("MANTA_REPO_ROOT")
+	explicit := os.Getenv("EOS_REPO_ROOT")
 	if hasRepoRoot(explicit) {
 		return filepath.Abs(explicit)
 	}
@@ -203,7 +203,7 @@ func findRoot() (string, error) {
 	if hasRepoRoot(cwd) {
 		return filepath.Abs(cwd)
 	}
-	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
 }
 
 func splitList(value string) []string {
@@ -321,25 +321,25 @@ func runCmd(cfg alignConfig, label string, logName string, name string, args []s
 }
 
 func prepareConfig(root string) (alignConfig, error) {
-	initialArtifact, err := requireFile(os.Getenv("MANTA_ALIGN_INITIAL_ARTIFACT"), "MANTA_ALIGN_INITIAL_ARTIFACT")
+	initialArtifact, err := requireFile(os.Getenv("EOS_ALIGN_INITIAL_ARTIFACT"), "EOS_ALIGN_INITIAL_ARTIFACT")
 	guard err == nil else return alignConfig{}, err
-	initialTrain, err := requireFile(getenv("MANTA_ALIGN_INITIAL_TRAIN_ARTIFACT", inferTrainArtifact(initialArtifact)), "MANTA_ALIGN_INITIAL_TRAIN_ARTIFACT")
+	initialTrain, err := requireFile(getenv("EOS_ALIGN_INITIAL_TRAIN_ARTIFACT", inferTrainArtifact(initialArtifact)), "EOS_ALIGN_INITIAL_TRAIN_ARTIFACT")
 	guard err == nil else return alignConfig{}, err
-	initialSealed, err := requireFile(getenv("MANTA_ALIGN_INITIAL_SEALED_ARTIFACT", inferSealedArtifact(initialArtifact)), "MANTA_ALIGN_INITIAL_SEALED_ARTIFACT")
+	initialSealed, err := requireFile(getenv("EOS_ALIGN_INITIAL_SEALED_ARTIFACT", inferSealedArtifact(initialArtifact)), "EOS_ALIGN_INITIAL_SEALED_ARTIFACT")
 	guard err == nil else return alignConfig{}, err
 
-	tokenizer := os.Getenv("MANTA_ALIGN_TOKENIZER")
+	tokenizer := os.Getenv("EOS_ALIGN_TOKENIZER")
 	if tokenizer == "" {
 		tokenizer = inferTokenizer(initialTrain, initialSealed)
 	}
-	tokenizer, err = requireFile(tokenizer, "MANTA_ALIGN_TOKENIZER")
+	tokenizer, err = requireFile(tokenizer, "EOS_ALIGN_TOKENIZER")
 	guard err == nil else return alignConfig{}, err
 
-	datasetRoot, err := filepath.Abs(getenv("MANTA_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1")))
+	datasetRoot, err := filepath.Abs(getenv("EOS_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1")))
 	guard err == nil else return alignConfig{}, err
 	processedDir := filepath.Join(datasetRoot, "processed")
-	runID := getenv("MANTA_ALIGN_RUN_ID", "manta-embed-v1-retrieval-align-"+time.Now().UTC().Format("20060102T150405Z"))
-	runRoot, err := filepath.Abs(getenv("MANTA_ALIGN_RUN_ROOT", filepath.Join(root, "runs")))
+	runID := getenv("EOS_ALIGN_RUN_ID", "manta-embed-v1-retrieval-align-"+time.Now().UTC().Format("20060102T150405Z"))
+	runRoot, err := filepath.Abs(getenv("EOS_ALIGN_RUN_ROOT", filepath.Join(root, "runs")))
 	guard err == nil else return alignConfig{}, err
 	runDir := filepath.Join(runRoot, runID)
 	if entries, err := os.ReadDir(runDir); err == nil && len(entries) > 0 {
@@ -350,20 +350,20 @@ func prepareConfig(root string) (alignConfig, error) {
 	err = os.MkdirAll(filepath.Join(runDir, "mined"), 0o755)
 	guard err == nil else return alignConfig{}, err
 
-	modelName := getenv("MANTA_ALIGN_MODEL_NAME", "manta-embed-v1")
-	candidateRunID := getenv("MANTA_ALIGN_CANDIDATE_RUN_ID", "candidate")
+	modelName := getenv("EOS_ALIGN_MODEL_NAME", "manta-embed-v1")
+	candidateRunID := getenv("EOS_ALIGN_CANDIDATE_RUN_ID", "candidate")
 	candidateDir := filepath.Join(runDir, candidateRunID)
-	baselineScoreboardRunID := getenv("MANTA_ALIGN_BASELINE_SCOREBOARD_RUN_ID", "baseline-scoreboard")
-	candidateScoreboardRunID := getenv("MANTA_ALIGN_CANDIDATE_SCOREBOARD_RUN_ID", "candidate-scoreboard")
-	gateMinMacro, err := getenvFloat("MANTA_ALIGN_MIN_MACRO_NDCG_DELTA", 0)
+	baselineScoreboardRunID := getenv("EOS_ALIGN_BASELINE_SCOREBOARD_RUN_ID", "baseline-scoreboard")
+	candidateScoreboardRunID := getenv("EOS_ALIGN_CANDIDATE_SCOREBOARD_RUN_ID", "candidate-scoreboard")
+	gateMinMacro, err := getenvFloat("EOS_ALIGN_MIN_MACRO_NDCG_DELTA", 0)
 	guard err == nil else return alignConfig{}, err
-	gateMaxRegression, err := getenvFloat("MANTA_ALIGN_MAX_DATASET_NDCG_REGRESSION", 0)
+	gateMaxRegression, err := getenvFloat("EOS_ALIGN_MAX_DATASET_NDCG_REGRESSION", 0)
 	guard err == nil else return alignConfig{}, err
-	gateMinRatio, err := getenvFloat("MANTA_ALIGN_MIN_DATASET_NDCG_RATIO", 0)
+	gateMinRatio, err := getenvFloat("EOS_ALIGN_MIN_DATASET_NDCG_RATIO", 0)
 	guard err == nil else return alignConfig{}, err
-	gateMaxRecallRegression, err := getenvFloat("MANTA_ALIGN_MAX_DATASET_RECALL_AT_100_REGRESSION", 0)
+	gateMaxRecallRegression, err := getenvFloat("EOS_ALIGN_MAX_DATASET_RECALL_AT_100_REGRESSION", 0)
 	guard err == nil else return alignConfig{}, err
-	gateMinRecallRatio, err := getenvFloat("MANTA_ALIGN_MIN_DATASET_RECALL_AT_100_RATIO", 0)
+	gateMinRecallRatio, err := getenvFloat("EOS_ALIGN_MIN_DATASET_RECALL_AT_100_RATIO", 0)
 	guard err == nil else return alignConfig{}, err
 
 	cfg := alignConfig{
@@ -379,10 +379,10 @@ func prepareConfig(root string) (alignConfig, error) {
 		Tokenizer:                tokenizer,
 		DatasetRoot:              datasetRoot,
 		ProcessedDir:             processedDir,
-		Datasets:                 splitList(getenv("MANTA_ALIGN_DATASETS", "scifact,nfcorpus,fiqa")),
-		EvalJSONL:                getenv("MANTA_ALIGN_EVAL_JSONL", filepath.Join(processedDir, "eval.jsonl")),
-		HardEvalJSONL:            getenv("MANTA_ALIGN_HARD_EVAL_JSONL", filepath.Join(processedDir, "hard-eval.jsonl")),
-		BM25HardJSONL:            getenv("MANTA_ALIGN_BM25_HARD_JSONL", filepath.Join(processedDir, "train-hard-negatives.jsonl")),
+		Datasets:                 splitList(getenv("EOS_ALIGN_DATASETS", "scifact,nfcorpus,fiqa")),
+		EvalJSONL:                getenv("EOS_ALIGN_EVAL_JSONL", filepath.Join(processedDir, "eval.jsonl")),
+		HardEvalJSONL:            getenv("EOS_ALIGN_HARD_EVAL_JSONL", filepath.Join(processedDir, "hard-eval.jsonl")),
+		BM25HardJSONL:            getenv("EOS_ALIGN_BM25_HARD_JSONL", filepath.Join(processedDir, "train-hard-negatives.jsonl")),
 		ModelHardJSONL:           filepath.Join(runDir, "mined", "train-model-hard-negatives.jsonl"),
 		BlendedHardJSONL:         filepath.Join(runDir, "mined", "train-hard-negatives-plus-model.jsonl"),
 		MiningManifest:           filepath.Join(runDir, "mined", "model-hard-negatives.manifest.json"),
@@ -397,30 +397,30 @@ func prepareConfig(root string) (alignConfig, error) {
 		CandidateScoreboardTSV:   filepath.Join(runDir, candidateScoreboardRunID, "scoreboard.tsv"),
 		SummaryTSV:               filepath.Join(runDir, "retrieval-alignment-summary.tsv"),
 		SummaryJSON:              filepath.Join(runDir, "retrieval-alignment-summary.json"),
-		GateCandidate:                         envEnabledDefault("MANTA_ALIGN_GATE_CANDIDATE", false),
+		GateCandidate:                         envEnabledDefault("EOS_ALIGN_GATE_CANDIDATE", false),
 		GateMinMacroNDCGAt10Delta:            gateMinMacro,
 		GateMaxDatasetNDCGAt10Regression:     gateMaxRegression,
 		GateMinDatasetNDCGAt10Ratio:          gateMinRatio,
 		GateMaxDatasetRecallAt100Regression: gateMaxRecallRegression,
 		GateMinDatasetRecallAt100Ratio:       gateMinRecallRatio,
-		ScoreBaseline:                        envEnabledDefault("MANTA_ALIGN_SCORE_BASELINE", true),
-		RunMining:                            envEnabledDefault("MANTA_ALIGN_MINE_MODEL_HARD_NEGATIVES", true),
-		RunTraining:                          envEnabledDefault("MANTA_ALIGN_TRAIN_CANDIDATE", true),
-		ScoreCandidate:                       envEnabledDefault("MANTA_ALIGN_SCORE_CANDIDATE", true),
+		ScoreBaseline:                        envEnabledDefault("EOS_ALIGN_SCORE_BASELINE", true),
+		RunMining:                            envEnabledDefault("EOS_ALIGN_MINE_MODEL_HARD_NEGATIVES", true),
+		RunTraining:                          envEnabledDefault("EOS_ALIGN_TRAIN_CANDIDATE", true),
+		ScoreCandidate:                       envEnabledDefault("EOS_ALIGN_SCORE_CANDIDATE", true),
 	}
-	guard len(cfg.Datasets) > 0 else return alignConfig{}, fmt.Errorf("MANTA_ALIGN_DATASETS is empty")
-	cfg.EvalJSONL, err = requireFile(cfg.EvalJSONL, "MANTA_ALIGN_EVAL_JSONL")
+	guard len(cfg.Datasets) > 0 else return alignConfig{}, fmt.Errorf("EOS_ALIGN_DATASETS is empty")
+	cfg.EvalJSONL, err = requireFile(cfg.EvalJSONL, "EOS_ALIGN_EVAL_JSONL")
 	guard err == nil else return alignConfig{}, err
-	cfg.HardEvalJSONL, err = requireFile(cfg.HardEvalJSONL, "MANTA_ALIGN_HARD_EVAL_JSONL")
+	cfg.HardEvalJSONL, err = requireFile(cfg.HardEvalJSONL, "EOS_ALIGN_HARD_EVAL_JSONL")
 	guard err == nil else return alignConfig{}, err
-	cfg.BM25HardJSONL, err = requireFile(cfg.BM25HardJSONL, "MANTA_ALIGN_BM25_HARD_JSONL")
+	cfg.BM25HardJSONL, err = requireFile(cfg.BM25HardJSONL, "EOS_ALIGN_BM25_HARD_JSONL")
 	guard err == nil else return alignConfig{}, err
-	cfg.TrainJSONL = getenv("MANTA_ALIGN_TRAIN_JSONL", "")
+	cfg.TrainJSONL = getenv("EOS_ALIGN_TRAIN_JSONL", "")
 	if cfg.TrainJSONL == "" && !cfg.RunMining {
 		cfg.TrainJSONL = filepath.Join(processedDir, "train-hard-negatives-plus-model.jsonl")
 	}
 	if cfg.TrainJSONL != "" {
-		cfg.TrainJSONL, err = requireFile(cfg.TrainJSONL, "MANTA_ALIGN_TRAIN_JSONL")
+		cfg.TrainJSONL, err = requireFile(cfg.TrainJSONL, "EOS_ALIGN_TRAIN_JSONL")
 		guard err == nil else return alignConfig{}, err
 	}
 	return cfg, nil
@@ -432,20 +432,20 @@ func datasetCSV(cfg alignConfig) string {
 
 func scoreboardEnv(cfg alignConfig, runID string, artifact string, pairwiseArtifact string) []string {
 	env := []string{
-		"MANTA_REPO_ROOT=" + cfg.Root,
-		"MANTA_SCOREBOARD_RUN_ROOT=" + cfg.RunDir,
-		"MANTA_SCOREBOARD_RUN_ID=" + runID,
-		"MANTA_SCOREBOARD_ARTIFACT=" + artifact,
-		"MANTA_SCOREBOARD_PAIRWISE_ARTIFACT=" + pairwiseArtifact,
-		"MANTA_SCOREBOARD_PAIRWISE_JSONL=" + cfg.EvalJSONL,
-		"MANTA_SCOREBOARD_HARD_JSONL=" + cfg.HardEvalJSONL,
-		"MANTA_SCOREBOARD_RETRIEVAL_ROOT=" + cfg.DatasetRoot,
-		"MANTA_SCOREBOARD_RETRIEVAL_DATASETS=" + datasetCSV(cfg),
-		"MANTA_SCOREBOARD_BM25_BASELINE=" + getenv("MANTA_ALIGN_BM25_BASELINE", "1"),
-		"MANTA_SCOREBOARD_BATCH_SIZE=" + getenv("MANTA_ALIGN_SCOREBOARD_BATCH_SIZE", "512"),
-		"MANTA_SCOREBOARD_TOP_K=" + getenv("MANTA_ALIGN_TOP_K", "100"),
-		"MANTA_SCOREBOARD_MAX_DOCS=" + getenv("MANTA_ALIGN_MAX_DOCS", "0"),
-		"MANTA_SCOREBOARD_MAX_QUERIES=" + getenv("MANTA_ALIGN_MAX_QUERIES", "0"),
+		"EOS_REPO_ROOT=" + cfg.Root,
+		"EOS_SCOREBOARD_RUN_ROOT=" + cfg.RunDir,
+		"EOS_SCOREBOARD_RUN_ID=" + runID,
+		"EOS_SCOREBOARD_ARTIFACT=" + artifact,
+		"EOS_SCOREBOARD_PAIRWISE_ARTIFACT=" + pairwiseArtifact,
+		"EOS_SCOREBOARD_PAIRWISE_JSONL=" + cfg.EvalJSONL,
+		"EOS_SCOREBOARD_HARD_JSONL=" + cfg.HardEvalJSONL,
+		"EOS_SCOREBOARD_RETRIEVAL_ROOT=" + cfg.DatasetRoot,
+		"EOS_SCOREBOARD_RETRIEVAL_DATASETS=" + datasetCSV(cfg),
+		"EOS_SCOREBOARD_BM25_BASELINE=" + getenv("EOS_ALIGN_BM25_BASELINE", "1"),
+		"EOS_SCOREBOARD_BATCH_SIZE=" + getenv("EOS_ALIGN_SCOREBOARD_BATCH_SIZE", "512"),
+		"EOS_SCOREBOARD_TOP_K=" + getenv("EOS_ALIGN_TOP_K", "100"),
+		"EOS_SCOREBOARD_MAX_DOCS=" + getenv("EOS_ALIGN_MAX_DOCS", "0"),
+		"EOS_SCOREBOARD_MAX_QUERIES=" + getenv("EOS_ALIGN_MAX_QUERIES", "0"),
 	}
 	return env
 }
@@ -457,25 +457,25 @@ func runScoreboard(cfg alignConfig, label string, runID string, artifact string,
 
 func runMining(cfg alignConfig) error {
 	args := []string{
-		"MANTA_REPO_ROOT=" + cfg.Root,
-		"MANTA_DATASET_ROOT=" + cfg.DatasetRoot,
-		"MANTA_MODEL_HARD_NEGATIVE_ARTIFACT=" + cfg.InitialSealedArtifact,
-		"MANTA_MODEL_HARD_NEGATIVE_RUN_ROOT=" + cfg.RunDir,
-		"MANTA_MODEL_HARD_NEGATIVE_RUN_ID=model-hard-negative-mining",
-		"MANTA_MODEL_HARD_NEGATIVE_DATASETS=" + datasetCSV(cfg),
-		"MANTA_MODEL_HARD_NEGATIVE_DATASET_WEIGHTS=" + getenv("MANTA_ALIGN_MODEL_HARD_DATASET_WEIGHTS", ""),
-		"MANTA_MODEL_HARD_NEGATIVE_MAX_EXAMPLES=" + getenv("MANTA_ALIGN_MODEL_HARD_MAX_EXAMPLES", "6000"),
-		"MANTA_MODEL_HARD_NEGATIVE_MAX_DOCS=" + getenv("MANTA_ALIGN_MODEL_HARD_MAX_DOCS", "0"),
-		"MANTA_MODEL_HARD_NEGATIVE_MAX_QUERIES=" + getenv("MANTA_ALIGN_MODEL_HARD_MAX_QUERIES", "0"),
-		"MANTA_MODEL_HARD_NEGATIVE_NEGATIVES=" + getenv("MANTA_ALIGN_MODEL_HARD_NEGATIVES", "3"),
-		"MANTA_MODEL_HARD_NEGATIVE_CANDIDATE_TOP_K=" + getenv("MANTA_ALIGN_MODEL_HARD_CANDIDATE_TOP_K", "200"),
-		"MANTA_MODEL_HARD_NEGATIVE_BATCH_SIZE=" + getenv("MANTA_ALIGN_MODEL_HARD_BATCH_SIZE", "512"),
-		"MANTA_MODEL_HARD_NEGATIVE_BLEND_BM25=1",
-		"MANTA_MODEL_HARD_NEGATIVE_OUTPUT_JSONL=" + cfg.ModelHardJSONL,
-		"MANTA_MODEL_HARD_NEGATIVE_BLEND_JSONL=" + cfg.BlendedHardJSONL,
-		"MANTA_MODEL_HARD_NEGATIVE_BM25_JSONL=" + cfg.BM25HardJSONL,
-		"MANTA_MODEL_HARD_NEGATIVE_MANIFEST_JSON=" + cfg.MiningManifest,
-		"MANTA_MODEL_HARD_NEGATIVE_SHA256=" + cfg.MiningSHA,
+		"EOS_REPO_ROOT=" + cfg.Root,
+		"EOS_DATASET_ROOT=" + cfg.DatasetRoot,
+		"EOS_MODEL_HARD_NEGATIVE_ARTIFACT=" + cfg.InitialSealedArtifact,
+		"EOS_MODEL_HARD_NEGATIVE_RUN_ROOT=" + cfg.RunDir,
+		"EOS_MODEL_HARD_NEGATIVE_RUN_ID=model-hard-negative-mining",
+		"EOS_MODEL_HARD_NEGATIVE_DATASETS=" + datasetCSV(cfg),
+		"EOS_MODEL_HARD_NEGATIVE_DATASET_WEIGHTS=" + getenv("EOS_ALIGN_MODEL_HARD_DATASET_WEIGHTS", ""),
+		"EOS_MODEL_HARD_NEGATIVE_MAX_EXAMPLES=" + getenv("EOS_ALIGN_MODEL_HARD_MAX_EXAMPLES", "6000"),
+		"EOS_MODEL_HARD_NEGATIVE_MAX_DOCS=" + getenv("EOS_ALIGN_MODEL_HARD_MAX_DOCS", "0"),
+		"EOS_MODEL_HARD_NEGATIVE_MAX_QUERIES=" + getenv("EOS_ALIGN_MODEL_HARD_MAX_QUERIES", "0"),
+		"EOS_MODEL_HARD_NEGATIVE_NEGATIVES=" + getenv("EOS_ALIGN_MODEL_HARD_NEGATIVES", "3"),
+		"EOS_MODEL_HARD_NEGATIVE_CANDIDATE_TOP_K=" + getenv("EOS_ALIGN_MODEL_HARD_CANDIDATE_TOP_K", "200"),
+		"EOS_MODEL_HARD_NEGATIVE_BATCH_SIZE=" + getenv("EOS_ALIGN_MODEL_HARD_BATCH_SIZE", "512"),
+		"EOS_MODEL_HARD_NEGATIVE_BLEND_BM25=1",
+		"EOS_MODEL_HARD_NEGATIVE_OUTPUT_JSONL=" + cfg.ModelHardJSONL,
+		"EOS_MODEL_HARD_NEGATIVE_BLEND_JSONL=" + cfg.BlendedHardJSONL,
+		"EOS_MODEL_HARD_NEGATIVE_BM25_JSONL=" + cfg.BM25HardJSONL,
+		"EOS_MODEL_HARD_NEGATIVE_MANIFEST_JSON=" + cfg.MiningManifest,
+		"EOS_MODEL_HARD_NEGATIVE_SHA256=" + cfg.MiningSHA,
 		"ferrous-wheel", "run", "scripts/mine_manta_embed_v1_model_hard_negatives.fw",
 	}
 	return runCmd(cfg, "Mine model-hard negatives", "mine-model-hard-negatives.log", "env", args)
@@ -496,39 +496,39 @@ func selectedTrainJSONL(cfg alignConfig) (string, error) {
 
 func runTraining(cfg alignConfig, trainJSONL string) error {
 	args := []string{
-		"MANTA_REPO_ROOT=" + cfg.Root,
-		"MANTA_RUN_ROOT=" + cfg.RunDir,
-		"MANTA_RUN_ID=" + cfg.CandidateRunID,
-		"MANTA_MODEL_NAME=" + cfg.ModelName,
-		"MANTA_INITIAL_ARTIFACT=" + cfg.InitialTrainArtifact,
-		"MANTA_TRAIN_JSONL=" + trainJSONL,
-		"MANTA_EVAL_JSONL=" + cfg.EvalJSONL,
-		"MANTA_HARD_EVAL_JSONL=" + cfg.HardEvalJSONL,
-		"MANTA_TOKENIZER=" + cfg.Tokenizer,
-		"MANTA_PACKAGE_TOKENIZER=" + cfg.Tokenizer,
-		"MANTA_ALLOW_DIRTY=" + getenv("MANTA_ALIGN_ALLOW_DIRTY", "1"),
-		"MANTA_SKIP_TESTS=" + getenv("MANTA_ALIGN_SKIP_TESTS", "1"),
-		"MANTA_QUALITY_TARGET=" + getenv("MANTA_ALIGN_CANDIDATE_QUALITY_TARGET", "pairwise"),
-		"MANTA_RETRIEVAL_EVAL=" + getenv("MANTA_ALIGN_CANDIDATE_RETRIEVAL_EVAL", "0"),
-		"MANTA_HARD_NEGATIVE_TRAIN=1",
-		"MANTA_PAIRWISE_TRAIN=0",
-		"MANTA_HARD_NEGATIVES_PER_QUERY=" + getenv("MANTA_ALIGN_CANDIDATE_HARD_NEGATIVES", "1"),
-		"MANTA_HARD_NEGATIVE_SOURCE_WEIGHTS=" + getenv("MANTA_ALIGN_CANDIDATE_SOURCE_WEIGHTS", ""),
-		"MANTA_CONTRASTIVE_LOSS=" + getenv("MANTA_ALIGN_CANDIDATE_CONTRASTIVE_LOSS", "infonce"),
-		"MANTA_GROUPED_LOSS_WEIGHT=" + getenv("MANTA_ALIGN_CANDIDATE_GROUPED_LOSS_WEIGHT", "0"),
-		"MANTA_TEACHER_LOSS_WEIGHT=" + getenv("MANTA_ALIGN_CANDIDATE_TEACHER_LOSS_WEIGHT", "0"),
-		"MANTA_TEACHER_TEMPERATURE=" + getenv("MANTA_ALIGN_CANDIDATE_TEACHER_TEMPERATURE", "1"),
-		"MANTA_TEACHER_SOURCE_TEMPERATURES=" + getenv("MANTA_ALIGN_CANDIDATE_TEACHER_SOURCE_TEMPERATURES", ""),
-		"MANTA_TEACHER_SCORE_NORMALIZATION=" + getenv("MANTA_ALIGN_CANDIDATE_TEACHER_SCORE_NORMALIZATION", ""),
-		"MANTA_EPOCHS=" + getenv("MANTA_ALIGN_CANDIDATE_EPOCHS", "1"),
-		"MANTA_BATCH_SIZE=" + getenv("MANTA_ALIGN_CANDIDATE_BATCH_SIZE", "64"),
-		"MANTA_LR=" + getenv("MANTA_ALIGN_CANDIDATE_LR", "0.0003"),
-		"MANTA_SELECT_METRIC=" + getenv("MANTA_ALIGN_CANDIDATE_SELECT_METRIC", "mrr"),
-		"MANTA_RESTORE_BEST=" + getenv("MANTA_ALIGN_CANDIDATE_RESTORE_BEST", "false"),
-		"MANTA_EVAL_EVERY=" + getenv("MANTA_ALIGN_CANDIDATE_EVAL_EVERY", "999"),
-		"MANTA_EVAL_EVERY_STEPS=" + getenv("MANTA_ALIGN_CANDIDATE_EVAL_EVERY_STEPS", "0"),
-		"MANTA_PRETOKENIZE_JSONL=" + getenv("MANTA_ALIGN_PRETOKENIZE_JSONL", "1"),
-		"MANTA_PROGRESS_EVERY=" + getenv("MANTA_ALIGN_PROGRESS_EVERY", "25"),
+		"EOS_REPO_ROOT=" + cfg.Root,
+		"EOS_RUN_ROOT=" + cfg.RunDir,
+		"EOS_RUN_ID=" + cfg.CandidateRunID,
+		"EOS_MODEL_NAME=" + cfg.ModelName,
+		"EOS_INITIAL_ARTIFACT=" + cfg.InitialTrainArtifact,
+		"EOS_TRAIN_JSONL=" + trainJSONL,
+		"EOS_EVAL_JSONL=" + cfg.EvalJSONL,
+		"EOS_HARD_EVAL_JSONL=" + cfg.HardEvalJSONL,
+		"EOS_TOKENIZER=" + cfg.Tokenizer,
+		"EOS_PACKAGE_TOKENIZER=" + cfg.Tokenizer,
+		"EOS_ALLOW_DIRTY=" + getenv("EOS_ALIGN_ALLOW_DIRTY", "1"),
+		"EOS_SKIP_TESTS=" + getenv("EOS_ALIGN_SKIP_TESTS", "1"),
+		"EOS_QUALITY_TARGET=" + getenv("EOS_ALIGN_CANDIDATE_QUALITY_TARGET", "pairwise"),
+		"EOS_RETRIEVAL_EVAL=" + getenv("EOS_ALIGN_CANDIDATE_RETRIEVAL_EVAL", "0"),
+		"EOS_HARD_NEGATIVE_TRAIN=1",
+		"EOS_PAIRWISE_TRAIN=0",
+		"EOS_HARD_NEGATIVES_PER_QUERY=" + getenv("EOS_ALIGN_CANDIDATE_HARD_NEGATIVES", "1"),
+		"EOS_HARD_NEGATIVE_SOURCE_WEIGHTS=" + getenv("EOS_ALIGN_CANDIDATE_SOURCE_WEIGHTS", ""),
+		"EOS_CONTRASTIVE_LOSS=" + getenv("EOS_ALIGN_CANDIDATE_CONTRASTIVE_LOSS", "infonce"),
+		"EOS_GROUPED_LOSS_WEIGHT=" + getenv("EOS_ALIGN_CANDIDATE_GROUPED_LOSS_WEIGHT", "0"),
+		"EOS_TEACHER_LOSS_WEIGHT=" + getenv("EOS_ALIGN_CANDIDATE_TEACHER_LOSS_WEIGHT", "0"),
+		"EOS_TEACHER_TEMPERATURE=" + getenv("EOS_ALIGN_CANDIDATE_TEACHER_TEMPERATURE", "1"),
+		"EOS_TEACHER_SOURCE_TEMPERATURES=" + getenv("EOS_ALIGN_CANDIDATE_TEACHER_SOURCE_TEMPERATURES", ""),
+		"EOS_TEACHER_SCORE_NORMALIZATION=" + getenv("EOS_ALIGN_CANDIDATE_TEACHER_SCORE_NORMALIZATION", ""),
+		"EOS_EPOCHS=" + getenv("EOS_ALIGN_CANDIDATE_EPOCHS", "1"),
+		"EOS_BATCH_SIZE=" + getenv("EOS_ALIGN_CANDIDATE_BATCH_SIZE", "64"),
+		"EOS_LR=" + getenv("EOS_ALIGN_CANDIDATE_LR", "0.0003"),
+		"EOS_SELECT_METRIC=" + getenv("EOS_ALIGN_CANDIDATE_SELECT_METRIC", "mrr"),
+		"EOS_RESTORE_BEST=" + getenv("EOS_ALIGN_CANDIDATE_RESTORE_BEST", "false"),
+		"EOS_EVAL_EVERY=" + getenv("EOS_ALIGN_CANDIDATE_EVAL_EVERY", "999"),
+		"EOS_EVAL_EVERY_STEPS=" + getenv("EOS_ALIGN_CANDIDATE_EVAL_EVERY_STEPS", "0"),
+		"EOS_PRETOKENIZE_JSONL=" + getenv("EOS_ALIGN_PRETOKENIZE_JSONL", "1"),
+		"EOS_PROGRESS_EVERY=" + getenv("EOS_ALIGN_PROGRESS_EVERY", "25"),
 		"ferrous-wheel", "run", "scripts/train_manta_embed_v1_candidate.fw",
 	}
 	return runCmd(cfg, "Train retrieval-aligned candidate", "train-candidate.log", "env", args)

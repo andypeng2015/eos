@@ -1,11 +1,11 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"context"
 	"fmt"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 const ScoreManifestVersion = "manta/score-manifest/v0alpha1"
@@ -51,11 +51,11 @@ func ResolveScoreManifestPath(artifactPath string) string {
 
 // WriteFile writes the score manifest as an authored MLL container.
 func (m ScoreManifest) WriteFile(path string) error {
-	return writeAuthoredManifestMLL(path, "score_manifest", ScoreManifestVersion, m.nameOrDefault(), "Manta score manifest", m.mllValues())
+	return writeAuthoredManifestMLL(path, "score_manifest", ScoreManifestVersion, m.nameOrDefault(), "Eos score manifest", m.mllValues())
 }
 
 // LoadScore loads a score module with a validated serving manifest.
-func (rt *Runtime) LoadScore(ctx context.Context, mod *mantaartifact.Module, manifest ScoreManifest, opts ...LoadOption) (*ScoreModel, error) {
+func (rt *Runtime) LoadScore(ctx context.Context, mod *eosartifact.Module, manifest ScoreManifest, opts ...LoadOption) (*ScoreModel, error) {
 	manifest = manifest.normalized()
 	if err := manifest.ValidateModule(mod); err != nil {
 		return nil, err
@@ -69,7 +69,7 @@ func (rt *Runtime) LoadScore(ctx context.Context, mod *mantaartifact.Module, man
 
 // LoadScoreFile reads a .mll artifact and loads it as a score model.
 func (rt *Runtime) LoadScoreFile(ctx context.Context, artifactPath string, manifest ScoreManifest, opts ...LoadOption) (*ScoreModel, error) {
-	mod, err := mantaartifact.ReadFile(artifactPath)
+	mod, err := eosartifact.ReadFile(artifactPath)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +161,7 @@ func (m *ScoreModel) Manifest() ScoreManifest {
 }
 
 // Backend reports the selected backend.
-func (m *ScoreModel) Backend() mantaartifact.BackendKind {
+func (m *ScoreModel) Backend() eosartifact.BackendKind {
 	if m == nil || m.program == nil {
 		return ""
 	}
@@ -235,7 +235,7 @@ func (m ScoreManifest) normalized() ScoreManifest {
 }
 
 // ValidateModule checks that a module satisfies the score serving contract.
-func (m ScoreManifest) ValidateModule(mod *mantaartifact.Module) error {
+func (m ScoreManifest) ValidateModule(mod *eosartifact.Module) error {
 	if mod == nil {
 		return fmt.Errorf("nil module")
 	}
@@ -273,7 +273,7 @@ func (m *ScoreModel) validateScoreResult(result ScoreResult, batched bool) error
 	return nil
 }
 
-func validateScoreEntry(mod *mantaartifact.Module, entryName, queryInput string, queryRank int, docsInput string, docsRank int, queryDType, docsDType, outputName string, outputRank int, outputDType string) error {
+func validateScoreEntry(mod *eosartifact.Module, entryName, queryInput string, queryRank int, docsInput string, docsRank int, queryDType, docsDType, outputName string, outputRank int, outputDType string) error {
 	entry, err := findEntryPoint(mod, entryName)
 	if err != nil {
 		return err
@@ -282,7 +282,7 @@ func validateScoreEntry(mod *mantaartifact.Module, entryName, queryInput string,
 	if err != nil {
 		return err
 	}
-	if query.Type.Kind != mantaartifact.ValueTensor || query.Type.Tensor == nil {
+	if query.Type.Kind != eosartifact.ValueTensor || query.Type.Tensor == nil {
 		return fmt.Errorf("entrypoint %q input %q is not a tensor", entryName, queryInput)
 	}
 	if queryDType != "" && query.Type.Tensor.DType != queryDType {
@@ -295,7 +295,7 @@ func validateScoreEntry(mod *mantaartifact.Module, entryName, queryInput string,
 	if err != nil {
 		return err
 	}
-	if docs.Type.Kind != mantaartifact.ValueTensor || docs.Type.Tensor == nil {
+	if docs.Type.Kind != eosartifact.ValueTensor || docs.Type.Tensor == nil {
 		return fmt.Errorf("entrypoint %q input %q is not a tensor", entryName, docsInput)
 	}
 	if docsDType != "" && docs.Type.Tensor.DType != docsDType {
@@ -311,7 +311,7 @@ func validateScoreEntry(mod *mantaartifact.Module, entryName, queryInput string,
 	if outputName != "" && output.Name != outputName {
 		return fmt.Errorf("entrypoint %q output %q does not match manifest %q", entryName, output.Name, outputName)
 	}
-	if output.Type.Kind != mantaartifact.ValueTensor || output.Type.Tensor == nil {
+	if output.Type.Kind != eosartifact.ValueTensor || output.Type.Tensor == nil {
 		return fmt.Errorf("entrypoint %q output %q is not a tensor", entryName, output.Name)
 	}
 	if outputDType != "" && output.Type.Tensor.DType != outputDType {

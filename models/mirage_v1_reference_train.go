@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 // MirageV1ReferenceTrainConfig controls the tiny CPU reference training loop
@@ -76,7 +76,7 @@ type MirageV1ReferenceGradientNorms struct {
 
 // InitMirageV1ReferenceWeights creates deterministic trainable weights for the
 // reference Mirage v1 training loop.
-func InitMirageV1ReferenceWeights(mod *mantaartifact.Module, seed int64) (map[string]*backend.Tensor, error) {
+func InitMirageV1ReferenceWeights(mod *eosartifact.Module, seed int64) (map[string]*backend.Tensor, error) {
 	if mod == nil {
 		return nil, fmt.Errorf("nil module")
 	}
@@ -114,7 +114,7 @@ func InitMirageV1ReferenceWeights(mod *mantaartifact.Module, seed int64) (map[st
 
 // TrainMirageV1Reference fits Mirage v1 on a tiny in-memory image set using the
 // backend reference autograd path and plain clipped SGD.
-func TrainMirageV1Reference(mod *mantaartifact.Module, weights map[string]*backend.Tensor, images []*backend.Tensor, cfg MirageV1ReferenceTrainConfig) (MirageV1ReferenceTrainHistory, error) {
+func TrainMirageV1Reference(mod *eosartifact.Module, weights map[string]*backend.Tensor, images []*backend.Tensor, cfg MirageV1ReferenceTrainConfig) (MirageV1ReferenceTrainHistory, error) {
 	if mod == nil {
 		return MirageV1ReferenceTrainHistory{}, fmt.Errorf("nil module")
 	}
@@ -270,7 +270,7 @@ type MirageV1ReferenceMetrics struct {
 }
 
 // MirageV1ReferenceEval evaluates the current weights using ExecuteAutograd.
-func MirageV1ReferenceEval(mod *mantaartifact.Module, weights map[string]*backend.Tensor, images []*backend.Tensor) (MirageV1ReferenceMetrics, error) {
+func MirageV1ReferenceEval(mod *eosartifact.Module, weights map[string]*backend.Tensor, images []*backend.Tensor) (MirageV1ReferenceMetrics, error) {
 	if len(images) == 0 {
 		return MirageV1ReferenceMetrics{}, fmt.Errorf("at least one image is required")
 	}
@@ -412,7 +412,7 @@ type mirageReferenceOptimizerState struct {
 	v    map[string][]float32
 }
 
-func newMirageReferenceOptimizerState(mod *mantaartifact.Module, weights map[string]*backend.Tensor, cfg MirageV1ReferenceTrainConfig) *mirageReferenceOptimizerState {
+func newMirageReferenceOptimizerState(mod *eosartifact.Module, weights map[string]*backend.Tensor, cfg MirageV1ReferenceTrainConfig) *mirageReferenceOptimizerState {
 	if cfg.Optimizer != "adam" {
 		return nil
 	}
@@ -434,7 +434,7 @@ func newMirageReferenceOptimizerState(mod *mantaartifact.Module, weights map[str
 	return state
 }
 
-func applyMirageReferenceUpdate(mod *mantaartifact.Module, weights, grads map[string]*backend.Tensor, cfg MirageV1ReferenceTrainConfig, opt *mirageReferenceOptimizerState, step int) error {
+func applyMirageReferenceUpdate(mod *eosartifact.Module, weights, grads map[string]*backend.Tensor, cfg MirageV1ReferenceTrainConfig, opt *mirageReferenceOptimizerState, step int) error {
 	switch cfg.Optimizer {
 	case "sgd":
 		return applyMirageReferenceSGD(mod, weights, grads, cfg, step)
@@ -445,7 +445,7 @@ func applyMirageReferenceUpdate(mod *mantaartifact.Module, weights, grads map[st
 	}
 }
 
-func applyMirageReferenceSGD(mod *mantaartifact.Module, weights, grads map[string]*backend.Tensor, cfg MirageV1ReferenceTrainConfig, step int) error {
+func applyMirageReferenceSGD(mod *eosartifact.Module, weights, grads map[string]*backend.Tensor, cfg MirageV1ReferenceTrainConfig, step int) error {
 	for _, param := range mod.Params {
 		if !param.Trainable {
 			continue
@@ -470,7 +470,7 @@ func applyMirageReferenceSGD(mod *mantaartifact.Module, weights, grads map[strin
 	return nil
 }
 
-func applyMirageReferenceAdam(mod *mantaartifact.Module, weights, grads map[string]*backend.Tensor, cfg MirageV1ReferenceTrainConfig, opt *mirageReferenceOptimizerState, step int) error {
+func applyMirageReferenceAdam(mod *eosartifact.Module, weights, grads map[string]*backend.Tensor, cfg MirageV1ReferenceTrainConfig, opt *mirageReferenceOptimizerState, step int) error {
 	if opt == nil {
 		return fmt.Errorf("adam optimizer state is nil")
 	}
@@ -570,7 +570,7 @@ func mirageTrainMetrics(result backend.GradResult) (MirageV1ReferenceMetrics, er
 	return MirageV1ReferenceMetrics{Loss: loss, MSE: mse, Rate: rate}, nil
 }
 
-func mirageReferenceTrainStepLambda(mod *mantaartifact.Module) (float32, error) {
+func mirageReferenceTrainStepLambda(mod *eosartifact.Module) (float32, error) {
 	step, err := mirageReferenceTrainStepLoss(mod)
 	if err != nil {
 		return 0, err
@@ -582,7 +582,7 @@ func mirageReferenceTrainStepLambda(mod *mantaartifact.Module) (float32, error) 
 	return float32(value), nil
 }
 
-func setMirageReferenceTrainStepLambda(mod *mantaartifact.Module, lambda float32) error {
+func setMirageReferenceTrainStepLambda(mod *eosartifact.Module, lambda float32) error {
 	step, err := mirageReferenceTrainStepLoss(mod)
 	if err != nil {
 		return err
@@ -597,13 +597,13 @@ func setMirageReferenceTrainStepLambda(mod *mantaartifact.Module, lambda float32
 	return nil
 }
 
-func mirageReferenceTrainStepLoss(mod *mantaartifact.Module) (*mantaartifact.Step, error) {
+func mirageReferenceTrainStepLoss(mod *eosartifact.Module) (*eosartifact.Step, error) {
 	if mod == nil {
 		return nil, fmt.Errorf("nil module")
 	}
 	for i := range mod.Steps {
 		step := &mod.Steps[i]
-		if step.Entry == "train_step" && step.Kind == mantaartifact.StepRDLoss {
+		if step.Entry == "train_step" && step.Kind == eosartifact.StepRDLoss {
 			return step, nil
 		}
 	}

@@ -1,11 +1,11 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"context"
 	"fmt"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 // EmbeddingResult is the Go-facing embedding output.
@@ -186,7 +186,7 @@ func decodeSingleTensorOutput(raw backend.Result, preferred string) (string, *ba
 	outputName := ""
 	var output backend.Value
 	for name, value := range raw.Outputs {
-		if value.Type.Kind != mantaartifact.ValueTensor {
+		if value.Type.Kind != eosartifact.ValueTensor {
 			continue
 		}
 		if outputName != "" {
@@ -205,9 +205,9 @@ func decodeSingleTensorOutput(raw backend.Result, preferred string) (string, *ba
 	return outputName, tensor, nil
 }
 
-func (p *Program) requireNamedEntryInput(name, inputName string) (mantaartifact.EntryPoint, error) {
+func (p *Program) requireNamedEntryInput(name, inputName string) (eosartifact.EntryPoint, error) {
 	if p == nil || p.module == nil {
-		return mantaartifact.EntryPoint{}, fmt.Errorf("program is not loaded")
+		return eosartifact.EntryPoint{}, fmt.Errorf("program is not loaded")
 	}
 	for _, entry := range p.module.EntryPoints {
 		if entry.Name != name {
@@ -218,30 +218,30 @@ func (p *Program) requireNamedEntryInput(name, inputName string) (mantaartifact.
 				return entry, nil
 			}
 		}
-		return mantaartifact.EntryPoint{}, fmt.Errorf("entrypoint %q does not declare input %q", name, inputName)
+		return eosartifact.EntryPoint{}, fmt.Errorf("entrypoint %q does not declare input %q", name, inputName)
 	}
-	return mantaartifact.EntryPoint{}, fmt.Errorf("unknown entrypoint %q", name)
+	return eosartifact.EntryPoint{}, fmt.Errorf("unknown entrypoint %q", name)
 }
 
-func (p *Program) requireScoringEntry(name string, batched bool) (mantaartifact.EntryPoint, error) {
+func (p *Program) requireScoringEntry(name string, batched bool) (eosartifact.EntryPoint, error) {
 	entry, err := p.requireNamedEntryInput(name, "docs")
 	if err != nil {
-		return mantaartifact.EntryPoint{}, err
+		return eosartifact.EntryPoint{}, err
 	}
 	queryName, _, err := scoreEntryInputNames(entry)
 	if err != nil {
-		return mantaartifact.EntryPoint{}, err
+		return eosartifact.EntryPoint{}, err
 	}
 	if batched && queryName != "queries" {
-		return mantaartifact.EntryPoint{}, fmt.Errorf("entrypoint %q is not batched", name)
+		return eosartifact.EntryPoint{}, fmt.Errorf("entrypoint %q is not batched", name)
 	}
 	if !batched && queryName != "query" {
-		return mantaartifact.EntryPoint{}, fmt.Errorf("entrypoint %q is not unbatched", name)
+		return eosartifact.EntryPoint{}, fmt.Errorf("entrypoint %q is not unbatched", name)
 	}
 	return entry, nil
 }
 
-func scoreEntryInputNames(entry mantaartifact.EntryPoint) (queryName, docsName string, err error) {
+func scoreEntryInputNames(entry eosartifact.EntryPoint) (queryName, docsName string, err error) {
 	for _, input := range entry.Inputs {
 		switch input.Name {
 		case "query", "queries":

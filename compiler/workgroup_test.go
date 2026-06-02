@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/ir/lir"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/ir/lir"
 )
 
 // TestWebGPUWorkgroupSizeFromHints verifies the generated WebGPU compute kernel
@@ -15,7 +15,7 @@ func TestWebGPUWorkgroupSizeFromHints(t *testing.T) {
 	var webgpu kernelBackendEmitter
 	found := false
 	for _, e := range kernelBackendEmitters {
-		if e.backend == mantaartifact.BackendWebGPU {
+		if e.backend == eosartifact.BackendWebGPU {
 			webgpu, found = e, true
 		}
 	}

@@ -1,12 +1,12 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"os"
 	"path/filepath"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/compiler"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/compiler"
 )
 
 func TestInitializeEmbeddingTrainerPackageWithManifestCreatesPackage(t *testing.T) {
@@ -31,7 +31,7 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 		t.Fatalf("build: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "tiny_train_embed.mll")
-	if err := mantaartifact.WriteFile(path, bundle.Artifact); err != nil {
+	if err := eosartifact.WriteFile(path, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
 	manifest := EmbeddingManifest{
@@ -105,7 +105,7 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 		t.Fatalf("build: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "tiny_train_embed.mll")
-	if err := mantaartifact.WriteFile(path, bundle.Artifact); err != nil {
+	if err := eosartifact.WriteFile(path, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
 	manifest := EmbeddingManifest{

@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"fmt"
@@ -1615,7 +1615,7 @@ func contrastiveLengthBucketWindow(batchSize, total int) int {
 		return 0
 	}
 	windowSize := batchSize * 4
-	if raw := trainEnv("MANTA_TRAIN_LENGTH_BUCKET_WINDOW"); raw != "" {
+	if raw := trainEnv("EOS_TRAIN_LENGTH_BUCKET_WINDOW"); raw != "" {
 		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
 			windowSize = parsed
 		}

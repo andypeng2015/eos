@@ -32,16 +32,16 @@ func usage() {
 	fmt.Println(`Verify the Manta production training/inference path.
 
 This is a local preflight, not a quality run. It checks the Manta public surface,
-builds cmd/manta, creates a tiny .mll embedding package, trains it, evals it
+builds cmd/eos, creates a tiny .mll embedding package, trains it, evals it
 without optimizer updates, exports a sealed .mll, and verifies the package.
 
 Run:
-  MANTA_REPO_ROOT=$PWD ferrous-wheel run scripts/verify_manta_production.fw
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/verify_manta_production.fw
 
 Optional:
-  MANTA_VERIFY_RUN_ROOT=$PWD/runs
-  MANTA_VERIFY_RUN_ID=production-verify-20260412
-  MANTA_VERIFY_SKIP_TESTS=1`)
+  EOS_VERIFY_RUN_ROOT=$PWD/runs
+  EOS_VERIFY_RUN_ID=production-verify-20260412
+  EOS_VERIFY_SKIP_TESTS=1`)
 }
 
 func getenv(name string, fallback string) string {
@@ -74,7 +74,7 @@ func hasRepoRoot(dir string) bool {
 }
 
 func findRoot() (string, error) {
-	let explicit = os.Getenv("MANTA_REPO_ROOT")
+	let explicit = os.Getenv("EOS_REPO_ROOT")
 	if hasRepoRoot(explicit) {
 		return filepath.Abs(explicit)
 	}
@@ -87,7 +87,7 @@ func findRoot() (string, error) {
 	if hasRepoRoot(cwd) {
 		return filepath.Abs(cwd)
 	}
-	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
 }
 
 func shellQuote(value string) string {
@@ -138,9 +138,9 @@ func commandOutput(dir string, name string, args []string) (string, error) {
 }
 
 func prepareConfig(root string) (verifyConfig, error) {
-	runID := getenv("MANTA_VERIFY_RUN_ID", "production-verify-"+time.Now().UTC().Format("20060102T150405Z"))
-	runRoot := getenv("MANTA_VERIFY_RUN_ROOT", filepath.Join(root, "runs"))
-	runDir, err := filepath.Abs(getenv("MANTA_VERIFY_RUN_DIR", filepath.Join(runRoot, runID)))
+	runID := getenv("EOS_VERIFY_RUN_ID", "production-verify-"+time.Now().UTC().Format("20060102T150405Z"))
+	runRoot := getenv("EOS_VERIFY_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir, err := filepath.Abs(getenv("EOS_VERIFY_RUN_DIR", filepath.Join(runRoot, runID)))
 	guard err == nil else return verifyConfig{}, err
 	if entries, err := os.ReadDir(runDir); err == nil && len(entries) > 0 {
 		return verifyConfig{}, fmt.Errorf("run directory already exists and is not empty: %s", runDir)
@@ -149,7 +149,7 @@ func prepareConfig(root string) (verifyConfig, error) {
 	guard err == nil else return verifyConfig{}, err
 	err = os.MkdirAll(filepath.Join(runDir, "logs"), 0o755)
 	guard err == nil else return verifyConfig{}, err
-	modelName := getenv("MANTA_VERIFY_MODEL_NAME", "manta-embed-v1")
+	modelName := getenv("EOS_VERIFY_MODEL_NAME", "manta-embed-v1")
 	return verifyConfig{
 		Root:           root,
 		RunID:          runID,
@@ -187,7 +187,7 @@ func auditPublicSurface(root string) error {
 	}
 	oldTag := "X" + "BAR"
 	markers := []string{
-		"github.com/odvcencio/manta/artifact/" + oldName,
+		"github.com/odvcencio/eos/artifact/" + oldName,
 		"artifact/" + oldName,
 		"cmd/" + oldName,
 		"." + oldName,
@@ -330,11 +330,11 @@ func runVerification(cfg verifyConfig) error {
 	err = auditNoSpecOrPlanDocs(cfg.Root)
 	guard err == nil else return err
 
-	if !envEnabled("MANTA_VERIFY_SKIP_TESTS") {
-		err = runCmd(cfg, "Go package gate", "go-test.log", "go", []string{"test", "./artifact/manta", "./cmd/manta", "./runtime", "./models", "-count=1"})
+	if !envEnabled("EOS_VERIFY_SKIP_TESTS") {
+		err = runCmd(cfg, "Go package gate", "go-test.log", "go", []string{"test", "./artifact/manta", "./cmd/eos", "./runtime", "./models", "-count=1"})
 		guard err == nil else return err
 	}
-	err = runCmd(cfg, "Build manta CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.MantaBin, "./cmd/manta"})
+	err = runCmd(cfg, "Build manta CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.MantaBin, "./cmd/eos"})
 	guard err == nil else return err
 
 	step("Write local production preflight fixtures")

@@ -102,13 +102,13 @@ func usage() {
 	fmt.Println(`Acquire public retrieval data for manta-embed-v1.
 
 Run:
-  MANTA_REPO_ROOT=$PWD ferrous-wheel run scripts/acquire_manta_embed_v1_datasets.fw
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/acquire_manta_embed_v1_datasets.fw
 
 Defaults:
-  MANTA_DATASET_ROOT=$PWD/datasets/manta-embed-v1
-  MANTA_BEIR_DATASETS=scifact,nfcorpus,fiqa
-  MANTA_DATASET_MAX_HARD_TRAIN=6000
-  MANTA_DATASET_BM25_CANDIDATE_TOP_K=25
+  EOS_DATASET_ROOT=$PWD/datasets/manta-embed-v1
+  EOS_BEIR_DATASETS=scifact,nfcorpus,fiqa
+  EOS_DATASET_MAX_HARD_TRAIN=6000
+  EOS_DATASET_BM25_CANDIDATE_TOP_K=25
 
 Outputs:
   processed/train.jsonl
@@ -152,7 +152,7 @@ func hasRepoRoot(dir string) bool {
 }
 
 func findRoot() (string, error) {
-	let explicit = os.Getenv("MANTA_REPO_ROOT")
+	let explicit = os.Getenv("EOS_REPO_ROOT")
 	if hasRepoRoot(explicit) {
 		return filepath.Abs(explicit)
 	}
@@ -165,15 +165,15 @@ func findRoot() (string, error) {
 	if hasRepoRoot(cwd) {
 		return filepath.Abs(cwd)
 	}
-	return "", fmt.Errorf("could not find repo root; set MANTA_REPO_ROOT")
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
 }
 
 func rejectTmpPath(label string, path string) error {
-	if envEnabled("MANTA_ALLOW_TMP") {
+	if envEnabled("EOS_ALLOW_TMP") {
 		return nil
 	}
 	if strings.HasPrefix(path, "/tmp/") || strings.HasPrefix(path, "/var/tmp/") {
-		return fmt.Errorf("%s is under a temporary directory: %s (set MANTA_ALLOW_TMP=1 only for local smoke checks)", label, path)
+		return fmt.Errorf("%s is under a temporary directory: %s (set EOS_ALLOW_TMP=1 only for local smoke checks)", label, path)
 	}
 	return nil
 }
@@ -214,7 +214,7 @@ func datasetForName(name string) (datasetSpec, error) {
 }
 
 func parseDatasets() ([]datasetSpec, error) {
-	let raw = getenv("MANTA_BEIR_DATASETS", "scifact,nfcorpus,fiqa")
+	let raw = getenv("EOS_BEIR_DATASETS", "scifact,nfcorpus,fiqa")
 	specs := []datasetSpec{}
 	for _, name := range strings.Split(raw, ",") {
 		spec, err := datasetForName(name)
@@ -226,25 +226,25 @@ func parseDatasets() ([]datasetSpec, error) {
 }
 
 func prepareConfig(root string) (acquireConfig, error) {
-	outRoot, err := filepath.Abs(getenv("MANTA_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1")))
+	outRoot, err := filepath.Abs(getenv("EOS_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1")))
 	guard err == nil else return acquireConfig{}, err
 	err = rejectTmpPath("dataset root", outRoot)
 	guard err == nil else return acquireConfig{}, err
-	maxTrain, err := parseIntEnv("MANTA_DATASET_MAX_TRAIN", 50000)
+	maxTrain, err := parseIntEnv("EOS_DATASET_MAX_TRAIN", 50000)
 	guard err == nil else return acquireConfig{}, err
-	maxHardTrain, err := parseIntEnv("MANTA_DATASET_MAX_HARD_TRAIN", 6000)
+	maxHardTrain, err := parseIntEnv("EOS_DATASET_MAX_HARD_TRAIN", 6000)
 	guard err == nil else return acquireConfig{}, err
-	guard maxHardTrain >= 0 else return acquireConfig{}, fmt.Errorf("MANTA_DATASET_MAX_HARD_TRAIN must be non-negative")
-	maxEval, err := parseIntEnv("MANTA_DATASET_MAX_EVAL", 2000)
+	guard maxHardTrain >= 0 else return acquireConfig{}, fmt.Errorf("EOS_DATASET_MAX_HARD_TRAIN must be non-negative")
+	maxEval, err := parseIntEnv("EOS_DATASET_MAX_EVAL", 2000)
 	guard err == nil else return acquireConfig{}, err
-	maxHard, err := parseIntEnv("MANTA_DATASET_MAX_HARD", 2000)
+	maxHard, err := parseIntEnv("EOS_DATASET_MAX_HARD", 2000)
 	guard err == nil else return acquireConfig{}, err
-	negatives, err := parseIntEnv("MANTA_DATASET_NEGATIVES_PER_POSITIVE", 1)
+	negatives, err := parseIntEnv("EOS_DATASET_NEGATIVES_PER_POSITIVE", 1)
 	guard err == nil else return acquireConfig{}, err
-	guard negatives > 0 else return acquireConfig{}, fmt.Errorf("MANTA_DATASET_NEGATIVES_PER_POSITIVE must be positive")
-	bm25CandidateTopK, err := parseIntEnv("MANTA_DATASET_BM25_CANDIDATE_TOP_K", 25)
+	guard negatives > 0 else return acquireConfig{}, fmt.Errorf("EOS_DATASET_NEGATIVES_PER_POSITIVE must be positive")
+	bm25CandidateTopK, err := parseIntEnv("EOS_DATASET_BM25_CANDIDATE_TOP_K", 25)
 	guard err == nil else return acquireConfig{}, err
-	guard bm25CandidateTopK > 0 else return acquireConfig{}, fmt.Errorf("MANTA_DATASET_BM25_CANDIDATE_TOP_K must be positive")
+	guard bm25CandidateTopK > 0 else return acquireConfig{}, fmt.Errorf("EOS_DATASET_BM25_CANDIDATE_TOP_K must be positive")
 	specs, err := parseDatasets()
 	guard err == nil else return acquireConfig{}, err
 	cfg := acquireConfig{
@@ -496,7 +496,7 @@ func mineBM25HardNegativeRecords(cfg acquireConfig, dataset string, dir string, 
 	outPath := filepath.Join(cfg.ProcessedDir, dataset+".train-hard-negatives.jsonl")
 	args := []string{
 		"run",
-		"./cmd/manta",
+		"./cmd/eos",
 		"mine-retrieval-hard-negatives",
 		"--dataset", dataset,
 		"--split", "train",
@@ -797,34 +797,34 @@ func writeThresholds(path string) error {
 	body := strings.Join([]string{
 		"# Initial release gates for retrieval hard-eval logs.",
 		"# These are intentionally below the first stable candidate and should tighten as the base embedder improves.",
-		"MANTA_SELECT_METRIC=mrr",
-		"MANTA_MIN_MRR=0.90",
-		"MANTA_MIN_TOP1=0.85",
-		"MANTA_MIN_TOP5=0.95",
-		"MANTA_MIN_TOP10=0.98",
-		"MANTA_MAX_MEAN_RANK=1.50",
-		"MANTA_MIN_AUC=0.70",
-		"MANTA_MIN_THRESHOLD_ACCURACY=0.65",
-		"MANTA_MIN_SCORE_MARGIN=0.05",
-		"MANTA_MAX_LOSS=0.35",
-		"MANTA_MIN_TRAIN_PAIRS_PER_SEC=120000",
-		"MANTA_MIN_OPTIMIZER_STEPS_PER_SEC=0.10",
-		"MANTA_MAX_MATMUL_RUNS=400000",
-		"MANTA_MAX_MATMUL_RUN_UPLOAD_MB=950000",
-		"MANTA_MAX_MATMUL_RUN_DOWNLOAD_MB=485000",
-		"MANTA_MIN_RETRIEVAL_NDCG10_SCIFACT=0.228430",
-		"MANTA_MIN_RETRIEVAL_MRR10_SCIFACT=0.213567",
-		"MANTA_MIN_RETRIEVAL_RECALL10_SCIFACT=0.314000",
-		"MANTA_MIN_RETRIEVAL_RECALL100_SCIFACT=0.590444",
-		"MANTA_MIN_RETRIEVAL_NDCG10_NFCORPUS=0.110113",
-		"MANTA_MIN_RETRIEVAL_MRR10_NFCORPUS=0.211574",
-		"MANTA_MIN_RETRIEVAL_RECALL10_NFCORPUS=0.048110",
-		"MANTA_MIN_RETRIEVAL_RECALL100_NFCORPUS=0.152181",
-		"MANTA_MIN_RETRIEVAL_NDCG10_FIQA=0.066785",
-		"MANTA_MIN_RETRIEVAL_MRR10_FIQA=0.087438",
-		"MANTA_MIN_RETRIEVAL_RECALL10_FIQA=0.089869",
-		"MANTA_MIN_RETRIEVAL_RECALL100_FIQA=0.241676",
-		"MANTA_MIN_RETRIEVAL_SCORES_PER_SEC=7000000",
+		"EOS_SELECT_METRIC=mrr",
+		"EOS_MIN_MRR=0.90",
+		"EOS_MIN_TOP1=0.85",
+		"EOS_MIN_TOP5=0.95",
+		"EOS_MIN_TOP10=0.98",
+		"EOS_MAX_MEAN_RANK=1.50",
+		"EOS_MIN_AUC=0.70",
+		"EOS_MIN_THRESHOLD_ACCURACY=0.65",
+		"EOS_MIN_SCORE_MARGIN=0.05",
+		"EOS_MAX_LOSS=0.35",
+		"EOS_MIN_TRAIN_PAIRS_PER_SEC=120000",
+		"EOS_MIN_OPTIMIZER_STEPS_PER_SEC=0.10",
+		"EOS_MAX_MATMUL_RUNS=400000",
+		"EOS_MAX_MATMUL_RUN_UPLOAD_MB=950000",
+		"EOS_MAX_MATMUL_RUN_DOWNLOAD_MB=485000",
+		"EOS_MIN_RETRIEVAL_NDCG10_SCIFACT=0.228430",
+		"EOS_MIN_RETRIEVAL_MRR10_SCIFACT=0.213567",
+		"EOS_MIN_RETRIEVAL_RECALL10_SCIFACT=0.314000",
+		"EOS_MIN_RETRIEVAL_RECALL100_SCIFACT=0.590444",
+		"EOS_MIN_RETRIEVAL_NDCG10_NFCORPUS=0.110113",
+		"EOS_MIN_RETRIEVAL_MRR10_NFCORPUS=0.211574",
+		"EOS_MIN_RETRIEVAL_RECALL10_NFCORPUS=0.048110",
+		"EOS_MIN_RETRIEVAL_RECALL100_NFCORPUS=0.152181",
+		"EOS_MIN_RETRIEVAL_NDCG10_FIQA=0.066785",
+		"EOS_MIN_RETRIEVAL_MRR10_FIQA=0.087438",
+		"EOS_MIN_RETRIEVAL_RECALL10_FIQA=0.089869",
+		"EOS_MIN_RETRIEVAL_RECALL100_FIQA=0.241676",
+		"EOS_MIN_RETRIEVAL_SCORES_PER_SEC=7000000",
 		"",
 	}, "\n")
 	return os.WriteFile(path, []byte(body), 0o644)

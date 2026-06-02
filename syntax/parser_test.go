@@ -41,7 +41,7 @@ pipeline embed(tokens: i32[T]) -> f16[T, E] {
 	}
 }
 
-func TestParseTreeExposesMantaCST(t *testing.T) {
+func TestParseTreeExposesEosCST(t *testing.T) {
 	src := []byte(`
 pipeline embed(tokens: i32[T]) -> f16[T, E] {
     let hidden = gather(token_embedding, tokens)

@@ -4,8 +4,8 @@ import (
 	"math"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 func TestMirageV1ReferenceTrainSingleImageConverges(t *testing.T) {
@@ -171,8 +171,8 @@ func TestMirageV1ReferenceLambdaSchedule(t *testing.T) {
 }
 
 func TestMirageV1ReferenceFreezeAnalysisSteps(t *testing.T) {
-	mod := &mantaartifact.Module{
-		Params: []mantaartifact.Param{
+	mod := &eosartifact.Module{
+		Params: []eosartifact.Param{
 			{Name: "ga0_weight", Trainable: true},
 			{Name: "gdn0_beta", Trainable: true},
 			{Name: "hs_logits_weight", Trainable: true},

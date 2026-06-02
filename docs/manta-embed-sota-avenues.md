@@ -1,6 +1,6 @@
-# Manta Embedder SOTA Avenue Map
+# Eos Embedder SOTA Avenue Map
 
-This is the working map for trying everything that can plausibly move `manta-embed-v1` toward a best-in-class local embedder. The objective is not one clever loss. SOTA embedding systems combine foundation-model backbones, staged data, synthetic data, hard negatives, distillation, task routing, multi-output retrieval modes, and compression-aware serving. Manta should turn each of those into a measured lane.
+This is the working map for trying everything that can plausibly move `manta-embed-v1` toward a best-in-class local embedder. The objective is not one clever loss. SOTA embedding systems combine foundation-model backbones, staged data, synthetic data, hard negatives, distillation, task routing, multi-output retrieval modes, and compression-aware serving. Eos should turn each of those into a measured lane.
 
 ## External Signals
 
@@ -84,10 +84,10 @@ Sweep:
 
 | Var | Values |
 | --- | --- |
-| `MANTA_TEACHER_LOSS_WEIGHT` | `0.05`, `0.10`, `0.20`, `0.35`, `0.50` |
-| `MANTA_TEACHER_TEMPERATURE` | `0.5`, `0.75`, `1.0`, `1.5`, `2.0` |
-| `MANTA_LR` | `0.000005`, `0.000008`, `0.000010`, `0.0000125` |
-| `MANTA_HARD_NEGATIVE_SOURCE_WEIGHTS` | `scifact=1,nfcorpus=3,fiqa=1`, `scifact=1,nfcorpus=4,fiqa=1`, `scifact=2,nfcorpus=3,fiqa=1` |
+| `EOS_TEACHER_LOSS_WEIGHT` | `0.05`, `0.10`, `0.20`, `0.35`, `0.50` |
+| `EOS_TEACHER_TEMPERATURE` | `0.5`, `0.75`, `1.0`, `1.5`, `2.0` |
+| `EOS_LR` | `0.000005`, `0.000008`, `0.000010`, `0.0000125` |
+| `EOS_HARD_NEGATIVE_SOURCE_WEIGHTS` | `scifact=1,nfcorpus=3,fiqa=1`, `scifact=1,nfcorpus=4,fiqa=1`, `scifact=2,nfcorpus=3,fiqa=1` |
 
 Gate:
 
@@ -103,10 +103,10 @@ Sweep:
 
 | Var | Values |
 | --- | --- |
-| `MANTA_ALIGN_MODEL_HARD_MAX_EXAMPLES` | `6000`, `9000`, `12000` |
-| `MANTA_ALIGN_MODEL_HARD_NEGATIVES` | `3`, `5`, `8` |
-| `MANTA_ALIGN_MODEL_HARD_CANDIDATE_TOP_K` | `100`, `200`, `400`, `800` |
-| `MANTA_ALIGN_CANDIDATE_HARD_NEGATIVES` | `1`, `2`, `3` |
+| `EOS_ALIGN_MODEL_HARD_MAX_EXAMPLES` | `6000`, `9000`, `12000` |
+| `EOS_ALIGN_MODEL_HARD_NEGATIVES` | `3`, `5`, `8` |
+| `EOS_ALIGN_MODEL_HARD_CANDIDATE_TOP_K` | `100`, `200`, `400`, `800` |
+| `EOS_ALIGN_CANDIDATE_HARD_NEGATIVES` | `1`, `2`, `3` |
 
 Gate:
 
@@ -169,7 +169,7 @@ Sweep:
 
 | Var | Values |
 | --- | --- |
-| `MANTA_WEIGHT_BITS` | `4`, `6`, `8` |
+| `EOS_WEIGHT_BITS` | `4`, `6`, `8` |
 | train/eval dtype | current f16 output plus future q-vector variants |
 | package mode | trainable `.mll` vs sealed `.mll` |
 
@@ -186,7 +186,7 @@ These are likely necessary for true best-in-class local performance.
 
 Add a tool that imports query/document/candidate teacher scores from Qwen3, BGE-M3, Jina, Voyage/OpenAI/Gemini APIs, or local TEI servers into the existing `teacher_scores` JSONL field.
 
-Status: the generic landing zone is implemented as `manta import-teacher-scores`. It accepts either one score vector per hard-negative example:
+Status: the generic landing zone is implemented as `eos import-teacher-scores`. It accepts either one score vector per hard-negative example:
 
 ```json
 {"source":"scifact","query":"...","scores":[0.91,0.22,0.13]}
@@ -200,17 +200,17 @@ or one row per query/candidate pair:
 
 The command writes validated text hard-negative JSONL plus a `manta.teacher_score_import.v1` provenance manifest. External scorers should now target this sidecar format first, then let the existing tokenizer and `teacher_loss_weight` path carry scores into training.
 
-Use `manta export-teacher-score-requests <hard-negatives.jsonl> <requests.jsonl>` to generate one external-teacher request per query/candidate pair:
+Use `eos export-teacher-score-requests <hard-negatives.jsonl> <requests.jsonl>` to generate one external-teacher request per query/candidate pair:
 
 ```json
 {"source":"scifact","query":"...","candidate":"document text","role":"negative","example_index":0,"candidate_index":1}
 ```
 
-An external scorer can add a `score` field to those rows and feed them directly into `manta import-teacher-scores`. The export command writes a `manta.teacher_score_requests.v1` manifest and supports `--missing-only` for partially scored files.
+An external scorer can add a `score` field to those rows and feed them directly into `eos import-teacher-scores`. The export command writes a `manta.teacher_score_requests.v1` manifest and supports `--missing-only` for partially scored files.
 
-Local Manta teachers can bypass the sidecar step with `manta score-teacher-hard-negatives <teacher.mll> <hard-negatives.jsonl> <output.jsonl>`. That command embeds each query and its `positive + negatives`, writes cosine-style `teacher_scores`, and emits a `manta.teacher_hard_negative_score.v1` manifest with artifact, backend, batch size, and teacher provenance.
+Local Eos teachers can bypass the sidecar step with `eos score-teacher-hard-negatives <teacher.mll> <hard-negatives.jsonl> <output.jsonl>`. That command embeds each query and its `positive + negatives`, writes cosine-style `teacher_scores`, and emits a `manta.teacher_hard_negative_score.v1` manifest with artifact, backend, batch size, and teacher provenance.
 
-Before spending a training run on a new teacher, run `manta audit-teacher-scores <hard-negatives.jsonl> <summary.json>`. It reports score coverage, positive top-1 rate, mean positive rank, positive-vs-best-negative margin, and teacher-distribution entropy overall and by source, giving a cheap reject path for teachers that misorder positives or produce unusably flat/sharp targets.
+Before spending a training run on a new teacher, run `eos audit-teacher-scores <hard-negatives.jsonl> <summary.json>`. It reports score coverage, positive top-1 rate, mean positive rank, positive-vs-best-negative margin, and teacher-distribution entropy overall and by source, giving a cheap reject path for teachers that misorder positives or produce unusably flat/sharp targets.
 
 Status: BM25 and model-hard mining can both emit `teacher_scores`, and dataset acquisition now preserves those scores when it rewrites source-tagged hard-negative JSONL. A full BM25-scored blend gave complete score coverage but rejected at macro `0.147151`; BM25 scores were on a much larger scale than model cosine scores. Source-specific teacher temperatures are implemented, including exact source, source-family, and wildcard fallback, but split-temperature runs rejected at macro `0.145395` with `teacher_loss_weight=0.20` and macro `0.146459` with `teacher_loss_weight=0.05`. Teacher-score normalization is available in `train-embed` and the alignment scripts with `source_zscore`, `family_zscore`, and `example_zscore`. `source_zscore` at `teacher_loss_weight=0.20` rejected at macro `0.144793`, while reducing teacher pressure to `0.05` passed the stale-baseline gate at macro `0.147714` with SciFact `0.331279`, NFCorpus inside the floor, validation AUC `0.823381`, and hard AUC `0.814565`. It still missed the current anchor by `0.000429` macro because FiQA fell to `0.028101`. Adding FiQA sampler pressure (`scifact=1,nfcorpus=3,fiqa=2`) lifted FiQA to `0.028354` and NFCorpus to `0.083956`, but SciFact fell to `0.329793`, macro slipped to `0.147368`, and the current anchor miss widened to `0.000775`. `example_zscore` is the best normalized branch so far: SciFact `0.329417`, NFCorpus `0.085742`, FiQA `0.029123`, macro `0.148094`, validation AUC `0.823282`, and hard AUC `0.815203`. It passed the stale-baseline gate by `+0.002526` macro but missed the current anchor by only `0.000049` because SciFact fell below the current-best row. A narrow SciFact-recovery tweak (`scifact=2,nfcorpus=3,fiqa=1`) failed early: validation/hard AUC fell to `0.817674`/`0.810527`, and SciFact retrieval dropped to `0.326679`. Stop local score-normalization reshuffling here; the next improvement path should bring in stronger external/synthetic teacher signal.
 
@@ -243,7 +243,7 @@ prefix dims: 32, 64, 96, 128, 192, 256
 loss = full_loss + sum(prefix_loss[d] * weight[d])
 ```
 
-This makes Manta vectors cheaper to store, gives CorkScrewDB multiple latency/quality modes, and aligns with SOTA embedding compression practice.
+This makes Eos vectors cheaper to store, gives CorkScrewDB multiple latency/quality modes, and aligns with SOTA embedding compression practice.
 
 ### Lane I: Sparse Lexical Head
 
@@ -267,7 +267,7 @@ Minimum version:
 - MaxSim or pruned MaxSim scorer
 - scoreboard for first-stage dense retrieval plus late-interaction reranking
 
-This is the direct Manta analogue to BGE-M3 multi-vector and ColBERT-style retrieval.
+This is the direct Eos analogue to BGE-M3 multi-vector and ColBERT-style retrieval.
 
 ### Lane K: Reranker Distillation
 
@@ -275,7 +275,7 @@ Use the existing rerank/select runtime surface to train a compact reranker from 
 
 Gate:
 
-- candidate reranker improves top-10/top-100 ordering from Manta dense retrieval
+- candidate reranker improves top-10/top-100 ordering from Eos dense retrieval
 - reranker latency remains suitable for local desktop serving
 
 ### Lane L: Sparse Long-Context Encoder

@@ -1,10 +1,10 @@
-package mantaruntime
+package eosruntime
 
 import (
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
-func newTrainerOptimizerAccelerator() (backend.OptimizerAccelerator, mantaartifact.BackendKind, error) {
-	return backend.NewPreferredOptimizerAccelerator(mantaartifact.BackendCUDA, mantaartifact.BackendMetal)
+func newTrainerOptimizerAccelerator() (backend.OptimizerAccelerator, eosartifact.BackendKind, error) {
+	return backend.NewPreferredOptimizerAccelerator(eosartifact.BackendCUDA, eosartifact.BackendMetal)
 }

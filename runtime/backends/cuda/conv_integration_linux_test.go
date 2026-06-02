@@ -5,8 +5,8 @@ package cuda
 import (
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 func TestCUDAConvImageStepsMatchHost(t *testing.T) {
@@ -19,14 +19,14 @@ func TestCUDAConvImageStepsMatchHost(t *testing.T) {
 	}
 	defer rt.close()
 
-	outputType := mantaartifact.ValueType{
-		Kind:   mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{DType: "f32"},
+	outputType := eosartifact.ValueType{
+		Kind:   eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{DType: "f32"},
 	}
 	input := backend.NewTensorF32([]int{1, 2, 4, 4}, sequentialFloats(32, 0.1))
 	weight := backend.NewTensorF32([]int{3, 2, 3, 3}, sequentialFloats(54, -0.03))
 	bias := backend.NewTensorF32([]int{3}, []float32{0.25, -0.5, 0.75})
-	step := mantaartifact.Step{Kind: mantaartifact.StepConv2D, Attributes: map[string]string{"stride": "2", "padding": "1"}}
+	step := eosartifact.Step{Kind: eosartifact.StepConv2D, Attributes: map[string]string{"stride": "2", "padding": "1"}}
 	cfg, ok := planBuiltinConv2D(step, []*backend.Tensor{input, weight, bias})
 	if !ok {
 		t.Fatal("conv2d should be supported")
@@ -51,7 +51,7 @@ func TestCUDAConvImageStepsMatchHost(t *testing.T) {
 	})
 	transWeight := backend.NewTensorF32([]int{2, 3, 3, 3}, sequentialFloats(54, 0.04))
 	transBias := backend.NewTensorF32([]int{3}, []float32{0.1, -0.2, 0.3})
-	transStep := mantaartifact.Step{Kind: mantaartifact.StepConv2DTrans, Attributes: map[string]string{"stride": "2", "padding": "1", "output_padding": "1"}}
+	transStep := eosartifact.Step{Kind: eosartifact.StepConv2DTrans, Attributes: map[string]string{"stride": "2", "padding": "1", "output_padding": "1"}}
 	transCfg, ok := planBuiltinConv2DTranspose(transStep, []*backend.Tensor{transInput, transWeight, transBias})
 	if !ok {
 		t.Fatal("conv2d_transpose should be supported")

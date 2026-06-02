@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"bytes"
@@ -8,7 +8,7 @@ import (
 	"strings"
 	"unicode"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
+	eosartifact "m31labs.dev/eos/artifact/eos"
 	mll "m31labs.dev/mll"
 )
 
@@ -21,7 +21,7 @@ type TokenizerMerge struct {
 	Right string `json:"right"`
 }
 
-// TokenizerFile is a lightweight Manta text-tokenizer bundle for training-time ingestion.
+// TokenizerFile is a lightweight Eos text-tokenizer bundle for training-time ingestion.
 type TokenizerFile struct {
 	Version      string           `json:"version"`
 	Tokens       []string         `json:"tokens"`
@@ -75,7 +75,7 @@ func ReadTokenizerFile(path string) (TokenizerFile, error) {
 	if err != nil {
 		return TokenizerFile{}, err
 	}
-	if !mantaartifact.IsMLLBytes(data) {
+	if !eosartifact.IsMLLBytes(data) {
 		return TokenizerFile{}, fmt.Errorf("tokenizer %q is not an MLL file", path)
 	}
 	return decodeTokenizerMLL(data)
@@ -98,7 +98,7 @@ func encodeTokenizerMLL(file TokenizerFile) ([]byte, error) {
 
 	head := mll.HeadSection{
 		Name:        strg.Intern("manta-tokenizer"),
-		Description: strg.Intern("Manta tokenizer"),
+		Description: strg.Intern("Eos tokenizer"),
 		Metadata: []mll.HeadMetadataEntry{
 			headStringMeta(strg, "tokenizer_version", file.Version),
 			headIntMeta(strg, "token_count", int64(len(file.Tokens))),

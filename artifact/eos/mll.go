@@ -1,4 +1,4 @@
-package manta
+package eos
 
 import (
 	"bytes"
@@ -17,8 +17,8 @@ const MLLMetadataVersion = "manta/mll/v0alpha1"
 
 var MLLTagXMTA = [4]byte{'X', 'M', 'T', 'A'}
 
-// MLLMetadata preserves the Manta module inside an MLL container while
-// the native MLL section model catches up with Manta-specific semantics.
+// MLLMetadata preserves the Eos module inside an MLL container while
+// the native MLL section model catches up with Eos-specific semantics.
 type MLLMetadata struct {
 	Version            string                     `json:"version"`
 	ModuleName         string                     `json:"module_name"`
@@ -206,7 +206,7 @@ func EncodeMLL(mod *Module) ([]byte, error) {
 
 	head := mll.HeadSection{
 		Name:        state.strings.Intern(mod.Name),
-		Description: state.strings.Intern("Manta module artifact"),
+		Description: state.strings.Intern("Eos module artifact"),
 		Metadata: []mll.HeadMetadataEntry{
 			headStringMeta(state.strings, "artifact_version", mod.Version),
 			headStringMeta(state.strings, "supported_backends", joinBackends(mod.Requirements.SupportedBackends)),
@@ -373,7 +373,7 @@ func (s *mllState) addValueTypeRef(name string, typ ValueType) (mll.Ref, error) 
 		if typ.Tensor == nil {
 			return mll.Ref{}, fmt.Errorf("tensor payload is required")
 		}
-		dtype, err := mantaDTypeToMLL(typ.Tensor.DType)
+		dtype, err := eosDTypeToMLL(typ.Tensor.DType)
 		if err != nil {
 			return mll.Ref{}, err
 		}
@@ -399,7 +399,7 @@ func (s *mllState) addValueTypeRef(name string, typ ValueType) (mll.Ref, error) 
 func (s *mllState) addTensorTypeRef(name, dtype string, shape []string) (mll.Ref, error) {
 	idx := uint32(len(s.types.Decls()))
 	nameIdx := s.strings.Intern(name)
-	mllDType, err := mantaDTypeToMLL(dtype)
+	mllDType, err := eosDTypeToMLL(dtype)
 	if err != nil {
 		return mll.Ref{}, err
 	}
@@ -420,7 +420,7 @@ func (s *mllState) addBufferTypeRef(name, dtype string, shape []string) (mll.Ref
 	case "kv_cache":
 		s.types.AddKVCacheType(nameIdx, 0, 0, 0)
 	default:
-		mllDType, err := mantaDTypeToMLL(dtype)
+		mllDType, err := eosDTypeToMLL(dtype)
 		if err != nil {
 			return mll.Ref{}, err
 		}
@@ -475,7 +475,7 @@ func bufferStorageClassToMLL(storage string) uint8 {
 	}
 }
 
-func mantaDTypeToMLL(dtype string) (mll.DType, error) {
+func eosDTypeToMLL(dtype string) (mll.DType, error) {
 	switch dtype {
 	case "i32":
 		return mll.DTypeI32, nil
@@ -492,6 +492,6 @@ func mantaDTypeToMLL(dtype string) (mll.DType, error) {
 	case "q2", "q_norm":
 		return mll.DTypeU8, nil
 	default:
-		return mll.DTypeInvalid, fmt.Errorf("unsupported Manta dtype %q", dtype)
+		return mll.DTypeInvalid, fmt.Errorf("unsupported Eos dtype %q", dtype)
 	}
 }

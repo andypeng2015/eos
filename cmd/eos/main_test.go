@@ -10,15 +10,15 @@ import (
 	"testing"
 	"time"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/compiler"
-	mantaruntime "m31labs.dev/manta/runtime"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/compiler"
+	eosruntime "m31labs.dev/eos/runtime"
 	mll "m31labs.dev/mll"
 )
 
 func TestFormatTrainThroughputIncludesExamplePairAndStepRates(t *testing.T) {
-	summary := mantaruntime.EmbeddingTrainRunSummary{
-		Workload: mantaruntime.EmbeddingTrainWorkload{
+	summary := eosruntime.EmbeddingTrainRunSummary{
+		Workload: eosruntime.EmbeddingTrainWorkload{
 			ActualTotalExamples: 100,
 			ActualTotalPairs:    10000,
 			ActualTrainExamples: 80,
@@ -55,11 +55,11 @@ func TestRunInitTrainCreatesTrainingPackage(t *testing.T) {
 		t.Fatalf("run init-train: %v", err)
 	}
 	for _, candidate := range []string{
-		mantaruntime.DefaultWeightFilePath(path),
-		mantaruntime.DefaultMemoryPlanPath(path),
-		mantaruntime.DefaultEmbeddingTrainManifestPath(path),
-		mantaruntime.DefaultEmbeddingCheckpointPath(path),
-		mantaruntime.DefaultEmbeddingTrainProfilePath(path),
+		eosruntime.DefaultWeightFilePath(path),
+		eosruntime.DefaultMemoryPlanPath(path),
+		eosruntime.DefaultEmbeddingTrainManifestPath(path),
+		eosruntime.DefaultEmbeddingCheckpointPath(path),
+		eosruntime.DefaultEmbeddingTrainProfilePath(path),
 	} {
 		if _, err := os.Stat(candidate); err != nil {
 			t.Fatalf("expected package file %q: %v", candidate, err)
@@ -72,7 +72,7 @@ func TestRunInitTrainAppliesTrainingConfigWithDefaultManifest(t *testing.T) {
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", "--lr", "0.0125", "--weight-decay", "0.001", "--contrastive-loss", "infonce", "--temperature", "0.05", path}); err != nil {
 		t.Fatalf("run init-train: %v", err)
 	}
-	checkpoint, err := mantaruntime.ReadEmbeddingTrainCheckpointFile(mantaruntime.DefaultEmbeddingCheckpointPath(path))
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(eosruntime.DefaultEmbeddingCheckpointPath(path))
 	if err != nil {
 		t.Fatalf("read checkpoint: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestRunInitModelCreatesDefaultEmbeddingTrainingPackage(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("run init-model: %v", err)
 	}
-	manifest, err := mantaruntime.ReadEmbeddingManifestFile(mantaruntime.DefaultEmbeddingManifestPath(path))
+	manifest, err := eosruntime.ReadEmbeddingManifestFile(eosruntime.DefaultEmbeddingManifestPath(path))
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
@@ -116,14 +116,14 @@ func TestRunInitModelCreatesDefaultEmbeddingTrainingPackage(t *testing.T) {
 	if manifest.Tokenizer.VocabSize != 16 || manifest.Tokenizer.MaxSequence != 8 {
 		t.Fatalf("unexpected tokenizer contract: %+v", manifest.Tokenizer)
 	}
-	checkpoint, err := mantaruntime.ReadEmbeddingTrainCheckpointFile(mantaruntime.DefaultEmbeddingCheckpointPath(path))
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(eosruntime.DefaultEmbeddingCheckpointPath(path))
 	if err != nil {
 		t.Fatalf("read checkpoint: %v", err)
 	}
 	if checkpoint.Config.ContrastiveLoss != "infonce" {
 		t.Fatalf("contrastive loss = %q, want infonce", checkpoint.Config.ContrastiveLoss)
 	}
-	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+	if _, err := eosruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("reload initialized model package: %v", err)
 	}
 }
@@ -141,7 +141,7 @@ func TestRunInitModelHonorsEncoderRepeats(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("run init-model: %v", err)
 	}
-	manifest, err := mantaruntime.ReadEmbeddingManifestFile(mantaruntime.DefaultEmbeddingManifestPath(path))
+	manifest, err := eosruntime.ReadEmbeddingManifestFile(eosruntime.DefaultEmbeddingManifestPath(path))
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestRunInitMirageCreatesArtifact(t *testing.T) {
 			t.Fatalf("init-mirage output missing %q\noutput:\n%s", want, output)
 		}
 	}
-	mod, err := mantaartifact.ReadFile(path)
+	mod, err := eosartifact.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read artifact: %v", err)
 	}
@@ -203,13 +203,13 @@ func TestRunInitModelTrainCorpusExportFlow(t *testing.T) {
 	if err := run([]string{"train-corpus", "--vocab-size", "16", "--min-freq", "1", "--epochs", "2", "--batch-size", "2", "--min-chars", "2", "--eval-pairs", "2", path, corpusPath}); err != nil {
 		t.Fatalf("run train-corpus: %v", err)
 	}
-	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+	if _, err := eosruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("reload trained default package: %v", err)
 	}
 	if err := run([]string{"export-mll", path}); err != nil {
 		t.Fatalf("run export-mll: %v", err)
 	}
-	sealedPath := mantaruntime.DefaultMLLPath(path)
+	sealedPath := eosruntime.DefaultMLLPath(path)
 	if sealedPath == path {
 		t.Fatalf("sealed export path reused artifact path %q", path)
 	}
@@ -245,15 +245,15 @@ func TestRunEmbedTextLoadsSealedMLLTokenizer(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("run init-model: %v", err)
 	}
-	tokenizer := mantaruntime.TokenizerFile{
-		Version:      mantaruntime.TokenizerFileVersion,
+	tokenizer := eosruntime.TokenizerFile{
+		Version:      eosruntime.TokenizerFileVersion,
 		Tokens:       []string{"[PAD]", "[UNK]", "a"},
 		UnknownToken: "[UNK]",
 	}
-	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
+	if err := tokenizer.WriteFile(eosruntime.DefaultTokenizerPath(path)); err != nil {
 		t.Fatalf("write tokenizer: %v", err)
 	}
-	if _, _, err := mantaruntime.RebuildSiblingPackageManifest(path); err != nil {
+	if _, _, err := eosruntime.RebuildSiblingPackageManifest(path); err != nil {
 		t.Fatalf("rebuild package manifest: %v", err)
 	}
 	sealedPath := filepath.Join(dir, "manta-embed-v1.sealed.mll")
@@ -287,15 +287,15 @@ func TestRunEvalRetrievalWritesMetricsJSON(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("run init-model: %v", err)
 	}
-	tokenizer := mantaruntime.TokenizerFile{
-		Version:      mantaruntime.TokenizerFileVersion,
+	tokenizer := eosruntime.TokenizerFile{
+		Version:      eosruntime.TokenizerFileVersion,
 		Tokens:       []string{"[PAD]", "[UNK]", "a", "b"},
 		UnknownToken: "[UNK]",
 	}
-	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
+	if err := tokenizer.WriteFile(eosruntime.DefaultTokenizerPath(path)); err != nil {
 		t.Fatalf("write tokenizer: %v", err)
 	}
-	if _, _, err := mantaruntime.RebuildSiblingPackageManifest(path); err != nil {
+	if _, _, err := eosruntime.RebuildSiblingPackageManifest(path); err != nil {
 		t.Fatalf("rebuild package manifest: %v", err)
 	}
 	sealedPath := filepath.Join(dir, "manta-embed-v1.sealed.mll")
@@ -345,7 +345,7 @@ func TestRunEvalRetrievalWritesMetricsJSON(t *testing.T) {
 	if err := json.Unmarshal(data, &metrics); err != nil {
 		t.Fatalf("decode metrics: %v", err)
 	}
-	if metrics.Schema != mantaruntime.RetrievalEvalMetricsSchema || metrics.Dataset != "tiny" || metrics.Inputs.Documents != 2 || metrics.Inputs.Queries != 1 {
+	if metrics.Schema != eosruntime.RetrievalEvalMetricsSchema || metrics.Dataset != "tiny" || metrics.Inputs.Documents != 2 || metrics.Inputs.Queries != 1 {
 		t.Fatalf("metrics = %+v", metrics)
 	}
 }
@@ -379,7 +379,7 @@ func TestRunEvalRetrievalBM25WritesMetricsJSON(t *testing.T) {
 			t.Fatalf("eval-retrieval-bm25 output missing %q\noutput:\n%s", want, output)
 		}
 	}
-	var metrics mantaruntime.RetrievalEvalMetrics
+	var metrics eosruntime.RetrievalEvalMetrics
 	data, err := os.ReadFile(metricsPath)
 	if err != nil {
 		t.Fatalf("read metrics: %v", err)
@@ -387,7 +387,7 @@ func TestRunEvalRetrievalBM25WritesMetricsJSON(t *testing.T) {
 	if err := json.Unmarshal(data, &metrics); err != nil {
 		t.Fatalf("decode metrics: %v", err)
 	}
-	if metrics.Schema != mantaruntime.RetrievalEvalMetricsSchema || metrics.Dataset != "tiny" || metrics.Backend != "bm25" || metrics.Quality.NDCGAt10 != 1 {
+	if metrics.Schema != eosruntime.RetrievalEvalMetricsSchema || metrics.Dataset != "tiny" || metrics.Backend != "bm25" || metrics.Quality.NDCGAt10 != 1 {
 		t.Fatalf("metrics = %+v", metrics)
 	}
 }
@@ -421,7 +421,7 @@ func TestRunMineRetrievalHardNegativesWritesTextJSONL(t *testing.T) {
 			t.Fatalf("mine-retrieval-hard-negatives output missing %q\noutput:\n%s", want, output)
 		}
 	}
-	examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
+	examples, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
 	if err != nil {
 		t.Fatalf("read hard negatives: %v", err)
 	}
@@ -446,15 +446,15 @@ func TestRunMineRetrievalModelHardNegativesWritesTextJSONL(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("run init-model: %v", err)
 	}
-	tokenizer := mantaruntime.TokenizerFile{
-		Version:      mantaruntime.TokenizerFileVersion,
+	tokenizer := eosruntime.TokenizerFile{
+		Version:      eosruntime.TokenizerFileVersion,
 		Tokens:       []string{"[PAD]", "[UNK]", "alpha", "target", "distractor", "omega"},
 		UnknownToken: "[UNK]",
 	}
-	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
+	if err := tokenizer.WriteFile(eosruntime.DefaultTokenizerPath(path)); err != nil {
 		t.Fatalf("write tokenizer: %v", err)
 	}
-	if _, _, err := mantaruntime.RebuildSiblingPackageManifest(path); err != nil {
+	if _, _, err := eosruntime.RebuildSiblingPackageManifest(path); err != nil {
 		t.Fatalf("rebuild package manifest: %v", err)
 	}
 	sealedPath := filepath.Join(dir, "manta-embed-v1.sealed.mll")
@@ -489,7 +489,7 @@ func TestRunMineRetrievalModelHardNegativesWritesTextJSONL(t *testing.T) {
 			t.Fatalf("mine-retrieval-model-hard-negatives output missing %q\noutput:\n%s", want, output)
 		}
 	}
-	examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
+	examples, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
 	if err != nil {
 		t.Fatalf("read model hard negatives: %v", err)
 	}
@@ -504,7 +504,7 @@ func TestRunMineRetrievalModelHardNegativesWritesTextJSONL(t *testing.T) {
 func TestRunImportTeacherScoresWritesVectorsAndManifest(t *testing.T) {
 	dir := t.TempDir()
 	inputPath := filepath.Join(dir, "hard-negatives.jsonl")
-	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []mantaruntime.EmbeddingTextHardNegativeExample{
+	if err := eosruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []eosruntime.EmbeddingTextHardNegativeExample{
 		{Source: "scifact", Query: "alpha", Positive: "target", Negatives: []string{"distractor"}},
 	}); err != nil {
 		t.Fatalf("write hard negatives: %v", err)
@@ -536,7 +536,7 @@ func TestRunImportTeacherScoresWritesVectorsAndManifest(t *testing.T) {
 			t.Fatalf("import-teacher-scores output missing %q\noutput:\n%s", want, output)
 		}
 	}
-	examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
+	examples, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
@@ -559,7 +559,7 @@ func TestRunImportTeacherScoresWritesVectorsAndManifest(t *testing.T) {
 func TestRunExportTeacherScoreRequestsRoundTripsThroughImport(t *testing.T) {
 	dir := t.TempDir()
 	inputPath := filepath.Join(dir, "hard-negatives.jsonl")
-	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []mantaruntime.EmbeddingTextHardNegativeExample{
+	if err := eosruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []eosruntime.EmbeddingTextHardNegativeExample{
 		{Source: "nfcorpus", Query: "vitamin c", Positive: "ascorbic acid", Negatives: []string{"calcium", "zinc"}},
 	}); err != nil {
 		t.Fatalf("write hard negatives: %v", err)
@@ -630,7 +630,7 @@ func TestRunExportTeacherScoreRequestsRoundTripsThroughImport(t *testing.T) {
 	}
 	outputPath := filepath.Join(dir, "with-teacher.jsonl")
 	_ = captureRunOutput(t, []string{"import-teacher-scores", inputPath, scorePath, outputPath})
-	examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
+	examples, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
@@ -647,7 +647,7 @@ func TestRunExportTeacherScoreRequestsRoundTripsThroughImport(t *testing.T) {
 func TestRunExportTeacherScoreRequestsMissingOnly(t *testing.T) {
 	dir := t.TempDir()
 	inputPath := filepath.Join(dir, "hard-negatives.jsonl")
-	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []mantaruntime.EmbeddingTextHardNegativeExample{
+	if err := eosruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []eosruntime.EmbeddingTextHardNegativeExample{
 		{Source: "scifact", Query: "q1", Positive: "p1", Negatives: []string{"n1"}, TeacherScores: []float32{0.8, 0.1}},
 		{Source: "fiqa", Query: "q2", Positive: "p2", Negatives: []string{"n2"}},
 	}); err != nil {
@@ -676,7 +676,7 @@ func TestRunExportTeacherScoreRequestsMissingOnly(t *testing.T) {
 func TestRunImportTeacherScoresMatchesCandidateRows(t *testing.T) {
 	dir := t.TempDir()
 	inputPath := filepath.Join(dir, "hard-negatives.jsonl")
-	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []mantaruntime.EmbeddingTextHardNegativeExample{
+	if err := eosruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []eosruntime.EmbeddingTextHardNegativeExample{
 		{Source: "nfcorpus", Query: "vitamin c", Positive: "ascorbic acid", Negatives: []string{"calcium", "zinc"}},
 	}); err != nil {
 		t.Fatalf("write hard negatives: %v", err)
@@ -691,7 +691,7 @@ func TestRunImportTeacherScoresMatchesCandidateRows(t *testing.T) {
 	outputPath := filepath.Join(dir, "with-teacher.jsonl")
 
 	_ = captureRunOutput(t, []string{"import-teacher-scores", inputPath, scoresPath, outputPath})
-	examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
+	examples, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
@@ -720,20 +720,20 @@ func TestRunScoreTeacherHardNegativesWritesScoresAndManifest(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("run init-model: %v", err)
 	}
-	tokenizer := mantaruntime.TokenizerFile{
-		Version:      mantaruntime.TokenizerFileVersion,
+	tokenizer := eosruntime.TokenizerFile{
+		Version:      eosruntime.TokenizerFileVersion,
 		Tokens:       []string{"[PAD]", "[UNK]", "a", "b", "c", "d", "e", "f"},
 		PadToken:     "[PAD]",
 		UnknownToken: "[UNK]",
 	}
-	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(artifactPath)); err != nil {
+	if err := tokenizer.WriteFile(eosruntime.DefaultTokenizerPath(artifactPath)); err != nil {
 		t.Fatalf("write tokenizer: %v", err)
 	}
-	if _, _, err := mantaruntime.RebuildSiblingPackageManifest(artifactPath); err != nil {
+	if _, _, err := eosruntime.RebuildSiblingPackageManifest(artifactPath); err != nil {
 		t.Fatalf("rebuild package manifest: %v", err)
 	}
 	inputPath := filepath.Join(dir, "hard-negatives.jsonl")
-	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []mantaruntime.EmbeddingTextHardNegativeExample{
+	if err := eosruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []eosruntime.EmbeddingTextHardNegativeExample{
 		{Source: "scifact", Query: "abc", Positive: "abc", Negatives: []string{"def"}},
 	}); err != nil {
 		t.Fatalf("write hard negatives: %v", err)
@@ -760,7 +760,7 @@ func TestRunScoreTeacherHardNegativesWritesScoresAndManifest(t *testing.T) {
 			t.Fatalf("score-teacher-hard-negatives output missing %q\noutput:\n%s", want, output)
 		}
 	}
-	examples, err := mantaruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
+	examples, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
 	if err != nil {
 		t.Fatalf("read output: %v", err)
 	}
@@ -788,7 +788,7 @@ func TestRunScoreTeacherHardNegativesWritesScoresAndManifest(t *testing.T) {
 func TestRunAuditTeacherScoresWritesSummary(t *testing.T) {
 	dir := t.TempDir()
 	inputPath := filepath.Join(dir, "hard-negatives.jsonl")
-	if err := mantaruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []mantaruntime.EmbeddingTextHardNegativeExample{
+	if err := eosruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []eosruntime.EmbeddingTextHardNegativeExample{
 		{Source: "scifact", Query: "q1", Positive: "p1", Negatives: []string{"n1", "n2"}, TeacherScores: []float32{0.9, 0.1, 0.2}},
 		{Source: "fiqa", Query: "q2", Positive: "p2", Negatives: []string{"n3"}, TeacherScores: []float32{0.1, 0.8}},
 		{Source: "fiqa", Query: "q3", Positive: "p3", Negatives: []string{"n4"}},
@@ -909,19 +909,19 @@ func TestRunCompareRetrievalMetricsCanRequireBaselineWin(t *testing.T) {
 	dir := t.TempDir()
 	currentPath := filepath.Join(dir, "current.retrieval.metrics.json")
 	baselinePath := filepath.Join(dir, "baseline.retrieval.metrics.json")
-	current := mantaruntime.RetrievalEvalMetrics{
-		Schema:  mantaruntime.RetrievalEvalMetricsSchema,
+	current := eosruntime.RetrievalEvalMetrics{
+		Schema:  eosruntime.RetrievalEvalMetricsSchema,
 		Dataset: "tiny",
 		Backend: "cuda",
-		Quality: mantaruntime.RetrievalEvalQualityMetrics{
+		Quality: eosruntime.RetrievalEvalQualityMetrics{
 			NDCGAt10: 0.30,
 		},
 	}
-	baseline := mantaruntime.RetrievalEvalMetrics{
-		Schema:  mantaruntime.RetrievalEvalMetricsSchema,
+	baseline := eosruntime.RetrievalEvalMetrics{
+		Schema:  eosruntime.RetrievalEvalMetricsSchema,
 		Dataset: "tiny",
 		Backend: "bm25",
-		Quality: mantaruntime.RetrievalEvalQualityMetrics{
+		Quality: eosruntime.RetrievalEvalQualityMetrics{
 			NDCGAt10: 0.25,
 		},
 	}
@@ -960,25 +960,25 @@ func TestRunTrainEmbedFitsContrastivePackage(t *testing.T) {
 	}
 	trainPath := filepath.Join(t.TempDir(), "train.jsonl")
 	evalPath := filepath.Join(t.TempDir(), "eval.jsonl")
-	examples := []mantaruntime.EmbeddingContrastiveExample{
+	examples := []eosruntime.EmbeddingContrastiveExample{
 		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
 		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
 		{QueryTokens: []int32{3, 4}, PositiveTokens: []int32{3, 4}},
 		{QueryTokens: []int32{4, 5}, PositiveTokens: []int32{4, 5}},
 	}
-	if err := mantaruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
 		t.Fatalf("write train dataset: %v", err)
 	}
-	if err := mantaruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
 		t.Fatalf("write eval dataset: %v", err)
 	}
 	if err := run([]string{"train-embed", "--epochs", "2", "--batch-size", "2", "--lr", "0.003", "--contrastive-loss", "infonce", "--temperature", "0.07", path, trainPath, evalPath}); err != nil {
 		t.Fatalf("run train-embed: %v", err)
 	}
-	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+	if _, err := eosruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("reload trained package: %v", err)
 	}
-	checkpoint, err := mantaruntime.ReadEmbeddingTrainCheckpointFile(mantaruntime.DefaultEmbeddingCheckpointPath(path))
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(eosruntime.DefaultEmbeddingCheckpointPath(path))
 	if err != nil {
 		t.Fatalf("read checkpoint: %v", err)
 	}
@@ -998,13 +998,13 @@ func TestRunRenameEmbedRewritesPackageIdentity(t *testing.T) {
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
 		t.Fatalf("run init-train: %v", err)
 	}
-	tokenizer := mantaruntime.TokenizerFile{
-		Version:      mantaruntime.TokenizerFileVersion,
+	tokenizer := eosruntime.TokenizerFile{
+		Version:      eosruntime.TokenizerFileVersion,
 		Tokens:       []string{"<pad>", "<unk>", "alpha", "beta"},
 		PadToken:     "<pad>",
 		UnknownToken: "<unk>",
 	}
-	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
+	if err := tokenizer.WriteFile(eosruntime.DefaultTokenizerPath(path)); err != nil {
 		t.Fatalf("write tokenizer: %v", err)
 	}
 	renamedPath := filepath.Join(t.TempDir(), "manta-embed-v1.mll")
@@ -1013,31 +1013,31 @@ func TestRunRenameEmbedRewritesPackageIdentity(t *testing.T) {
 		t.Fatalf("run rename-embed: %v", err)
 	}
 
-	mod, err := mantaartifact.ReadFile(renamedPath)
+	mod, err := eosartifact.ReadFile(renamedPath)
 	if err != nil {
 		t.Fatalf("read renamed artifact: %v", err)
 	}
 	if mod.Name != "manta-embed-v1" {
 		t.Fatalf("module name = %q, want manta-embed-v1", mod.Name)
 	}
-	manifest, err := mantaruntime.ReadEmbeddingManifestFile(mantaruntime.DefaultEmbeddingManifestPath(renamedPath))
+	manifest, err := eosruntime.ReadEmbeddingManifestFile(eosruntime.DefaultEmbeddingManifestPath(renamedPath))
 	if err != nil {
 		t.Fatalf("read renamed manifest: %v", err)
 	}
 	if manifest.Name != "manta-embed-v1" {
 		t.Fatalf("manifest name = %q, want manta-embed-v1", manifest.Name)
 	}
-	checkpoint, err := mantaruntime.ReadEmbeddingTrainCheckpointFile(mantaruntime.DefaultEmbeddingCheckpointPath(renamedPath))
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(eosruntime.DefaultEmbeddingCheckpointPath(renamedPath))
 	if err != nil {
 		t.Fatalf("read renamed checkpoint: %v", err)
 	}
 	if checkpoint.Manifest.Name != "manta-embed-v1" {
 		t.Fatalf("checkpoint manifest name = %q, want manta-embed-v1", checkpoint.Manifest.Name)
 	}
-	if _, err := os.Stat(mantaruntime.DefaultTokenizerPath(renamedPath)); err != nil {
+	if _, err := os.Stat(eosruntime.DefaultTokenizerPath(renamedPath)); err != nil {
 		t.Fatalf("renamed tokenizer sidecar missing: %v", err)
 	}
-	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(renamedPath); err != nil {
+	if _, err := eosruntime.LoadEmbeddingTrainerPackage(renamedPath); err != nil {
 		t.Fatalf("reload renamed package: %v", err)
 	}
 }
@@ -1049,16 +1049,16 @@ func TestRunTrainEmbedPlanOnlyShowsWorkload(t *testing.T) {
 	}
 	trainPath := filepath.Join(t.TempDir(), "train.jsonl")
 	evalPath := filepath.Join(t.TempDir(), "eval.jsonl")
-	examples := []mantaruntime.EmbeddingContrastiveExample{
+	examples := []eosruntime.EmbeddingContrastiveExample{
 		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
 		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
 		{QueryTokens: []int32{3, 4}, PositiveTokens: []int32{3, 4}},
 		{QueryTokens: []int32{4, 5}, PositiveTokens: []int32{4, 5}},
 	}
-	if err := mantaruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
 		t.Fatalf("write train dataset: %v", err)
 	}
-	if err := mantaruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
 		t.Fatalf("write eval dataset: %v", err)
 	}
 	output := captureRunOutput(t, []string{"train-embed", "--plan-only", "--epochs", "2", "--batch-size", "2", path, trainPath, evalPath})
@@ -1083,11 +1083,11 @@ func TestRunTrainEmbedEvalOnlyUsesSingleContrastiveDataset(t *testing.T) {
 		t.Fatalf("run init-train: %v", err)
 	}
 	evalPath := filepath.Join(t.TempDir(), "eval.jsonl")
-	examples := []mantaruntime.EmbeddingContrastiveExample{
+	examples := []eosruntime.EmbeddingContrastiveExample{
 		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
 		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
 	}
-	if err := mantaruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
 		t.Fatalf("write eval dataset: %v", err)
 	}
 
@@ -1112,11 +1112,11 @@ func TestRunTrainEmbedEvalOnlyUsesSingleTextPairDataset(t *testing.T) {
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
 		t.Fatalf("run init-train: %v", err)
 	}
-	tokenizer := mantaruntime.TokenizerFile{
-		Version: mantaruntime.TokenizerFileVersion,
+	tokenizer := eosruntime.TokenizerFile{
+		Version: eosruntime.TokenizerFileVersion,
 		Tokens:  []string{"[PAD]", "[UNK]", "[CLS]", "[SEP]", "a", "b", "c", "d"},
 	}
-	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
+	if err := tokenizer.WriteFile(eosruntime.DefaultTokenizerPath(path)); err != nil {
 		t.Fatalf("write tokenizer: %v", err)
 	}
 	evalPath := filepath.Join(t.TempDir(), "eval-text.jsonl")
@@ -1151,11 +1151,11 @@ func TestRunTrainEmbedEvalOnlyWritesMetricsJSON(t *testing.T) {
 		t.Fatalf("run init-train: %v", err)
 	}
 	evalPath := filepath.Join(t.TempDir(), "eval.jsonl")
-	examples := []mantaruntime.EmbeddingContrastiveExample{
+	examples := []eosruntime.EmbeddingContrastiveExample{
 		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
 		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
 	}
-	if err := mantaruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
 		t.Fatalf("write eval dataset: %v", err)
 	}
 	metricsPath := filepath.Join(t.TempDir(), "metrics.json")
@@ -1447,11 +1447,11 @@ func TestRunGateTrainMetricsChecksThresholdFile(t *testing.T) {
 	}
 	writeMetricsJSONForTest(t, metricsPath, metrics)
 	thresholds := "" +
-		"MANTA_MIN_MRR=0.90\n" +
-		"MANTA_MIN_TOP1=0.80\n" +
-		"MANTA_MAX_MEAN_RANK=1.20\n" +
-		"MANTA_MIN_TRAIN_PAIRS_PER_SEC=100000\n" +
-		"MANTA_MAX_MATMUL_RUNS=2000\n"
+		"EOS_MIN_MRR=0.90\n" +
+		"EOS_MIN_TOP1=0.80\n" +
+		"EOS_MAX_MEAN_RANK=1.20\n" +
+		"EOS_MIN_TRAIN_PAIRS_PER_SEC=100000\n" +
+		"EOS_MAX_MATMUL_RUNS=2000\n"
 	if err := os.WriteFile(thresholdsPath, []byte(thresholds), 0o644); err != nil {
 		t.Fatalf("write thresholds: %v", err)
 	}
@@ -1512,7 +1512,7 @@ func TestRunGateTrainMetricsFailsMissedThreshold(t *testing.T) {
 		},
 	}
 	writeMetricsJSONForTest(t, metricsPath, metrics)
-	if err := os.WriteFile(thresholdsPath, []byte("MANTA_MIN_MRR=0.90\n"), 0o644); err != nil {
+	if err := os.WriteFile(thresholdsPath, []byte("EOS_MIN_MRR=0.90\n"), 0o644); err != nil {
 		t.Fatalf("write thresholds: %v", err)
 	}
 
@@ -1535,16 +1535,16 @@ func TestRunGateRetrievalMetricsChecksDatasetThresholds(t *testing.T) {
 	dir := t.TempDir()
 	metricsPath := filepath.Join(dir, "scifact.retrieval.metrics.json")
 	thresholdsPath := filepath.Join(dir, "thresholds.env")
-	metrics := mantaruntime.RetrievalEvalMetrics{
-		Schema:  mantaruntime.RetrievalEvalMetricsSchema,
+	metrics := eosruntime.RetrievalEvalMetrics{
+		Schema:  eosruntime.RetrievalEvalMetricsSchema,
 		Dataset: "scifact",
-		Quality: mantaruntime.RetrievalEvalQualityMetrics{
+		Quality: eosruntime.RetrievalEvalQualityMetrics{
 			NDCGAt10:    0.23,
 			MRRAt10:     0.22,
 			RecallAt10:  0.32,
 			RecallAt100: 0.60,
 		},
-		Throughput: mantaruntime.RetrievalEvalThroughput{
+		Throughput: eosruntime.RetrievalEvalThroughput{
 			ScoresPerSecond: 8000000,
 		},
 	}
@@ -1556,9 +1556,9 @@ func TestRunGateRetrievalMetricsChecksDatasetThresholds(t *testing.T) {
 		t.Fatalf("write retrieval metrics: %v", err)
 	}
 	thresholds := "" +
-		"MANTA_MIN_RETRIEVAL_NDCG10_SCIFACT=0.22843\n" +
-		"MANTA_MIN_RETRIEVAL_MRR10_SCIFACT=0.213567\n" +
-		"MANTA_MIN_RETRIEVAL_SCORES_PER_SEC=7000000\n"
+		"EOS_MIN_RETRIEVAL_NDCG10_SCIFACT=0.22843\n" +
+		"EOS_MIN_RETRIEVAL_MRR10_SCIFACT=0.213567\n" +
+		"EOS_MIN_RETRIEVAL_SCORES_PER_SEC=7000000\n"
 	if err := os.WriteFile(thresholdsPath, []byte(thresholds), 0o644); err != nil {
 		t.Fatalf("write thresholds: %v", err)
 	}
@@ -1582,10 +1582,10 @@ func TestRunGateRetrievalMetricsAllowsRoundedEquality(t *testing.T) {
 	dir := t.TempDir()
 	metricsPath := filepath.Join(dir, "scifact.retrieval.metrics.json")
 	thresholdsPath := filepath.Join(dir, "thresholds.env")
-	metrics := mantaruntime.RetrievalEvalMetrics{
-		Schema:  mantaruntime.RetrievalEvalMetricsSchema,
+	metrics := eosruntime.RetrievalEvalMetrics{
+		Schema:  eosruntime.RetrievalEvalMetricsSchema,
 		Dataset: "scifact",
-		Quality: mantaruntime.RetrievalEvalQualityMetrics{
+		Quality: eosruntime.RetrievalEvalQualityMetrics{
 			NDCGAt10: 0.22842998825189667,
 		},
 	}
@@ -1596,7 +1596,7 @@ func TestRunGateRetrievalMetricsAllowsRoundedEquality(t *testing.T) {
 	if err := os.WriteFile(metricsPath, data, 0o644); err != nil {
 		t.Fatalf("write retrieval metrics: %v", err)
 	}
-	if err := os.WriteFile(thresholdsPath, []byte("MANTA_MIN_RETRIEVAL_NDCG10_SCIFACT=0.228430\n"), 0o644); err != nil {
+	if err := os.WriteFile(thresholdsPath, []byte("EOS_MIN_RETRIEVAL_NDCG10_SCIFACT=0.228430\n"), 0o644); err != nil {
 		t.Fatalf("write thresholds: %v", err)
 	}
 
@@ -1637,31 +1637,31 @@ func TestRunTrainEmbedFitsTextContrastivePackage(t *testing.T) {
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
 		t.Fatalf("run init-train: %v", err)
 	}
-	tokenizer := mantaruntime.TokenizerFile{
-		Version: mantaruntime.TokenizerFileVersion,
+	tokenizer := eosruntime.TokenizerFile{
+		Version: eosruntime.TokenizerFileVersion,
 		Tokens:  []string{"[PAD]", "[UNK]", "[CLS]", "[SEP]", "a", "b", "c", "d"},
 	}
-	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
+	if err := tokenizer.WriteFile(eosruntime.DefaultTokenizerPath(path)); err != nil {
 		t.Fatalf("write tokenizer: %v", err)
 	}
 	trainPath := filepath.Join(t.TempDir(), "train-text.jsonl")
 	evalPath := filepath.Join(t.TempDir(), "eval-text.jsonl")
-	examples := []mantaruntime.EmbeddingTextContrastiveExample{
+	examples := []eosruntime.EmbeddingTextContrastiveExample{
 		{Query: "ab", Positive: "ab"},
 		{Query: "cd", Positive: "cd"},
 		{Query: "ab", Positive: "ab"},
 		{Query: "cd", Positive: "cd"},
 	}
-	if err := mantaruntime.WriteEmbeddingTextContrastiveExamplesFile(trainPath, examples); err != nil {
+	if err := eosruntime.WriteEmbeddingTextContrastiveExamplesFile(trainPath, examples); err != nil {
 		t.Fatalf("write train text dataset: %v", err)
 	}
-	if err := mantaruntime.WriteEmbeddingTextContrastiveExamplesFile(evalPath, examples); err != nil {
+	if err := eosruntime.WriteEmbeddingTextContrastiveExamplesFile(evalPath, examples); err != nil {
 		t.Fatalf("write eval text dataset: %v", err)
 	}
 	if err := run([]string{"train-embed", "--epochs", "2", "--batch-size", "2", path, trainPath, evalPath}); err != nil {
 		t.Fatalf("run train-embed text: %v", err)
 	}
-	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+	if _, err := eosruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("reload trained package: %v", err)
 	}
 }
@@ -1671,11 +1671,11 @@ func TestRunTrainEmbedFitsTextContrastivePackageWithLabeledEvalPairs(t *testing.
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
 		t.Fatalf("run init-train: %v", err)
 	}
-	tokenizer := mantaruntime.TokenizerFile{
-		Version: mantaruntime.TokenizerFileVersion,
+	tokenizer := eosruntime.TokenizerFile{
+		Version: eosruntime.TokenizerFileVersion,
 		Tokens:  []string{"[PAD]", "[UNK]", "[CLS]", "[SEP]", "a", "b", "c", "d"},
 	}
-	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
+	if err := tokenizer.WriteFile(eosruntime.DefaultTokenizerPath(path)); err != nil {
 		t.Fatalf("write tokenizer: %v", err)
 	}
 	trainPath := filepath.Join(t.TempDir(), "train-text.jsonl")
@@ -1695,7 +1695,7 @@ func TestRunTrainEmbedFitsTextContrastivePackageWithLabeledEvalPairs(t *testing.
 	if err := run([]string{"train-embed", "--epochs", "2", "--batch-size", "2", path, trainPath, evalPath}); err != nil {
 		t.Fatalf("run train-embed text with labeled eval: %v", err)
 	}
-	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+	if _, err := eosruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("reload trained package: %v", err)
 	}
 }
@@ -1705,11 +1705,11 @@ func TestRunTrainEmbedFitsTextPairwisePackage(t *testing.T) {
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
 		t.Fatalf("run init-train: %v", err)
 	}
-	tokenizer := mantaruntime.TokenizerFile{
-		Version: mantaruntime.TokenizerFileVersion,
+	tokenizer := eosruntime.TokenizerFile{
+		Version: eosruntime.TokenizerFileVersion,
 		Tokens:  []string{"[PAD]", "[UNK]", "[CLS]", "[SEP]", "a", "b", "c", "d"},
 	}
-	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
+	if err := tokenizer.WriteFile(eosruntime.DefaultTokenizerPath(path)); err != nil {
 		t.Fatalf("write tokenizer: %v", err)
 	}
 	trainPath := filepath.Join(t.TempDir(), "train-pairs.jsonl")
@@ -1739,7 +1739,7 @@ func TestRunTrainEmbedFitsTextPairwisePackage(t *testing.T) {
 			t.Fatalf("pairwise train output missing %q\noutput:\n%s", want, output)
 		}
 	}
-	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+	if _, err := eosruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("reload trained package: %v", err)
 	}
 }
@@ -1749,11 +1749,11 @@ func TestRunTrainEmbedFitsTextHardNegativePackage(t *testing.T) {
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
 		t.Fatalf("run init-train: %v", err)
 	}
-	tokenizer := mantaruntime.TokenizerFile{
-		Version: mantaruntime.TokenizerFileVersion,
+	tokenizer := eosruntime.TokenizerFile{
+		Version: eosruntime.TokenizerFileVersion,
 		Tokens:  []string{"[PAD]", "[UNK]", "[CLS]", "[SEP]", "a", "b", "c", "d"},
 	}
-	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
+	if err := tokenizer.WriteFile(eosruntime.DefaultTokenizerPath(path)); err != nil {
 		t.Fatalf("write tokenizer: %v", err)
 	}
 	trainPath := filepath.Join(t.TempDir(), "train-pairs.jsonl")
@@ -1783,18 +1783,18 @@ func TestRunTrainEmbedFitsTextHardNegativePackage(t *testing.T) {
 			t.Fatalf("hard-negative train output missing %q\noutput:\n%s", want, output)
 		}
 	}
-	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+	if _, err := eosruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("reload trained package: %v", err)
 	}
 }
 
 func TestRunTokenizeEmbedHardNegativeMode(t *testing.T) {
 	path := writeTrainableArtifact(t)
-	tokenizer := mantaruntime.TokenizerFile{
-		Version: mantaruntime.TokenizerFileVersion,
+	tokenizer := eosruntime.TokenizerFile{
+		Version: eosruntime.TokenizerFileVersion,
 		Tokens:  []string{"[PAD]", "[UNK]", "[CLS]", "[SEP]", "a", "b", "c", "d"},
 	}
-	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
+	if err := tokenizer.WriteFile(eosruntime.DefaultTokenizerPath(path)); err != nil {
 		t.Fatalf("write tokenizer: %v", err)
 	}
 	inputPath := filepath.Join(t.TempDir(), "pairs.jsonl")
@@ -1810,7 +1810,7 @@ func TestRunTokenizeEmbedHardNegativeMode(t *testing.T) {
 	if !strings.Contains(output, "tokenized hard-negative examples: 1") {
 		t.Fatalf("tokenize hard-negative output unexpected:\n%s", output)
 	}
-	examples, err := mantaruntime.ReadEmbeddingHardNegativeExamplesFile(outputPath)
+	examples, err := eosruntime.ReadEmbeddingHardNegativeExamplesFile(outputPath)
 	if err != nil {
 		t.Fatalf("read tokenized hard-negative output: %v", err)
 	}
@@ -1831,7 +1831,7 @@ func TestRunInspectReadsPackageManifest(t *testing.T) {
 
 func TestRunInspectShowsRepeatedEncoderEmbeddingDetails(t *testing.T) {
 	dir := t.TempDir()
-	srcPath := copyExampleFile(t, dir, "encoder_trainable_q8x2.manta")
+	srcPath := copyExampleFile(t, dir, "encoder_trainable_q8x2.eos")
 	artifactPath := filepath.Join(dir, "encoder_trainable_q8x2.mll")
 	copyExampleFile(t, dir, "encoder_trainable_q8x2.embedding.mll")
 	if err := run([]string{"compile", srcPath, artifactPath}); err != nil {
@@ -1858,7 +1858,7 @@ func TestRunExportMLLWritesContainer(t *testing.T) {
 	if err := run([]string{"export-mll", path}); err != nil {
 		t.Fatalf("run export-mll: %v", err)
 	}
-	outPath := mantaruntime.DefaultMLLPath(path)
+	outPath := eosruntime.DefaultMLLPath(path)
 	if _, err := os.Stat(outPath); err != nil {
 		t.Fatalf("expected MLL file %q: %v", outPath, err)
 	}
@@ -1876,14 +1876,14 @@ func TestRunTrainTokenizerWritesSiblingTokenizer(t *testing.T) {
 	if err := run([]string{"train-tokenizer", "--vocab-size", "12", path, corpusPath}); err != nil {
 		t.Fatalf("run train-tokenizer: %v", err)
 	}
-	tokenizerPath := mantaruntime.DefaultTokenizerPath(path)
+	tokenizerPath := eosruntime.DefaultTokenizerPath(path)
 	if _, err := os.Stat(tokenizerPath); err != nil {
 		t.Fatalf("expected tokenizer file %q: %v", tokenizerPath, err)
 	}
-	if _, err := mantaruntime.ReadTokenizerFile(tokenizerPath); err != nil {
+	if _, err := eosruntime.ReadTokenizerFile(tokenizerPath); err != nil {
 		t.Fatalf("read tokenizer file: %v", err)
 	}
-	manifest, err := mantaruntime.ReadEmbeddingManifestFile(mantaruntime.DefaultEmbeddingManifestPath(path))
+	manifest, err := eosruntime.ReadEmbeddingManifestFile(eosruntime.DefaultEmbeddingManifestPath(path))
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
@@ -1897,11 +1897,11 @@ func TestRunTokenizeEmbedWritesTokenDatasets(t *testing.T) {
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
 		t.Fatalf("run init-train: %v", err)
 	}
-	tokenizer := mantaruntime.TokenizerFile{
-		Version: mantaruntime.TokenizerFileVersion,
+	tokenizer := eosruntime.TokenizerFile{
+		Version: eosruntime.TokenizerFileVersion,
 		Tokens:  []string{"[PAD]", "[UNK]", "[CLS]", "[SEP]", "a", "b", "c", "d"},
 	}
-	if err := tokenizer.WriteFile(mantaruntime.DefaultTokenizerPath(path)); err != nil {
+	if err := tokenizer.WriteFile(eosruntime.DefaultTokenizerPath(path)); err != nil {
 		t.Fatalf("write tokenizer: %v", err)
 	}
 
@@ -1926,10 +1926,10 @@ func TestRunTokenizeEmbedWritesTokenDatasets(t *testing.T) {
 	if err := run([]string{"tokenize-embed", "--mode", "pair", path, evalTextPath, evalTokenPath}); err != nil {
 		t.Fatalf("run tokenize pair: %v", err)
 	}
-	if _, err := mantaruntime.ReadEmbeddingContrastiveExamplesFile(trainTokenPath); err != nil {
+	if _, err := eosruntime.ReadEmbeddingContrastiveExamplesFile(trainTokenPath); err != nil {
 		t.Fatalf("read tokenized train: %v", err)
 	}
-	pairs, err := mantaruntime.ReadEmbeddingPairExamplesFile(evalTokenPath)
+	pairs, err := eosruntime.ReadEmbeddingPairExamplesFile(evalTokenPath)
 	if err != nil {
 		t.Fatalf("read tokenized eval: %v", err)
 	}
@@ -1957,10 +1957,10 @@ func TestRunMineTextPairsWritesTrainAndEvalFiles(t *testing.T) {
 	if err := run([]string{"mine-text-pairs", "--min-chars", "5", "--eval-pairs", "2", corpusPath, trainPath, evalPath}); err != nil {
 		t.Fatalf("run mine-text-pairs: %v", err)
 	}
-	if _, err := mantaruntime.ReadEmbeddingTextContrastiveExamplesFile(trainPath); err != nil {
+	if _, err := eosruntime.ReadEmbeddingTextContrastiveExamplesFile(trainPath); err != nil {
 		t.Fatalf("read mined train pairs: %v", err)
 	}
-	evalSet, err := mantaruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
+	evalSet, err := eosruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
 	if err != nil {
 		t.Fatalf("read mined eval pairs: %v", err)
 	}
@@ -2002,7 +2002,7 @@ func TestRunMineTextPairsThenTrainEmbedFlow(t *testing.T) {
 	if err := run([]string{"train-embed", "--epochs", "2", "--batch-size", "2", path, trainPath, evalPath}); err != nil {
 		t.Fatalf("run train-embed from mined text: %v", err)
 	}
-	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+	if _, err := eosruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("reload trained package: %v", err)
 	}
 }
@@ -2024,23 +2024,23 @@ func TestRunTrainCorpusFlow(t *testing.T) {
 	if err := run([]string{"train-corpus", "--vocab-size", "20", "--min-freq", "1", "--epochs", "2", "--batch-size", "2", "--min-chars", "5", "--eval-pairs", "2", path, corpusPath}); err != nil {
 		t.Fatalf("run train-corpus: %v", err)
 	}
-	if _, err := os.Stat(mantaruntime.DefaultTokenizerPath(path)); err != nil {
+	if _, err := os.Stat(eosruntime.DefaultTokenizerPath(path)); err != nil {
 		t.Fatalf("expected tokenizer file: %v", err)
 	}
-	if _, err := os.Stat(mantaruntime.DefaultMinedTrainPairsPath(path)); err != nil {
+	if _, err := os.Stat(eosruntime.DefaultMinedTrainPairsPath(path)); err != nil {
 		t.Fatalf("expected mined train pairs: %v", err)
 	}
-	if _, err := os.Stat(mantaruntime.DefaultMinedEvalPairsPath(path)); err != nil {
+	if _, err := os.Stat(eosruntime.DefaultMinedEvalPairsPath(path)); err != nil {
 		t.Fatalf("expected mined eval pairs: %v", err)
 	}
-	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(path); err != nil {
+	if _, err := eosruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("reload trained package: %v", err)
 	}
 }
 
 func TestRunTrainCorpusRepeatedEncoderExampleFlow(t *testing.T) {
 	dir := t.TempDir()
-	srcPath := copyExampleFile(t, dir, "encoder_trainable_q8x2.manta")
+	srcPath := copyExampleFile(t, dir, "encoder_trainable_q8x2.eos")
 	artifactPath := filepath.Join(dir, "encoder_trainable_q8x2.mll")
 	copyExampleFile(t, dir, "encoder_trainable_q8x2.embedding.mll")
 
@@ -2052,7 +2052,7 @@ func TestRunTrainCorpusRepeatedEncoderExampleFlow(t *testing.T) {
 	}
 	corpusPath := filepath.Join(dir, "corpus.txt")
 	corpus := "" +
-		"Manta trains and serves compact transformer encoders.\n" +
+		"Eos trains and serves compact transformer encoders.\n" +
 		"CorkScrewDB needs a small default model with strong retrieval quality.\n" +
 		"Quantized embeddings should be fast, portable, and cheap to ship.\n" +
 		"Native CUDA training should reuse weights, activations, and optimizer state.\n" +
@@ -2067,14 +2067,14 @@ func TestRunTrainCorpusRepeatedEncoderExampleFlow(t *testing.T) {
 	if err := run([]string{"inspect", artifactPath}); err != nil {
 		t.Fatalf("run inspect: %v", err)
 	}
-	manifest, err := mantaruntime.ReadEmbeddingManifestFile(mantaruntime.DefaultEmbeddingManifestPath(artifactPath))
+	manifest, err := eosruntime.ReadEmbeddingManifestFile(eosruntime.DefaultEmbeddingManifestPath(artifactPath))
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
 	if manifest.EncoderRepeats != 2 {
 		t.Fatalf("encoder repeats = %d, want 2", manifest.EncoderRepeats)
 	}
-	profile, err := mantaruntime.ReadEmbeddingTrainProfileFile(mantaruntime.DefaultEmbeddingTrainProfilePath(artifactPath))
+	profile, err := eosruntime.ReadEmbeddingTrainProfileFile(eosruntime.DefaultEmbeddingTrainProfilePath(artifactPath))
 	if err != nil {
 		t.Fatalf("read training profile: %v", err)
 	}
@@ -2085,22 +2085,22 @@ func TestRunTrainCorpusRepeatedEncoderExampleFlow(t *testing.T) {
 		t.Fatal("expected matmul bind activity in repeated encoder train profile")
 	}
 	for _, candidate := range []string{
-		mantaruntime.DefaultTokenizerPath(artifactPath),
-		mantaruntime.DefaultMinedTrainPairsPath(artifactPath),
-		mantaruntime.DefaultMinedEvalPairsPath(artifactPath),
+		eosruntime.DefaultTokenizerPath(artifactPath),
+		eosruntime.DefaultMinedTrainPairsPath(artifactPath),
+		eosruntime.DefaultMinedEvalPairsPath(artifactPath),
 	} {
 		if _, err := os.Stat(candidate); err != nil {
 			t.Fatalf("expected generated training artifact %q: %v", candidate, err)
 		}
 	}
-	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(artifactPath); err != nil {
+	if _, err := eosruntime.LoadEmbeddingTrainerPackage(artifactPath); err != nil {
 		t.Fatalf("reload trained repeated-encoder package: %v", err)
 	}
 }
 
 func TestRunCompileDefaultMLLThenTrainFlow(t *testing.T) {
 	dir := t.TempDir()
-	srcPath := filepath.Join(dir, "tiny_train_embed.manta")
+	srcPath := filepath.Join(dir, "tiny_train_embed.eos")
 	source := []byte(`
 param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable
 param projection: q8[D, E] @weight("weights/projection") @trainable
@@ -2127,7 +2127,7 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 	if _, err := os.Stat(artifactPath); err != nil {
 		t.Fatalf("expected compiled .mll artifact %q: %v", artifactPath, err)
 	}
-	manifest := mantaruntime.EmbeddingManifest{
+	manifest := eosruntime.EmbeddingManifest{
 		Name:                "tiny-train-embed",
 		PooledEntry:         "embed_pooled",
 		BatchEntry:          "embed_pooled_batch",
@@ -2136,13 +2136,13 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 		OutputDType:         "q8",
 		TokenEmbeddingParam: "token_embedding",
 		ProjectionParam:     "projection",
-		Tokenizer: mantaruntime.TokenizerManifest{
+		Tokenizer: eosruntime.TokenizerManifest{
 			VocabSize:   8,
 			MaxSequence: 8,
 			PadID:       0,
 		},
 	}
-	if err := manifest.WriteFile(mantaruntime.DefaultEmbeddingManifestPath(artifactPath)); err != nil {
+	if err := manifest.WriteFile(eosruntime.DefaultEmbeddingManifestPath(artifactPath)); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", artifactPath}); err != nil {
@@ -2150,22 +2150,22 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 	}
 	trainPath := filepath.Join(dir, "train.jsonl")
 	evalPath := filepath.Join(dir, "eval.jsonl")
-	examples := []mantaruntime.EmbeddingContrastiveExample{
+	examples := []eosruntime.EmbeddingContrastiveExample{
 		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
 		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
 		{QueryTokens: []int32{3, 4}, PositiveTokens: []int32{3, 4}},
 		{QueryTokens: []int32{4, 5}, PositiveTokens: []int32{4, 5}},
 	}
-	if err := mantaruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
 		t.Fatalf("write train dataset: %v", err)
 	}
-	if err := mantaruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
 		t.Fatalf("write eval dataset: %v", err)
 	}
 	if err := run([]string{"train-embed", "--epochs", "2", "--batch-size", "2", artifactPath, trainPath, evalPath}); err != nil {
 		t.Fatalf("run train-embed: %v", err)
 	}
-	if _, err := mantaruntime.LoadEmbeddingTrainerPackage(artifactPath); err != nil {
+	if _, err := eosruntime.LoadEmbeddingTrainerPackage(artifactPath); err != nil {
 		t.Fatalf("reload trained package: %v", err)
 	}
 }
@@ -2193,10 +2193,10 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 		t.Fatalf("build: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "tiny_train_embed.mll")
-	if err := mantaartifact.WriteFile(path, bundle.Artifact); err != nil {
+	if err := eosartifact.WriteFile(path, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
-	manifest := mantaruntime.EmbeddingManifest{
+	manifest := eosruntime.EmbeddingManifest{
 		Name:                "tiny-train-embed",
 		PooledEntry:         "embed_pooled",
 		BatchEntry:          "embed_pooled_batch",
@@ -2205,13 +2205,13 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 		OutputDType:         "q8",
 		TokenEmbeddingParam: "token_embedding",
 		ProjectionParam:     "projection",
-		Tokenizer: mantaruntime.TokenizerManifest{
+		Tokenizer: eosruntime.TokenizerManifest{
 			VocabSize:   8,
 			MaxSequence: 8,
 			PadID:       0,
 		},
 	}
-	if err := manifest.WriteFile(mantaruntime.DefaultEmbeddingManifestPath(path)); err != nil {
+	if err := manifest.WriteFile(eosruntime.DefaultEmbeddingManifestPath(path)); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
 	return path

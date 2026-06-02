@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
+	eosartifact "m31labs.dev/eos/artifact/eos"
 )
 
 func TestBuildTinyEmbedSource(t *testing.T) {
@@ -63,7 +63,7 @@ func TestKernelVariantsFollowBackendEmitterTable(t *testing.T) {
 	if got := len(kernel.Variants); got != len(kernelBackendEmitters) {
 		t.Fatalf("variant count = %d, want backend emitter count %d", got, len(kernelBackendEmitters))
 	}
-	byBackend := map[mantaartifact.BackendKind]mantaartifact.KernelVariant{}
+	byBackend := map[eosartifact.BackendKind]eosartifact.KernelVariant{}
 	for _, variant := range kernel.Variants {
 		byBackend[variant.Backend] = variant
 	}
@@ -393,7 +393,7 @@ pipeline attend(q: f16[Q, D], k: f16[T, D], v: f16[T, V]) -> f16[Q, V] {
 	}
 	found := false
 	for _, step := range bundle.Artifact.Steps {
-		if step.Kind == mantaartifact.StepSparseAttention {
+		if step.Kind == eosartifact.StepSparseAttention {
 			found = true
 			if got := step.Attributes["top_k"]; got != "2" {
 				t.Fatalf("sparse top_k = %q, want 2", got)
@@ -403,7 +403,7 @@ pipeline attend(q: f16[Q, D], k: f16[T, D], v: f16[T, V]) -> f16[Q, V] {
 	if !found {
 		t.Fatal("expected sparse_attention step")
 	}
-	if !containsString(bundle.Artifact.Requirements.Capabilities, mantaartifact.CapabilitySparseAttention) {
+	if !containsString(bundle.Artifact.Requirements.Capabilities, eosartifact.CapabilitySparseAttention) {
 		t.Fatalf("capabilities = %v, want sparse_attention", bundle.Artifact.Requirements.Capabilities)
 	}
 }
@@ -421,7 +421,7 @@ pipeline attend(q: f16[B, Q, D], kc: q4[B, D, T, 1], kn: q_norm[B, T, 1], vc: q4
 	}
 	found := false
 	for _, step := range bundle.Artifact.Steps {
-		if step.Kind == mantaartifact.StepTurboSparseAttention {
+		if step.Kind == eosartifact.StepTurboSparseAttention {
 			found = true
 			if got := step.Attributes["top_k"]; got != "3" {
 				t.Fatalf("turbo sparse top_k = %q, want 3", got)
@@ -431,10 +431,10 @@ pipeline attend(q: f16[B, Q, D], kc: q4[B, D, T, 1], kn: q_norm[B, T, 1], vc: q4
 	if !found {
 		t.Fatal("expected turbo_sparse_attention step")
 	}
-	if !containsString(bundle.Artifact.Requirements.Capabilities, mantaartifact.CapabilitySparseAttention) {
+	if !containsString(bundle.Artifact.Requirements.Capabilities, eosartifact.CapabilitySparseAttention) {
 		t.Fatalf("capabilities = %v, want sparse_attention", bundle.Artifact.Requirements.Capabilities)
 	}
-	if !containsString(bundle.Artifact.Requirements.Capabilities, mantaartifact.CapabilityTurboQuant) {
+	if !containsString(bundle.Artifact.Requirements.Capabilities, eosartifact.CapabilityTurboQuant) {
 		t.Fatalf("capabilities = %v, want turboquant", bundle.Artifact.Requirements.Capabilities)
 	}
 }
@@ -451,7 +451,7 @@ pipeline attend(q: f16[B, Q, D], kc: q4[B, D, T, 1], kn: q_norm[B, T, 1], vc: q4
 		t.Fatalf("build: %v", err)
 	}
 	for _, step := range bundle.Artifact.Steps {
-		if step.Kind == mantaartifact.StepTurboSparseAttention {
+		if step.Kind == eosartifact.StepTurboSparseAttention {
 			if got := step.Attributes["top_k"]; got != "3" {
 				t.Fatalf("turbo sparse top_k = %q, want 3", got)
 			}
@@ -564,8 +564,8 @@ func TestBuildTinyScoreSource(t *testing.T) {
 	if got := len(kernel.Variants); got != len(kernelBackendEmitters) {
 		t.Fatalf("variant count = %d, want backend emitter count %d", got, len(kernelBackendEmitters))
 	}
-	cudaVariant := kernelVariantByBackend(t, kernel, mantaartifact.BackendCUDA)
-	metalVariant := kernelVariantByBackend(t, kernel, mantaartifact.BackendMetal)
+	cudaVariant := kernelVariantByBackend(t, kernel, eosartifact.BackendCUDA)
+	metalVariant := kernelVariantByBackend(t, kernel, eosartifact.BackendMetal)
 	if !strings.Contains(cudaVariant.Source, "const float* query") || !strings.Contains(metalVariant.Source, "const device float* query") {
 		t.Fatalf("expected emitted score kernel sources, got %+v", kernel.Variants)
 	}
@@ -618,8 +618,8 @@ pipeline ffn(x: f16[T, D], w: f16[D, E]) -> f16[T, E] {
 	if got := len(kernel.Variants); got != len(kernelBackendEmitters) {
 		t.Fatalf("variant count = %d, want backend emitter count %d", got, len(kernelBackendEmitters))
 	}
-	cudaVariant := kernelVariantByBackend(t, kernel, mantaartifact.BackendCUDA)
-	metalVariant := kernelVariantByBackend(t, kernel, mantaartifact.BackendMetal)
+	cudaVariant := kernelVariantByBackend(t, kernel, eosartifact.BackendCUDA)
+	metalVariant := kernelVariantByBackend(t, kernel, eosartifact.BackendMetal)
 	if !strings.Contains(cudaVariant.Source, "tanhf") || !strings.Contains(metalVariant.Source, "tanh(") {
 		t.Fatalf("expected emitted gelu backend sources, got %+v", kernel.Variants)
 	}
@@ -1059,14 +1059,14 @@ pipeline deq(x: q4[T, D]) -> f16[T, D] {
 	if got := len(kernel.Variants); got != len(kernelBackendEmitters) {
 		t.Fatalf("variant count = %d, want backend emitter count %d", got, len(kernelBackendEmitters))
 	}
-	cudaVariant := kernelVariantByBackend(t, kernel, mantaartifact.BackendCUDA)
-	metalVariant := kernelVariantByBackend(t, kernel, mantaartifact.BackendMetal)
+	cudaVariant := kernelVariantByBackend(t, kernel, eosartifact.BackendCUDA)
+	metalVariant := kernelVariantByBackend(t, kernel, eosartifact.BackendMetal)
 	if !strings.Contains(cudaVariant.Source, "_cuda(") || !strings.Contains(metalVariant.Source, "_metal(") {
 		t.Fatalf("expected emitted CUDA and Metal dequant sources, got %+v", kernel.Variants)
 	}
 }
 
-func kernelVariantByBackend(t *testing.T, kernel mantaartifact.Kernel, kind mantaartifact.BackendKind) mantaartifact.KernelVariant {
+func kernelVariantByBackend(t *testing.T, kernel eosartifact.Kernel, kind eosartifact.BackendKind) eosartifact.KernelVariant {
 	t.Helper()
 	for _, variant := range kernel.Variants {
 		if variant.Backend == kind {
@@ -1074,10 +1074,10 @@ func kernelVariantByBackend(t *testing.T, kernel mantaartifact.Kernel, kind mant
 		}
 	}
 	t.Fatalf("missing variant for backend %q in %+v", kind, kernel.Variants)
-	return mantaartifact.KernelVariant{}
+	return eosartifact.KernelVariant{}
 }
 
-func assertAllKernelVariantSources(t *testing.T, kernel mantaartifact.Kernel) {
+func assertAllKernelVariantSources(t *testing.T, kernel eosartifact.Kernel) {
 	t.Helper()
 	if len(kernel.Variants) != len(kernelBackendEmitters) {
 		t.Fatalf("variant count = %d, want backend emitter count %d", len(kernel.Variants), len(kernelBackendEmitters))

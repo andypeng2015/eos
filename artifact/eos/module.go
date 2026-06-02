@@ -1,4 +1,4 @@
-package manta
+package eos
 
 import (
 	"encoding/json"
@@ -108,7 +108,7 @@ type Param struct {
 	Trainable bool      `json:"trainable,omitempty"`
 }
 
-// Module is the compiled Manta artifact.
+// Module is the compiled Eos artifact.
 type Module struct {
 	Version      string         `json:"version"`
 	Name         string         `json:"name"`

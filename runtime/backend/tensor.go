@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strconv"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
+	eosartifact "m31labs.dev/eos/artifact/eos"
 )
 
 // Tensor is the bootstrap dense runtime tensor representation.
@@ -168,57 +168,57 @@ func (t *Tensor) EqualShape(other *Tensor) bool {
 	return slices.Equal(t.Shape, other.Shape)
 }
 
-func MaterializeValue(typ mantaartifact.ValueType, data any) (any, error) {
+func MaterializeValue(typ eosartifact.ValueType, data any) (any, error) {
 	switch typ.Kind {
-	case mantaartifact.ValueTensor:
+	case eosartifact.ValueTensor:
 		return materializeTensor(typ, data)
-	case mantaartifact.ValueKVCache:
+	case eosartifact.ValueKVCache:
 		return materializeKVCache(data)
-	case mantaartifact.ValueCandidatePack:
+	case eosartifact.ValueCandidatePack:
 		return materializeCandidatePack(typ, data)
 	default:
 		return nil, fmt.Errorf("unsupported runtime value kind %q", typ.Kind)
 	}
 }
 
-func PreviewValue(typ mantaartifact.ValueType, data any) (any, error) {
+func PreviewValue(typ eosartifact.ValueType, data any) (any, error) {
 	switch typ.Kind {
-	case mantaartifact.ValueTensor:
+	case eosartifact.ValueTensor:
 		return previewTensor(typ, data)
-	case mantaartifact.ValueKVCache:
+	case eosartifact.ValueKVCache:
 		return previewKVCache(data)
-	case mantaartifact.ValueCandidatePack:
+	case eosartifact.ValueCandidatePack:
 		return previewCandidatePack(typ, data)
 	default:
 		return nil, fmt.Errorf("unsupported runtime value kind %q", typ.Kind)
 	}
 }
 
-func MaterializeValueWithBindings(typ mantaartifact.ValueType, data any, bindings map[string]int) (any, mantaartifact.ValueType, error) {
+func MaterializeValueWithBindings(typ eosartifact.ValueType, data any, bindings map[string]int) (any, eosartifact.ValueType, error) {
 	value, err := MaterializeValue(typ, data)
 	if err != nil {
-		return nil, mantaartifact.ValueType{}, err
+		return nil, eosartifact.ValueType{}, err
 	}
 	concrete, err := concretizeValueType(typ, value, bindings)
 	if err != nil {
-		return nil, mantaartifact.ValueType{}, err
+		return nil, eosartifact.ValueType{}, err
 	}
 	return value, concrete, nil
 }
 
-func PreviewValueWithBindings(typ mantaartifact.ValueType, data any, bindings map[string]int) (any, mantaartifact.ValueType, error) {
+func PreviewValueWithBindings(typ eosartifact.ValueType, data any, bindings map[string]int) (any, eosartifact.ValueType, error) {
 	value, err := PreviewValue(typ, data)
 	if err != nil {
-		return nil, mantaartifact.ValueType{}, err
+		return nil, eosartifact.ValueType{}, err
 	}
 	concrete, err := concretizeValueType(typ, value, bindings)
 	if err != nil {
-		return nil, mantaartifact.ValueType{}, err
+		return nil, eosartifact.ValueType{}, err
 	}
 	return value, concrete, nil
 }
 
-func materializeTensor(typ mantaartifact.ValueType, data any) (*Tensor, error) {
+func materializeTensor(typ eosartifact.ValueType, data any) (*Tensor, error) {
 	switch v := data.(type) {
 	case *Tensor:
 		if err := validateTensorType(typ, v); err != nil {
@@ -294,7 +294,7 @@ func materializeTensor(typ mantaartifact.ValueType, data any) (*Tensor, error) {
 	}
 }
 
-func previewTensor(typ mantaartifact.ValueType, data any) (*Tensor, error) {
+func previewTensor(typ eosartifact.ValueType, data any) (*Tensor, error) {
 	switch v := data.(type) {
 	case *Tensor:
 		if err := validateTensorType(typ, v); err != nil {
@@ -346,7 +346,7 @@ func previewKVCache(data any) (*KVCache, error) {
 	}
 }
 
-func materializeCandidatePack(typ mantaartifact.ValueType, data any) (*CandidatePack, error) {
+func materializeCandidatePack(typ eosartifact.ValueType, data any) (*CandidatePack, error) {
 	switch v := data.(type) {
 	case *CandidatePack:
 		if err := validateCandidatePackType(typ, v); err != nil {
@@ -364,7 +364,7 @@ func materializeCandidatePack(typ mantaartifact.ValueType, data any) (*Candidate
 	}
 }
 
-func previewCandidatePack(typ mantaartifact.ValueType, data any) (*CandidatePack, error) {
+func previewCandidatePack(typ eosartifact.ValueType, data any) (*CandidatePack, error) {
 	switch v := data.(type) {
 	case *CandidatePack:
 		if err := validateCandidatePackType(typ, v); err != nil {
@@ -382,11 +382,11 @@ func previewCandidatePack(typ mantaartifact.ValueType, data any) (*CandidatePack
 	}
 }
 
-func validateTensorType(typ mantaartifact.ValueType, t *Tensor) error {
+func validateTensorType(typ eosartifact.ValueType, t *Tensor) error {
 	if t == nil {
 		return fmt.Errorf("tensor is nil")
 	}
-	if typ.Kind != mantaartifact.ValueTensor || typ.Tensor == nil {
+	if typ.Kind != eosartifact.ValueTensor || typ.Tensor == nil {
 		return fmt.Errorf("expected tensor type metadata")
 	}
 	expected := typ.Tensor.DType
@@ -402,11 +402,11 @@ func validateTensorType(typ mantaartifact.ValueType, t *Tensor) error {
 	return nil
 }
 
-func validateCandidatePackType(typ mantaartifact.ValueType, pack *CandidatePack) error {
+func validateCandidatePackType(typ eosartifact.ValueType, pack *CandidatePack) error {
 	if pack == nil {
 		return fmt.Errorf("candidate pack is nil")
 	}
-	if typ.Kind != mantaartifact.ValueCandidatePack || typ.CandidatePack == nil {
+	if typ.Kind != eosartifact.ValueCandidatePack || typ.CandidatePack == nil {
 		return fmt.Errorf("expected candidate pack type metadata")
 	}
 	if pack.IDs == nil || pack.Scores == nil || pack.Docs == nil {
@@ -443,48 +443,48 @@ func validateCandidatePackType(typ mantaartifact.ValueType, pack *CandidatePack)
 	return nil
 }
 
-func concretizeValueType(typ mantaartifact.ValueType, value any, bindings map[string]int) (mantaartifact.ValueType, error) {
+func concretizeValueType(typ eosartifact.ValueType, value any, bindings map[string]int) (eosartifact.ValueType, error) {
 	switch typ.Kind {
-	case mantaartifact.ValueTensor:
+	case eosartifact.ValueTensor:
 		t, ok := value.(*Tensor)
 		if !ok || t == nil {
-			return mantaartifact.ValueType{}, fmt.Errorf("expected tensor value, got %T", value)
+			return eosartifact.ValueType{}, fmt.Errorf("expected tensor value, got %T", value)
 		}
 		if typ.Tensor == nil {
-			return mantaartifact.ValueType{}, fmt.Errorf("tensor type metadata missing")
+			return eosartifact.ValueType{}, fmt.Errorf("tensor type metadata missing")
 		}
 		if err := bindShape(typ.Tensor.Shape, t.Shape, bindings); err != nil {
-			return mantaartifact.ValueType{}, err
+			return eosartifact.ValueType{}, err
 		}
-		return mantaartifact.ValueType{
-			Kind: mantaartifact.ValueTensor,
-			Tensor: &mantaartifact.TensorType{
+		return eosartifact.ValueType{
+			Kind: eosartifact.ValueTensor,
+			Tensor: &eosartifact.TensorType{
 				DType: typ.Tensor.DType,
 				Shape: concreteShapeStrings(typ.Tensor.Shape, t.Shape),
 			},
 		}, nil
-	case mantaartifact.ValueKVCache:
-		return mantaartifact.ValueType{Kind: mantaartifact.ValueKVCache}, nil
-	case mantaartifact.ValueCandidatePack:
+	case eosartifact.ValueKVCache:
+		return eosartifact.ValueType{Kind: eosartifact.ValueKVCache}, nil
+	case eosartifact.ValueCandidatePack:
 		pack, ok := value.(*CandidatePack)
 		if !ok || pack == nil {
-			return mantaartifact.ValueType{}, fmt.Errorf("expected candidate pack value, got %T", value)
+			return eosartifact.ValueType{}, fmt.Errorf("expected candidate pack value, got %T", value)
 		}
 		if typ.CandidatePack == nil {
-			return mantaartifact.ValueType{}, fmt.Errorf("candidate pack type metadata missing")
+			return eosartifact.ValueType{}, fmt.Errorf("candidate pack type metadata missing")
 		}
 		if err := validateCandidatePackType(typ, pack); err != nil {
-			return mantaartifact.ValueType{}, err
+			return eosartifact.ValueType{}, err
 		}
 		if err := bindShape(typ.CandidatePack.Shape, pack.Docs.Shape, bindings); err != nil {
-			return mantaartifact.ValueType{}, err
+			return eosartifact.ValueType{}, err
 		}
-		return mantaartifact.ValueType{
-			Kind:          mantaartifact.ValueCandidatePack,
-			CandidatePack: &mantaartifact.CandidatePackType{Shape: concreteShapeStrings(typ.CandidatePack.Shape, pack.Docs.Shape)},
+		return eosartifact.ValueType{
+			Kind:          eosartifact.ValueCandidatePack,
+			CandidatePack: &eosartifact.CandidatePackType{Shape: concreteShapeStrings(typ.CandidatePack.Shape, pack.Docs.Shape)},
 		}, nil
 	default:
-		return mantaartifact.ValueType{}, fmt.Errorf("unsupported runtime value kind %q", typ.Kind)
+		return eosartifact.ValueType{}, fmt.Errorf("unsupported runtime value kind %q", typ.Kind)
 	}
 }
 

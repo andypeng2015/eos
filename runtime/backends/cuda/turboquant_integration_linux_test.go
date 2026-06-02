@@ -6,8 +6,8 @@ import (
 	"math"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 	turboquant "m31labs.dev/turboquant"
 )
 
@@ -28,7 +28,7 @@ func TestCUDATurboQuantStepsMatchTurboQuantSpec(t *testing.T) {
 		1.30, -1.40, 1.50, -1.60,
 		1.70, -1.80, 1.90, -2.00,
 	})
-	step := mantaartifact.Step{Kind: mantaartifact.StepTurboQEncode, Attributes: map[string]string{"bits": "4", "seed": "77"}}
+	step := eosartifact.Step{Kind: eosartifact.StepTurboQEncode, Attributes: map[string]string{"bits": "4", "seed": "77"}}
 	cfg, ok := planBuiltinTurboQEncode(step, []*backend.Tensor{input})
 	if !ok {
 		t.Fatal("turboquant encode should be supported")
@@ -47,11 +47,11 @@ func TestCUDATurboQuantStepsMatchTurboQuantSpec(t *testing.T) {
 	assertTensorClose(t, encoded.Outputs[0], input.Shape, wantCoords)
 	assertTensorClose(t, encoded.Outputs[1], []int{1, 2, 2}, wantNorms)
 
-	decodeType := mantaartifact.ValueType{
-		Kind:   mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{DType: "f32"},
+	decodeType := eosartifact.ValueType{
+		Kind:   eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{DType: "f32"},
 	}
-	decodeStep := mantaartifact.Step{Kind: mantaartifact.StepTurboQDecode, Attributes: map[string]string{"bits": "4", "seed": "77"}}
+	decodeStep := eosartifact.Step{Kind: eosartifact.StepTurboQDecode, Attributes: map[string]string{"bits": "4", "seed": "77"}}
 	decodeCfg, ok := planBuiltinTurboQDecode(decodeStep, encoded.Outputs)
 	if !ok {
 		t.Fatal("turboquant decode should be supported")

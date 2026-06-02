@@ -10,15 +10,15 @@ import (
 	"strconv"
 	"syscall/js"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 	turboquant "m31labs.dev/turboquant"
 )
 
 type deviceRuntime struct {
 	device    js.Value
 	queue     js.Value
-	pipelines map[mantaartifact.StepKind]js.Value
+	pipelines map[eosartifact.StepKind]js.Value
 }
 
 func newDeviceRuntime(ctx context.Context) (*deviceRuntime, error) {
@@ -50,12 +50,12 @@ func newDeviceRuntime(ctx context.Context) (*deviceRuntime, error) {
 	return &deviceRuntime{
 		device:    device,
 		queue:     device.Get("queue"),
-		pipelines: map[mantaartifact.StepKind]js.Value{},
+		pipelines: map[eosartifact.StepKind]js.Value{},
 	}, nil
 }
 
 // adoptDeviceRuntime wraps an externally-owned GPUDevice (a syscall/js value,
-// e.g. from GoSX's jsgpu.Device.NativeDevice()) as a deviceRuntime, so Manta
+// e.g. from GoSX's jsgpu.Device.NativeDevice()) as a deviceRuntime, so Eos
 // shares the renderer's device instead of requesting its own.
 func adoptDeviceRuntime(handle any) (*deviceRuntime, error) {
 	dev, ok := handle.(js.Value)
@@ -68,28 +68,28 @@ func adoptDeviceRuntime(handle any) (*deviceRuntime, error) {
 	return &deviceRuntime{
 		device:    dev,
 		queue:     dev.Get("queue"),
-		pipelines: map[mantaartifact.StepKind]js.Value{},
+		pipelines: map[eosartifact.StepKind]js.Value{},
 	}, nil
 }
 
-func (d *deviceRuntime) dispatchStep(ctx context.Context, step mantaartifact.Step, inputs []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
+func (d *deviceRuntime) dispatchStep(ctx context.Context, step eosartifact.Step, inputs []*backend.Tensor) (backend.StepDispatchResult, bool, error) {
 	if d == nil || !d.device.Truthy() {
 		return backend.StepDispatchResult{}, false, nil
 	}
 	switch step.Kind {
-	case mantaartifact.StepConv2D:
+	case eosartifact.StepConv2D:
 		out, meta, ok, err := d.runConv2D(ctx, step, inputs)
 		return stepResult(out, meta), ok, err
-	case mantaartifact.StepConv2DTrans:
+	case eosartifact.StepConv2DTrans:
 		out, meta, ok, err := d.runConv2DTranspose(ctx, step, inputs)
 		return stepResult(out, meta), ok, err
-	case mantaartifact.StepGDN:
+	case eosartifact.StepGDN:
 		out, meta, ok, err := d.runGDN(ctx, step, inputs, false)
 		return stepResult(out, meta), ok, err
-	case mantaartifact.StepIGDN:
+	case eosartifact.StepIGDN:
 		out, meta, ok, err := d.runGDN(ctx, step, inputs, true)
 		return stepResult(out, meta), ok, err
-	case mantaartifact.StepTurboQDecode:
+	case eosartifact.StepTurboQDecode:
 		out, meta, ok, err := d.runTurboQuantDecode(ctx, step, inputs)
 		return stepResult(out, meta), ok, err
 	default:
@@ -116,7 +116,7 @@ func stepResult(out []*backend.Tensor, meta map[string]any) backend.StepDispatch
 	}
 }
 
-func (d *deviceRuntime) runConv2D(ctx context.Context, step mantaartifact.Step, inputs []*backend.Tensor) ([]*backend.Tensor, map[string]any, bool, error) {
+func (d *deviceRuntime) runConv2D(ctx context.Context, step eosartifact.Step, inputs []*backend.Tensor) ([]*backend.Tensor, map[string]any, bool, error) {
 	if len(inputs) < 2 || len(inputs) > 3 || inputs[0] == nil || inputs[1] == nil {
 		return nil, nil, false, nil
 	}
@@ -159,7 +159,7 @@ func (d *deviceRuntime) runConv2D(ctx context.Context, step mantaartifact.Step, 
 		uint32(strideH), uint32(strideW), uint32(int32(padH)), uint32(int32(padW)),
 		uint32(dilH), uint32(dilW), boolU32(hasBias),
 	)
-	kernel, _ := BuiltinForStep(mantaartifact.StepConv2D)
+	kernel, _ := BuiltinForStep(eosartifact.StepConv2D)
 	outputBytes, meta, err := d.dispatch(ctx, kernel, []js.Value{
 		d.floatStorageBuffer(input.F32),
 		d.floatStorageBuffer(weight.F32),
@@ -174,7 +174,7 @@ func (d *deviceRuntime) runConv2D(ctx context.Context, step mantaartifact.Step, 
 	return []*backend.Tensor{out}, meta, true, nil
 }
 
-func (d *deviceRuntime) runConv2DTranspose(ctx context.Context, step mantaartifact.Step, inputs []*backend.Tensor) ([]*backend.Tensor, map[string]any, bool, error) {
+func (d *deviceRuntime) runConv2DTranspose(ctx context.Context, step eosartifact.Step, inputs []*backend.Tensor) ([]*backend.Tensor, map[string]any, bool, error) {
 	if len(inputs) < 2 || len(inputs) > 3 || inputs[0] == nil || inputs[1] == nil {
 		return nil, nil, false, nil
 	}
@@ -223,7 +223,7 @@ func (d *deviceRuntime) runConv2DTranspose(ctx context.Context, step mantaartifa
 		uint32(strideH), uint32(strideW), uint32(int32(padH)), uint32(int32(padW)),
 		uint32(dilH), uint32(dilW), boolU32(hasBias),
 	)
-	kernel, _ := BuiltinForStep(mantaartifact.StepConv2DTrans)
+	kernel, _ := BuiltinForStep(eosartifact.StepConv2DTrans)
 	outputBytes, meta, err := d.dispatch(ctx, kernel, []js.Value{
 		d.floatStorageBuffer(input.F32),
 		d.floatStorageBuffer(weight.F32),
@@ -238,7 +238,7 @@ func (d *deviceRuntime) runConv2DTranspose(ctx context.Context, step mantaartifa
 	return []*backend.Tensor{out}, meta, true, nil
 }
 
-func (d *deviceRuntime) runGDN(ctx context.Context, step mantaartifact.Step, inputs []*backend.Tensor, inverse bool) ([]*backend.Tensor, map[string]any, bool, error) {
+func (d *deviceRuntime) runGDN(ctx context.Context, step eosartifact.Step, inputs []*backend.Tensor, inverse bool) ([]*backend.Tensor, map[string]any, bool, error) {
 	if len(inputs) < 3 || inputs[0] == nil || inputs[1] == nil || inputs[2] == nil {
 		return nil, nil, false, nil
 	}
@@ -251,9 +251,9 @@ func (d *deviceRuntime) runGDN(ctx context.Context, step mantaartifact.Step, inp
 		return nil, nil, false, nil
 	}
 	cfg := uint32Bytes(uint32(input.Elements()), uint32(n), uint32(channels), uint32(height), uint32(width))
-	kind := mantaartifact.StepGDN
+	kind := eosartifact.StepGDN
 	if inverse {
-		kind = mantaartifact.StepIGDN
+		kind = eosartifact.StepIGDN
 	}
 	kernel, _ := BuiltinForStep(kind)
 	outputBytes, meta, err := d.dispatch(ctx, kernel, []js.Value{
@@ -270,7 +270,7 @@ func (d *deviceRuntime) runGDN(ctx context.Context, step mantaartifact.Step, inp
 	return []*backend.Tensor{out}, meta, true, nil
 }
 
-func (d *deviceRuntime) runTurboQuantDecode(ctx context.Context, step mantaartifact.Step, inputs []*backend.Tensor) ([]*backend.Tensor, map[string]any, bool, error) {
+func (d *deviceRuntime) runTurboQuantDecode(ctx context.Context, step eosartifact.Step, inputs []*backend.Tensor) ([]*backend.Tensor, map[string]any, bool, error) {
 	if len(inputs) != 2 || inputs[0] == nil || inputs[1] == nil {
 		return nil, nil, false, nil
 	}
@@ -295,7 +295,7 @@ func (d *deviceRuntime) runTurboQuantDecode(ctx context.Context, step mantaartif
 		uint32(n*height*width), uint32(n), uint32(channels), uint32(height), uint32(width),
 		uint32(bits), uint32(1<<bits),
 	)
-	kernel, _ := BuiltinForStep(mantaartifact.StepTurboQDecode)
+	kernel, _ := BuiltinForStep(eosartifact.StepTurboQDecode)
 	outputBytes, meta, err := d.dispatch(ctx, kernel, []js.Value{
 		d.floatStorageBuffer(coords.F32),
 		d.floatStorageBuffer(norms.F32),

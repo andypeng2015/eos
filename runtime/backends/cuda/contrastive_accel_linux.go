@@ -13,8 +13,8 @@ import (
 	"math"
 	"time"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 const contrastiveScoresKernelSource = `
@@ -158,7 +158,7 @@ type contrastiveAccelerator struct {
 }
 
 func init() {
-	backend.RegisterContrastiveAccelerator(mantaartifact.BackendCUDA, NewContrastiveAccelerator)
+	backend.RegisterContrastiveAccelerator(eosartifact.BackendCUDA, NewContrastiveAccelerator)
 }
 
 func NewContrastiveAccelerator() (backend.ContrastiveAccelerator, error) {
@@ -195,8 +195,8 @@ func NewContrastiveAccelerator() (backend.ContrastiveAccelerator, error) {
 	}, nil
 }
 
-func (a *contrastiveAccelerator) Backend() mantaartifact.BackendKind {
-	return mantaartifact.BackendCUDA
+func (a *contrastiveAccelerator) Backend() eosartifact.BackendKind {
+	return eosartifact.BackendCUDA
 }
 
 func (a *contrastiveAccelerator) RunInfoNCE(query, positive *backend.Tensor, cfg backend.ContrastiveLossConfig) (backend.ContrastiveGradResult, error) {

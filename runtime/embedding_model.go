@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"context"
@@ -6,8 +6,8 @@ import (
 	"slices"
 	"strconv"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 const EmbeddingManifestVersion = "manta/embedding-manifest/v0alpha1"
@@ -75,11 +75,11 @@ func ResolveEmbeddingManifestPath(artifactPath string) string {
 
 // WriteFile writes the embedding manifest as an authored MLL container.
 func (m EmbeddingManifest) WriteFile(path string) error {
-	return writeAuthoredManifestMLL(path, "embedding_manifest", EmbeddingManifestVersion, m.nameOrDefault(), "Manta embedding manifest", m.mllValues())
+	return writeAuthoredManifestMLL(path, "embedding_manifest", EmbeddingManifestVersion, m.nameOrDefault(), "Eos embedding manifest", m.mllValues())
 }
 
 // LoadEmbedding loads an embedding module with a validated serving manifest.
-func (rt *Runtime) LoadEmbedding(ctx context.Context, mod *mantaartifact.Module, manifest EmbeddingManifest, opts ...LoadOption) (*EmbeddingModel, error) {
+func (rt *Runtime) LoadEmbedding(ctx context.Context, mod *eosartifact.Module, manifest EmbeddingManifest, opts ...LoadOption) (*EmbeddingModel, error) {
 	manifest = manifest.normalized()
 	if err := manifest.ValidateModule(mod); err != nil {
 		return nil, err
@@ -93,7 +93,7 @@ func (rt *Runtime) LoadEmbedding(ctx context.Context, mod *mantaartifact.Module,
 
 // LoadEmbeddingFile reads a .mll artifact and loads it as an embedding model.
 func (rt *Runtime) LoadEmbeddingFile(ctx context.Context, artifactPath string, manifest EmbeddingManifest, opts ...LoadOption) (*EmbeddingModel, error) {
-	mod, err := mantaartifact.ReadFile(artifactPath)
+	mod, err := eosartifact.ReadFile(artifactPath)
 	if err != nil {
 		return nil, err
 	}
@@ -290,7 +290,7 @@ func (m *EmbeddingModel) Manifest() EmbeddingManifest {
 }
 
 // Backend reports the selected backend.
-func (m *EmbeddingModel) Backend() mantaartifact.BackendKind {
+func (m *EmbeddingModel) Backend() eosartifact.BackendKind {
 	if m == nil || m.program == nil {
 		return ""
 	}
@@ -564,9 +564,9 @@ func (m *EmbeddingModel) embedBatchByTokenLength(ctx context.Context, batches []
 		Raw: backend.Result{
 			Outputs: map[string]backend.Value{
 				outputName: {
-					Type: mantaartifact.ValueType{
-						Kind: mantaartifact.ValueTensor,
-						Tensor: &mantaartifact.TensorType{
+					Type: eosartifact.ValueType{
+						Kind: eosartifact.ValueTensor,
+						Tensor: &eosartifact.TensorType{
 							DType: dtype,
 							Shape: []string{strconv.Itoa(len(batches)), strconv.Itoa(width)},
 						},
@@ -640,7 +640,7 @@ func (m EmbeddingManifest) normalized() EmbeddingManifest {
 }
 
 // ValidateModule checks that a module satisfies the embedding serving contract.
-func (m EmbeddingManifest) ValidateModule(mod *mantaartifact.Module) error {
+func (m EmbeddingManifest) ValidateModule(mod *eosartifact.Module) error {
 	if mod == nil {
 		return fmt.Errorf("nil module")
 	}
@@ -731,7 +731,7 @@ func (m *EmbeddingModel) validateEmbeddingResult(result EmbeddingResult, batched
 	return nil
 }
 
-func validateEmbeddingEntry(mod *mantaartifact.Module, entryName, tokenInput, maskInput string, tokenRank, outputRank int, outputDType string) error {
+func validateEmbeddingEntry(mod *eosartifact.Module, entryName, tokenInput, maskInput string, tokenRank, outputRank int, outputDType string) error {
 	entry, err := findEntryPoint(mod, entryName)
 	if err != nil {
 		return err
@@ -740,7 +740,7 @@ func validateEmbeddingEntry(mod *mantaartifact.Module, entryName, tokenInput, ma
 	if err != nil {
 		return err
 	}
-	if input.Type.Kind != mantaartifact.ValueTensor || input.Type.Tensor == nil {
+	if input.Type.Kind != eosartifact.ValueTensor || input.Type.Tensor == nil {
 		return fmt.Errorf("entrypoint %q input %q is not a tensor", entryName, tokenInput)
 	}
 	if input.Type.Tensor.DType != "i32" {
@@ -754,7 +754,7 @@ func validateEmbeddingEntry(mod *mantaartifact.Module, entryName, tokenInput, ma
 		if err != nil {
 			return err
 		}
-		if mask.Type.Kind != mantaartifact.ValueTensor || mask.Type.Tensor == nil {
+		if mask.Type.Kind != eosartifact.ValueTensor || mask.Type.Tensor == nil {
 			return fmt.Errorf("entrypoint %q input %q is not a tensor", entryName, maskInput)
 		}
 		if mask.Type.Tensor.DType != "i32" {
@@ -768,7 +768,7 @@ func validateEmbeddingEntry(mod *mantaartifact.Module, entryName, tokenInput, ma
 		return fmt.Errorf("entrypoint %q output count = %d, want 1", entryName, len(entry.Outputs))
 	}
 	output := entry.Outputs[0]
-	if output.Type.Kind != mantaartifact.ValueTensor || output.Type.Tensor == nil {
+	if output.Type.Kind != eosartifact.ValueTensor || output.Type.Tensor == nil {
 		return fmt.Errorf("entrypoint %q output %q is not a tensor", entryName, output.Name)
 	}
 	if outputDType != "" && output.Type.Tensor.DType != outputDType {
@@ -780,13 +780,13 @@ func validateEmbeddingEntry(mod *mantaartifact.Module, entryName, tokenInput, ma
 	return nil
 }
 
-func validateEmbeddingParam(mod *mantaartifact.Module, name string) error {
+func validateEmbeddingParam(mod *eosartifact.Module, name string) error {
 	if name == "" {
 		return nil
 	}
 	for _, param := range mod.Params {
 		if param.Name == name {
-			if param.Type.Kind != mantaartifact.ValueTensor || param.Type.Tensor == nil {
+			if param.Type.Kind != eosartifact.ValueTensor || param.Type.Tensor == nil {
 				return fmt.Errorf("param %q is not a tensor", name)
 			}
 			if got := len(param.Type.Tensor.Shape); got != 2 {
@@ -798,7 +798,7 @@ func validateEmbeddingParam(mod *mantaartifact.Module, name string) error {
 	return fmt.Errorf("missing param %q", name)
 }
 
-func validateAttentionParams(mod *mantaartifact.Module, manifest EmbeddingManifest) error {
+func validateAttentionParams(mod *eosartifact.Module, manifest EmbeddingManifest) error {
 	names := []string{
 		manifest.AttentionQueryParam,
 		manifest.AttentionKeyParam,
@@ -825,25 +825,25 @@ func validateAttentionParams(mod *mantaartifact.Module, manifest EmbeddingManife
 	return nil
 }
 
-func findEntryPoint(mod *mantaartifact.Module, name string) (mantaartifact.EntryPoint, error) {
+func findEntryPoint(mod *eosartifact.Module, name string) (eosartifact.EntryPoint, error) {
 	if mod == nil {
-		return mantaartifact.EntryPoint{}, fmt.Errorf("nil module")
+		return eosartifact.EntryPoint{}, fmt.Errorf("nil module")
 	}
 	for _, entry := range mod.EntryPoints {
 		if entry.Name == name {
 			return entry, nil
 		}
 	}
-	return mantaartifact.EntryPoint{}, fmt.Errorf("unknown entrypoint %q", name)
+	return eosartifact.EntryPoint{}, fmt.Errorf("unknown entrypoint %q", name)
 }
 
-func requireEntryInput(entry mantaartifact.EntryPoint, name string) (mantaartifact.ValueBinding, error) {
+func requireEntryInput(entry eosartifact.EntryPoint, name string) (eosartifact.ValueBinding, error) {
 	for _, input := range entry.Inputs {
 		if input.Name == name {
 			return input, nil
 		}
 	}
-	return mantaartifact.ValueBinding{}, fmt.Errorf("entrypoint %q does not declare input %q", entry.Name, name)
+	return eosartifact.ValueBinding{}, fmt.Errorf("entrypoint %q does not declare input %q", entry.Name, name)
 }
 
 func buildMaskedTokenInputs(batches [][]int32, padID int32, batched bool) (*backend.Tensor, *backend.Tensor, error) {

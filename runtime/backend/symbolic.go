@@ -4,14 +4,14 @@ import (
 	"context"
 	"fmt"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
+	eosartifact "m31labs.dev/eos/artifact/eos"
 )
 
-// ExecuteSymbolic runs the current Manta runtime path. The selected
+// ExecuteSymbolic runs the current Eos runtime path. The selected
 // backend resolves compiled variants at load time, and plan steps execute
 // through backend-owned dispatch where promoted kernels exist and through the
 // host/reference path where they do not yet.
-func ExecuteSymbolic(ctx context.Context, mod *mantaartifact.Module, weights map[string]WeightBinding, compiled map[string]CompiledKernel, dispatch KernelDispatcher, dispatchStep StepDispatcher, kind mantaartifact.BackendKind, req Request) (Result, error) {
+func ExecuteSymbolic(ctx context.Context, mod *eosartifact.Module, weights map[string]WeightBinding, compiled map[string]CompiledKernel, dispatch KernelDispatcher, dispatchStep StepDispatcher, kind eosartifact.BackendKind, req Request) (Result, error) {
 	if mod == nil {
 		return Result{}, fmt.Errorf("nil module")
 	}
@@ -120,7 +120,7 @@ func ExecuteSymbolic(ctx context.Context, mod *mantaartifact.Module, weights map
 			Outputs: cloneStrings(step.Outputs),
 		})
 		switch step.Kind {
-		case mantaartifact.StepReturn:
+		case eosartifact.StepReturn:
 			for _, name := range step.Outputs {
 				value, ok := env[name]
 				if !ok {
@@ -170,21 +170,21 @@ func shouldReleaseMaterializedParam(weight WeightBinding) bool {
 	return weight.Residency == "lazy_staged"
 }
 
-func materializeParamValue(name string, params []mantaartifact.Param, weights map[string]WeightBinding, bindings map[string]int, env map[string]Value) (Value, mantaartifact.ValueType, bool, error) {
+func materializeParamValue(name string, params []eosartifact.Param, weights map[string]WeightBinding, bindings map[string]int, env map[string]Value) (Value, eosartifact.ValueType, bool, error) {
 	param, ok := paramByName(params, name)
 	if !ok {
-		return Value{}, mantaartifact.ValueType{}, false, fmt.Errorf("unknown param %q", name)
+		return Value{}, eosartifact.ValueType{}, false, fmt.Errorf("unknown param %q", name)
 	}
 	if value, ok := env[name]; ok {
 		return value, value.Type, false, nil
 	}
 	weight, ok := weights[name]
 	if !ok {
-		return Value{}, mantaartifact.ValueType{}, false, fmt.Errorf("missing weight binding")
+		return Value{}, eosartifact.ValueType{}, false, fmt.Errorf("missing weight binding")
 	}
 	data, concreteType, err := PreviewValueWithBindings(param.Type, weight.Data, bindings)
 	if err != nil {
-		return Value{}, mantaartifact.ValueType{}, false, err
+		return Value{}, eosartifact.ValueType{}, false, err
 	}
 	return Value{
 		Type:     concreteType,
@@ -198,7 +198,7 @@ func materializeParamValue(name string, params []mantaartifact.Param, weights ma
 	}, concreteType, true, nil
 }
 
-func countEntryParamUses(steps []mantaartifact.Step, params []mantaartifact.Param) map[string]int {
+func countEntryParamUses(steps []eosartifact.Step, params []eosartifact.Param) map[string]int {
 	counts := map[string]int{}
 	if len(steps) == 0 || len(params) == 0 {
 		return counts
@@ -228,18 +228,18 @@ func countUnusedEntryParams(uses map[string]int) int {
 	return unused
 }
 
-func isParamName(params []mantaartifact.Param, name string) bool {
+func isParamName(params []eosartifact.Param, name string) bool {
 	_, ok := paramByName(params, name)
 	return ok
 }
 
-func paramByName(params []mantaartifact.Param, name string) (mantaartifact.Param, bool) {
+func paramByName(params []eosartifact.Param, name string) (eosartifact.Param, bool) {
 	for _, param := range params {
 		if param.Name == name {
 			return param, true
 		}
 	}
-	return mantaartifact.Param{}, false
+	return eosartifact.Param{}, false
 }
 
 func paramMaterializationMode(eager, lazy int) string {
@@ -253,16 +253,16 @@ func paramMaterializationMode(eager, lazy int) string {
 	}
 }
 
-func entryPointByName(mod *mantaartifact.Module, name string) (mantaartifact.EntryPoint, bool) {
+func entryPointByName(mod *eosartifact.Module, name string) (eosartifact.EntryPoint, bool) {
 	for _, entry := range mod.EntryPoints {
 		if entry.Name == name {
 			return entry, true
 		}
 	}
-	return mantaartifact.EntryPoint{}, false
+	return eosartifact.EntryPoint{}, false
 }
 
-func validateRequestInputs(entry mantaartifact.EntryPoint, inputs map[string]any) error {
+func validateRequestInputs(entry eosartifact.EntryPoint, inputs map[string]any) error {
 	for _, input := range entry.Inputs {
 		if _, ok := inputs[input.Name]; !ok {
 			return fmt.Errorf("entrypoint %q missing input %q", entry.Name, input.Name)
@@ -276,7 +276,7 @@ func validateRequestInputs(entry mantaartifact.EntryPoint, inputs map[string]any
 	return nil
 }
 
-func entryHasInput(entry mantaartifact.EntryPoint, name string) bool {
+func entryHasInput(entry eosartifact.EntryPoint, name string) bool {
 	for _, input := range entry.Inputs {
 		if input.Name == name {
 			return true
@@ -285,8 +285,8 @@ func entryHasInput(entry mantaartifact.EntryPoint, name string) bool {
 	return false
 }
 
-func stepsForEntry(mod *mantaartifact.Module, entry string) []mantaartifact.Step {
-	out := make([]mantaartifact.Step, 0, len(mod.Steps))
+func stepsForEntry(mod *eosartifact.Module, entry string) []eosartifact.Step {
+	out := make([]eosartifact.Step, 0, len(mod.Steps))
 	for _, step := range mod.Steps {
 		if step.Entry == entry {
 			out = append(out, step)
@@ -295,7 +295,7 @@ func stepsForEntry(mod *mantaartifact.Module, entry string) []mantaartifact.Step
 	return out
 }
 
-func resolveStepOutputType(mod *mantaartifact.Module, entry mantaartifact.EntryPoint, step mantaartifact.Step, outputIndex int, env map[string]Value) mantaartifact.ValueType {
+func resolveStepOutputType(mod *eosartifact.Module, entry eosartifact.EntryPoint, step eosartifact.Step, outputIndex int, env map[string]Value) eosartifact.ValueType {
 	if outputIndex < len(step.Outputs) {
 		name := step.Outputs[outputIndex]
 		if binding, ok := entryOutputByName(entry, name); ok {
@@ -305,7 +305,7 @@ func resolveStepOutputType(mod *mantaartifact.Module, entry mantaartifact.EntryP
 			return valueTypeForBuffer(buf)
 		}
 	}
-	if step.Kind == mantaartifact.StepLaunchKernel {
+	if step.Kind == eosartifact.StepLaunchKernel {
 		if kernel, ok := kernelByName(mod, step.Kernel); ok && outputIndex < len(kernel.Outputs) {
 			return kernel.Outputs[outputIndex].Type
 		}
@@ -315,53 +315,53 @@ func resolveStepOutputType(mod *mantaartifact.Module, entry mantaartifact.EntryP
 			return value.Type
 		}
 	}
-	return mantaartifact.ValueType{Kind: mantaartifact.ValueTensor, Tensor: &mantaartifact.TensorType{DType: "f32"}}
+	return eosartifact.ValueType{Kind: eosartifact.ValueTensor, Tensor: &eosartifact.TensorType{DType: "f32"}}
 }
 
-func entryOutputByName(entry mantaartifact.EntryPoint, name string) (mantaartifact.ValueBinding, bool) {
+func entryOutputByName(entry eosartifact.EntryPoint, name string) (eosartifact.ValueBinding, bool) {
 	for _, output := range entry.Outputs {
 		if output.Name == name {
 			return output, true
 		}
 	}
-	return mantaartifact.ValueBinding{}, false
+	return eosartifact.ValueBinding{}, false
 }
 
-func bufferByName(mod *mantaartifact.Module, name string) (mantaartifact.Buffer, bool) {
+func bufferByName(mod *eosartifact.Module, name string) (eosartifact.Buffer, bool) {
 	for _, buf := range mod.Buffers {
 		if buf.Name == name {
 			return buf, true
 		}
 	}
-	return mantaartifact.Buffer{}, false
+	return eosartifact.Buffer{}, false
 }
 
-func kernelVariantForBackend(kernel mantaartifact.Kernel, kind mantaartifact.BackendKind) (mantaartifact.KernelVariant, bool) {
+func kernelVariantForBackend(kernel eosartifact.Kernel, kind eosartifact.BackendKind) (eosartifact.KernelVariant, bool) {
 	for _, variant := range kernel.Variants {
 		if variant.Backend == kind {
 			return variant, true
 		}
 	}
-	return mantaartifact.KernelVariant{}, false
+	return eosartifact.KernelVariant{}, false
 }
 
-func valueTypeForBuffer(buf mantaartifact.Buffer) mantaartifact.ValueType {
+func valueTypeForBuffer(buf eosartifact.Buffer) eosartifact.ValueType {
 	if buf.DType == "kv_cache" {
-		return mantaartifact.ValueType{Kind: mantaartifact.ValueKVCache}
+		return eosartifact.ValueType{Kind: eosartifact.ValueKVCache}
 	}
 	if buf.DType == "candidate_pack" {
-		return mantaartifact.ValueType{
-			Kind:          mantaartifact.ValueCandidatePack,
-			CandidatePack: &mantaartifact.CandidatePackType{Shape: cloneStrings(buf.Shape)},
+		return eosartifact.ValueType{
+			Kind:          eosartifact.ValueCandidatePack,
+			CandidatePack: &eosartifact.CandidatePackType{Shape: cloneStrings(buf.Shape)},
 		}
 	}
-	return mantaartifact.ValueType{
-		Kind:   mantaartifact.ValueTensor,
-		Tensor: &mantaartifact.TensorType{DType: buf.DType, Shape: cloneStrings(buf.Shape)},
+	return eosartifact.ValueType{
+		Kind:   eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{DType: buf.DType, Shape: cloneStrings(buf.Shape)},
 	}
 }
 
-func producerName(step mantaartifact.Step) string {
+func producerName(step eosartifact.Step) string {
 	if step.Kernel != "" {
 		return "kernel:" + step.Kernel
 	}

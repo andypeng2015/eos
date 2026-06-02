@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"context"
@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/compiler"
-	"m31labs.dev/manta/runtime/backends/cuda"
-	"m31labs.dev/manta/runtime/backends/metal"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/compiler"
+	"m31labs.dev/eos/runtime/backends/cuda"
+	"m31labs.dev/eos/runtime/backends/metal"
 	mll "m31labs.dev/mll"
 )
 
@@ -51,7 +51,7 @@ func TestExportPackageToMLLWritesSealedContainer(t *testing.T) {
 		t.Fatalf("profile = %d, want %d", reader.Profile(), mll.ProfileSealed)
 	}
 
-	for _, tag := range [][4]byte{mll.TagHEAD, mll.TagSTRG, mll.TagDIMS, mll.TagTYPE, mll.TagPARM, mll.TagENTR, mll.TagMEMP, mll.TagTNSR, mantaartifact.MLLTagXMTA} {
+	for _, tag := range [][4]byte{mll.TagHEAD, mll.TagSTRG, mll.TagDIMS, mll.TagTYPE, mll.TagPARM, mll.TagENTR, mll.TagMEMP, mll.TagTNSR, eosartifact.MLLTagXMTA} {
 		if _, ok := reader.Section(tag); !ok {
 			t.Fatalf("missing section %q", string(tag[:]))
 		}
@@ -99,8 +99,8 @@ func TestExportPackageToMLLWritesSealedContainer(t *testing.T) {
 		t.Fatalf("stored tensor dtype = %d, want widened f32 (%d)", got, mll.DTypeF32)
 	}
 
-	xmtaBody, _ := reader.Section(mantaartifact.MLLTagXMTA)
-	meta, err := mantaartifact.DecodeMLLMetadata(xmtaBody)
+	xmtaBody, _ := reader.Section(eosartifact.MLLTagXMTA)
+	meta, err := eosartifact.DecodeMLLMetadata(xmtaBody)
 	if err != nil {
 		t.Fatalf("decode XMTA: %v", err)
 	}
@@ -173,7 +173,7 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 		t.Fatalf("build: %v", err)
 	}
 	path := filepath.Join(t.TempDir(), "tiny_train_embed.mll")
-	if err := mantaartifact.WriteFile(path, bundle.Artifact); err != nil {
+	if err := eosartifact.WriteFile(path, bundle.Artifact); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
 	manifest := EmbeddingManifest{

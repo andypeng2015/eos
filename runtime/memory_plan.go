@@ -1,4 +1,4 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"encoding/json"
@@ -6,8 +6,8 @@ import (
 	"os"
 	"sort"
 
-	mantaartifact "m31labs.dev/manta/artifact/manta"
-	"m31labs.dev/manta/runtime/backend"
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 	mll "m31labs.dev/mll"
 )
 
@@ -25,9 +25,9 @@ const (
 )
 
 type MemoryPlanOptions struct {
-	Backend           mantaartifact.BackendKind `json:"backend,omitempty"`
-	DeviceBudgetBytes int64                     `json:"device_budget_bytes,omitempty"`
-	SharedHostWeights bool                      `json:"shared_host_weights,omitempty"`
+	Backend           eosartifact.BackendKind `json:"backend,omitempty"`
+	DeviceBudgetBytes int64                   `json:"device_budget_bytes,omitempty"`
+	SharedHostWeights bool                    `json:"shared_host_weights,omitempty"`
 }
 
 type WeightMemoryPlan struct {
@@ -41,22 +41,22 @@ type WeightMemoryPlan struct {
 }
 
 type MemoryPlan struct {
-	Version             string                    `json:"version"`
-	ModuleName          string                    `json:"module_name"`
-	Backend             mantaartifact.BackendKind `json:"backend,omitempty"`
-	DeviceBudgetBytes   int64                     `json:"device_budget_bytes,omitempty"`
-	TotalWeightBytes    int64                     `json:"total_weight_bytes"`
-	DeviceResidentBytes int64                     `json:"device_resident_bytes,omitempty"`
-	HostResidentBytes   int64                     `json:"host_resident_bytes,omitempty"`
-	LazyStagedBytes     int64                     `json:"lazy_staged_bytes,omitempty"`
-	Weights             []WeightMemoryPlan        `json:"weights"`
+	Version             string                  `json:"version"`
+	ModuleName          string                  `json:"module_name"`
+	Backend             eosartifact.BackendKind `json:"backend,omitempty"`
+	DeviceBudgetBytes   int64                   `json:"device_budget_bytes,omitempty"`
+	TotalWeightBytes    int64                   `json:"total_weight_bytes"`
+	DeviceResidentBytes int64                   `json:"device_resident_bytes,omitempty"`
+	HostResidentBytes   int64                   `json:"host_resident_bytes,omitempty"`
+	LazyStagedBytes     int64                   `json:"lazy_staged_bytes,omitempty"`
+	Weights             []WeightMemoryPlan      `json:"weights"`
 }
 
 func DefaultMemoryPlanPath(artifactPath string) string {
 	return defaultManifestPath(artifactPath, ".memory.mll")
 }
 
-func NewMemoryPlan(mod *mantaartifact.Module, weights map[string]*backend.Tensor, opts MemoryPlanOptions) MemoryPlan {
+func NewMemoryPlan(mod *eosartifact.Module, weights map[string]*backend.Tensor, opts MemoryPlanOptions) MemoryPlan {
 	plan := MemoryPlan{
 		Version:           MemoryPlanVersion,
 		Backend:           opts.Backend,
@@ -70,7 +70,7 @@ func NewMemoryPlan(mod *mantaartifact.Module, weights map[string]*backend.Tensor
 	}
 
 	accessCounts := countParamAccesses(mod)
-	params := map[string]mantaartifact.Param{}
+	params := map[string]eosartifact.Param{}
 	for _, param := range mod.Params {
 		params[param.Name] = param
 	}
@@ -209,7 +209,7 @@ func ReadMemoryPlanFile(path string) (MemoryPlan, error) {
 	if err != nil {
 		return MemoryPlan{}, err
 	}
-	if !mantaartifact.IsMLLBytes(data) {
+	if !eosartifact.IsMLLBytes(data) {
 		return MemoryPlan{}, fmt.Errorf("memory plan %q is not an MLL file", path)
 	}
 	return decodeMemoryPlanMLL(data)
@@ -220,7 +220,7 @@ func encodeMemoryPlanMLL(plan MemoryPlan) ([]byte, error) {
 	strg.Intern("")
 	head := mll.HeadSection{
 		Name:        strg.Intern(plan.ModuleName),
-		Description: strg.Intern("Manta memory plan"),
+		Description: strg.Intern("Eos memory plan"),
 		Metadata: []mll.HeadMetadataEntry{
 			headStringMeta(strg, "memory_plan_version", plan.Version),
 			headStringMeta(strg, "backend", string(plan.Backend)),
@@ -359,7 +359,7 @@ func cloneMemoryPlan(plan *MemoryPlan) *MemoryPlan {
 	return &cp
 }
 
-func countParamAccesses(mod *mantaartifact.Module) map[string]int {
+func countParamAccesses(mod *eosartifact.Module) map[string]int {
 	counts := map[string]int{}
 	if mod == nil {
 		return counts

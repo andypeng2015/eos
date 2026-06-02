@@ -1,13 +1,13 @@
-package mantaruntime
+package eosruntime
 
 import (
 	"context"
 	"math"
 	"testing"
 
-	"m31labs.dev/manta/compiler"
-	"m31labs.dev/manta/runtime/backend"
-	"m31labs.dev/manta/runtime/backends/cuda"
+	"m31labs.dev/eos/compiler"
+	"m31labs.dev/eos/runtime/backend"
+	"m31labs.dev/eos/runtime/backends/cuda"
 )
 
 func TestRunAttentionEmbedUsesCUDADeviceDispatch(t *testing.T) {
