@@ -1853,6 +1853,7 @@ type deviceRuntime struct {
 	rdLossKernel       *auxKernel
 	crossEntropyKernel *auxKernel
 	matMulStats        backend.MatMulAcceleratorStats
+	graphCache         map[string]*cudaGraph
 }
 
 type residentMatrix struct {
@@ -1892,7 +1893,7 @@ func newDeviceRuntime() (*deviceRuntime, error) {
 	if C.mantaCudaRuntimeCreate(&rt, &errStr) != 0 {
 		return nil, cStringError(errStr)
 	}
-	return &deviceRuntime{ptr: rt, residentMatrices: map[string]residentMatrix{}, matMulScratch: map[string]deviceScratchBuffer{}}, nil
+	return &deviceRuntime{ptr: rt, residentMatrices: map[string]residentMatrix{}, matMulScratch: map[string]deviceScratchBuffer{}, graphCache: map[string]*cudaGraph{}}, nil
 }
 
 func (rt *deviceRuntime) close() {
@@ -1933,6 +1934,10 @@ func (rt *deviceRuntime) close() {
 	rt.rdLossKernel = nil
 	rt.destroyAuxKernel(rt.crossEntropyKernel)
 	rt.crossEntropyKernel = nil
+	for sig, g := range rt.graphCache {
+		g.destroy()
+		delete(rt.graphCache, sig)
+	}
 	C.mantaCudaRuntimeDestroy(rt.ptr)
 	rt.ptr = nil
 }
@@ -3842,6 +3847,49 @@ func (g *cudaGraph) destroy() {
 	g.ptr = nil
 }
 
+// runCapturedGEMMBatch executes a batch of stream GEMMs. On a cache hit for
+// `key` it replays the captured graph (one launch + one sync, no per-GEMM
+// launch/sync overhead). On a miss it runs the batch once synchronously (which
+// both produces this call's result AND warms cuBLAS workspace for every shape),
+// then captures the identical sequence for future replays. `issue` must enqueue
+// the GEMMs on rt's stream without syncing; all operands must be
+// stable-pointered buffers (resident weights + named scratch) whose contents
+// are refreshed by the caller before each invocation.
+func (rt *deviceRuntime) runCapturedGEMMBatch(key string, issue func() error) error {
+	if rt.graphCache != nil {
+		if g, ok := rt.graphCache[key]; ok {
+			return rt.launchGraph(g)
+		}
+	}
+	// Miss: warm cuBLAS workspace + produce this call's result synchronously.
+	if err := issue(); err != nil {
+		return err
+	}
+	if err := rt.synchronize(); err != nil {
+		return err
+	}
+	// Capture the same sequence (recorded, not executed) for future replays.
+	if err := rt.beginCapture(); err != nil {
+		return err
+	}
+	captureErr := issue()
+	g, endErr := rt.endCapture()
+	if captureErr != nil {
+		if endErr == nil {
+			g.destroy()
+		}
+		return captureErr
+	}
+	if endErr != nil {
+		return endErr
+	}
+	if rt.graphCache == nil {
+		rt.graphCache = map[string]*cudaGraph{}
+	}
+	rt.graphCache[key] = g
+	return nil
+}
+
 func cudaFloat32SliceBitEqual(a, b []float32) bool {
 	if len(a) != len(b) {
 		return false
@@ -4170,12 +4218,39 @@ func (rt *deviceRuntime) runMatMulWithBoundRights(lhs *backend.Tensor, rightName
 		runUploadedBytes[i] = uploadedBytes
 		outHosts[i] = outHost
 		outBufs[i] = outBuf
-		if err := rt.matMulCublasWithBetaNoSync(lhsBuf, plan.resident.ptr, outBuf, C.int(plan.lhsRows), C.int(plan.lhsCols), C.int(plan.rhsRows), C.int(plan.rhsCols), transposeLeft, transposeRight, 0); err != nil {
+	}
+
+	// Issue the bound-right GEMMs on the stream without syncing. Every operand
+	// (lhsBuf, resident weights, out scratch) is a stable-pointered buffer whose
+	// contents are refreshed per call, so the sequence is safe to capture once
+	// and replay against fresh data.
+	issueGEMMs := func() error {
+		for i, plan := range plans {
+			if err := rt.matMulCublasWithBetaNoSync(lhsBuf, plan.resident.ptr, outBufs[i], C.int(plan.lhsRows), C.int(plan.lhsCols), C.int(plan.rhsRows), C.int(plan.rhsCols), transposeLeft, transposeRight, 0); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if mantaCudaGraphEnabled {
+		// Key the captured graph by the exact operands (device pointers) and
+		// shapes it records, so any scratch reallocation or shape change is a
+		// natural cache miss that forces a fresh capture.
+		key := fmt.Sprintf("boundright|lhs=%d|tl=%t|tr=%t", uint64(lhsBuf), transposeLeft, transposeRight)
+		for i, plan := range plans {
+			key += fmt.Sprintf("|%s:rhs=%d,out=%d,%dx%d*%dx%d", plan.name, uint64(plan.resident.ptr), uint64(outBufs[i]), plan.lhsRows, plan.lhsCols, plan.rhsRows, plan.rhsCols)
+		}
+		if err := rt.runCapturedGEMMBatch(key, issueGEMMs); err != nil {
 			return nil, err
 		}
-	}
-	if err := rt.synchronize(); err != nil {
-		return nil, err
+	} else {
+		if err := issueGEMMs(); err != nil {
+			return nil, err
+		}
+		if err := rt.synchronize(); err != nil {
+			return nil, err
+		}
 	}
 	for i, plan := range plans {
 		if err := rt.downloadFloat32(outHosts[i], outBufs[i]); err != nil {
