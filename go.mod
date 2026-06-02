@@ -3,7 +3,7 @@ module m31labs.dev/manta
 go 1.25.1
 
 require (
-	github.com/odvcencio/gotreesitter v0.15.2
+	github.com/odvcencio/gotreesitter v0.19.1
 	m31labs.dev/mll v0.1.0
 	m31labs.dev/turboquant v0.2.0
 )
