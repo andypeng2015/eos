@@ -61,6 +61,46 @@ extern "C" __global__ void manta_softmax_backward_rows(
 }
 `
 
+// forwardSoftmaxRowsKernelSource is the on-device forward row softmax,
+// numerically identical to the host softmaxRowsInPlace (max-subtract, exp,
+// normalize), in-place, one thread per row. It is the keystone of the
+// device-resident forward dataflow: keeping attention scores on the device
+// between the scores GEMM and the mixed GEMM removes a download/host-compute/
+// upload round-trip and is a prerequisite for whole-forward CUDA-graph capture.
+const forwardSoftmaxRowsKernelSource = `
+extern "C" __global__ void manta_softmax_forward_rows(
+    float* data,
+    int rows,
+    int cols
+) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= rows) {
+        return;
+    }
+    int base = row * cols;
+    float maxVal = data[base];
+    for (int col = 1; col < cols; ++col) {
+        float v = data[base + col];
+        if (v > maxVal) {
+            maxVal = v;
+        }
+    }
+    float sum = 0.0f;
+    for (int col = 0; col < cols; ++col) {
+        float e = expf(data[base + col] - maxVal);
+        data[base + col] = e;
+        sum += e;
+    }
+    if (sum == 0.0f) {
+        return;
+    }
+    float inv = 1.0f / sum;
+    for (int col = 0; col < cols; ++col) {
+        data[base + col] *= inv;
+    }
+}
+`
+
 const layerNormBackwardRowsKernelSource = `
 extern "C" __global__ void manta_layernorm_backward_rows(
     const float* grad_out,

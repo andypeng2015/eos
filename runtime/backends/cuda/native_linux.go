@@ -457,6 +457,11 @@ static int mantaCudaLaunchSoftmaxBackwardRows(MantaCudaRuntime* rt, MantaCudaKer
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
+static int mantaCudaLaunchSoftmaxForwardRows(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr data, int rows, int cols, char** err) {
+	void* args[] = {&data, &rows, &cols};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
 static int mantaCudaLaunchLayerNormBackwardRows(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr gradOut, CUdeviceptr normalized, CUdeviceptr pre, CUdeviceptr out0, int rows, int cols, char** err) {
 	void* args[] = {&gradOut, &normalized, &pre, &out0, &rows, &cols};
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
@@ -3690,6 +3695,19 @@ func (rt *deviceRuntime) launchAuxSoftmaxBackwardRows(kernel *auxKernel, grid, b
 	return nil
 }
 
+// launchAuxSoftmaxForwardRows runs the on-device forward row softmax in place
+// over a rows×cols buffer on rt's stream (capturable).
+func (rt *deviceRuntime) launchAuxSoftmaxForwardRows(kernel *auxKernel, grid, block uint, data C.CUdeviceptr, rows, cols int) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda auxiliary softmax forward kernel is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchSoftmaxForwardRows(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), data, C.int(rows), C.int(cols), &errStr) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
 func (rt *deviceRuntime) launchAuxLayerNormBackwardRows(kernel *auxKernel, grid, block uint, gradOut, normalized, pre, out0 C.CUdeviceptr, rows, cols int) error {
 	if kernel == nil || kernel.ptr == nil {
 		return fmt.Errorf("cuda auxiliary layernorm backward kernel is not initialized")
@@ -4006,6 +4024,85 @@ func (rt *deviceRuntime) graphReplaySelfTest() error {
 	}
 	if cudaFloat32SliceBitEqual(direct1, direct2) {
 		return errors.New("self-test inputs a1/a2 produced identical output; pick more distinct data")
+	}
+	return nil
+}
+
+// hostSoftmaxRows is the CPU reference for the forward row softmax, matching
+// the trainer's softmaxRowsInPlace. Kept local to avoid a cycle with the
+// runtime package.
+func hostSoftmaxRows(data []float32, rows, cols int) {
+	for row := 0; row < rows; row++ {
+		base := row * cols
+		maxVal := data[base]
+		for col := 1; col < cols; col++ {
+			if data[base+col] > maxVal {
+				maxVal = data[base+col]
+			}
+		}
+		var sum float32
+		for col := 0; col < cols; col++ {
+			e := float32(math.Exp(float64(data[base+col] - maxVal)))
+			data[base+col] = e
+			sum += e
+		}
+		if sum == 0 {
+			continue
+		}
+		inv := 1 / sum
+		for col := 0; col < cols; col++ {
+			data[base+col] *= inv
+		}
+	}
+}
+
+// softmaxForwardSelfTest compiles + runs the on-device forward row softmax and
+// asserts it matches the host reference within float tolerance. Validates the
+// first device-resident forward activation kernel before it is wired into the
+// forward pass.
+func (rt *deviceRuntime) softmaxForwardSelfTest() error {
+	kernel, err := rt.compileAuxKernel(forwardSoftmaxRowsKernelSource, "manta_softmax_forward_rows")
+	if err != nil {
+		return fmt.Errorf("compile forward softmax kernel: %w", err)
+	}
+	defer rt.destroyAuxKernel(kernel)
+
+	const rows, cols = 6, 9
+	data := make([]float32, rows*cols)
+	for i := range data {
+		data[i] = float32((i*3)%11-5) * 0.3
+	}
+	want := append([]float32(nil), data...)
+	hostSoftmaxRows(want, rows, cols)
+
+	buf, err := rt.uploadFloat32(data)
+	if err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	defer rt.freeBuffer(buf)
+	block := uint(128)
+	grid := uint((rows + int(block) - 1) / int(block))
+	if err := rt.launchAuxSoftmaxForwardRows(kernel, grid, block, buf, rows, cols); err != nil {
+		return fmt.Errorf("launch: %w", err)
+	}
+	got := make([]float32, rows*cols)
+	if err := rt.downloadFloat32(got, buf); err != nil {
+		return fmt.Errorf("download: %w", err)
+	}
+	for i := range want {
+		if d := got[i] - want[i]; d > 1e-5 || d < -1e-5 {
+			return fmt.Errorf("softmax mismatch at %d: device=%g host=%g", i, got[i], want[i])
+		}
+	}
+	// Confirm each row normalized to ~1.
+	for row := 0; row < rows; row++ {
+		var sum float32
+		for col := 0; col < cols; col++ {
+			sum += got[row*cols+col]
+		}
+		if d := sum - 1; d > 1e-4 || d < -1e-4 {
+			return fmt.Errorf("row %d sums to %g, want ~1", row, sum)
+		}
 	}
 	return nil
 }
