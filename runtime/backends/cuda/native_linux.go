@@ -658,6 +658,94 @@ static void mantaCudaFreeCString(char* s) {
 		free(s);
 	}
 }
+
+typedef struct {
+	CUgraph graph;
+	CUgraphExec exec;
+} MantaCudaGraph;
+
+// mantaCudaBeginCapture puts the runtime's (non-default) stream into
+// thread-local capture mode. Subsequent stream work — kernel launches and
+// cuBLAS GEMMs, both already bound to rt->stream — is recorded into a graph
+// instead of executing. cuBLAS workspace for every GEMM shape MUST be warmed
+// up before capture begins; allocations are illegal during capture.
+static int mantaCudaBeginCapture(MantaCudaRuntime* rt, char** err) {
+	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
+	if (cuRes != CUDA_SUCCESS) {
+		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
+		return 1;
+	}
+	cuRes = cuStreamBeginCapture(rt->stream, CU_STREAM_CAPTURE_MODE_THREAD_LOCAL);
+	if (cuRes != CUDA_SUCCESS) {
+		*err = manta_dup_cu_error("cuStreamBeginCapture", cuRes);
+		return 1;
+	}
+	return 0;
+}
+
+// mantaCudaEndCapture ends capture, instantiates the recorded graph into an
+// executable graph, and returns both (the graph is retained for teardown).
+static int mantaCudaEndCapture(MantaCudaRuntime* rt, MantaCudaGraph** out, char** err) {
+	CUgraph graph = NULL;
+	CUresult cuRes = cuStreamEndCapture(rt->stream, &graph);
+	if (cuRes != CUDA_SUCCESS) {
+		*err = manta_dup_cu_error("cuStreamEndCapture", cuRes);
+		return 1;
+	}
+	CUgraphExec exec = NULL;
+	cuRes = cuGraphInstantiate(&exec, graph, 0);
+	if (cuRes != CUDA_SUCCESS) {
+		cuGraphDestroy(graph);
+		*err = manta_dup_cu_error("cuGraphInstantiate", cuRes);
+		return 1;
+	}
+	MantaCudaGraph* g = (MantaCudaGraph*)malloc(sizeof(MantaCudaGraph));
+	if (g == NULL) {
+		cuGraphExecDestroy(exec);
+		cuGraphDestroy(graph);
+		*err = manta_dup_format("malloc", "failed to allocate graph");
+		return 1;
+	}
+	g->graph = graph;
+	g->exec = exec;
+	*out = g;
+	return 0;
+}
+
+// mantaCudaGraphLaunch replays a captured graph and synchronizes once. The
+// graph references the device pointers recorded at capture time, so replay
+// recomputes against whatever those (stable) buffers currently hold.
+static int mantaCudaGraphLaunch(MantaCudaRuntime* rt, MantaCudaGraph* g, char** err) {
+	CUresult cuRes = cuCtxSetCurrent(rt->ctx);
+	if (cuRes != CUDA_SUCCESS) {
+		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
+		return 1;
+	}
+	cuRes = cuGraphLaunch(g->exec, rt->stream);
+	if (cuRes != CUDA_SUCCESS) {
+		*err = manta_dup_cu_error("cuGraphLaunch", cuRes);
+		return 1;
+	}
+	cuRes = cuStreamSynchronize(rt->stream);
+	if (cuRes != CUDA_SUCCESS) {
+		*err = manta_dup_cu_error("cuStreamSynchronize", cuRes);
+		return 1;
+	}
+	return 0;
+}
+
+static void mantaCudaGraphDestroy(MantaCudaGraph* g) {
+	if (g == NULL) {
+		return;
+	}
+	if (g->exec != NULL) {
+		cuGraphExecDestroy(g->exec);
+	}
+	if (g->graph != NULL) {
+		cuGraphDestroy(g->graph);
+	}
+	free(g);
+}
 */
 import "C"
 
@@ -3700,6 +3788,178 @@ func cStringValue(value *C.char) string {
 	out := C.GoString(value)
 	C.mantaCudaFreeCString(value)
 	return out
+}
+
+// mantaCudaGraphEnabled gates CUDA-graph capture/replay of stable, repeated
+// GEMM regions. Read once from MANTA_CUDA_GRAPH=1 so the default path is
+// unchanged. Capture/replay requires stable device pointers (resident weights
+// + named scratch); see project_manta_cuda_graph.
+var mantaCudaGraphEnabled = os.Getenv("MANTA_CUDA_GRAPH") == "1"
+
+// cudaGraph wraps an instantiated, replayable CUDA graph.
+type cudaGraph struct {
+	ptr *C.MantaCudaGraph
+}
+
+// beginCapture puts rt's stream into capture mode. Warm up cuBLAS workspace
+// for every GEMM shape BEFORE calling this — allocations are illegal during
+// capture.
+func (rt *deviceRuntime) beginCapture() error {
+	var errStr *C.char
+	if C.mantaCudaBeginCapture(rt.ptr, &errStr) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+// endCapture ends capture and instantiates the recorded graph.
+func (rt *deviceRuntime) endCapture() (*cudaGraph, error) {
+	var g *C.MantaCudaGraph
+	var errStr *C.char
+	if C.mantaCudaEndCapture(rt.ptr, &g, &errStr) != 0 {
+		return nil, cStringError(errStr)
+	}
+	return &cudaGraph{ptr: g}, nil
+}
+
+// launchGraph replays a captured graph and synchronizes once.
+func (rt *deviceRuntime) launchGraph(g *cudaGraph) error {
+	if g == nil || g.ptr == nil {
+		return errors.New("cuda: launch of nil graph")
+	}
+	var errStr *C.char
+	if C.mantaCudaGraphLaunch(rt.ptr, g.ptr, &errStr) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (g *cudaGraph) destroy() {
+	if g == nil || g.ptr == nil {
+		return
+	}
+	C.mantaCudaGraphDestroy(g.ptr)
+	g.ptr = nil
+}
+
+func cudaFloat32SliceBitEqual(a, b []float32) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// graphReplaySelfTest validates the CUDA-graph capture/replay primitive on a
+// small deterministic GEMM. It asserts a captured graph (1) reproduces the
+// direct (synced) cuBLAS result bit-for-bit, and (2) on replay recomputes
+// against fresh contents of the same stable input buffer. This retires the
+// cuBLAS-in-graph risk before capture is wired into the forward pass.
+func (rt *deviceRuntime) graphReplaySelfTest() error {
+	const m, k, n = 8, 16, 4
+	a1 := make([]float32, m*k)
+	a2 := make([]float32, m*k)
+	b := make([]float32, k*n)
+	for i := range a1 {
+		a1[i] = float32((i%7)-3) * 0.25
+	}
+	for i := range a2 {
+		a2[i] = float32((i%5)-2) * 0.5
+	}
+	for i := range b {
+		b[i] = float32((i%4)-1) * 0.5
+	}
+
+	bPtr, err := rt.uploadMatMulScratchFloat32("graphtest_b", b)
+	if err != nil {
+		return fmt.Errorf("upload b: %w", err)
+	}
+	aPtr, err := rt.uploadMatMulScratchFloat32("graphtest_a", a1)
+	if err != nil {
+		return fmt.Errorf("upload a: %w", err)
+	}
+	outPtr, err := rt.matMulScratchFloat32("graphtest_out", m*n)
+	if err != nil {
+		return fmt.Errorf("alloc out: %w", err)
+	}
+
+	gemm := func() error {
+		return rt.matMulCublasWithBeta(aPtr, bPtr, outPtr, C.int(m), C.int(k), C.int(k), C.int(n), false, false, 0)
+	}
+	gemmNoSync := func() error {
+		return rt.matMulCublasWithBetaNoSync(aPtr, bPtr, outPtr, C.int(m), C.int(k), C.int(k), C.int(n), false, false, 0)
+	}
+	download := func() ([]float32, error) {
+		dst := make([]float32, m*n)
+		if err := rt.downloadFloat32(dst, outPtr); err != nil {
+			return nil, err
+		}
+		return dst, nil
+	}
+
+	// 1) Direct (synced) result for a1 — also warms the cuBLAS workspace for
+	// this shape so no allocation happens during capture.
+	if err := gemm(); err != nil {
+		return fmt.Errorf("direct gemm a1: %w", err)
+	}
+	direct1, err := download()
+	if err != nil {
+		return fmt.Errorf("download direct a1: %w", err)
+	}
+
+	// 2) Capture the identical GEMM, replay it, expect bit-identical output.
+	if err := rt.beginCapture(); err != nil {
+		return fmt.Errorf("begin capture: %w", err)
+	}
+	if err := gemmNoSync(); err != nil {
+		return fmt.Errorf("capture gemm: %w", err)
+	}
+	g, err := rt.endCapture()
+	if err != nil {
+		return fmt.Errorf("end capture: %w", err)
+	}
+	defer g.destroy()
+	if err := rt.launchGraph(g); err != nil {
+		return fmt.Errorf("replay a1: %w", err)
+	}
+	graph1, err := download()
+	if err != nil {
+		return fmt.Errorf("download graph a1: %w", err)
+	}
+	if !cudaFloat32SliceBitEqual(direct1, graph1) {
+		return fmt.Errorf("graph replay != direct for a1: direct=%v graph=%v", direct1, graph1)
+	}
+
+	// 3) Overwrite the stable input buffer with a2 and confirm replay
+	// recomputes against the new contents (matches a fresh direct GEMM).
+	if err := rt.copyFloat32ToBuffer(aPtr, a2); err != nil {
+		return fmt.Errorf("overwrite a2: %w", err)
+	}
+	if err := gemm(); err != nil {
+		return fmt.Errorf("direct gemm a2: %w", err)
+	}
+	direct2, err := download()
+	if err != nil {
+		return fmt.Errorf("download direct a2: %w", err)
+	}
+	if err := rt.launchGraph(g); err != nil {
+		return fmt.Errorf("replay a2: %w", err)
+	}
+	graph2, err := download()
+	if err != nil {
+		return fmt.Errorf("download graph a2: %w", err)
+	}
+	if !cudaFloat32SliceBitEqual(direct2, graph2) {
+		return fmt.Errorf("graph replay != direct for a2 (stale capture?): direct=%v graph=%v", direct2, graph2)
+	}
+	if cudaFloat32SliceBitEqual(direct1, direct2) {
+		return errors.New("self-test inputs a1/a2 produced identical output; pick more distinct data")
+	}
+	return nil
 }
 
 func cStringError(value *C.char) error {
