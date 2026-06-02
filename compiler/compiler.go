@@ -988,10 +988,51 @@ func emitKernelVariants(kernel lir.Kernel) []mantaartifact.KernelVariant {
 	return variants
 }
 
+// signature returns the kernel signature prefix. For WebGPU the
+// @workgroup_size is derived from the kernel's schedule hints (subgroup / tile),
+// so generated compute kernels launch a full workgroup instead of a single
+// thread; other backends use their static prefix.
+func (e kernelBackendEmitter) signature(kernel lir.Kernel) string {
+	if e.backend == mantaartifact.BackendWebGPU {
+		return "@compute @workgroup_size(" + webgpuWorkgroupSize(kernel.Hints) + ")\nfn "
+	}
+	return e.signaturePrefix
+}
+
+// webgpuWorkgroupSize derives a WGSL workgroup size from schedule hints,
+// preferring an explicit subgroup/tile shape and otherwise falling back to a
+// throughput-friendly 1D default (64) rather than a single thread.
+func webgpuWorkgroupSize(h lir.ScheduleHints) string {
+	dims := h.Subgroup2D
+	if len(dims) == 0 {
+		dims = h.Tile2D
+	}
+	if len(dims) == 0 {
+		dims = h.Tile
+	}
+	switch len(dims) {
+	case 0:
+		return "64"
+	case 1:
+		return strconv.Itoa(atLeastOne(dims[0]))
+	case 2:
+		return fmt.Sprintf("%d, %d", atLeastOne(dims[0]), atLeastOne(dims[1]))
+	default:
+		return fmt.Sprintf("%d, %d, %d", atLeastOne(dims[0]), atLeastOne(dims[1]), atLeastOne(dims[2]))
+	}
+}
+
+func atLeastOne(n int) int {
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
 func emitGenericKernelSource(emitter kernelBackendEmitter, kernel lir.Kernel) string {
 	var b strings.Builder
 	b.WriteString(emitter.prelude)
-	b.WriteString(emitter.signaturePrefix)
+	b.WriteString(emitter.signature(kernel))
 	b.WriteString(emitter.entry(kernel))
 	b.WriteString("(")
 	b.WriteString(strings.Join(emitter.params(kernel), ", "))
