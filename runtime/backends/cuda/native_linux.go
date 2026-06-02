@@ -462,6 +462,21 @@ static int mantaCudaLaunchSoftmaxForwardRows(MantaCudaRuntime* rt, MantaCudaKern
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
+static int mantaCudaLaunchGeluForward(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr src, CUdeviceptr dst, int elements, char** err) {
+	void* args[] = {&src, &dst, &elements};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
+static int mantaCudaLaunchLayerNormForwardRows(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr src, CUdeviceptr dst, int rows, int cols, char** err) {
+	void* args[] = {&src, &dst, &rows, &cols};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
+static int mantaCudaLaunchResidualAdd(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr a, CUdeviceptr b, CUdeviceptr out0, int elements, char** err) {
+	void* args[] = {&a, &b, &out0, &elements};
+	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
 static int mantaCudaLaunchLayerNormBackwardRows(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr gradOut, CUdeviceptr normalized, CUdeviceptr pre, CUdeviceptr out0, int rows, int cols, char** err) {
 	void* args[] = {&gradOut, &normalized, &pre, &out0, &rows, &cols};
 	return mantaCudaLaunch1D(rt, kernel, grid, block, args, err);
@@ -3708,6 +3723,42 @@ func (rt *deviceRuntime) launchAuxSoftmaxForwardRows(kernel *auxKernel, grid, bl
 	return nil
 }
 
+// launchAuxGeluForward runs the on-device forward GELU (out = gelu(src)) on rt's stream.
+func (rt *deviceRuntime) launchAuxGeluForward(kernel *auxKernel, grid, block uint, src, dst C.CUdeviceptr, elements int) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda auxiliary gelu forward kernel is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchGeluForward(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), src, dst, C.int(elements), &errStr) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+// launchAuxLayerNormForwardRows runs the on-device forward row layernorm on rt's stream.
+func (rt *deviceRuntime) launchAuxLayerNormForwardRows(kernel *auxKernel, grid, block uint, src, dst C.CUdeviceptr, rows, cols int) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda auxiliary layernorm forward kernel is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchLayerNormForwardRows(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), src, dst, C.int(rows), C.int(cols), &errStr) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+// launchAuxResidualAdd runs the on-device element-wise residual add (out = a+b) on rt's stream.
+func (rt *deviceRuntime) launchAuxResidualAdd(kernel *auxKernel, grid, block uint, a, b, out0 C.CUdeviceptr, elements int) error {
+	if kernel == nil || kernel.ptr == nil {
+		return fmt.Errorf("cuda auxiliary residual add kernel is not initialized")
+	}
+	var errStr *C.char
+	if C.mantaCudaLaunchResidualAdd(rt.ptr, kernel.ptr, C.uint(grid), C.uint(block), a, b, out0, C.int(elements), &errStr) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
 func (rt *deviceRuntime) launchAuxLayerNormBackwardRows(kernel *auxKernel, grid, block uint, gradOut, normalized, pre, out0 C.CUdeviceptr, rows, cols int) error {
 	if kernel == nil || kernel.ptr == nil {
 		return fmt.Errorf("cuda auxiliary layernorm backward kernel is not initialized")
@@ -4102,6 +4153,173 @@ func (rt *deviceRuntime) softmaxForwardSelfTest() error {
 		}
 		if d := sum - 1; d > 1e-4 || d < -1e-4 {
 			return fmt.Errorf("row %d sums to %g, want ~1", row, sum)
+		}
+	}
+	return nil
+}
+
+func hostGeluForward(x float32) float32 {
+	cubic := x * x * x
+	inner := float32(0.7978845608) * (x + float32(0.044715)*cubic)
+	return 0.5 * x * (1 + float32(math.Tanh(float64(inner))))
+}
+
+func hostLayerNormRows(dst, src []float32, rows, cols int) {
+	for row := 0; row < rows; row++ {
+		base := row * cols
+		var mean float32
+		for c := 0; c < cols; c++ {
+			mean += src[base+c]
+		}
+		mean /= float32(cols)
+		var variance float32
+		for c := 0; c < cols; c++ {
+			d := src[base+c] - mean
+			variance += d * d
+		}
+		variance /= float32(cols)
+		invStd := float32(1.0 / math.Sqrt(float64(variance)+1e-5))
+		for c := 0; c < cols; c++ {
+			dst[base+c] = (src[base+c] - mean) * invStd
+		}
+	}
+}
+
+func nearlyEqualF32(a, b []float32, tol float32) (int, bool) {
+	if len(a) != len(b) {
+		return -1, false
+	}
+	for i := range a {
+		d := a[i] - b[i]
+		if d < 0 {
+			d = -d
+		}
+		if d > tol {
+			return i, false
+		}
+	}
+	return -1, true
+}
+
+// forwardActivationKernelsSelfTest validates the on-device forward GELU,
+// layernorm, and residual-add kernels against host references. These are the
+// remaining device-resident forward activations (after softmax) needed to keep
+// the whole forward pass on the GPU.
+func (rt *deviceRuntime) forwardActivationKernelsSelfTest() error {
+	const rows, cols = 6, 9
+	n := rows * cols
+	src := make([]float32, n)
+	for i := range src {
+		src[i] = float32((i*7)%13-6) * 0.2
+	}
+	block := uint(128)
+
+	// GELU (element-wise).
+	{
+		kernel, err := rt.compileAuxKernel(forwardGeluKernelSource, "manta_gelu_forward")
+		if err != nil {
+			return fmt.Errorf("compile gelu: %w", err)
+		}
+		defer rt.destroyAuxKernel(kernel)
+		want := make([]float32, n)
+		for i := range src {
+			want[i] = hostGeluForward(src[i])
+		}
+		srcBuf, err := rt.uploadFloat32(src)
+		if err != nil {
+			return fmt.Errorf("gelu upload: %w", err)
+		}
+		defer rt.freeBuffer(srcBuf)
+		dstBuf, err := rt.allocFloat32(n)
+		if err != nil {
+			return fmt.Errorf("gelu alloc: %w", err)
+		}
+		defer rt.freeBuffer(dstBuf)
+		grid := uint((n + int(block) - 1) / int(block))
+		if err := rt.launchAuxGeluForward(kernel, grid, block, srcBuf, dstBuf, n); err != nil {
+			return fmt.Errorf("gelu launch: %w", err)
+		}
+		got := make([]float32, n)
+		if err := rt.downloadFloat32(got, dstBuf); err != nil {
+			return fmt.Errorf("gelu download: %w", err)
+		}
+		if idx, ok := nearlyEqualF32(want, got, 1e-4); !ok {
+			return fmt.Errorf("gelu mismatch at %d: host=%g device=%g", idx, want[idx], got[idx])
+		}
+	}
+
+	// LayerNorm (per row).
+	{
+		kernel, err := rt.compileAuxKernel(forwardLayerNormRowsKernelSource, "manta_layernorm_forward_rows")
+		if err != nil {
+			return fmt.Errorf("compile layernorm: %w", err)
+		}
+		defer rt.destroyAuxKernel(kernel)
+		want := make([]float32, n)
+		hostLayerNormRows(want, src, rows, cols)
+		srcBuf, err := rt.uploadFloat32(src)
+		if err != nil {
+			return fmt.Errorf("layernorm upload: %w", err)
+		}
+		defer rt.freeBuffer(srcBuf)
+		dstBuf, err := rt.allocFloat32(n)
+		if err != nil {
+			return fmt.Errorf("layernorm alloc: %w", err)
+		}
+		defer rt.freeBuffer(dstBuf)
+		grid := uint((rows + int(block) - 1) / int(block))
+		if err := rt.launchAuxLayerNormForwardRows(kernel, grid, block, srcBuf, dstBuf, rows, cols); err != nil {
+			return fmt.Errorf("layernorm launch: %w", err)
+		}
+		got := make([]float32, n)
+		if err := rt.downloadFloat32(got, dstBuf); err != nil {
+			return fmt.Errorf("layernorm download: %w", err)
+		}
+		if idx, ok := nearlyEqualF32(want, got, 1e-4); !ok {
+			return fmt.Errorf("layernorm mismatch at %d: host=%g device=%g", idx, want[idx], got[idx])
+		}
+	}
+
+	// Residual add (element-wise).
+	{
+		kernel, err := rt.compileAuxKernel(forwardResidualAddKernelSource, "manta_residual_add")
+		if err != nil {
+			return fmt.Errorf("compile residual: %w", err)
+		}
+		defer rt.destroyAuxKernel(kernel)
+		bvals := make([]float32, n)
+		for i := range bvals {
+			bvals[i] = float32((i*5)%9-4) * 0.15
+		}
+		want := make([]float32, n)
+		for i := range src {
+			want[i] = src[i] + bvals[i]
+		}
+		aBuf, err := rt.uploadFloat32(src)
+		if err != nil {
+			return fmt.Errorf("residual upload a: %w", err)
+		}
+		defer rt.freeBuffer(aBuf)
+		bBuf, err := rt.uploadFloat32(bvals)
+		if err != nil {
+			return fmt.Errorf("residual upload b: %w", err)
+		}
+		defer rt.freeBuffer(bBuf)
+		outBuf, err := rt.allocFloat32(n)
+		if err != nil {
+			return fmt.Errorf("residual alloc: %w", err)
+		}
+		defer rt.freeBuffer(outBuf)
+		grid := uint((n + int(block) - 1) / int(block))
+		if err := rt.launchAuxResidualAdd(kernel, grid, block, aBuf, bBuf, outBuf, n); err != nil {
+			return fmt.Errorf("residual launch: %w", err)
+		}
+		got := make([]float32, n)
+		if err := rt.downloadFloat32(got, outBuf); err != nil {
+			return fmt.Errorf("residual download: %w", err)
+		}
+		if idx, ok := nearlyEqualF32(want, got, 1e-6); !ok {
+			return fmt.Errorf("residual mismatch at %d: host=%g device=%g", idx, want[idx], got[idx])
 		}
 	}
 	return nil

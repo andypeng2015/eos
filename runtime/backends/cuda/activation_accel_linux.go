@@ -101,6 +101,74 @@ extern "C" __global__ void manta_softmax_forward_rows(
 }
 `
 
+// forwardGeluKernelSource is the on-device forward GELU (tanh approximation),
+// numerically matching the host geluForward.
+const forwardGeluKernelSource = `
+extern "C" __global__ void manta_gelu_forward(
+    const float* src,
+    float* dst,
+    int elements
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= elements) {
+        return;
+    }
+    float x = src[idx];
+    float cubic = x * x * x;
+    float inner = 0.7978845608f * (x + 0.044715f * cubic);
+    dst[idx] = 0.5f * x * (1.0f + tanhf(inner));
+}
+`
+
+// forwardLayerNormRowsKernelSource is the on-device forward row layernorm
+// (no learnable scale/shift), matching the host layerNormRow.
+const forwardLayerNormRowsKernelSource = `
+extern "C" __global__ void manta_layernorm_forward_rows(
+    const float* src,
+    float* dst,
+    int rows,
+    int cols
+) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= rows) {
+        return;
+    }
+    int base = row * cols;
+    float mean = 0.0f;
+    for (int col = 0; col < cols; ++col) {
+        mean += src[base + col];
+    }
+    mean /= (float)cols;
+    float variance = 0.0f;
+    for (int col = 0; col < cols; ++col) {
+        float centered = src[base + col] - mean;
+        variance += centered * centered;
+    }
+    variance /= (float)cols;
+    float inv_std = 1.0f / sqrtf(variance + 1e-5f);
+    for (int col = 0; col < cols; ++col) {
+        dst[base + col] = (src[base + col] - mean) * inv_std;
+    }
+}
+`
+
+// forwardResidualAddKernelSource is the on-device element-wise residual add
+// (out = a + b), keeping residual streams on the device between GEMMs.
+const forwardResidualAddKernelSource = `
+extern "C" __global__ void manta_residual_add(
+    const float* a,
+    const float* b,
+    float* out0,
+    int elements
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= elements) {
+        return;
+    }
+    out0[idx] = a[idx] + b[idx];
+}
+`
+
 const layerNormBackwardRowsKernelSource = `
 extern "C" __global__ void manta_layernorm_backward_rows(
     const float* grad_out,

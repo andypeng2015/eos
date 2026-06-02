@@ -21,3 +21,19 @@ func TestCUDASoftmaxForwardRowsMatchesHost(t *testing.T) {
 		t.Fatalf("on-device forward softmax kernel: %v", err)
 	}
 }
+
+// TestCUDAForwardActivationKernelsMatchHost validates the on-device forward
+// GELU, layernorm, and residual-add kernels against host references — the
+// remaining device-resident forward activations needed to keep the whole
+// forward pass on the GPU (alongside the softmax kernel).
+func TestCUDAForwardActivationKernelsMatchHost(t *testing.T) {
+	rt, err := newDeviceRuntime()
+	if err != nil {
+		t.Skipf("no CUDA device available: %v", err)
+	}
+	defer rt.close()
+
+	if err := rt.forwardActivationKernelsSelfTest(); err != nil {
+		t.Fatalf("on-device forward activation kernels: %v", err)
+	}
+}
