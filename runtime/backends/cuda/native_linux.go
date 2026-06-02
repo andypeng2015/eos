@@ -20,6 +20,7 @@ typedef struct {
 	int minor;
 	int primary_ctx;
 	cublasHandle_t blas;
+	CUstream stream;
 } MantaCudaRuntime;
 
 typedef struct {
@@ -164,6 +165,28 @@ static int mantaCudaRuntimeCreate(MantaCudaRuntime** out, char** err) {
 	rt->minor = minor;
 	rt->primary_ctx = 1;
 	rt->blas = blas;
+	rt->stream = NULL;
+	// A non-default (non-blocking) stream is required so kernel launches and
+	// cuBLAS work can later be captured into a CUDA graph; the legacy default
+	// stream (stream 0) cannot be captured. cublasSetStream binds GEMMs to the
+	// same stream so a single stream sync covers both.
+	cuRes = cuStreamCreate(&rt->stream, CU_STREAM_NON_BLOCKING);
+	if (cuRes != CUDA_SUCCESS) {
+		cublasDestroy(blas);
+		cuDevicePrimaryCtxRelease(device);
+		free(rt);
+		*err = manta_dup_cu_error("cuStreamCreate", cuRes);
+		return 1;
+	}
+	blasRes = cublasSetStream(blas, rt->stream);
+	if (blasRes != CUBLAS_STATUS_SUCCESS) {
+		cuStreamDestroy(rt->stream);
+		cublasDestroy(blas);
+		cuDevicePrimaryCtxRelease(device);
+		free(rt);
+		*err = manta_dup_cublas_error("cublasSetStream", blasRes);
+		return 1;
+	}
 	*out = rt;
 	return 0;
 }
@@ -174,6 +197,9 @@ static void mantaCudaRuntimeDestroy(MantaCudaRuntime* rt) {
 	}
 	if (rt->ctx != NULL) {
 		cuCtxSetCurrent(rt->ctx);
+	}
+	if (rt->stream != NULL) {
+		cuStreamDestroy(rt->stream);
 	}
 	if (rt->blas != NULL) {
 		cublasDestroy(rt->blas);
@@ -344,9 +370,9 @@ static int mantaCudaSynchronize(MantaCudaRuntime* rt, char** err) {
 		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
 		return 1;
 	}
-	cuRes = cuCtxSynchronize();
+	cuRes = cuStreamSynchronize(rt->stream);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = manta_dup_cu_error("cuCtxSynchronize", cuRes);
+		*err = manta_dup_cu_error("cuStreamSynchronize", cuRes);
 		return 1;
 	}
 	return 0;
@@ -388,14 +414,14 @@ static int mantaCudaLaunch1D(MantaCudaRuntime* rt, MantaCudaKernel* kernel, unsi
 		*err = manta_dup_cu_error("cuCtxSetCurrent", cuRes);
 		return 1;
 	}
-	cuRes = cuLaunchKernel(kernel->function, grid, 1, 1, block, 1, 1, 0, NULL, args, NULL);
+	cuRes = cuLaunchKernel(kernel->function, grid, 1, 1, block, 1, 1, 0, rt->stream, args, NULL);
 	if (cuRes != CUDA_SUCCESS) {
 		*err = manta_dup_cu_error("cuLaunchKernel", cuRes);
 		return 1;
 	}
-	cuRes = cuCtxSynchronize();
+	cuRes = cuStreamSynchronize(rt->stream);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = manta_dup_cu_error("cuCtxSynchronize", cuRes);
+		*err = manta_dup_cu_error("cuStreamSynchronize", cuRes);
 		return 1;
 	}
 	return 0;
@@ -619,9 +645,9 @@ static int mantaCudaMatMulCublasStridedBatched(MantaCudaRuntime* rt, CUdeviceptr
 		*err = manta_dup_cublas_error("cublasSgemmStridedBatched", blasRes);
 		return 1;
 	}
-	cuRes = cuCtxSynchronize();
+	cuRes = cuStreamSynchronize(rt->stream);
 	if (cuRes != CUDA_SUCCESS) {
-		*err = manta_dup_cu_error("cuCtxSynchronize", cuRes);
+		*err = manta_dup_cu_error("cuStreamSynchronize", cuRes);
 		return 1;
 	}
 	return 0;
