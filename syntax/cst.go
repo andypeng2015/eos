@@ -6,11 +6,11 @@ import (
 	"strings"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/taproot"
 )
 
 type cstLowerer struct {
-	src   []byte
-	lang  *gotreesitter.Language
+	*taproot.Walker
 	diags []Diagnostic
 }
 
@@ -30,7 +30,7 @@ func parseWithTreeSitter(moduleName string, src []byte) (*File, []Diagnostic) {
 	}
 
 	root := tree.RootNode()
-	l := &cstLowerer{src: append([]byte(nil), src...), lang: lang}
+	l := &cstLowerer{Walker: taproot.NewWalker(lang, append([]byte(nil), src...))}
 	if root.HasError() {
 		if !l.collectParseErrors(root) {
 			l.diags = append(l.diags, Diagnostic{
@@ -54,7 +54,7 @@ func parseWithTreeSitter(moduleName string, src []byte) (*File, []Diagnostic) {
 }
 
 func (l *cstLowerer) lowerDecl(n *gotreesitter.Node) Decl {
-	switch nodeType(n, l.lang) {
+	switch l.Type(n) {
 	case "param_declaration":
 		return l.lowerParamDecl(n)
 	case "kernel_declaration":
@@ -64,15 +64,15 @@ func (l *cstLowerer) lowerDecl(n *gotreesitter.Node) Decl {
 	case "comment":
 		return nil
 	default:
-		l.errorf(n, "expected declaration, found %q", nodeType(n, l.lang))
+		l.errorf(n, "expected declaration, found %q", l.Type(n))
 		return nil
 	}
 }
 
 func (l *cstLowerer) lowerParamDecl(n *gotreesitter.Node) Decl {
-	nameNode := childByField(n, l.lang, "name")
-	typeNode := childByField(n, l.lang, "type")
-	bindingNode := childByField(n, l.lang, "binding")
+	nameNode := l.Field(n, "name")
+	typeNode := l.Field(n, "type")
+	bindingNode := l.Field(n, "binding")
 	if nameNode == nil || typeNode == nil || bindingNode == nil {
 		l.errorf(n, "malformed param declaration")
 		return nil
@@ -81,25 +81,25 @@ func (l *cstLowerer) lowerParamDecl(n *gotreesitter.Node) Decl {
 	if !ok {
 		return nil
 	}
-	weight := firstNamedChildOfType(bindingNode, l.lang, "string_literal")
+	weight := firstNamedChildOfType(l.Walker, bindingNode, "string_literal")
 	if weight == nil {
 		l.errorf(bindingNode, "expected @weight annotation")
 		return nil
 	}
 	return &ParamDecl{
-		Name:      nodeText(nameNode, l.src),
+		Name:      l.Text(nameNode),
 		Type:      typ,
-		Binding:   unquoteEosString(nodeText(weight, l.src)),
-		Trainable: childByField(n, l.lang, "trainable") != nil,
+		Binding:   unquoteEosString(l.Text(weight)),
+		Trainable: l.Field(n, "trainable") != nil,
 		Span:      spanOf(n),
 	}
 }
 
 func (l *cstLowerer) lowerCallableDecl(n *gotreesitter.Node, kind CallableKind) Decl {
-	nameNode := childByField(n, l.lang, "name")
-	paramsNode := childByField(n, l.lang, "parameters")
-	resultNode := childByField(n, l.lang, "result")
-	bodyNode := childByField(n, l.lang, "body")
+	nameNode := l.Field(n, "name")
+	paramsNode := l.Field(n, "parameters")
+	resultNode := l.Field(n, "result")
+	bodyNode := l.Field(n, "body")
 	if nameNode == nil || paramsNode == nil || resultNode == nil || bodyNode == nil {
 		l.errorf(n, "malformed %s declaration", kind)
 		return nil
@@ -107,11 +107,11 @@ func (l *cstLowerer) lowerCallableDecl(n *gotreesitter.Node, kind CallableKind) 
 
 	decl := &CallableDecl{
 		Kind:   kind,
-		Name:   nodeText(nameNode, l.src),
+		Name:   l.Text(nameNode),
 		Params: l.lowerFields(paramsNode),
 		Span:   spanOf(n),
 	}
-	if nodeType(resultNode, l.lang) == "result_list" {
+	if l.Type(resultNode) == "result_list" {
 		if kind != CallablePipeline {
 			l.errorf(resultNode, "kernel result must be a single type")
 			return nil
@@ -138,7 +138,7 @@ func (l *cstLowerer) lowerFields(parent *gotreesitter.Node) []Field {
 	fields := []Field{}
 	for i := 0; i < parent.NamedChildCount(); i++ {
 		child := parent.NamedChild(i)
-		if nodeType(child, l.lang) != "field" {
+		if l.Type(child) != "field" {
 			continue
 		}
 		field, ok := l.lowerField(child)
@@ -150,8 +150,8 @@ func (l *cstLowerer) lowerFields(parent *gotreesitter.Node) []Field {
 }
 
 func (l *cstLowerer) lowerField(n *gotreesitter.Node) (Field, bool) {
-	nameNode := childByField(n, l.lang, "name")
-	typeNode := childByField(n, l.lang, "type")
+	nameNode := l.Field(n, "name")
+	typeNode := l.Field(n, "type")
 	if nameNode == nil || typeNode == nil {
 		l.errorf(n, "malformed field")
 		return Field{}, false
@@ -160,33 +160,33 @@ func (l *cstLowerer) lowerField(n *gotreesitter.Node) (Field, bool) {
 	if !ok {
 		return Field{}, false
 	}
-	return Field{Name: nodeText(nameNode, l.src), Type: typ, Span: spanOf(n)}, true
+	return Field{Name: l.Text(nameNode), Type: typ, Span: spanOf(n)}, true
 }
 
 func (l *cstLowerer) lowerType(n *gotreesitter.Node) (TypeRef, bool) {
-	nameNode := childByField(n, l.lang, "name")
+	nameNode := l.Field(n, "name")
 	if nameNode == nil {
 		l.errorf(n, "malformed type reference")
 		return TypeRef{}, false
 	}
-	typ := TypeRef{Name: nodeText(nameNode, l.src), Span: spanOf(n)}
-	if shapeNode := childByField(n, l.lang, "shape"); shapeNode != nil {
+	typ := TypeRef{Name: l.Text(nameNode), Span: spanOf(n)}
+	if shapeNode := l.Field(n, "shape"); shapeNode != nil {
 		for i := 0; i < shapeNode.NamedChildCount(); i++ {
 			dimNode := shapeNode.NamedChild(i)
-			if nodeType(dimNode, l.lang) != "dimension" {
+			if l.Type(dimNode) != "dimension" {
 				continue
 			}
-			typ.Shape = append(typ.Shape, DimExpr{Text: nodeText(dimNode, l.src), Span: spanOf(dimNode)})
+			typ.Shape = append(typ.Shape, DimExpr{Text: l.Text(dimNode), Span: spanOf(dimNode)})
 		}
 	}
 	return typ, true
 }
 
 func (l *cstLowerer) lowerStmt(n *gotreesitter.Node) Stmt {
-	switch nodeType(n, l.lang) {
+	switch l.Type(n) {
 	case "let_statement":
-		nameNode := childByField(n, l.lang, "name")
-		valueNode := childByField(n, l.lang, "value")
+		nameNode := l.Field(n, "name")
+		valueNode := l.Field(n, "value")
 		if nameNode == nil || valueNode == nil {
 			l.errorf(n, "malformed let statement")
 			return nil
@@ -195,9 +195,9 @@ func (l *cstLowerer) lowerStmt(n *gotreesitter.Node) Stmt {
 		if expr == nil {
 			return nil
 		}
-		return &LetStmt{Name: nodeText(nameNode, l.src), Expr: expr, Span: spanOf(n)}
+		return &LetStmt{Name: l.Text(nameNode), Expr: expr, Span: spanOf(n)}
 	case "return_statement":
-		valuesNode := childByField(n, l.lang, "values")
+		valuesNode := l.Field(n, "values")
 		if valuesNode == nil {
 			l.errorf(n, "malformed return statement")
 			return nil
@@ -214,7 +214,7 @@ func (l *cstLowerer) lowerStmt(n *gotreesitter.Node) Stmt {
 		}
 		return stmt
 	case "expression_statement":
-		exprNode := childByField(n, l.lang, "expression")
+		exprNode := l.Field(n, "expression")
 		if exprNode == nil {
 			l.errorf(n, "malformed expression statement")
 			return nil
@@ -227,7 +227,7 @@ func (l *cstLowerer) lowerStmt(n *gotreesitter.Node) Stmt {
 	case "comment":
 		return nil
 	default:
-		l.errorf(n, "expected statement, found %q", nodeType(n, l.lang))
+		l.errorf(n, "expected statement, found %q", l.Type(n))
 		return nil
 	}
 }
@@ -244,29 +244,29 @@ func (l *cstLowerer) lowerExprList(n *gotreesitter.Node) []Expr {
 }
 
 func (l *cstLowerer) lowerExpr(n *gotreesitter.Node) Expr {
-	switch nodeType(n, l.lang) {
+	switch l.Type(n) {
 	case "identifier":
-		return &IdentExpr{Name: nodeText(n, l.src), Span: spanOf(n)}
+		return &IdentExpr{Name: l.Text(n), Span: spanOf(n)}
 	case "number":
-		return &NumberExpr{Text: nodeText(n, l.src), Span: spanOf(n)}
+		return &NumberExpr{Text: l.Text(n), Span: spanOf(n)}
 	case "string_literal":
-		return &StringExpr{Value: unquoteEosString(nodeText(n, l.src)), Span: spanOf(n)}
+		return &StringExpr{Value: unquoteEosString(l.Text(n)), Span: spanOf(n)}
 	case "call_expression":
 		return l.lowerCallExpr(n, false)
 	case "intrinsic_call_expression":
 		return l.lowerCallExpr(n, true)
 	case "binary_expression":
-		left := l.lowerExpr(childByField(n, l.lang, "left"))
-		right := l.lowerExpr(childByField(n, l.lang, "right"))
-		op := nodeText(childByField(n, l.lang, "operator"), l.src)
+		left := l.lowerExpr(l.Field(n, "left"))
+		right := l.lowerExpr(l.Field(n, "right"))
+		op := l.Text(l.Field(n, "operator"))
 		if left == nil || right == nil || op == "" {
 			l.errorf(n, "malformed binary expression")
 			return nil
 		}
 		return &BinaryExpr{Op: op, Left: left, Right: right, Span: spanOf(n)}
 	case "unary_expression":
-		operand := l.lowerExpr(childByField(n, l.lang, "operand"))
-		op := nodeText(childByField(n, l.lang, "operator"), l.src)
+		operand := l.lowerExpr(l.Field(n, "operand"))
+		op := l.Text(l.Field(n, "operator"))
 		if operand == nil || op != "-" {
 			l.errorf(n, "malformed unary expression")
 			return nil
@@ -274,25 +274,25 @@ func (l *cstLowerer) lowerExpr(n *gotreesitter.Node) Expr {
 		zero := &NumberExpr{Text: "0", Span: spanOf(n)}
 		return &BinaryExpr{Op: "-", Left: zero, Right: operand, Span: spanOf(n)}
 	case "parenthesized_expression":
-		return l.lowerExpr(childByField(n, l.lang, "expression"))
+		return l.lowerExpr(l.Field(n, "expression"))
 	default:
 		if n == nil {
 			return nil
 		}
-		l.errorf(n, "expected expression, found %q", nodeType(n, l.lang))
+		l.errorf(n, "expected expression, found %q", l.Type(n))
 		return nil
 	}
 }
 
 func (l *cstLowerer) lowerCallExpr(n *gotreesitter.Node, intrinsic bool) Expr {
-	calleeNode := childByField(n, l.lang, "callee")
-	argsNode := childByField(n, l.lang, "arguments")
+	calleeNode := l.Field(n, "callee")
+	argsNode := l.Field(n, "arguments")
 	if calleeNode == nil || argsNode == nil {
 		l.errorf(n, "malformed call expression")
 		return nil
 	}
 	call := &CallExpr{
-		Callee:    nodeText(calleeNode, l.src),
+		Callee:    l.Text(calleeNode),
 		Intrinsic: intrinsic,
 		Span:      spanOf(n),
 	}
@@ -312,7 +312,7 @@ func (l *cstLowerer) collectParseErrors(n *gotreesitter.Node) bool {
 	if n.IsError() || n.IsMissing() {
 		l.diags = append(l.diags, Diagnostic{
 			Severity: SeverityError,
-			Message:  fmt.Sprintf("invalid Eos syntax near %q", strings.TrimSpace(nodeText(n, l.src))),
+			Message:  fmt.Sprintf("invalid Eos syntax near %q", strings.TrimSpace(l.Text(n))),
 			Span:     spanOf(n),
 		})
 		return true
@@ -334,38 +334,19 @@ func (l *cstLowerer) errorf(n *gotreesitter.Node, format string, args ...any) {
 	})
 }
 
-func childByField(n *gotreesitter.Node, lang *gotreesitter.Language, name string) *gotreesitter.Node {
-	if n == nil {
-		return nil
-	}
-	return n.ChildByFieldName(name, lang)
-}
-
-func firstNamedChildOfType(n *gotreesitter.Node, lang *gotreesitter.Language, typ string) *gotreesitter.Node {
+// firstNamedChildOfType walks the immediate named children of n and returns
+// the first whose type matches typ.
+func firstNamedChildOfType(w *taproot.Walker, n *gotreesitter.Node, typ string) *gotreesitter.Node {
 	if n == nil {
 		return nil
 	}
 	for i := 0; i < n.NamedChildCount(); i++ {
 		child := n.NamedChild(i)
-		if nodeType(child, lang) == typ {
+		if w.Type(child) == typ {
 			return child
 		}
 	}
 	return nil
-}
-
-func nodeType(n *gotreesitter.Node, lang *gotreesitter.Language) string {
-	if n == nil {
-		return ""
-	}
-	return n.Type(lang)
-}
-
-func nodeText(n *gotreesitter.Node, src []byte) string {
-	if n == nil {
-		return ""
-	}
-	return n.Text(src)
 }
 
 func spanOf(n *gotreesitter.Node) Span {

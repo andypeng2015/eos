@@ -2,16 +2,10 @@ package syntax
 
 import (
 	"fmt"
-	"sync"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammargen"
-)
-
-var (
-	eosLangOnce sync.Once
-	eosLang     *gotreesitter.Language
-	eosLangErr  error
+	"github.com/odvcencio/gotreesitter/taproot"
 )
 
 // EosGrammar returns the tree-sitter grammar for the Eos source language.
@@ -213,10 +207,7 @@ pipeline embed(tokens: i32[T]) -> f16[T, D] {
 
 // Language returns the cached generated Eos tree-sitter language.
 func Language() (*gotreesitter.Language, error) {
-	eosLangOnce.Do(func() {
-		eosLang, eosLangErr = grammargen.GenerateLanguage(EosGrammar())
-	})
-	return eosLang, eosLangErr
+	return taproot.Language("eos", EosGrammar)
 }
 
 // ParseTree parses Eos source and returns the tree-sitter tree and language.
