@@ -16,6 +16,154 @@ import (
 	mll "m31labs.dev/mll"
 )
 
+func TestRunGraphPrintsSourceJSON(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := copyExampleFile(t, dir, "embed.eos")
+	output := captureRunOutput(t, []string{"graph", "--format", "json", srcPath})
+	var payload struct {
+		GraphVersion int    `json:"graph_version"`
+		InputKind    string `json:"input_kind"`
+		Module       string `json:"module"`
+		Counts       struct {
+			SourceDecls      int `json:"source_decls"`
+			ArtifactKernels  int `json:"artifact_kernels"`
+			KernelSourceVars int `json:"kernel_source_variants"`
+		} `json:"counts"`
+		Artifact struct {
+			Name    string `json:"name"`
+			Kernels []struct {
+				Name     string `json:"name"`
+				Variants []struct {
+					Backend     string `json:"backend"`
+					SourceBytes int    `json:"source_bytes"`
+				} `json:"variants"`
+			} `json:"kernels"`
+		} `json:"artifact"`
+	}
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		t.Fatalf("unmarshal graph output: %v\n%s", err, output)
+	}
+	if payload.GraphVersion != 1 || payload.InputKind != "source" || payload.Module != "embed" {
+		t.Fatalf("unexpected graph identity: %+v", payload)
+	}
+	if payload.Counts.SourceDecls == 0 || payload.Counts.ArtifactKernels == 0 || payload.Counts.KernelSourceVars == 0 {
+		t.Fatalf("graph counts missing compiler structure: %+v", payload.Counts)
+	}
+	if len(payload.Artifact.Kernels) == 0 || len(payload.Artifact.Kernels[0].Variants) == 0 {
+		t.Fatalf("graph output missing kernel variant summary: %+v", payload.Artifact)
+	}
+	if payload.Artifact.Kernels[0].Variants[0].SourceBytes == 0 {
+		t.Fatalf("variant source byte count was not recorded: %+v", payload.Artifact.Kernels[0].Variants[0])
+	}
+}
+
+func TestRunKernelsExtractsBackendSources(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := copyExampleFile(t, dir, "embed.eos")
+	outDir := filepath.Join(dir, "kernels")
+	output := captureRunOutput(t, []string{"kernels", "--backend", "webgpu", "--out", outDir, srcPath})
+	if !strings.Contains(output, "wrote ") || !strings.Contains(output, outDir) {
+		t.Fatalf("unexpected kernels output:\n%s", output)
+	}
+	data, err := os.ReadFile(filepath.Join(outDir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("read kernel manifest: %v", err)
+	}
+	var manifest struct {
+		Module            string `json:"module"`
+		KernelSourceCount int    `json:"kernel_source_count"`
+		Kernels           []struct {
+			Backend     string `json:"backend"`
+			SourceFile  string `json:"source_file"`
+			SourceBytes int    `json:"source_bytes"`
+		} `json:"kernels"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("unmarshal kernel manifest: %v\n%s", err, data)
+	}
+	if manifest.Module != "embed" || manifest.KernelSourceCount == 0 || len(manifest.Kernels) == 0 {
+		t.Fatalf("unexpected kernel manifest: %+v", manifest)
+	}
+	for _, kernel := range manifest.Kernels {
+		if kernel.Backend != "webgpu" {
+			t.Fatalf("backend filter leaked variant: %+v", kernel)
+		}
+		sourcePath := filepath.Join(outDir, kernel.SourceFile)
+		source, err := os.ReadFile(sourcePath)
+		if err != nil {
+			t.Fatalf("read extracted source %q: %v", sourcePath, err)
+		}
+		if !strings.Contains(string(source), "@compute") || kernel.SourceBytes != len(source) {
+			t.Fatalf("unexpected extracted WGSL source %q", sourcePath)
+		}
+	}
+}
+
+func TestRunCompileBundleWritesInspectionArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := copyExampleFile(t, dir, "embed.eos")
+	outPath := filepath.Join(dir, "embed.mll")
+	bundleDir := filepath.Join(dir, "bundle")
+	output := captureRunOutput(t, []string{"compile", "--bundle", bundleDir, srcPath, outPath})
+	for _, want := range []string{"bundle: " + bundleDir, "compiled "} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("compile bundle output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	for _, path := range []string{
+		filepath.Join(bundleDir, "manifest.json"),
+		filepath.Join(bundleDir, "source.eos"),
+		filepath.Join(bundleDir, "artifact.mll"),
+		filepath.Join(bundleDir, "graph.json"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected bundle file %q: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(bundleDir, "kernels")); err != nil {
+		t.Fatalf("expected kernels dir: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(bundleDir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("read bundle manifest: %v", err)
+	}
+	var manifest struct {
+		BundleVersion     int    `json:"bundle_version"`
+		Module            string `json:"module"`
+		ArtifactPath      string `json:"artifact_path"`
+		KernelSourceCount int    `json:"kernel_source_count"`
+		KernelSources     []struct {
+			SourceFile string `json:"source_file"`
+		} `json:"kernel_sources"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("unmarshal bundle manifest: %v\n%s", err, data)
+	}
+	if manifest.BundleVersion != 1 || manifest.Module != "embed" || manifest.ArtifactPath != outPath || manifest.KernelSourceCount == 0 {
+		t.Fatalf("unexpected bundle manifest: %+v", manifest)
+	}
+	if len(manifest.KernelSources) == 0 || !strings.HasPrefix(manifest.KernelSources[0].SourceFile, "kernels/") {
+		t.Fatalf("bundle kernel sources should be manifest-relative: %+v", manifest.KernelSources)
+	}
+}
+
+func TestRunDoctorReportsRuntimeFacts(t *testing.T) {
+	output := captureRunOutput(t, []string{"doctor"})
+	for _, want := range []string{
+		"artifact schema:",
+		"go: ",
+		"backends:",
+		"cuda",
+		"webgpu",
+		"tools:",
+		"env:",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("doctor output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
 func TestFormatTrainThroughputIncludesExamplePairAndStepRates(t *testing.T) {
 	summary := eosruntime.EmbeddingTrainRunSummary{
 		Workload: eosruntime.EmbeddingTrainWorkload{

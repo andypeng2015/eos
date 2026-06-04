@@ -97,6 +97,12 @@ func run(args []string) error {
 		return nil
 	case "compile":
 		return runCompile(args[1:])
+	case "graph":
+		return runGraph(args[1:])
+	case "kernels":
+		return runKernels(args[1:])
+	case "doctor":
+		return runDoctor(args[1:])
 	case "run":
 		return runArtifact(args[1:])
 	case "embed-text":
@@ -159,13 +165,18 @@ func run(args []string) error {
 }
 
 func runCompile(args []string) error {
-	if len(args) == 0 || args[0] == "" {
-		return fmt.Errorf("usage: eos compile <source.eos> [output.mll]")
+	fs := flag.NewFlagSet("compile", flag.ContinueOnError)
+	bundleDir := fs.String("bundle", "", "write inspection bundle sidecar directory")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
-	srcPath := args[0]
+	if fs.NArg() == 0 || fs.Arg(0) == "" {
+		return fmt.Errorf("usage: eos compile [--bundle dir] <source.eos> [output.mll]")
+	}
+	srcPath := fs.Arg(0)
 	outPath := defaultArtifactPath(srcPath)
-	if len(args) > 1 && args[1] != "" {
-		outPath = args[1]
+	if fs.NArg() > 1 && fs.Arg(1) != "" {
+		outPath = fs.Arg(1)
 	}
 
 	src, err := os.ReadFile(srcPath)
@@ -179,6 +190,13 @@ func runCompile(args []string) error {
 	}
 	if err := eosartifact.WriteFile(outPath, bundle.Artifact); err != nil {
 		return err
+	}
+	if *bundleDir != "" {
+		if err := writeCompileBundle(*bundleDir, srcPath, src, outPath, bundle); err != nil {
+			fmt.Fprintf(os.Stderr, "bundle warning: %v\n", err)
+		} else {
+			fmt.Printf("bundle: %s\n", *bundleDir)
+		}
 	}
 
 	fmt.Printf("compiled %q -> %q\n", srcPath, outPath)
@@ -4137,7 +4155,10 @@ func runMineTextPairs(args []string) error {
 func printUsage() {
 	fmt.Println("usage:")
 	fmt.Println("  eos version")
-	fmt.Println("  eos compile <source.eos> [output.mll]")
+	fmt.Println("  eos compile [--bundle dir] <source.eos> [output.mll]")
+	fmt.Println("  eos graph [--format json|dot] <source.eos|artifact.mll>")
+	fmt.Println("  eos kernels [--backend backend] [--out dir] <source.eos|artifact.mll>")
+	fmt.Println("  eos doctor")
 	fmt.Println("  eos inspect <artifact.mll>")
 	fmt.Println("  eos export-mll <artifact.mll> [output.mll]")
 	fmt.Println("  eos embed-text <artifact.mll> <text...>")
@@ -4167,6 +4188,9 @@ func printUsage() {
 	fmt.Println("  eos demo [module-name]")
 	fmt.Println()
 	fmt.Println("compile lowers a Eos source file into an .mll artifact.")
+	fmt.Println("graph prints compiler or artifact graph structure as JSON or DOT.")
+	fmt.Println("kernels extracts backend kernel sources and a manifest for inspection.")
+	fmt.Println("doctor reports Eos runtime, backend, tool, and relevant environment facts.")
 	fmt.Println("inspect summarizes an artifact and verifies its sibling package manifest when present.")
 	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Eos metadata in XMTA.")
 	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
