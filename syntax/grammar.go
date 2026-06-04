@@ -207,7 +207,7 @@ pipeline embed(tokens: i32[T]) -> f16[T, D] {
 
 // Language returns the cached generated Eos tree-sitter language.
 func Language() (*gotreesitter.Language, error) {
-	return taproot.Language("eos", EosGrammar)
+	return taproot.LanguageFromBlob("eos", grammarBlob, EosGrammar)
 }
 
 // ParseTree parses Eos source and returns the tree-sitter tree and language.
