@@ -22,6 +22,7 @@ import (
 	"m31labs.dev/eos/runtime/backends/metal"
 	"m31labs.dev/eos/runtime/backends/vulkan"
 	"m31labs.dev/eos/runtime/backends/webgpu"
+	prismvalidate "m31labs.dev/prism/validate"
 )
 
 type inspectionInput struct {
@@ -255,17 +256,18 @@ func runKernels(args []string) error {
 	fs := flag.NewFlagSet("kernels", flag.ContinueOnError)
 	backendFilter := fs.String("backend", "", "backend to extract; empty extracts all")
 	outDir := fs.String("out", "kernels", "directory for extracted kernel sources")
+	validateSources := fs.Bool("validate", false, "record Prism kernel source validation status")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: eos kernels [--backend backend] [--out dir] <source.eos|artifact.mll>")
+		return fmt.Errorf("usage: eos kernels [--backend backend] [--out dir] [--validate] <source.eos|artifact.mll>")
 	}
 	input, err := loadInspectionInput(fs.Arg(0))
 	if err != nil {
 		return err
 	}
-	manifest, err := writeKernelSources(input.Artifact, *outDir, *backendFilter, "")
+	manifest, err := writeKernelSources(input.Artifact, *outDir, *backendFilter, "", *validateSources)
 	if err != nil {
 		return err
 	}
@@ -300,9 +302,17 @@ type kernelSourceEntry struct {
 	Inputs      []eosartifact.ValueBinding `json:"inputs,omitempty"`
 	Outputs     []eosartifact.ValueBinding `json:"outputs,omitempty"`
 	Hints       eosartifact.ScheduleHints  `json:"hints,omitempty"`
+	Validation  *kernelSourceValidation    `json:"validation,omitempty"`
 }
 
-func writeKernelSources(mod *eosartifact.Module, outDir, backendFilter, manifestPrefix string) (kernelSourceManifest, error) {
+type kernelSourceValidation struct {
+	EntryChecked  bool   `json:"entry_checked"`
+	ToolSkipped   bool   `json:"tool_skipped,omitempty"`
+	ToolError     string `json:"tool_error,omitempty"`
+	ToolOutputLen int    `json:"tool_output_len,omitempty"`
+}
+
+func writeKernelSources(mod *eosartifact.Module, outDir, backendFilter, manifestPrefix string, validateSources bool) (kernelSourceManifest, error) {
 	if mod == nil {
 		return kernelSourceManifest{}, fmt.Errorf("module is nil")
 	}
@@ -330,6 +340,10 @@ func writeKernelSources(mod *eosartifact.Module, outDir, backendFilter, manifest
 			if manifestPrefix != "" {
 				sourceFile = filepath.ToSlash(filepath.Join(manifestPrefix, filename))
 			}
+			validation, err := validateKernelSource(kernel.Name, variant, validateSources)
+			if err != nil {
+				return kernelSourceManifest{}, err
+			}
 			manifest.Kernels = append(manifest.Kernels, kernelSourceEntry{
 				Kernel:      kernel.Name,
 				Backend:     variant.Backend,
@@ -339,6 +353,7 @@ func writeKernelSources(mod *eosartifact.Module, outDir, backendFilter, manifest
 				Inputs:      kernel.Inputs,
 				Outputs:     kernel.Outputs,
 				Hints:       kernel.Hints,
+				Validation:  validation,
 			})
 			manifest.KernelSourceCount++
 			seenBackends[string(variant.Backend)] = true
@@ -352,6 +367,27 @@ func writeKernelSources(mod *eosartifact.Module, outDir, backendFilter, manifest
 	}
 	sort.Strings(manifest.Backends)
 	return manifest, nil
+}
+
+func validateKernelSource(kernelName string, variant eosartifact.KernelVariant, runTool bool) (*kernelSourceValidation, error) {
+	if !runTool {
+		return nil, nil
+	}
+	src, err := eosartifact.PrismSourceForKernelVariant(kernelName, variant)
+	if err != nil {
+		return nil, err
+	}
+	if err := prismvalidate.CheckSource(src); err != nil {
+		return nil, err
+	}
+	out := &kernelSourceValidation{EntryChecked: true}
+	res, err := prismvalidate.RunSource(src)
+	out.ToolSkipped = res.Skipped
+	out.ToolOutputLen = len(res.Output)
+	if err != nil {
+		out.ToolError = err.Error()
+	}
+	return out, nil
 }
 
 func kernelSourceFilename(kernel string, backend eosartifact.BackendKind) string {
@@ -389,7 +425,7 @@ type compileBundleManifest struct {
 	KernelSources     []kernelSourceEntry `json:"kernel_sources"`
 }
 
-func writeCompileBundle(dir, srcPath string, src []byte, artifactPath string, bundle *compiler.Bundle) error {
+func writeCompileBundle(dir, srcPath string, src []byte, artifactPath string, bundle *compiler.Bundle, validateSources bool) error {
 	if bundle == nil || bundle.Artifact == nil {
 		return fmt.Errorf("compiler bundle is empty")
 	}
@@ -411,7 +447,7 @@ func writeCompileBundle(dir, srcPath string, src []byte, artifactPath string, bu
 	})); err != nil {
 		return err
 	}
-	kernelManifest, err := writeKernelSources(bundle.Artifact, filepath.Join(dir, "kernels"), "", "kernels")
+	kernelManifest, err := writeKernelSources(bundle.Artifact, filepath.Join(dir, "kernels"), "", "kernels", validateSources)
 	if err != nil {
 		return err
 	}

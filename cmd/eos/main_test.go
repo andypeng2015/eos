@@ -99,6 +99,35 @@ func TestRunKernelsExtractsBackendSources(t *testing.T) {
 	}
 }
 
+func TestRunKernelsValidateRecordsPrismChecks(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := copyExampleFile(t, dir, "embed.eos")
+	outDir := filepath.Join(dir, "kernels")
+	captureRunOutput(t, []string{"kernels", "--backend", "webgpu", "--validate", "--out", outDir, srcPath})
+	data, err := os.ReadFile(filepath.Join(outDir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("read kernel manifest: %v", err)
+	}
+	var manifest struct {
+		Kernels []struct {
+			Validation *struct {
+				EntryChecked bool   `json:"entry_checked"`
+				ToolSkipped  bool   `json:"tool_skipped"`
+				ToolError    string `json:"tool_error"`
+			} `json:"validation"`
+		} `json:"kernels"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("unmarshal kernel manifest: %v\n%s", err, data)
+	}
+	if len(manifest.Kernels) == 0 || manifest.Kernels[0].Validation == nil {
+		t.Fatalf("validation metadata missing: %+v", manifest)
+	}
+	if !manifest.Kernels[0].Validation.EntryChecked {
+		t.Fatalf("Prism entry check was not recorded: %+v", manifest.Kernels[0].Validation)
+	}
+}
+
 func TestRunCompileBundleWritesInspectionArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	srcPath := copyExampleFile(t, dir, "embed.eos")

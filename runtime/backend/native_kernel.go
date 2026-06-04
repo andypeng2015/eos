@@ -35,31 +35,11 @@ func CompileNativeKernelProgram(kind eosartifact.BackendKind, kernel eosartifact
 }
 
 func validateCompiledKernelSource(kind eosartifact.BackendKind, compiled CompiledKernel) error {
-	switch kind {
-	case eosartifact.BackendCUDA:
-		if !strings.Contains(compiled.Source, "__global__ void "+compiled.Entry+"(") {
-			return fmt.Errorf("kernel %q CUDA source does not define entry %q", compiled.Name, compiled.Entry)
-		}
-	case eosartifact.BackendMetal:
-		if !strings.Contains(compiled.Source, "kernel void "+compiled.Entry+"(") {
-			return fmt.Errorf("kernel %q Metal source does not define entry %q", compiled.Name, compiled.Entry)
-		}
-	case eosartifact.BackendVulkan:
-		if !strings.Contains(compiled.Source, "void "+compiled.Entry+"(") {
-			return fmt.Errorf("kernel %q Vulkan source does not define entry %q", compiled.Name, compiled.Entry)
-		}
-	case eosartifact.BackendDirectML:
-		if !strings.Contains(compiled.Source, "eos_directml_graph "+compiled.Entry+"(") {
-			return fmt.Errorf("kernel %q DirectML source does not define entry %q", compiled.Name, compiled.Entry)
-		}
-	case eosartifact.BackendWebGPU:
-		if !strings.Contains(compiled.Source, "fn "+compiled.Entry+"(") {
-			return fmt.Errorf("kernel %q WebGPU source does not define entry %q", compiled.Name, compiled.Entry)
-		}
-	default:
-		return fmt.Errorf("unsupported backend %q", kind)
-	}
-	return nil
+	return eosartifact.ValidateKernelVariantSource(compiled.Name, eosartifact.KernelVariant{
+		Backend: kind,
+		Entry:   compiled.Entry,
+		Source:  compiled.Source,
+	})
 }
 
 func nativeLaunchConfig(kind eosartifact.BackendKind, kernel eosartifact.Kernel, compiled CompiledKernel) map[string]any {

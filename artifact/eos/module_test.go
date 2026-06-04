@@ -242,6 +242,68 @@ func TestValidateRejectsMissingKernelVariantSource(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsKernelVariantEntryMismatch(t *testing.T) {
+	module := NewModule("bad-kernel-entry")
+	module.Requirements.SupportedBackends = []BackendKind{BackendWebGPU}
+	module.EntryPoints = []EntryPoint{
+		{
+			Name: "embed",
+			Kind: EntryPointPipeline,
+			Inputs: []ValueBinding{
+				{Name: "tokens", Type: ValueType{Kind: ValueTensor, Tensor: &TensorType{DType: "i32", Shape: []string{"T"}}}},
+			},
+			Outputs: []ValueBinding{
+				{Name: "embeddings", Type: ValueType{Kind: ValueTensor, Tensor: &TensorType{DType: "f16", Shape: []string{"T", "D"}}}},
+			},
+		},
+	}
+	module.Buffers = []Buffer{{Name: "embeddings", DType: "f16", Shape: []string{"T", "D"}}}
+	module.Kernels = []Kernel{
+		{
+			Name: "embed_kernel",
+			Inputs: []ValueBinding{
+				{Name: "x", Type: ValueType{Kind: ValueTensor, Tensor: &TensorType{DType: "f16", Shape: []string{"T", "D"}}}},
+			},
+			Outputs: []ValueBinding{
+				{Name: "result", Type: ValueType{Kind: ValueTensor, Tensor: &TensorType{DType: "f16", Shape: []string{"T", "D"}}}},
+			},
+			Body: []KernelOp{
+				{Kind: KernelOpPointwise, Op: "identity", Inputs: []string{"x"}, Outputs: []string{"result"}},
+				{Kind: KernelOpReturn, Op: "return", Outputs: []string{"result"}},
+			},
+			Variants: []KernelVariant{
+				{Backend: BackendWebGPU, Entry: "embed_kernel_webgpu", Source: "@compute @workgroup_size(1) fn other_webgpu() {}"},
+			},
+		},
+	}
+	module.Steps = []Step{
+		{Entry: "embed", Kind: StepLaunchKernel, Name: "embed_kernel", Kernel: "embed_kernel", Inputs: []string{"tokens"}, Outputs: []string{"embeddings"}},
+		{Entry: "embed", Kind: StepReturn, Outputs: []string{"embeddings"}},
+	}
+
+	err := module.Validate()
+	if err == nil {
+		t.Fatal("expected validate error")
+	}
+	if !strings.Contains(err.Error(), `source "embed_kernel"`) || !strings.Contains(err.Error(), `entry "embed_kernel_webgpu"`) {
+		t.Fatalf("validate error = %v", err)
+	}
+}
+
+func TestPrismSourceForKernelVariant(t *testing.T) {
+	src, err := PrismSourceForKernelVariant("embed_kernel", KernelVariant{
+		Backend: BackendWebGPU,
+		Entry:   "embed_kernel_webgpu",
+		Source:  "@compute @workgroup_size(1) fn embed_kernel_webgpu() {}",
+	})
+	if err != nil {
+		t.Fatalf("PrismSourceForKernelVariant: %v", err)
+	}
+	if src.Name != "embed_kernel" || string(src.Backend) != string(BackendWebGPU) || src.Entry != "embed_kernel_webgpu" {
+		t.Fatalf("unexpected Prism source descriptor: %+v", src)
+	}
+}
+
 func TestValidateCandidatePackEntryPoint(t *testing.T) {
 	module := NewModule("packed")
 	module.Requirements.SupportedBackends = []BackendKind{BackendCUDA, BackendMetal}

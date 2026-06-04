@@ -9,6 +9,7 @@ to be reviewed without opening a debugger.
 
 ```bash
 eos compile --bundle bundle/ embed.eos embed.mll
+eos compile --bundle bundle/ --validate-kernels embed.eos embed.mll
 ```
 
 The bundle directory contains:
@@ -24,7 +25,9 @@ kernels/
 `graph.json` is the same structured report produced by `eos graph --format
 json`. `kernels/` contains one source file per backend kernel variant. The
 top-level `manifest.json` records module identity, artifact path, entrypoint,
-step, kernel, backend, and kernel-source counts.
+step, kernel, backend, and kernel-source counts. With `--validate-kernels`, the
+manifest also records Prism backend entry checks and whether optional external
+validators were skipped or reported errors.
 
 Bundle writing is best-effort after artifact compilation. If the artifact was
 written but bundle sidecars fail, `compile` prints a warning so production
@@ -48,12 +51,14 @@ compact visual map of modules, entrypoints, kernels, and scheduled steps.
 
 ```bash
 eos kernels --backend webgpu --out kernels/ embed.mll
+eos kernels --backend webgpu --validate --out kernels/ embed.mll
 eos kernels --out kernels/ embed.eos
 ```
 
 Kernel extraction accepts either source or artifact input. The command writes a
 `manifest.json` beside the extracted sources. Backend names are sorted in the
-manifest for stable comparisons.
+manifest for stable comparisons. `--validate` records Prism source validation
+metadata for each extracted backend variant.
 
 Common backend filters:
 

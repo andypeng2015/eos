@@ -442,6 +442,9 @@ func validateKernelVariants(required []BackendKind, kernel Kernel) error {
 		if variant.Source == "" {
 			return fmt.Errorf("kernel %q variant source is required for backend %q", kernel.Name, variant.Backend)
 		}
+		if err := ValidateKernelVariantSource(kernel.Name, variant); err != nil {
+			return err
+		}
 	}
 	for _, backend := range required {
 		if !seen[backend] {

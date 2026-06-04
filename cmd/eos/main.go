@@ -167,11 +167,12 @@ func run(args []string) error {
 func runCompile(args []string) error {
 	fs := flag.NewFlagSet("compile", flag.ContinueOnError)
 	bundleDir := fs.String("bundle", "", "write inspection bundle sidecar directory")
+	validateKernels := fs.Bool("validate-kernels", false, "record Prism kernel source validation status in the bundle manifest")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 || fs.Arg(0) == "" {
-		return fmt.Errorf("usage: eos compile [--bundle dir] <source.eos> [output.mll]")
+		return fmt.Errorf("usage: eos compile [--bundle dir] [--validate-kernels] <source.eos> [output.mll]")
 	}
 	srcPath := fs.Arg(0)
 	outPath := defaultArtifactPath(srcPath)
@@ -192,7 +193,7 @@ func runCompile(args []string) error {
 		return err
 	}
 	if *bundleDir != "" {
-		if err := writeCompileBundle(*bundleDir, srcPath, src, outPath, bundle); err != nil {
+		if err := writeCompileBundle(*bundleDir, srcPath, src, outPath, bundle, *validateKernels); err != nil {
 			fmt.Fprintf(os.Stderr, "bundle warning: %v\n", err)
 		} else {
 			fmt.Printf("bundle: %s\n", *bundleDir)
@@ -4155,7 +4156,7 @@ func runMineTextPairs(args []string) error {
 func printUsage() {
 	fmt.Println("usage:")
 	fmt.Println("  eos version")
-	fmt.Println("  eos compile [--bundle dir] <source.eos> [output.mll]")
+	fmt.Println("  eos compile [--bundle dir] [--validate-kernels] <source.eos> [output.mll]")
 	fmt.Println("  eos graph [--format json|dot] <source.eos|artifact.mll>")
 	fmt.Println("  eos kernels [--backend backend] [--out dir] <source.eos|artifact.mll>")
 	fmt.Println("  eos doctor")
