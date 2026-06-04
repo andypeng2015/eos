@@ -197,124 +197,43 @@ type embeddingForwardWeights struct {
 	proj   *backend.Tensor
 }
 
+type embeddingTrainerParams struct {
+	token         eosartifact.Param
+	attnQ         eosartifact.Param
+	attnK         eosartifact.Param
+	attnV         eosartifact.Param
+	attnO         eosartifact.Param
+	hidden        eosartifact.Param
+	proj          eosartifact.Param
+	attnEnabled   bool
+	hiddenEnabled bool
+}
+
+type embeddingTrainerWeights struct {
+	token            *backend.Tensor
+	attentionQuery   *backend.Tensor
+	attentionKey     *backend.Tensor
+	attentionValue   *backend.Tensor
+	attentionOutput  *backend.Tensor
+	hiddenProjection *backend.Tensor
+	projection       *backend.Tensor
+}
+
 // NewEmbeddingTrainer constructs the first native pooled-embedder trainer.
 func NewEmbeddingTrainer(mod *eosartifact.Module, manifest EmbeddingManifest, weights map[string]*backend.Tensor, cfg EmbeddingTrainConfig) (*EmbeddingTrainer, error) {
 	manifest = manifest.normalized()
 	if err := manifest.ValidateModule(mod); err != nil {
 		return nil, err
 	}
-	tokenParam, err := requireTrainableEmbeddingParam(mod, manifest.TokenEmbeddingParam)
+	params, err := resolveEmbeddingTrainerParams(mod, manifest)
 	if err != nil {
 		return nil, err
 	}
-	attnQParam, attnEnabled, err := optionalTrainableEmbeddingParam(mod, manifest.AttentionQueryParam)
+	tensors, err := resolveEmbeddingTrainerWeights(params, manifest, weights)
 	if err != nil {
 		return nil, err
 	}
-	attnKParam, _, err := optionalTrainableEmbeddingParam(mod, manifest.AttentionKeyParam)
-	if err != nil {
-		return nil, err
-	}
-	attnVParam, _, err := optionalTrainableEmbeddingParam(mod, manifest.AttentionValueParam)
-	if err != nil {
-		return nil, err
-	}
-	attnOParam, _, err := optionalTrainableEmbeddingParam(mod, manifest.AttentionOutputParam)
-	if err != nil {
-		return nil, err
-	}
-	hiddenParam, hiddenEnabled, err := optionalTrainableEmbeddingParam(mod, manifest.HiddenProjectionParam)
-	if err != nil {
-		return nil, err
-	}
-	if (manifest.AttentionResidual || manifest.AttentionLayerNorm) && !attnEnabled {
-		return nil, fmt.Errorf("attention residual/layernorm requires attention weights")
-	}
-	if (manifest.FFNResidual || manifest.FFNLayerNorm) && !hiddenEnabled {
-		return nil, fmt.Errorf("ffn residual/layernorm requires hidden projection weights")
-	}
-	projParam, err := requireTrainableEmbeddingParam(mod, manifest.ProjectionParam)
-	if err != nil {
-		return nil, err
-	}
-	tokenEmbed, ok := weights[tokenParam.Name]
-	if !ok || tokenEmbed == nil {
-		return nil, fmt.Errorf("missing training weight %q", tokenParam.Name)
-	}
-	projection, ok := weights[projParam.Name]
-	if !ok || projection == nil {
-		return nil, fmt.Errorf("missing training weight %q", projParam.Name)
-	}
-	var attentionQuery *backend.Tensor
-	var attentionKey *backend.Tensor
-	var attentionValue *backend.Tensor
-	var attentionOutput *backend.Tensor
-	if attnEnabled {
-		attentionQuery, ok = weights[attnQParam.Name]
-		if !ok || attentionQuery == nil {
-			return nil, fmt.Errorf("missing training weight %q", attnQParam.Name)
-		}
-		attentionKey, ok = weights[attnKParam.Name]
-		if !ok || attentionKey == nil {
-			return nil, fmt.Errorf("missing training weight %q", attnKParam.Name)
-		}
-		attentionValue, ok = weights[attnVParam.Name]
-		if !ok || attentionValue == nil {
-			return nil, fmt.Errorf("missing training weight %q", attnVParam.Name)
-		}
-		attentionOutput, ok = weights[attnOParam.Name]
-		if !ok || attentionOutput == nil {
-			return nil, fmt.Errorf("missing training weight %q", attnOParam.Name)
-		}
-	}
-	var hiddenProjection *backend.Tensor
-	if hiddenEnabled {
-		hiddenProjection, ok = weights[hiddenParam.Name]
-		if !ok || hiddenProjection == nil {
-			return nil, fmt.Errorf("missing training weight %q", hiddenParam.Name)
-		}
-	}
-	if len(tokenEmbed.Shape) != 2 {
-		return nil, fmt.Errorf("training weight %q rank = %d, want 2", tokenParam.Name, len(tokenEmbed.Shape))
-	}
-	if attnEnabled {
-		for name, tensor := range map[string]*backend.Tensor{
-			attnQParam.Name: attentionQuery,
-			attnKParam.Name: attentionKey,
-			attnVParam.Name: attentionValue,
-			attnOParam.Name: attentionOutput,
-		} {
-			if len(tensor.Shape) != 2 {
-				return nil, fmt.Errorf("training weight %q rank = %d, want 2", name, len(tensor.Shape))
-			}
-			if tensor.Shape[0] != tokenEmbed.Shape[1] || tensor.Shape[1] != tokenEmbed.Shape[1] {
-				return nil, fmt.Errorf("attention weight %q shape %v does not match embedding width %d", name, tensor.Shape, tokenEmbed.Shape[1])
-			}
-		}
-	}
-	if hiddenEnabled && len(hiddenProjection.Shape) != 2 {
-		return nil, fmt.Errorf("training weight %q rank = %d, want 2", hiddenParam.Name, len(hiddenProjection.Shape))
-	}
-	if len(projection.Shape) != 2 {
-		return nil, fmt.Errorf("training weight %q rank = %d, want 2", projParam.Name, len(projection.Shape))
-	}
-	if hiddenEnabled {
-		if tokenEmbed.Shape[1] != hiddenProjection.Shape[0] {
-			return nil, fmt.Errorf("embedding/hidden projection shape mismatch %v x %v", tokenEmbed.Shape, hiddenProjection.Shape)
-		}
-		if hiddenProjection.Shape[1] != projection.Shape[0] {
-			return nil, fmt.Errorf("hidden/output projection shape mismatch %v x %v", hiddenProjection.Shape, projection.Shape)
-		}
-		if manifest.FFNResidual && projection.Shape[1] != tokenEmbed.Shape[1] {
-			return nil, fmt.Errorf("ffn residual requires projection output width %d to match hidden width %d", projection.Shape[1], tokenEmbed.Shape[1])
-		}
-	} else if tokenEmbed.Shape[1] != projection.Shape[0] {
-		return nil, fmt.Errorf("embedding/projection shape mismatch %v x %v", tokenEmbed.Shape, projection.Shape)
-	}
-	if vocab := manifest.Tokenizer.VocabSize; vocab > 0 && tokenEmbed.Shape[0] < vocab {
-		return nil, fmt.Errorf("training token embedding rows %d are smaller than vocab_size %d", tokenEmbed.Shape[0], vocab)
-	}
-	cfg = normalizedTrainConfig(cfg, tokenParam, attnQParam, attnKParam, attnVParam, attnOParam, hiddenParam, projParam)
+	cfg = normalizedTrainConfig(cfg, params.token, params.attnQ, params.attnK, params.attnV, params.attnO, params.hidden, params.proj)
 	if err := validateTrainConfig(cfg); err != nil {
 		return nil, err
 	}
@@ -357,34 +276,34 @@ func NewEmbeddingTrainer(mod *eosartifact.Module, manifest EmbeddingManifest, we
 		manifest:             manifest,
 		config:               cfg,
 		memoryPlan:           nil,
-		tokenParam:           tokenParam,
-		attnQParam:           attnQParam,
-		attnKParam:           attnKParam,
-		attnVParam:           attnVParam,
-		attnOParam:           attnOParam,
-		hiddenParam:          hiddenParam,
-		projParam:            projParam,
-		tokenEmbed:           tensorAsMasterF32(tokenEmbed),
-		attentionQuery:       tensorAsMasterF32(attentionQuery),
-		attentionKey:         tensorAsMasterF32(attentionKey),
-		attentionValue:       tensorAsMasterF32(attentionValue),
-		attentionOutput:      tensorAsMasterF32(attentionOutput),
-		hiddenProjection:     tensorAsMasterF32(hiddenProjection),
-		projection:           tensorAsMasterF32(projection),
-		tokenMom1:            zeroLikeMaster(tokenEmbed),
-		tokenMom2:            zeroLikeMaster(tokenEmbed),
-		attnQMom1:            zeroLikeMaster(attentionQuery),
-		attnQMom2:            zeroLikeMaster(attentionQuery),
-		attnKMom1:            zeroLikeMaster(attentionKey),
-		attnKMom2:            zeroLikeMaster(attentionKey),
-		attnVMom1:            zeroLikeMaster(attentionValue),
-		attnVMom2:            zeroLikeMaster(attentionValue),
-		attnOMom1:            zeroLikeMaster(attentionOutput),
-		attnOMom2:            zeroLikeMaster(attentionOutput),
-		hiddenMom1:           zeroLikeMaster(hiddenProjection),
-		hiddenMom2:           zeroLikeMaster(hiddenProjection),
-		projMom1:             zeroLikeMaster(projection),
-		projMom2:             zeroLikeMaster(projection),
+		tokenParam:           params.token,
+		attnQParam:           params.attnQ,
+		attnKParam:           params.attnK,
+		attnVParam:           params.attnV,
+		attnOParam:           params.attnO,
+		hiddenParam:          params.hidden,
+		projParam:            params.proj,
+		tokenEmbed:           tensorAsMasterF32(tensors.token),
+		attentionQuery:       tensorAsMasterF32(tensors.attentionQuery),
+		attentionKey:         tensorAsMasterF32(tensors.attentionKey),
+		attentionValue:       tensorAsMasterF32(tensors.attentionValue),
+		attentionOutput:      tensorAsMasterF32(tensors.attentionOutput),
+		hiddenProjection:     tensorAsMasterF32(tensors.hiddenProjection),
+		projection:           tensorAsMasterF32(tensors.projection),
+		tokenMom1:            zeroLikeMaster(tensors.token),
+		tokenMom2:            zeroLikeMaster(tensors.token),
+		attnQMom1:            zeroLikeMaster(tensors.attentionQuery),
+		attnQMom2:            zeroLikeMaster(tensors.attentionQuery),
+		attnKMom1:            zeroLikeMaster(tensors.attentionKey),
+		attnKMom2:            zeroLikeMaster(tensors.attentionKey),
+		attnVMom1:            zeroLikeMaster(tensors.attentionValue),
+		attnVMom2:            zeroLikeMaster(tensors.attentionValue),
+		attnOMom1:            zeroLikeMaster(tensors.attentionOutput),
+		attnOMom2:            zeroLikeMaster(tensors.attentionOutput),
+		hiddenMom1:           zeroLikeMaster(tensors.hiddenProjection),
+		hiddenMom2:           zeroLikeMaster(tensors.hiddenProjection),
+		projMom1:             zeroLikeMaster(tensors.projection),
+		projMom2:             zeroLikeMaster(tensors.projection),
 		forwardMatMul:        accel,
 		forwardBackend:       accelBackend,
 		optimizerAccel:       optimizerAccel,
@@ -396,6 +315,149 @@ func NewEmbeddingTrainer(mod *eosartifact.Module, manifest EmbeddingManifest, we
 		contrastiveAccel:     contrastiveAccel,
 		contrastiveBackend:   contrastiveBackend,
 	}, nil
+}
+
+func resolveEmbeddingTrainerParams(mod *eosartifact.Module, manifest EmbeddingManifest) (embeddingTrainerParams, error) {
+	tokenParam, err := requireTrainableEmbeddingParam(mod, manifest.TokenEmbeddingParam)
+	if err != nil {
+		return embeddingTrainerParams{}, err
+	}
+	attnQParam, attnEnabled, err := optionalTrainableEmbeddingParam(mod, manifest.AttentionQueryParam)
+	if err != nil {
+		return embeddingTrainerParams{}, err
+	}
+	attnKParam, _, err := optionalTrainableEmbeddingParam(mod, manifest.AttentionKeyParam)
+	if err != nil {
+		return embeddingTrainerParams{}, err
+	}
+	attnVParam, _, err := optionalTrainableEmbeddingParam(mod, manifest.AttentionValueParam)
+	if err != nil {
+		return embeddingTrainerParams{}, err
+	}
+	attnOParam, _, err := optionalTrainableEmbeddingParam(mod, manifest.AttentionOutputParam)
+	if err != nil {
+		return embeddingTrainerParams{}, err
+	}
+	hiddenParam, hiddenEnabled, err := optionalTrainableEmbeddingParam(mod, manifest.HiddenProjectionParam)
+	if err != nil {
+		return embeddingTrainerParams{}, err
+	}
+	if (manifest.AttentionResidual || manifest.AttentionLayerNorm) && !attnEnabled {
+		return embeddingTrainerParams{}, fmt.Errorf("attention residual/layernorm requires attention weights")
+	}
+	if (manifest.FFNResidual || manifest.FFNLayerNorm) && !hiddenEnabled {
+		return embeddingTrainerParams{}, fmt.Errorf("ffn residual/layernorm requires hidden projection weights")
+	}
+	projParam, err := requireTrainableEmbeddingParam(mod, manifest.ProjectionParam)
+	if err != nil {
+		return embeddingTrainerParams{}, err
+	}
+	return embeddingTrainerParams{
+		token:         tokenParam,
+		attnQ:         attnQParam,
+		attnK:         attnKParam,
+		attnV:         attnVParam,
+		attnO:         attnOParam,
+		hidden:        hiddenParam,
+		proj:          projParam,
+		attnEnabled:   attnEnabled,
+		hiddenEnabled: hiddenEnabled,
+	}, nil
+}
+
+func resolveEmbeddingTrainerWeights(params embeddingTrainerParams, manifest EmbeddingManifest, weights map[string]*backend.Tensor) (embeddingTrainerWeights, error) {
+	tokenEmbed, err := requireTrainingWeight(weights, params.token.Name)
+	if err != nil {
+		return embeddingTrainerWeights{}, err
+	}
+	projection, err := requireTrainingWeight(weights, params.proj.Name)
+	if err != nil {
+		return embeddingTrainerWeights{}, err
+	}
+	out := embeddingTrainerWeights{
+		token:      tokenEmbed,
+		projection: projection,
+	}
+	if params.attnEnabled {
+		out.attentionQuery, err = requireTrainingWeight(weights, params.attnQ.Name)
+		if err != nil {
+			return embeddingTrainerWeights{}, err
+		}
+		out.attentionKey, err = requireTrainingWeight(weights, params.attnK.Name)
+		if err != nil {
+			return embeddingTrainerWeights{}, err
+		}
+		out.attentionValue, err = requireTrainingWeight(weights, params.attnV.Name)
+		if err != nil {
+			return embeddingTrainerWeights{}, err
+		}
+		out.attentionOutput, err = requireTrainingWeight(weights, params.attnO.Name)
+		if err != nil {
+			return embeddingTrainerWeights{}, err
+		}
+	}
+	if params.hiddenEnabled {
+		out.hiddenProjection, err = requireTrainingWeight(weights, params.hidden.Name)
+		if err != nil {
+			return embeddingTrainerWeights{}, err
+		}
+	}
+	if err := validateEmbeddingTrainerWeightShapes(params, manifest, out); err != nil {
+		return embeddingTrainerWeights{}, err
+	}
+	return out, nil
+}
+
+func requireTrainingWeight(weights map[string]*backend.Tensor, name string) (*backend.Tensor, error) {
+	tensor, ok := weights[name]
+	if !ok || tensor == nil {
+		return nil, fmt.Errorf("missing training weight %q", name)
+	}
+	return tensor, nil
+}
+
+func validateEmbeddingTrainerWeightShapes(params embeddingTrainerParams, manifest EmbeddingManifest, weights embeddingTrainerWeights) error {
+	if len(weights.token.Shape) != 2 {
+		return fmt.Errorf("training weight %q rank = %d, want 2", params.token.Name, len(weights.token.Shape))
+	}
+	if params.attnEnabled {
+		for name, tensor := range map[string]*backend.Tensor{
+			params.attnQ.Name: weights.attentionQuery,
+			params.attnK.Name: weights.attentionKey,
+			params.attnV.Name: weights.attentionValue,
+			params.attnO.Name: weights.attentionOutput,
+		} {
+			if len(tensor.Shape) != 2 {
+				return fmt.Errorf("training weight %q rank = %d, want 2", name, len(tensor.Shape))
+			}
+			if tensor.Shape[0] != weights.token.Shape[1] || tensor.Shape[1] != weights.token.Shape[1] {
+				return fmt.Errorf("attention weight %q shape %v does not match embedding width %d", name, tensor.Shape, weights.token.Shape[1])
+			}
+		}
+	}
+	if params.hiddenEnabled && len(weights.hiddenProjection.Shape) != 2 {
+		return fmt.Errorf("training weight %q rank = %d, want 2", params.hidden.Name, len(weights.hiddenProjection.Shape))
+	}
+	if len(weights.projection.Shape) != 2 {
+		return fmt.Errorf("training weight %q rank = %d, want 2", params.proj.Name, len(weights.projection.Shape))
+	}
+	if params.hiddenEnabled {
+		if weights.token.Shape[1] != weights.hiddenProjection.Shape[0] {
+			return fmt.Errorf("embedding/hidden projection shape mismatch %v x %v", weights.token.Shape, weights.hiddenProjection.Shape)
+		}
+		if weights.hiddenProjection.Shape[1] != weights.projection.Shape[0] {
+			return fmt.Errorf("hidden/output projection shape mismatch %v x %v", weights.hiddenProjection.Shape, weights.projection.Shape)
+		}
+		if manifest.FFNResidual && weights.projection.Shape[1] != weights.token.Shape[1] {
+			return fmt.Errorf("ffn residual requires projection output width %d to match hidden width %d", weights.projection.Shape[1], weights.token.Shape[1])
+		}
+	} else if weights.token.Shape[1] != weights.projection.Shape[0] {
+		return fmt.Errorf("embedding/projection shape mismatch %v x %v", weights.token.Shape, weights.projection.Shape)
+	}
+	if vocab := manifest.Tokenizer.VocabSize; vocab > 0 && weights.token.Shape[0] < vocab {
+		return fmt.Errorf("training token embedding rows %d are smaller than vocab_size %d", weights.token.Shape[0], vocab)
+	}
+	return nil
 }
 
 // Close releases any backend-owned trainer acceleration state.
