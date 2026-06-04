@@ -36,7 +36,7 @@ func main() {
 	}
 	defer stopProfile()
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCommandError(os.Stderr, err)
 		os.Exit(1)
 	}
 }
@@ -187,7 +187,7 @@ func runCompile(args []string) error {
 	moduleName := strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath))
 	bundle, err := compiler.Build(src, compiler.Options{ModuleName: moduleName})
 	if err != nil {
-		return err
+		return attachSource(srcPath, src, err)
 	}
 	if err := eosartifact.WriteFile(outPath, bundle.Artifact); err != nil {
 		return err

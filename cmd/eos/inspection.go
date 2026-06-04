@@ -58,7 +58,7 @@ func loadInspectionInput(path string) (*inspectionInput, error) {
 	moduleName := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	bundle, err := compiler.Build(data, compiler.Options{ModuleName: moduleName})
 	if err != nil {
-		return nil, err
+		return nil, attachSource(path, data, err)
 	}
 	return &inspectionInput{
 		Path:       path,

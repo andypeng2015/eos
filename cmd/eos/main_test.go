@@ -176,6 +176,30 @@ func TestRunCompileBundleWritesInspectionArtifacts(t *testing.T) {
 	}
 }
 
+func TestCompileRendersSourceDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "bad.eos")
+	src := `kernel broken(x: f16[T, E]) -> f16[T, E] {
+    return missing
+}
+`
+	if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runErr := run([]string{"compile", srcPath, filepath.Join(dir, "bad.mll")})
+	if runErr == nil {
+		t.Fatal("compile succeeded, want diagnostic error")
+	}
+	var out strings.Builder
+	printCommandError(&out, runErr)
+	for _, want := range []string{"EOS1001 error", "--> " + srcPath + ":2:", "return missing", "^", "hint:"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("diagnostic output missing %q\n--- output ---\n%s", want, out.String())
+		}
+	}
+}
+
 func TestRunDoctorReportsRuntimeFacts(t *testing.T) {
 	output := captureRunOutput(t, []string{"doctor"})
 	for _, want := range []string{
