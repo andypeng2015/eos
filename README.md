@@ -21,7 +21,7 @@ The credible long-context wedge is the best local long-context embedder: consume
 
 ## Agent Skill
 
-Agents working with Eos should use the [using-manta](https://github.com/odvcencio/m31labs-skills/blob/main/skills/using-manta/SKILL.md) skill.
+Agents working with Eos should use the [using-manta](https://github.com/odvcencio/m31labs-skills/blob/main/skills/using-manta/SKILL.md) skill. The skill is still published under the former project name while the runtime, CLI, and module path have moved to Eos.
 
 Current embedder work is focused on retrieval-aligned training, not pairwise-only wins. The alignment harness now supports source-aware hard-negative scheduling, promotion gates over full retrieval scoreboards, recall@100 guardrails, grouped hard-negative InfoNCE, hybrid InfoNCE, and teacher-score distillation over mined candidate groups. The current nDCG best is the teacher-distilled hybrid follow-up with grouped weight `0.05`, teacher weight `0.20`, LR `0.000010`, NF-biased model-hard mining, and `nfcorpus=3` source bias during training; macro nDCG@10 improves from `0.145568` to `0.147862` against the previous best while staying inside the nDCG and recall@100 floors.
 
@@ -49,7 +49,7 @@ The shipping pipeline trains a mixed pretraining + BEIR Stage A model, mines mod
 ## Install
 
 ```bash
-go install github.com/odvcencio/eos/cmd/eos@latest
+go install m31labs.dev/eos/cmd/eos@latest
 ```
 
 ## Quick Start
@@ -76,6 +76,15 @@ Compile and run:
 ```bash
 eos compile embed.eos embed.mll
 eos run embed.mll embed
+```
+
+Inspect compiler output while developing:
+
+```bash
+eos compile --bundle bundle/ embed.eos embed.mll
+eos graph --format dot embed.eos > graph.dot
+eos kernels --backend webgpu --out kernels/ embed.mll
+eos doctor
 ```
 
 Or use the built-in demo:
@@ -243,20 +252,24 @@ The `.mll` artifact carries a Eos execution plan:
 
 Artifacts are validated on load: all referenced buffers, kernels, and entry points must exist, I/O flows must be consistent, and kernel variants must be present for all declared backends.
 
+Current artifact and package schema identifiers still use the legacy `manta/*`
+prefix for compatibility with previously sealed packages. Treat those strings
+as wire-format names, not the public project or module name.
+
 ## Runtime
 
 ### Loading and executing
 
 ```go
 import (
-    eosartifact "github.com/odvcencio/eos/artifact/eos"
-    "github.com/odvcencio/eos/runtime"
-    "github.com/odvcencio/eos/runtime/backend"
-    "github.com/odvcencio/eos/runtime/backends/cuda"
-    "github.com/odvcencio/eos/runtime/backends/directml"
-    "github.com/odvcencio/eos/runtime/backends/metal"
-    "github.com/odvcencio/eos/runtime/backends/vulkan"
-    "github.com/odvcencio/eos/runtime/backends/webgpu"
+    eosartifact "m31labs.dev/eos/artifact/eos"
+    "m31labs.dev/eos/runtime"
+    "m31labs.dev/eos/runtime/backend"
+    "m31labs.dev/eos/runtime/backends/cuda"
+    "m31labs.dev/eos/runtime/backends/directml"
+    "m31labs.dev/eos/runtime/backends/metal"
+    "m31labs.dev/eos/runtime/backends/vulkan"
+    "m31labs.dev/eos/runtime/backends/webgpu"
 )
 
 rt := runtime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
@@ -332,6 +345,10 @@ and eventually:
 
 ```
 eos compile <source.eos> [output.mll]             Compile .eos source to a Eos artifact
+eos compile --bundle <dir> <source.eos> [output] Write an artifact plus graph/kernel sidecars
+eos graph [--format json|dot] <source|artifact>  Inspect compiler or artifact graph structure
+eos kernels [--backend b] [--out dir] <input>    Extract backend kernel sources and manifest
+eos doctor                                       Report runtime, backend, tool, and env facts
 eos init-model [flags] <artifact.mll>             Create the default quantized embedding training package
 eos train-corpus [flags] <artifact.mll> <corpus>  Train tokenizer, mine pairs, and fit the embedder
 eos tokenize-embed <artifact.mll> <text> <tokens> Convert text JSONL to reusable token JSONL
@@ -349,6 +366,9 @@ eos run <artifact.mll> [entry]                    Load and execute an artifact e
 eos demo [tiny_embed|tiny_decode|tiny_score]      Run a built-in preset module
 eos version                                      Print version
 ```
+
+See [docs/inspection.md](docs/inspection.md) for the inspection bundle layout
+and JSON/DOT surfaces.
 
 Before a candidate run, use `ferrous-wheel run scripts/verify_manta_production.fw` to preflight the local `.mll` training, eval-only, sealed export, and inspect path.
 
