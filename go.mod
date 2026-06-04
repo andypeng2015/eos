@@ -3,7 +3,7 @@ module m31labs.dev/eos
 go 1.25.1
 
 require (
-	github.com/odvcencio/gotreesitter v0.19.1
+	github.com/odvcencio/gotreesitter v0.20.1
 	m31labs.dev/mll v0.1.0
 	m31labs.dev/turboquant v0.2.0
 )
@@ -12,5 +12,3 @@ require (
 	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
-
-replace github.com/odvcencio/gotreesitter => ../gotreesitter
