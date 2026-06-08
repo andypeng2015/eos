@@ -166,11 +166,17 @@ static int eosCudaRuntimeCreate(EosCudaRuntime** out, char** err) {
 	rt->primary_ctx = 1;
 	rt->blas = blas;
 	rt->stream = NULL;
-	// A non-default (non-blocking) stream is required so kernel launches and
-	// cuBLAS work can later be captured into a CUDA graph; the legacy default
-	// stream (stream 0) cannot be captured. cublasSetStream binds GEMMs to the
-	// same stream so a single stream sync covers both.
-	cuRes = cuStreamCreate(&rt->stream, CU_STREAM_NON_BLOCKING);
+	// A created (non-default) stream is required so kernel launches and cuBLAS
+	// work can be captured into a CUDA graph; the legacy default stream (stream
+	// 0) cannot be captured. It must be a BLOCKING stream (CU_STREAM_DEFAULT):
+	// our device<->host transfers use the synchronous cuMemcpy{H2D,D2H}, which
+	// run on the legacy default stream. A CU_STREAM_NON_BLOCKING work stream
+	// opts out of ordering with the default stream, so those copies raced
+	// in-flight kernels/GEMMs — producing non-deterministic, size-dependent
+	// garbage (orthogonal embeddings for D>=128). A blocking created stream is
+	// still capturable and orders correctly with the synchronous copies.
+	// cublasSetStream binds GEMMs to the same stream so one sync covers both.
+	cuRes = cuStreamCreate(&rt->stream, CU_STREAM_DEFAULT);
 	if (cuRes != CUDA_SUCCESS) {
 		cublasDestroy(blas);
 		cuDevicePrimaryCtxRelease(device);
