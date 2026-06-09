@@ -76,8 +76,11 @@ func TestBPETokenizerEncodeAppliesRankedOverlappingMerges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	assertInt32SliceEqual(t, ids, []int32{2, 7, 1, 8, 3})
-	assertInt32SliceEqual(t, mask, []int32{1, 1, 1, 1, 1})
+	// Ranked merges still apply within each word (ab=7, abc=8). The inter-word
+	// boundary is a merge barrier only and is NOT emitted — previously it was
+	// emitted as [UNK]=1, putting one UNK between every word (~45% of tokens).
+	assertInt32SliceEqual(t, ids, []int32{2, 7, 8, 3})
+	assertInt32SliceEqual(t, mask, []int32{1, 1, 1, 1})
 }
 
 func TestTokenizeEmbeddingTextContrastiveExamples(t *testing.T) {

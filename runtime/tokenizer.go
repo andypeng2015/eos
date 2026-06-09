@@ -357,6 +357,14 @@ func (t *BPETokenizer) Encode(text string) ([]int32, []int32, error) {
 		ids = append(ids, t.bosID)
 	}
 	for _, tok := range toks {
+		if tok == " " {
+			// Inter-word boundary marker injected by splitChars. It exists only
+			// to stop BPE merges from spanning words; it is not a real token and
+			// is not in the vocab. Emitting it (as [UNK]) put one UNK between
+			// every pair of words — ~45% of all tokens — drowning the real
+			// content in a single constant embedding. Drop it.
+			continue
+		}
 		if id, ok := t.tokenToID[tok]; ok {
 			ids = append(ids, id)
 			continue
