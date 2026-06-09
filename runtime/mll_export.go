@@ -26,11 +26,26 @@ func DefaultMLLPath(artifactPath string) string {
 	return defaultManifestPath(artifactPath, ".mll")
 }
 
+// MLLExportOptions controls how a package is sealed into an MLL container.
+type MLLExportOptions struct {
+	// PackQuantizedWeights stores q8/q4 fake-quantized tensors as real packed
+	// payloads with per-tensor scales instead of widened float32 bytes. The
+	// packed grid matches the QAT forward pass exactly, so retrieval quality
+	// is unchanged while the sealed file shrinks roughly 4x (q8) or 8x (q4).
+	PackQuantizedWeights bool
+}
+
 // ExportPackageToMLL exports a Eos artifact plus its sibling package
-// files into a sealed MLL container. The resulting file keeps the current
-// Eos module JSON in a schemaless XMTA section while populating the
-// closest matching MLL core sections.
+// files into a sealed MLL container with packed quantized weights.
 func ExportPackageToMLL(artifactPath, outPath string) (string, error) {
+	return ExportPackageToMLLWithOptions(artifactPath, outPath, MLLExportOptions{PackQuantizedWeights: true})
+}
+
+// ExportPackageToMLLWithOptions exports a Eos artifact plus its sibling
+// package files into a sealed MLL container. The resulting file keeps the
+// current Eos module JSON in a schemaless XMTA section while populating the
+// closest matching MLL core sections.
+func ExportPackageToMLLWithOptions(artifactPath, outPath string, opts MLLExportOptions) (string, error) {
 	if artifactPath == "" {
 		return "", fmt.Errorf("artifact path is required")
 	}
@@ -67,7 +82,7 @@ func ExportPackageToMLL(artifactPath, outPath string) (string, error) {
 		return "", err
 	}
 
-	file, err := buildMLLExport(mod, artifactJSON, jsonFiles, packageKind, weights, plan)
+	file, err := buildMLLExport(mod, artifactJSON, jsonFiles, packageKind, weights, plan, opts)
 	if err != nil {
 		return "", err
 	}
@@ -77,7 +92,7 @@ func ExportPackageToMLL(artifactPath, outPath string) (string, error) {
 	return outPath, nil
 }
 
-func buildMLLExport(mod *eosartifact.Module, artifactJSON []byte, jsonFiles map[string]json.RawMessage, packageKind PackageKind, weights map[string]*backend.Tensor, plan *MemoryPlan) ([]byte, error) {
+func buildMLLExport(mod *eosartifact.Module, artifactJSON []byte, jsonFiles map[string]json.RawMessage, packageKind PackageKind, weights map[string]*backend.Tensor, plan *MemoryPlan, opts MLLExportOptions) ([]byte, error) {
 	if mod == nil {
 		return nil, fmt.Errorf("nil module")
 	}
@@ -171,6 +186,7 @@ func buildMLLExport(mod *eosartifact.Module, artifactJSON []byte, jsonFiles map[
 	}
 
 	logicalTensorDTypes := map[string]string{}
+	tensorScales := map[string]float32{}
 	if len(weights) > 0 {
 		names := make([]string, 0, len(weights))
 		for name := range weights {
@@ -182,12 +198,27 @@ func buildMLLExport(mod *eosartifact.Module, artifactJSON []byte, jsonFiles map[
 			if tensor == nil {
 				continue
 			}
-			storageDType, raw, widened, err := encodeTensorStorage(tensor)
-			if err != nil {
-				return nil, fmt.Errorf("encode tensor %q: %w", name, err)
-			}
-			if widened {
+			var storageDType mll.DType
+			var raw []byte
+			if opts.PackQuantizedWeights && (tensor.DType == "q8" || tensor.DType == "q4") {
+				var scale float32
+				var err error
+				storageDType, raw, scale, err = packQuantizedTensorStorage(tensor)
+				if err != nil {
+					return nil, fmt.Errorf("pack tensor %q: %w", name, err)
+				}
 				logicalTensorDTypes[name] = tensor.DType
+				tensorScales[name] = scale
+			} else {
+				var widened bool
+				var err error
+				storageDType, raw, widened, err = encodeTensorStorage(tensor)
+				if err != nil {
+					return nil, fmt.Errorf("encode tensor %q: %w", name, err)
+				}
+				if widened {
+					logicalTensorDTypes[name] = tensor.DType
+				}
 			}
 			shape := make([]uint64, len(tensor.Shape))
 			for i, dim := range tensor.Shape {
@@ -241,7 +272,7 @@ func buildMLLExport(mod *eosartifact.Module, artifactJSON []byte, jsonFiles map[
 		Metadata:    buildMLLHeadMetadata(state.strings, mod, packageKind, weights),
 	}
 
-	xmta, err := buildMLLExportMetadata(mod, artifactJSON, jsonFiles, packageKind, logicalTensorDTypes)
+	xmta, err := buildMLLExportMetadata(mod, artifactJSON, jsonFiles, packageKind, logicalTensorDTypes, tensorScales)
 	if err != nil {
 		return nil, err
 	}
@@ -628,7 +659,7 @@ func readOptionalMemoryPlanJSON(path string) (json.RawMessage, bool, error) {
 	return json.RawMessage(body), true, nil
 }
 
-func buildMLLExportMetadata(mod *eosartifact.Module, artifactJSON []byte, jsonFiles map[string]json.RawMessage, packageKind PackageKind, logicalTensorDTypes map[string]string) ([]byte, error) {
+func buildMLLExportMetadata(mod *eosartifact.Module, artifactJSON []byte, jsonFiles map[string]json.RawMessage, packageKind PackageKind, logicalTensorDTypes map[string]string, tensorScales map[string]float32) ([]byte, error) {
 	meta := eosartifact.MLLMetadata{
 		Version:       eosartifact.MLLMetadataVersion,
 		ModuleName:    mod.Name,
@@ -653,6 +684,9 @@ func buildMLLExportMetadata(mod *eosartifact.Module, artifactJSON []byte, jsonFi
 	}
 	if len(logicalTensorDTypes) > 0 {
 		meta.LogicalTensorDType = logicalTensorDTypes
+	}
+	if len(tensorScales) > 0 {
+		meta.TensorScales = tensorScales
 	}
 	return eosartifact.EncodeMLLMetadata(meta)
 }
@@ -827,6 +861,73 @@ func eosDTypeToMLL(dtype string) (mll.DType, error) {
 		return mll.DTypeQ8, nil
 	default:
 		return mll.DTypeInvalid, fmt.Errorf("unsupported Eos dtype %q", dtype)
+	}
+}
+
+// packQuantizedTensorStorage encodes a fake-quantized q8/q4 tensor as a real
+// packed payload plus a per-tensor dequantization scale. The quantization grid
+// matches fakeQuantizeDataInPlace exactly (symmetric absmax, levels =
+// 2^(bits-1)-1), so packing a QAT-trained tensor and dequantizing on load
+// reproduces the trained forward pass bit-for-bit.
+func packQuantizedTensorStorage(t *backend.Tensor) (mll.DType, []byte, float32, error) {
+	if t == nil {
+		return mll.DTypeInvalid, nil, 0, fmt.Errorf("nil tensor")
+	}
+	var bits int
+	var storage mll.DType
+	switch t.DType {
+	case "q8":
+		bits = 8
+		storage = mll.DTypeQ8
+	case "q4":
+		bits = 4
+		storage = mll.DTypeQ4
+	default:
+		return mll.DTypeInvalid, nil, 0, fmt.Errorf("tensor dtype %q is not packable", t.DType)
+	}
+	levels := float32(int(1)<<uint(bits-1) - 1)
+	maxAbs := float32(0)
+	for _, value := range t.F32 {
+		abs := float32(math.Abs(float64(value)))
+		if abs > maxAbs {
+			maxAbs = abs
+		}
+	}
+	scale := float32(0)
+	if maxAbs > 0 {
+		scale = maxAbs / levels
+	}
+	codes := make([]int8, len(t.F32))
+	if scale > 0 {
+		for i, value := range t.F32 {
+			q := float32(math.Round(float64(value / scale)))
+			if q > levels {
+				q = levels
+			}
+			if q < -levels {
+				q = -levels
+			}
+			codes[i] = int8(q)
+		}
+	}
+	switch storage {
+	case mll.DTypeQ8:
+		data := make([]byte, len(codes))
+		for i, code := range codes {
+			data[i] = byte(code)
+		}
+		return storage, data, scale, nil
+	default: // mll.DTypeQ4: two offset-binary nibbles per byte, low nibble first.
+		data := make([]byte, (len(codes)+1)/2)
+		for i, code := range codes {
+			nibble := byte(code+8) & 0x0f
+			if i%2 == 0 {
+				data[i/2] = nibble
+			} else {
+				data[i/2] |= nibble << 4
+			}
+		}
+		return storage, data, scale, nil
 	}
 }
 

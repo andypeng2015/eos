@@ -25,8 +25,9 @@ type WeightFile struct {
 }
 
 type weightFileMLLMetadata struct {
-	Version            string            `json:"version"`
-	LogicalTensorDType map[string]string `json:"logical_tensor_dtypes,omitempty"`
+	Version            string             `json:"version"`
+	LogicalTensorDType map[string]string  `json:"logical_tensor_dtypes,omitempty"`
+	TensorScales       map[string]float32 `json:"tensor_scales,omitempty"`
 }
 
 // DefaultWeightFilePath returns the conventional sibling weight path for an artifact.
@@ -241,10 +242,10 @@ func decodeWeightFileMLL(data []byte) (WeightFile, error) {
 			return WeightFile{}, err
 		}
 	}
-	return decodeWeightFileFromMLLReader(reader, meta.Version, meta.LogicalTensorDType)
+	return decodeWeightFileFromMLLReader(reader, meta.Version, meta.LogicalTensorDType, meta.TensorScales)
 }
 
-func decodeWeightFileFromMLLReader(reader *mll.Reader, version string, logicalTensorDTypes map[string]string) (WeightFile, error) {
+func decodeWeightFileFromMLLReader(reader *mll.Reader, version string, logicalTensorDTypes map[string]string, tensorScales map[string]float32) (WeightFile, error) {
 	if reader == nil {
 		return WeightFile{}, fmt.Errorf("nil MLL reader")
 	}
@@ -277,7 +278,7 @@ func decodeWeightFileFromMLLReader(reader *mll.Reader, version string, logicalTe
 			return WeightFile{}, fmt.Errorf("weight tensor missing name for index %d", entry.NameIdx)
 		}
 		logical := logicalTensorDTypes[name]
-		tensor, err := decodeTensorEntry(entry, logical)
+		tensor, err := decodeTensorEntry(entry, logical, tensorScales[name])
 		if err != nil {
 			return WeightFile{}, fmt.Errorf("decode weight %q: %w", name, err)
 		}
@@ -301,13 +302,57 @@ func intShapeToMLLShape(strg *mll.StringTable, shape []int) ([]mll.Dimension, er
 	return out, nil
 }
 
-func decodeTensorEntry(entry mll.TensorEntry, logicalDType string) (*backend.Tensor, error) {
+func decodeTensorEntry(entry mll.TensorEntry, logicalDType string, scale float32) (*backend.Tensor, error) {
 	shape := make([]int, len(entry.Shape))
 	for i, dim := range entry.Shape {
 		if dim > math.MaxInt {
 			return nil, fmt.Errorf("shape dim %d overflows int", dim)
 		}
 		shape[i] = int(dim)
+	}
+	// Packed quantized payloads are identified by their storage dtype and
+	// dequantized to float32 on the fake-quant grid they were packed from.
+	switch entry.DType {
+	case mll.DTypeQ8:
+		elements := 1
+		for _, dim := range shape {
+			elements *= dim
+		}
+		if len(entry.Data) != elements {
+			return nil, fmt.Errorf("q8 tensor data length %d does not match %d elements", len(entry.Data), elements)
+		}
+		data := make([]float32, elements)
+		if scale > 0 {
+			for i := range data {
+				data[i] = float32(int8(entry.Data[i])) * scale
+			}
+		} else if err := requireAllZeroPackedPayload(entry.Data); err != nil {
+			return nil, fmt.Errorf("q8 tensor: %w", err)
+		}
+		return backend.NewTensorQ8(shape, data), nil
+	case mll.DTypeQ4:
+		elements := 1
+		for _, dim := range shape {
+			elements *= dim
+		}
+		if len(entry.Data) != (elements+1)/2 {
+			return nil, fmt.Errorf("q4 tensor data length %d does not match %d elements", len(entry.Data), elements)
+		}
+		data := make([]float32, elements)
+		if scale > 0 {
+			for i := range data {
+				nibble := entry.Data[i/2]
+				if i%2 == 0 {
+					nibble &= 0x0f
+				} else {
+					nibble >>= 4
+				}
+				data[i] = float32(int(nibble)-8) * scale
+			}
+		} else if err := requireAllZeroPackedPayloadQ4(entry.Data, elements); err != nil {
+			return nil, fmt.Errorf("q4 tensor: %w", err)
+		}
+		return backend.NewTensorQ4(shape, data), nil
 	}
 	dtype := logicalDType
 	if dtype == "" {
@@ -364,6 +409,34 @@ func decodeTensorEntry(entry mll.TensorEntry, logicalDType string) (*backend.Ten
 	default:
 		return nil, fmt.Errorf("unsupported tensor dtype %q", dtype)
 	}
+}
+
+// requireAllZeroPackedPayload rejects packed payloads that carry non-zero
+// codes without a dequantization scale: that means the tensor-scales metadata
+// is missing or corrupt, and decoding would silently zero real weights.
+func requireAllZeroPackedPayload(data []byte) error {
+	for _, b := range data {
+		if b != 0 {
+			return fmt.Errorf("packed payload has non-zero codes but no dequantization scale (missing tensor_scales metadata)")
+		}
+	}
+	return nil
+}
+
+func requireAllZeroPackedPayloadQ4(data []byte, elements int) error {
+	for i := 0; i < elements; i++ {
+		nibble := data[i/2]
+		if i%2 == 0 {
+			nibble &= 0x0f
+		} else {
+			nibble >>= 4
+		}
+		// Offset-binary zero is 8.
+		if nibble != 8 {
+			return fmt.Errorf("packed payload has non-zero codes but no dequantization scale (missing tensor_scales metadata)")
+		}
+	}
+	return nil
 }
 
 func mllDTypeToEos(dtype mll.DType) (string, error) {

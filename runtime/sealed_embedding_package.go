@@ -98,7 +98,7 @@ func sealedEmbeddingPackageFromReader(reader *mll.Reader, meta eosartifact.MLLMe
 	if err != nil {
 		return SealedEmbeddingPackage{}, false, err
 	}
-	weights, err := decodeWeightFileFromMLLReader(reader, WeightFileVersion, meta.LogicalTensorDType)
+	weights, err := decodeWeightFileFromMLLReader(reader, WeightFileVersion, meta.LogicalTensorDType, meta.TensorScales)
 	if err != nil {
 		return SealedEmbeddingPackage{}, false, err
 	}

@@ -95,9 +95,6 @@ func TestExportPackageToMLLWritesSealedContainer(t *testing.T) {
 	if len(tnsrSection.Tensors) != 2 {
 		t.Fatalf("tensor count = %d, want 2", len(tnsrSection.Tensors))
 	}
-	if got := tnsrSection.Tensors[0].DType; got != mll.DTypeF32 {
-		t.Fatalf("stored tensor dtype = %d, want widened f32 (%d)", got, mll.DTypeF32)
-	}
 
 	xmtaBody, _ := reader.Section(eosartifact.MLLTagXMTA)
 	meta, err := eosartifact.DecodeMLLMetadata(xmtaBody)
@@ -109,6 +106,38 @@ func TestExportPackageToMLLWritesSealedContainer(t *testing.T) {
 	}
 	if meta.LogicalTensorDType["token_embedding"] != "q8" {
 		t.Fatalf("logical dtype for token_embedding = %q, want q8", meta.LogicalTensorDType["token_embedding"])
+	}
+
+	// q8 tensors are sealed as real packed payloads: storage dtype Q8, one
+	// byte per element, and a per-tensor dequantization scale in XMTA.
+	strgBody, _ := reader.Section(mll.TagSTRG)
+	strg, err := mll.ReadStringTable(strgBody)
+	if err != nil {
+		t.Fatalf("ReadStringTable: %v", err)
+	}
+	packedSeen := 0
+	for _, entry := range tnsrSection.Tensors {
+		name := strg.At(entry.NameIdx)
+		if meta.LogicalTensorDType[name] != "q8" {
+			continue
+		}
+		packedSeen++
+		if entry.DType != mll.DTypeQ8 {
+			t.Fatalf("tensor %q stored dtype = %d, want packed q8 (%d)", name, entry.DType, mll.DTypeQ8)
+		}
+		elements := uint64(1)
+		for _, dim := range entry.Shape {
+			elements *= dim
+		}
+		if uint64(len(entry.Data)) != elements {
+			t.Fatalf("tensor %q packed bytes = %d, want %d", name, len(entry.Data), elements)
+		}
+		if scale, ok := meta.TensorScales[name]; !ok || scale < 0 {
+			t.Fatalf("tensor %q missing packed scale (scales=%v)", name, meta.TensorScales)
+		}
+	}
+	if packedSeen == 0 {
+		t.Fatal("expected at least one packed q8 tensor in sealed export")
 	}
 	if _, ok := meta.JSONFiles["embedding_manifest"]; !ok {
 		t.Fatalf("expected embedding_manifest JSON metadata")

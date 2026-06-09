@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -26,6 +27,9 @@ type MLLMetadata struct {
 	Artifact           json.RawMessage            `json:"artifact"`
 	JSONFiles          map[string]json.RawMessage `json:"json_files,omitempty"`
 	LogicalTensorDType map[string]string          `json:"logical_tensor_dtypes,omitempty"`
+	// TensorScales records the per-tensor dequantization scale for tensors
+	// stored with packed quantized payloads (Q8/Q4).
+	TensorScales map[string]float32 `json:"tensor_scales,omitempty"`
 }
 
 type mllState struct {
@@ -82,6 +86,14 @@ func (m MLLMetadata) Validate() error {
 		}
 		if dtype == "" {
 			return fmt.Errorf("MLL metadata logical tensor dtype for %q is required", name)
+		}
+	}
+	for name, scale := range m.TensorScales {
+		if name == "" {
+			return fmt.Errorf("MLL metadata tensor scale name is required")
+		}
+		if math.IsNaN(float64(scale)) || math.IsInf(float64(scale), 0) || scale < 0 {
+			return fmt.Errorf("MLL metadata tensor scale for %q must be finite and non-negative", name)
 		}
 	}
 	return nil

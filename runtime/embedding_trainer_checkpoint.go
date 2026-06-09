@@ -323,7 +323,7 @@ func decodeEmbeddingCheckpointMLL(data []byte) (EmbeddingTrainCheckpoint, error)
 		if name == "" {
 			return EmbeddingTrainCheckpoint{}, fmt.Errorf("checkpoint tensor missing name for index %d", entry.NameIdx)
 		}
-		tensor, err := decodeTensorEntry(entry, meta.LogicalTensorDType[name])
+		tensor, err := decodeTensorEntry(entry, meta.LogicalTensorDType[name], 0)
 		if err != nil {
 			return EmbeddingTrainCheckpoint{}, fmt.Errorf("decode checkpoint tensor %q: %w", name, err)
 		}

@@ -2,7 +2,6 @@ package eosruntime
 
 import (
 	"fmt"
-	"time"
 )
 
 type EmbeddingCorpusTrainConfig struct {
@@ -120,16 +119,14 @@ func TrainEmbeddingPackageFromContrastiveFiles(artifactPath, trainPath, evalPath
 				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 			}
 		} else {
-			summary, err = trainer.FitContrastive(trainSet, evalSet, cfg)
+			// Pairwise eval data drives per-epoch selection, early stopping,
+			// and best restore through cfg.EvalPairs; an empty contrastive
+			// eval set would otherwise silently disable all of them.
+			cfg.EvalPairs = evalPairs
+			summary, err = trainer.FitContrastive(trainSet, nil, cfg)
 			if err != nil {
 				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 			}
-			evalStart := time.Now()
-			finalEval, err := trainer.EvaluatePairs(evalPairs)
-			if err != nil {
-				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
-			}
-			applyPairwiseEvalSummary(&summary, finalEval, time.Since(evalStart), cfg)
 		}
 	} else {
 		summary, err = trainer.FitContrastive(trainSet, evalSet, cfg)
@@ -284,16 +281,14 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(artifactPath, tokenizerPath, 
 				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 			}
 		} else {
-			summary, err = trainer.FitContrastive(trainSet, evalSet, cfg)
+			// Pairwise eval data drives per-epoch selection, early stopping,
+			// and best restore through cfg.EvalPairs; an empty contrastive
+			// eval set would otherwise silently disable all of them.
+			cfg.EvalPairs = evalPairs
+			summary, err = trainer.FitContrastive(trainSet, nil, cfg)
 			if err != nil {
 				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 			}
-			evalStart := time.Now()
-			finalEval, err := trainer.EvaluatePairs(evalPairs)
-			if err != nil {
-				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
-			}
-			applyPairwiseEvalSummary(&summary, finalEval, time.Since(evalStart), cfg)
 		}
 	} else {
 		summary, err = trainer.FitContrastive(trainSet, evalSet, cfg)
@@ -306,34 +301,6 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(artifactPath, tokenizerPath, 
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 	}
 	return summary, paths, nil
-}
-
-func applyPairwiseEvalSummary(summary *EmbeddingTrainRunSummary, finalEval EmbeddingEvalMetrics, elapsed time.Duration, cfg EmbeddingTrainRunConfig) {
-	if summary == nil {
-		return
-	}
-	summary.LastEval = cloneEvalMetrics(finalEval)
-	summary.FinalEval = cloneEvalMetrics(finalEval)
-	summary.EvalDuration += elapsed
-	summary.Elapsed += elapsed
-	summary.Workload.EvalMode = workloadEvalMode(finalEval.PairCount, "pairwise")
-	summary.Workload.EvalExamples = finalEval.PairCount
-	summary.Workload.EvalPairsPerPass = int64(finalEval.PairCount)
-	summary.Workload.PlannedEvalPasses = 1
-	summary.Workload.ActualEvalPasses++
-	summary.Workload.PlannedEvalPairs = int64(finalEval.PairCount)
-	summary.Workload.ActualEvalPairs += int64(finalEval.PairCount)
-	summary.Workload.PlannedTotalPairs = summary.Workload.PlannedTrainPairs + summary.Workload.PlannedEvalPairs
-	summary.Workload.ActualTotalPairs = summary.Workload.ActualTrainPairs + summary.Workload.ActualEvalPairs
-	if summary.BestEval == nil || betterEvalMetrics(finalEval, *summary.BestEval, cfg.SelectMetric, cfg.MinDelta) {
-		summary.BestEval = cloneEvalMetrics(finalEval)
-		if summary.BestEpoch == 0 {
-			summary.BestEpoch = summary.EpochsCompleted
-		}
-		if summary.BestStep == 0 {
-			summary.BestStep = summary.StepsCompleted
-		}
-	}
 }
 
 func TrainEmbeddingPackageFromCorpusFile(artifactPath, corpusPath string, cfg EmbeddingCorpusTrainConfig) (EmbeddingTrainRunSummary, EmbeddingCorpusTrainPaths, error) {

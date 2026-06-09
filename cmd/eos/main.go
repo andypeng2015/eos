@@ -143,6 +143,10 @@ func run(args []string) error {
 		return runScoreTeacherHardNegatives(args[1:])
 	case "audit-teacher-scores":
 		return runAuditTeacherScores(args[1:])
+	case "relabel-teacher-negatives":
+		return runRelabelTeacherNegatives(args[1:])
+	case "sample-corpus-negatives":
+		return runSampleCorpusNegatives(args[1:])
 	case "plan-sparse-attention":
 		return runPlanSparseAttention(args[1:])
 	case "train-embed":
@@ -1889,15 +1893,23 @@ func printEmbeddingManifestSummary(manifest eosruntime.EmbeddingManifest) {
 }
 
 func runExportMLL(args []string) error {
-	if len(args) == 0 || args[0] == "" {
-		return fmt.Errorf("usage: eos export-mll <artifact.mll> [output.mll]")
+	fs := flag.NewFlagSet("export-mll", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	packQuantized := fs.Bool("pack-quantized", true, "store q8/q4 fake-quantized weights as packed payloads with per-tensor scales; false widens them to float32")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
-	artifactPath := args[0]
+	if fs.NArg() < 1 || fs.Arg(0) == "" {
+		return fmt.Errorf("usage: eos export-mll [flags] <artifact.mll> [output.mll]")
+	}
+	artifactPath := fs.Arg(0)
 	outputPath := ""
-	if len(args) > 1 {
-		outputPath = args[1]
+	if fs.NArg() > 1 {
+		outputPath = fs.Arg(1)
 	}
-	writtenPath, err := eosruntime.ExportPackageToMLL(artifactPath, outputPath)
+	writtenPath, err := eosruntime.ExportPackageToMLLWithOptions(artifactPath, outputPath, eosruntime.MLLExportOptions{
+		PackQuantizedWeights: *packQuantized,
+	})
 	if err != nil {
 		return err
 	}
@@ -2613,12 +2625,7 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg e
 			return eosruntime.EstimateContrastiveTrainWorkload(len(trainSet), positiveCount, cfg), nil
 		}
 		workload := eosruntime.EstimateContrastiveTrainWorkload(len(trainSet), 0, cfg)
-		workload.EvalMode = "pairwise"
-		workload.EvalExamples = len(evalPairs)
-		workload.EvalPairsPerPass = int64(len(evalPairs))
-		workload.PlannedEvalPasses = 1
-		workload.PlannedEvalPairs = int64(len(evalPairs))
-		workload.PlannedTotalPairs = workload.PlannedTrainPairs + workload.PlannedEvalPairs
+		workload = eosruntime.RetargetWorkloadToPairwiseEval(workload, len(evalPairs), cfg)
 		return workload, nil
 	}
 
@@ -4209,6 +4216,8 @@ func printUsage() {
 	fmt.Println("  eos import-teacher-scores [flags] <hard-negatives.jsonl> <scores.jsonl> <output.jsonl>")
 	fmt.Println("  eos score-teacher-hard-negatives [flags] <teacher.mll> <hard-negatives.jsonl> <output.jsonl>")
 	fmt.Println("  eos audit-teacher-scores [flags] <hard-negatives.jsonl> [summary.json]")
+	fmt.Println("  eos relabel-teacher-negatives [flags] <scored-hard-negatives.jsonl> <output.jsonl>")
+	fmt.Println("  eos sample-corpus-negatives [flags] <beir-dataset-dir> <output.jsonl>")
 	fmt.Println("  eos plan-sparse-attention [flags]")
 	fmt.Println("  eos init-model [flags] <artifact.mll>")
 	fmt.Println("  eos init-mirage [flags] <artifact.mll>")
@@ -4241,6 +4250,8 @@ func printUsage() {
 	fmt.Println("import-teacher-scores merges external teacher score JSONL into text hard-negative JSONL and writes a provenance manifest.")
 	fmt.Println("score-teacher-hard-negatives uses a Eos embedding teacher to score existing text hard-negative JSONL into teacher_scores.")
 	fmt.Println("audit-teacher-scores summarizes teacher score coverage, positive rank, margins, and entropy before distillation runs.")
+	fmt.Println("relabel-teacher-negatives promotes teacher-confirmed-relevant mined negatives to positive rows, keeps teacher-confirmed-irrelevant candidates as negatives, and drops the ambiguous band.")
+	fmt.Println("sample-corpus-negatives emits random non-qrel corpus documents per query for teacher scoring into a true-negative pool.")
 	fmt.Println("plan-sparse-attention preflights routed sparse attention plus logical TurboQuant K/V memory budgets before GPU runs.")
 	fmt.Println("init-model creates the Eos-owned default quantized embedding training package.")
 	fmt.Println("init-mirage creates the Eos-owned Mirage Image v1 host-reference artifact.")

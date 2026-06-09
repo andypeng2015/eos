@@ -47,6 +47,12 @@ type EmbeddingTrainRunConfig struct {
 	RetrievalEvalRuntime   *Runtime
 	RetrievalEval          RetrievalEvalConfig
 	RetrievalEvalTokenizer *TokenizerFile
+	// EvalPairs supplies labeled pairwise eval examples for contrastive
+	// training runs. When set, FitContrastive evaluates them per epoch (and
+	// per EvalEverySteps) for selection, early stopping, and best-checkpoint
+	// restore — pairwise eval data otherwise cannot drive per-epoch selection
+	// because the contrastive eval set stays empty.
+	EvalPairs []EmbeddingPairExample
 }
 
 // EmbeddingTrainProgressFunc receives incremental training progress updates.
@@ -364,10 +370,14 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 
 	runStart := time.Now()
 	startStep := t.step
+	workload := EstimateContrastiveTrainWorkload(len(trainSet), len(evalSet), cfg)
+	if len(cfg.EvalPairs) > 0 {
+		workload = RetargetWorkloadToPairwiseEval(workload, len(cfg.EvalPairs), cfg)
+	}
 	summary := EmbeddingTrainRunSummary{
 		Config:       cfg,
 		StartProfile: t.TrainProfile(),
-		Workload:     EstimateContrastiveTrainWorkload(len(trainSet), len(evalSet), cfg),
+		Workload:     workload,
 	}
 	if cfg.EvalOnly {
 		evalStart := time.Now()
@@ -402,16 +412,35 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		haveBest       bool
 		noImproveEvals int
 	)
+	runEval := func() (EmbeddingEvalMetrics, error) {
+		if len(cfg.EvalPairs) > 0 {
+			return t.EvaluatePairs(cfg.EvalPairs)
+		}
+		return t.EvaluateContrastive(evalSet)
+	}
+	evalPairsPerPass := func() int64 {
+		if len(cfg.EvalPairs) > 0 {
+			return int64(len(cfg.EvalPairs))
+		}
+		return int64(len(evalSet) * len(evalSet))
+	}
+	evalExamplesPerPass := func() int64 {
+		if len(cfg.EvalPairs) > 0 {
+			return int64(len(cfg.EvalPairs))
+		}
+		return int64(len(evalSet))
+	}
+	hasEval := len(evalSet) > 0 || len(cfg.EvalPairs) > 0
 	recordEval := func(epoch int) (*EmbeddingEvalMetrics, bool, error) {
 		evalStart := time.Now()
-		evalMetrics, err := t.EvaluateContrastive(evalSet)
+		evalMetrics, err := runEval()
 		if err != nil {
 			return nil, false, err
 		}
 		summary.EvalDuration += time.Since(evalStart)
 		summary.Workload.ActualEvalPasses++
-		summary.Workload.ActualEvalPairs += int64(len(evalSet) * len(evalSet))
-		summary.Workload.ActualEvalExamples += int64(len(evalSet))
+		summary.Workload.ActualEvalPairs += evalPairsPerPass()
+		summary.Workload.ActualEvalExamples += evalExamplesPerPass()
 		summary.LastEval = cloneEvalMetrics(evalMetrics)
 		improved := false
 		if !haveBest || betterEvalMetrics(evalMetrics, *summary.BestEval, cfg.SelectMetric, cfg.MinDelta) {
@@ -430,7 +459,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		}
 		return cloneEvalMetrics(evalMetrics), improved, nil
 	}
-	if len(evalSet) > 0 && cfg.RestoreBest {
+	if hasEval && cfg.RestoreBest {
 		if _, _, err := recordEval(0); err != nil {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("initial eval: %w", err)
 		}
@@ -447,7 +476,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		}
 		trainStart := time.Now()
 		var afterBatch contrastiveEpochBatchHook
-		if len(evalSet) > 0 && cfg.EvalEverySteps > 0 {
+		if hasEval && cfg.EvalEverySteps > 0 {
 			afterBatch = func(progress EmbeddingTrainProgress) error {
 				if progress.Batch <= 0 || progress.Batch%cfg.EvalEverySteps != 0 {
 					return nil
@@ -474,7 +503,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		summary.Workload.ActualTrainPairs += int64(trainMetrics.BatchSize)
 		summary.Workload.ActualTrainExamples += int64(contrastiveUsableExampleCount(len(indices), cfg.BatchSize))
 
-		if len(evalSet) > 0 && epoch%cfg.EvalEveryEpoch == 0 {
+		if hasEval && epoch%cfg.EvalEveryEpoch == 0 {
 			evalMetrics, improved, err := recordEval(epoch)
 			if err != nil {
 				return EmbeddingTrainRunSummary{}, fmt.Errorf("epoch %d eval: %w", epoch, err)
@@ -506,16 +535,16 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		restoreStartProfile = t.TrainProfile()
 		restored = true
 	}
-	if len(evalSet) > 0 {
+	if hasEval {
 		evalStart := time.Now()
-		finalEval, err := t.EvaluateContrastive(evalSet)
+		finalEval, err := runEval()
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("final eval: %w", err)
 		}
 		summary.EvalDuration += time.Since(evalStart)
 		summary.Workload.ActualEvalPasses++
-		summary.Workload.ActualEvalPairs += int64(len(evalSet) * len(evalSet))
-		summary.Workload.ActualEvalExamples += int64(len(evalSet))
+		summary.Workload.ActualEvalPairs += evalPairsPerPass()
+		summary.Workload.ActualEvalExamples += evalExamplesPerPass()
 		summary.FinalEval = cloneEvalMetrics(finalEval)
 		if summary.BestEval == nil {
 			summary.BestEval = cloneEvalMetrics(finalEval)
@@ -805,6 +834,27 @@ func EstimatePairwiseTrainWorkload(trainExamples, evalExamples int, cfg Embeddin
 }
 
 // EstimateContrastiveTrainWorkload returns planned pairwise work for contrastive training with in-batch negatives.
+// RetargetWorkloadToPairwiseEval rewrites the eval side of a contrastive
+// workload estimate for runs whose evals score labeled pairs (cfg.EvalPairs)
+// instead of in-batch contrastive examples.
+func RetargetWorkloadToPairwiseEval(workload EmbeddingTrainWorkload, evalPairs int, cfg EmbeddingTrainRunConfig) EmbeddingTrainWorkload {
+	cfg = normalizedTrainRunConfig(cfg)
+	passes := plannedEvalPassCount(evalPairs, cfg.Epochs, cfg.EvalEveryEpoch)
+	if cfg.RestoreBest && evalPairs > 0 {
+		passes++
+	}
+	if cfg.EvalEverySteps > 0 && evalPairs > 0 {
+		passes += (workload.TrainBatchesPerEpoch / cfg.EvalEverySteps) * cfg.Epochs
+	}
+	workload.EvalMode = workloadEvalMode(evalPairs, "pairwise")
+	workload.EvalExamples = evalPairs
+	workload.EvalPairsPerPass = int64(evalPairs)
+	workload.PlannedEvalPasses = passes
+	workload.PlannedEvalPairs = int64(evalPairs) * int64(passes)
+	workload.PlannedTotalPairs = workload.PlannedTrainPairs + workload.PlannedEvalPairs
+	return workload
+}
+
 func EstimateContrastiveTrainWorkload(trainExamples, evalExamples int, cfg EmbeddingTrainRunConfig) EmbeddingTrainWorkload {
 	cfg = normalizedTrainRunConfig(cfg)
 	batches, trainPairsPerEpoch := contrastiveBatchWork(trainExamples, cfg.BatchSize)
@@ -1599,7 +1649,14 @@ func (t *EmbeddingTrainer) restoreCheckpoint(checkpoint EmbeddingTrainCheckpoint
 	if err != nil {
 		return err
 	}
+	// The rebuilt trainer never saw configureRetrievalEval; preserve the
+	// retrieval gate across restore or the post-restore final eval silently
+	// reports retrieval_ndcg=0.
+	retrievalRuntime := t.retrievalEvalRuntime
+	retrievalConfig := t.retrievalEvalConfig
+	retrievalTokenizer := t.retrievalEvalTokenizer
 	*t = *restored
+	t.configureRetrievalEval(retrievalRuntime, retrievalConfig, retrievalTokenizer)
 	return nil
 }
 

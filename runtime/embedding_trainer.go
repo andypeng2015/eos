@@ -782,6 +782,12 @@ func (t *EmbeddingTrainer) augmentRetrievalNDCG(metrics *EmbeddingEvalMetrics) e
 	if t == nil || metrics == nil || !t.retrievalEvalEnabled {
 		return nil
 	}
+	// Mid-run, accelerated optimizers hold the live weights on device; sync
+	// the host masters first (as Checkpoint does) or the exported weights are
+	// stale and the retrieval score silently reflects an older model.
+	if err := t.syncOptimizerState(true); err != nil {
+		return fmt.Errorf("retrieval eval: sync weights: %w", err)
+	}
 	weights, err := t.ExportInferenceWeights()
 	if err != nil {
 		return fmt.Errorf("retrieval eval: export weights: %w", err)

@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added `relabel-teacher-negatives`: converts teacher-scored mined hard negatives into clean training rows by promoting teacher-confirmed-relevant candidates to positive rows, keeping teacher-confirmed-irrelevant candidates as negatives, and dropping the ambiguous band. Fixes the false-negative pollution that capped retrieval quality on sparse-label corpora.
+- Added `sample-corpus-negatives`: emits random non-qrel corpus documents per query for teacher scoring into a true-negative pool.
+- Sealed MLL exports now store q8/q4 fake-quantized weights as real packed payloads (int8 bytes or two offset-binary nibbles per byte) with per-tensor dequantization scales in XMTA metadata. The packed grid matches the QAT forward exactly, so retrieval metrics are bit-identical while sealed packages shrink ~3.8x (q8). `eos export-mll -pack-quantized=false` restores widened float32 storage.
 - Added a staged `manta-embed-v1` shipping pipeline that trains a mixed pretrain/BEIR candidate, mines model-hard negatives, runs a FiQA-weighted fine-tune, evaluates BEIR retrieval metrics, and can install gated assets into CorkScrewDB.
 - Added `retrievaldump` for per-query BEIR retrieval diagnostics.
 
@@ -11,6 +14,11 @@
 
 - Eos source parsing now uses a Go-authored gotreesitter grammar and lowers the CST into the existing compiler AST.
 - Default embedding package initialization now exposes `encoder_repeats` through the Go config and `eos init-model --encoder-repeats`.
+
+### Fixed
+
+- Contrastive training with pairwise eval data (the standard `train-embed train.jsonl eval.jsonl` invocation) now runs per-epoch evals: selection, early stopping, and `-restore-best` previously never fired in this path because the contrastive eval set stayed empty, so `best_epoch` always equalled the last epoch.
+- The retrieval-nDCG eval gate now syncs device weights to the host before each mid-run eval (accelerated optimizers hold live weights on device; the gate previously scored a stale model) and survives best-checkpoint restore (restoring rebuilt the trainer and silently dropped the gate, reporting `retrieval_ndcg=0` in the final eval).
 
 ## v0.1.0-alpha — 2026-04-09
 
