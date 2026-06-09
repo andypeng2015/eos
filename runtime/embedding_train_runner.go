@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -1466,6 +1468,13 @@ func (t *EmbeddingTrainer) runContrastiveEpoch(trainSet []EmbeddingContrastiveEx
 		totalTrainExamples += end - start
 		totalPairs += int64(metrics.BatchSize)
 		batchIndex++
+		// Bound RSS: per-step activations are unreferenced after the step, but
+		// Go's scavenger returns pages to the OS lazily, so RSS can climb past a
+		// memory cap (e.g. WSL2's) and trigger an OOM/SIGTERM before reclaim —
+		// especially for wider models. Force the scavenger periodically.
+		if n := trainMemReclaimEvery(); n > 0 && batchIndex%n == 0 {
+			debug.FreeOSMemory()
+		}
 		progress := EmbeddingTrainProgress{
 			Epoch:              epoch,
 			Batch:              batchIndex,
@@ -1496,6 +1505,21 @@ func (t *EmbeddingTrainer) runContrastiveEpoch(trainSet []EmbeddingContrastiveEx
 		AverageScore: totalScore * inv,
 		BatchSize:    totalExamples,
 	}, nil
+}
+
+// trainMemReclaimEvery returns how often (in batches) to force the Go scavenger
+// to return freed activation memory to the OS during training, bounding RSS.
+// Per-step activations are unreferenced after each step, but the scavenger
+// returns pages lazily, so for wider models RSS can climb past a memory cap
+// (e.g. WSL2's ~27GB) and get SIGTERM'd before reclaim. Default every 8 batches;
+// 0 disables. Override with EOS_TRAIN_RECLAIM_EVERY.
+func trainMemReclaimEvery() int {
+	if v := strings.TrimSpace(os.Getenv("EOS_TRAIN_RECLAIM_EVERY")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return 8
 }
 
 func (t *EmbeddingTrainer) runHardNegativeEpoch(trainSet []EmbeddingHardNegativeExample, order []int, batchSize int, cfg EmbeddingTrainRunConfig, epoch int, runStart time.Time, afterBatch contrastiveEpochBatchHook) (EmbeddingTrainMetrics, error) {
@@ -1531,6 +1555,13 @@ func (t *EmbeddingTrainer) runHardNegativeEpoch(trainSet []EmbeddingHardNegative
 		totalTrainExamples += end - start
 		totalPairs += int64(metrics.BatchSize)
 		batchIndex++
+		// Bound RSS: per-step activations are unreferenced after the step, but
+		// Go's scavenger returns pages to the OS lazily, so RSS can climb past a
+		// memory cap (e.g. WSL2's) and trigger an OOM/SIGTERM before reclaim —
+		// especially for wider models. Force the scavenger periodically.
+		if n := trainMemReclaimEvery(); n > 0 && batchIndex%n == 0 {
+			debug.FreeOSMemory()
+		}
 		progress := EmbeddingTrainProgress{
 			Epoch:              epoch,
 			Batch:              batchIndex,
