@@ -127,7 +127,7 @@ func EvaluateEmbeddingRetrieval(ctx context.Context, model *EmbeddingModel, cfg 
 	if err != nil {
 		return RetrievalEvalMetrics{}, err
 	}
-	corpus, err := readBEIRCorpus(cfg.CorpusPath, cfg.MaxDocs)
+	corpus, err := readBEIRCorpusWithRelevant(cfg.CorpusPath, cfg.MaxDocs, qrels)
 	if err != nil {
 		return RetrievalEvalMetrics{}, err
 	}
@@ -228,6 +228,50 @@ type beirJSONRecord struct {
 
 func readBEIRCorpus(path string, limit int) ([]retrievalTextRecord, error) {
 	return readBEIRTextFile(path, nil, limit)
+}
+
+// readBEIRCorpusWithRelevant reads the corpus capped to `limit` documents, but
+// guarantees every qrels-relevant document is included regardless of its
+// position in the file. A naive first-N cap can drop all relevant docs (their
+// IDs are often late in file order), which silently produces nDCG=0 and makes a
+// capped retrieval eval meaningless. Relevant docs come first; the remainder is
+// filled with non-relevant distractors up to `limit`. With limit<=0 the full
+// corpus is read.
+func readBEIRCorpusWithRelevant(path string, limit int, qrels retrievalQrels) ([]retrievalTextRecord, error) {
+	if limit <= 0 {
+		return readBEIRTextFile(path, nil, 0)
+	}
+	relevant := make(map[string]bool)
+	for _, docs := range qrels {
+		for docID := range docs {
+			relevant[docID] = true
+		}
+	}
+	if len(relevant) == 0 {
+		return readBEIRTextFile(path, nil, limit)
+	}
+	all, err := readBEIRTextFile(path, nil, 0)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]retrievalTextRecord, 0, limit)
+	seen := make(map[string]bool, limit)
+	for _, rec := range all { // all relevant docs first (kept even if they exceed limit)
+		if relevant[rec.ID] {
+			out = append(out, rec)
+			seen[rec.ID] = true
+		}
+	}
+	for _, rec := range all { // fill with distractors up to the cap
+		if len(out) >= limit {
+			break
+		}
+		if !seen[rec.ID] {
+			out = append(out, rec)
+			seen[rec.ID] = true
+		}
+	}
+	return out, nil
 }
 
 func readBEIRQueries(path string, qrels retrievalQrels, limit int) ([]retrievalTextRecord, int, error) {
