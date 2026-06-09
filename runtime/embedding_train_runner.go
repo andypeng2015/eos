@@ -38,6 +38,13 @@ type EmbeddingTrainRunConfig struct {
 	TeacherScoreNormalization string
 	ProgressEverySteps        int
 	Progress                  EmbeddingTrainProgressFunc
+	// Retrieval-nDCG eval gate (optional). When RetrievalEvalRuntime and a
+	// complete RetrievalEval (corpus/queries/qrels) are set, each eval also
+	// reports nDCG@10 over that held-out set, usable as -select-metric
+	// retrieval_ndcg. RetrievalEvalTokenizer is required to embed the raw text.
+	RetrievalEvalRuntime   *Runtime
+	RetrievalEval          RetrievalEvalConfig
+	RetrievalEvalTokenizer *TokenizerFile
 }
 
 // EmbeddingTrainProgressFunc receives incremental training progress updates.
@@ -153,6 +160,7 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 	if !validTrainSelectionMetric(cfg.SelectMetric) {
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("unsupported select_metric %q", cfg.SelectMetric)
 	}
+	t.configureRetrievalEval(cfg.RetrievalEvalRuntime, cfg.RetrievalEval, cfg.RetrievalEvalTokenizer)
 	if err := t.applyTrainRunOverrides(cfg); err != nil {
 		return EmbeddingTrainRunSummary{}, err
 	}
@@ -346,6 +354,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 	if !validTrainSelectionMetric(cfg.SelectMetric) {
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("unsupported select_metric %q", cfg.SelectMetric)
 	}
+	t.configureRetrievalEval(cfg.RetrievalEvalRuntime, cfg.RetrievalEval, cfg.RetrievalEvalTokenizer)
 	if err := t.applyTrainRunOverrides(cfg); err != nil {
 		return EmbeddingTrainRunSummary{}, err
 	}
@@ -568,6 +577,7 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 	if !validTrainSelectionMetric(cfg.SelectMetric) {
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("unsupported select_metric %q", cfg.SelectMetric)
 	}
+	t.configureRetrievalEval(cfg.RetrievalEvalRuntime, cfg.RetrievalEval, cfg.RetrievalEvalTokenizer)
 	if !cfg.EvalOnly {
 		var err error
 		trainSet, err = normalizeHardNegativeTeacherScoresForRun(trainSet, cfg.TeacherScoreNormalization)
@@ -1781,7 +1791,7 @@ func (t *EmbeddingTrainer) syncTrainRunObjectiveConfig(cfg EmbeddingTrainRunConf
 
 func validTrainSelectionMetric(metric string) bool {
 	switch metric {
-	case "loss", "pair_accuracy", "threshold_accuracy", "score_margin", "auc", "top1_accuracy", "top5_accuracy", "top10_accuracy", "mrr", "mean_positive_rank", "mean_rank":
+	case "loss", "pair_accuracy", "threshold_accuracy", "score_margin", "auc", "top1_accuracy", "top5_accuracy", "top10_accuracy", "mrr", "mean_positive_rank", "mean_rank", "retrieval_ndcg":
 		return true
 	default:
 		return false
@@ -1828,7 +1838,7 @@ func betterEvalMetrics(current, best EmbeddingEvalMetrics, metric string, minDel
 				return true
 			}
 		}
-	case "auc", "top1_accuracy", "top5_accuracy", "top10_accuracy", "mrr":
+	case "auc", "top1_accuracy", "top5_accuracy", "top10_accuracy", "mrr", "retrieval_ndcg":
 		currentRankMetric := evalRankMetric(current, metric)
 		bestRankMetric := evalRankMetric(best, metric)
 		if currentRankMetric > bestRankMetric+primaryDelta {
@@ -1880,6 +1890,8 @@ func evalRankMetric(metrics EmbeddingEvalMetrics, metric string) float32 {
 		return metrics.Top10Accuracy
 	case "mrr":
 		return metrics.MeanReciprocalRank
+	case "retrieval_ndcg":
+		return metrics.RetrievalNDCGAt10
 	default:
 		return metrics.Top1Accuracy
 	}

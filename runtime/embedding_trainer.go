@@ -1,6 +1,7 @@
 package eosruntime
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"os"
@@ -61,9 +62,15 @@ type EmbeddingEvalMetrics struct {
 	Top10Accuracy      float32
 	MeanReciprocalRank float32
 	MeanPositiveRank   float32
-	PairCount          int
-	PositiveCount      int
-	NegativeCount      int
+	// RetrievalNDCGAt10 is nDCG@10 over a held-out BEIR-style corpus+qrels,
+	// computed during training when a retrieval eval set is configured. It is
+	// the deployment metric (unlike the pairwise metrics above, which saturate),
+	// so it is the meaningful target for -select-metric retrieval_ndcg. Zero when
+	// no retrieval eval set is configured.
+	RetrievalNDCGAt10 float32
+	PairCount         int
+	PositiveCount     int
+	NegativeCount     int
 }
 
 // EmbeddingForwardResidencyStats summarizes trainer-level bind suppression plus backend prep activity.
@@ -85,57 +92,65 @@ type embeddingEvalRankScore struct {
 
 // EmbeddingTrainer trains a pooled embedding model with quantization-aware forward passes.
 type EmbeddingTrainer struct {
-	module               *eosartifact.Module
-	manifest             EmbeddingManifest
-	config               EmbeddingTrainConfig
-	memoryPlan           *MemoryPlan
-	step                 int
-	tokenParam           eosartifact.Param
-	attnQParam           eosartifact.Param
-	attnKParam           eosartifact.Param
-	attnVParam           eosartifact.Param
-	attnOParam           eosartifact.Param
-	hiddenParam          eosartifact.Param
-	projParam            eosartifact.Param
-	tokenEmbed           *backend.Tensor
-	attentionQuery       *backend.Tensor
-	attentionKey         *backend.Tensor
-	attentionValue       *backend.Tensor
-	attentionOutput      *backend.Tensor
-	hiddenProjection     *backend.Tensor
-	projection           *backend.Tensor
-	tokenMom1            *backend.Tensor
-	tokenMom2            *backend.Tensor
-	attnQMom1            *backend.Tensor
-	attnQMom2            *backend.Tensor
-	attnKMom1            *backend.Tensor
-	attnKMom2            *backend.Tensor
-	attnVMom1            *backend.Tensor
-	attnVMom2            *backend.Tensor
-	attnOMom1            *backend.Tensor
-	attnOMom2            *backend.Tensor
-	hiddenMom1           *backend.Tensor
-	hiddenMom2           *backend.Tensor
-	projMom1             *backend.Tensor
-	projMom2             *backend.Tensor
-	forwardMatMul        backend.MatMulAccelerator
-	forwardBackend       eosartifact.BackendKind
-	optimizerAccel       backend.OptimizerAccelerator
-	optimizerBackend     eosartifact.BackendKind
-	activationAccel      backend.ActivationAccelerator
-	activationBackend    eosartifact.BackendKind
-	activationAccelFull  bool
-	softmaxBackwardAccel bool
-	contrastiveAccel     backend.ContrastiveAccelerator
-	contrastiveBackend   eosartifact.BackendKind
-	sequenceBindingID    int
-	momentsDirty         bool
-	forwardCache         *embeddingForwardWeights
-	boundForward         embeddingForwardWeights
-	forwardDirty         bool
-	forwardNeedsBind     bool
-	forwardBindSkips     int64
-	scratchF32           [][]float32
+	module     *eosartifact.Module
+	manifest   EmbeddingManifest
+	config     EmbeddingTrainConfig
+	memoryPlan *MemoryPlan
+	// Retrieval-nDCG eval gate (optional). When enabled, each pairwise/contrastive
+	// eval also embeds a held-out BEIR-style corpus with the current in-training
+	// weights and computes nDCG@10 — the deployment metric — so training can
+	// select/restore-best on it instead of the saturated pairwise gate.
+	retrievalEvalRuntime   *Runtime
+	retrievalEvalConfig    RetrievalEvalConfig
+	retrievalEvalTokenizer *TokenizerFile
+	retrievalEvalEnabled   bool
+	step                   int
+	tokenParam             eosartifact.Param
+	attnQParam             eosartifact.Param
+	attnKParam             eosartifact.Param
+	attnVParam             eosartifact.Param
+	attnOParam             eosartifact.Param
+	hiddenParam            eosartifact.Param
+	projParam              eosartifact.Param
+	tokenEmbed             *backend.Tensor
+	attentionQuery         *backend.Tensor
+	attentionKey           *backend.Tensor
+	attentionValue         *backend.Tensor
+	attentionOutput        *backend.Tensor
+	hiddenProjection       *backend.Tensor
+	projection             *backend.Tensor
+	tokenMom1              *backend.Tensor
+	tokenMom2              *backend.Tensor
+	attnQMom1              *backend.Tensor
+	attnQMom2              *backend.Tensor
+	attnKMom1              *backend.Tensor
+	attnKMom2              *backend.Tensor
+	attnVMom1              *backend.Tensor
+	attnVMom2              *backend.Tensor
+	attnOMom1              *backend.Tensor
+	attnOMom2              *backend.Tensor
+	hiddenMom1             *backend.Tensor
+	hiddenMom2             *backend.Tensor
+	projMom1               *backend.Tensor
+	projMom2               *backend.Tensor
+	forwardMatMul          backend.MatMulAccelerator
+	forwardBackend         eosartifact.BackendKind
+	optimizerAccel         backend.OptimizerAccelerator
+	optimizerBackend       eosartifact.BackendKind
+	activationAccel        backend.ActivationAccelerator
+	activationBackend      eosartifact.BackendKind
+	activationAccelFull    bool
+	softmaxBackwardAccel   bool
+	contrastiveAccel       backend.ContrastiveAccelerator
+	contrastiveBackend     eosartifact.BackendKind
+	sequenceBindingID      int
+	momentsDirty           bool
+	forwardCache           *embeddingForwardWeights
+	boundForward           embeddingForwardWeights
+	forwardDirty           bool
+	forwardNeedsBind       bool
+	forwardBindSkips       int64
+	scratchF32             [][]float32
 }
 
 type embeddingSequenceState struct {
@@ -744,6 +759,54 @@ func (t *EmbeddingTrainer) EvalBatch(batch []EmbeddingPairExample) (EmbeddingTra
 	return t.runBatch(batch, false)
 }
 
+// configureRetrievalEval enables the retrieval-nDCG eval gate for this run. When
+// rt and a complete BEIR-style cfg (corpus/queries/qrels) are supplied, every
+// eval additionally computes nDCG@10 over that set with the current weights.
+func (t *EmbeddingTrainer) configureRetrievalEval(rt *Runtime, cfg RetrievalEvalConfig, tok *TokenizerFile) {
+	if t == nil {
+		return
+	}
+	t.retrievalEvalRuntime = rt
+	t.retrievalEvalConfig = cfg
+	t.retrievalEvalTokenizer = tok
+	t.retrievalEvalEnabled = rt != nil &&
+		strings.TrimSpace(cfg.CorpusPath) != "" &&
+		strings.TrimSpace(cfg.QueriesPath) != "" &&
+		strings.TrimSpace(cfg.QrelsPath) != ""
+}
+
+// augmentRetrievalNDCG fills metrics.RetrievalNDCGAt10 by embedding the configured
+// held-out corpus + queries with the trainer's current in-memory weights and
+// scoring nDCG@10 against the qrels. No-op when the gate is not enabled.
+func (t *EmbeddingTrainer) augmentRetrievalNDCG(metrics *EmbeddingEvalMetrics) error {
+	if t == nil || metrics == nil || !t.retrievalEvalEnabled {
+		return nil
+	}
+	weights, err := t.ExportInferenceWeights()
+	if err != nil {
+		return fmt.Errorf("retrieval eval: export weights: %w", err)
+	}
+	opts := make([]LoadOption, 0, len(weights))
+	for name, tensor := range weights {
+		opts = append(opts, WithWeight(name, tensor))
+	}
+	model, err := t.retrievalEvalRuntime.LoadEmbedding(context.Background(), t.module, t.manifest, opts...)
+	if err != nil {
+		return fmt.Errorf("retrieval eval: load model: %w", err)
+	}
+	if t.retrievalEvalTokenizer != nil {
+		if err := model.attachTokenizer(*t.retrievalEvalTokenizer); err != nil {
+			return fmt.Errorf("retrieval eval: attach tokenizer: %w", err)
+		}
+	}
+	result, err := EvaluateEmbeddingRetrieval(context.Background(), model, t.retrievalEvalConfig)
+	if err != nil {
+		return fmt.Errorf("retrieval eval: %w", err)
+	}
+	metrics.RetrievalNDCGAt10 = float32(result.Quality.NDCGAt10)
+	return nil
+}
+
 // EvaluatePairs runs the forward path and returns ship-facing pairwise quality metrics.
 func (t *EmbeddingTrainer) EvaluatePairs(batch []EmbeddingPairExample) (EmbeddingEvalMetrics, error) {
 	if t == nil {
@@ -790,6 +853,9 @@ func (t *EmbeddingTrainer) EvaluatePairs(batch []EmbeddingPairExample) (Embeddin
 	metrics.ScoreMargin = metrics.PositiveMeanScore - metrics.NegativeMeanScore
 	finalizeEvalScoreMetrics(&metrics, scores)
 	finalizeEvalRankMetrics(&metrics, rankScores)
+	if err := t.augmentRetrievalNDCG(&metrics); err != nil {
+		return EmbeddingEvalMetrics{}, err
+	}
 	return metrics, nil
 }
 
@@ -1031,7 +1097,11 @@ func (t *EmbeddingTrainer) EvaluateContrastive(batch []EmbeddingContrastiveExamp
 	}
 	defer t.releaseEncodedSequences(queries)
 	defer t.releaseEncodedSequences(positives)
-	return evaluateContrastiveEncodings(queries, positives, t.config), nil
+	metrics := evaluateContrastiveEncodings(queries, positives, t.config)
+	if err := t.augmentRetrievalNDCG(&metrics); err != nil {
+		return EmbeddingEvalMetrics{}, err
+	}
+	return metrics, nil
 }
 
 // TrainStep runs one SGD-style update over a batch of pairwise examples.

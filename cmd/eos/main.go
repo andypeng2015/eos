@@ -2231,6 +2231,12 @@ func runTrainEmbed(args []string) error {
 	var teacherTemperature float64
 	var teacherSourceTemperatures string
 	var teacherScoreNormalization string
+	var retrievalEvalDir string
+	var retrievalEvalSplit string
+	var retrievalEvalMaxDocs int
+	var retrievalEvalMaxQueries int
+	var retrievalEvalBatchSize int
+	var retrievalEvalTopK int
 	fs.IntVar(&epochs, "epochs", 10, "number of epochs")
 	fs.IntVar(&batchSize, "batch-size", 8, "batch size")
 	fs.BoolVar(&shuffle, "shuffle", true, "shuffle training set each epoch")
@@ -2260,6 +2266,12 @@ func runTrainEmbed(args []string) error {
 	fs.Float64Var(&teacherTemperature, "teacher-temperature", 0, "teacher score softmax temperature for hard-negative distillation")
 	fs.StringVar(&teacherSourceTemperatures, "teacher-source-temperatures", "", "comma-separated source=temperature overrides for teacher distillation, for example scifact=10,nfcorpus:model=1.5")
 	fs.StringVar(&teacherScoreNormalization, "teacher-score-normalization", "", "normalize hard-negative teacher_scores before distillation: none, source_zscore, family_zscore, or example_zscore")
+	fs.StringVar(&retrievalEvalDir, "retrieval-eval-dir", "", "BEIR-style dataset dir for per-epoch retrieval nDCG@10 eval with current weights; enables -select-metric retrieval_ndcg")
+	fs.StringVar(&retrievalEvalSplit, "retrieval-eval-split", "test", "qrels split for retrieval eval (test/dev/train)")
+	fs.IntVar(&retrievalEvalMaxDocs, "retrieval-eval-max-docs", 5000, "cap corpus docs embedded per retrieval eval (0 = all); smaller is faster per-epoch")
+	fs.IntVar(&retrievalEvalMaxQueries, "retrieval-eval-max-queries", 500, "cap queries per retrieval eval (0 = all)")
+	fs.IntVar(&retrievalEvalBatchSize, "retrieval-eval-batch-size", 0, "batch size for retrieval eval embedding (0 = use --batch-size)")
+	fs.IntVar(&retrievalEvalTopK, "retrieval-eval-top-k", 100, "top-k for retrieval eval ranking")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2359,6 +2371,32 @@ func runTrainEmbed(args []string) error {
 	if progressEvery > 0 {
 		runConfig.Progress = printTrainProgress
 	}
+	if strings.TrimSpace(retrievalEvalDir) != "" {
+		if tokenizerPath == "" {
+			return fmt.Errorf("--retrieval-eval-dir needs a tokenizer to embed corpus/query text (set --tokenizer or keep the sibling tokenizer; incompatible with --no-tokenizer)")
+		}
+		tokFile, terr := eosruntime.ReadTokenizerFile(tokenizerPath)
+		if terr != nil {
+			return fmt.Errorf("retrieval eval tokenizer: %w", terr)
+		}
+		corpusPath, queriesPath, qrelsPath := eosruntime.BEIRRetrievalPaths(retrievalEvalDir, retrievalEvalSplit)
+		retrBatch := retrievalEvalBatchSize
+		if retrBatch <= 0 {
+			retrBatch = batchSize
+		}
+		runConfig.RetrievalEvalRuntime = eosruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+		runConfig.RetrievalEvalTokenizer = &tokFile
+		runConfig.RetrievalEval = eosruntime.RetrievalEvalConfig{
+			DatasetName: filepath.Base(retrievalEvalDir),
+			CorpusPath:  corpusPath,
+			QueriesPath: queriesPath,
+			QrelsPath:   qrelsPath,
+			BatchSize:   retrBatch,
+			TopK:        retrievalEvalTopK,
+			MaxDocs:     retrievalEvalMaxDocs,
+			MaxQueries:  retrievalEvalMaxQueries,
+		}
+	}
 	workload, workloadErr := estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath, runConfig)
 	if workloadErr == nil {
 		fmt.Printf("planned workload: %s\n", formatTrainWorkload(workload))
@@ -2393,7 +2431,7 @@ func runTrainEmbed(args []string) error {
 	fmt.Printf("epochs: %d, steps: %d, run_steps: %d, best_epoch: %d, best_step: %d\n", summary.EpochsCompleted, summary.StepsCompleted, summary.StepsRun, summary.BestEpoch, summary.BestStep)
 	fmt.Printf("final train: loss=%.6f avg_score=%.6f batch=%d\n", summary.FinalTrain.Loss, summary.FinalTrain.AverageScore, summary.FinalTrain.BatchSize)
 	if summary.FinalEval != nil {
-		fmt.Printf("final eval: loss=%.6f margin=%.6f accuracy=%.6f threshold_accuracy=%.6f threshold=%.6f auc=%.6f top1=%.6f top5=%.6f top10=%.6f mrr=%.6f mean_rank=%.3f pairs=%d\n", summary.FinalEval.Loss, summary.FinalEval.ScoreMargin, summary.FinalEval.PairAccuracy, summary.FinalEval.ThresholdAccuracy, summary.FinalEval.ScoreThreshold, summary.FinalEval.ROCAUC, summary.FinalEval.Top1Accuracy, summary.FinalEval.Top5Accuracy, summary.FinalEval.Top10Accuracy, summary.FinalEval.MeanReciprocalRank, summary.FinalEval.MeanPositiveRank, summary.FinalEval.PairCount)
+		fmt.Printf("final eval: loss=%.6f margin=%.6f accuracy=%.6f threshold_accuracy=%.6f threshold=%.6f auc=%.6f top1=%.6f top5=%.6f top10=%.6f mrr=%.6f mean_rank=%.3f retrieval_ndcg=%.6f pairs=%d\n", summary.FinalEval.Loss, summary.FinalEval.ScoreMargin, summary.FinalEval.PairAccuracy, summary.FinalEval.ThresholdAccuracy, summary.FinalEval.ScoreThreshold, summary.FinalEval.ROCAUC, summary.FinalEval.Top1Accuracy, summary.FinalEval.Top5Accuracy, summary.FinalEval.Top10Accuracy, summary.FinalEval.MeanReciprocalRank, summary.FinalEval.MeanPositiveRank, summary.FinalEval.RetrievalNDCGAt10, summary.FinalEval.PairCount)
 	}
 	fmt.Printf("workload: %s\n", formatTrainWorkload(summary.Workload))
 	fmt.Printf("throughput: %s\n", formatTrainThroughput(summary))
@@ -2874,7 +2912,7 @@ func runTrainCorpus(args []string) error {
 	fmt.Printf("epochs: %d, steps: %d, run_steps: %d, best_epoch: %d, best_step: %d\n", summary.EpochsCompleted, summary.StepsCompleted, summary.StepsRun, summary.BestEpoch, summary.BestStep)
 	fmt.Printf("final train: loss=%.6f avg_score=%.6f batch=%d\n", summary.FinalTrain.Loss, summary.FinalTrain.AverageScore, summary.FinalTrain.BatchSize)
 	if summary.FinalEval != nil {
-		fmt.Printf("final eval: loss=%.6f margin=%.6f accuracy=%.6f threshold_accuracy=%.6f threshold=%.6f auc=%.6f top1=%.6f top5=%.6f top10=%.6f mrr=%.6f mean_rank=%.3f pairs=%d\n", summary.FinalEval.Loss, summary.FinalEval.ScoreMargin, summary.FinalEval.PairAccuracy, summary.FinalEval.ThresholdAccuracy, summary.FinalEval.ScoreThreshold, summary.FinalEval.ROCAUC, summary.FinalEval.Top1Accuracy, summary.FinalEval.Top5Accuracy, summary.FinalEval.Top10Accuracy, summary.FinalEval.MeanReciprocalRank, summary.FinalEval.MeanPositiveRank, summary.FinalEval.PairCount)
+		fmt.Printf("final eval: loss=%.6f margin=%.6f accuracy=%.6f threshold_accuracy=%.6f threshold=%.6f auc=%.6f top1=%.6f top5=%.6f top10=%.6f mrr=%.6f mean_rank=%.3f retrieval_ndcg=%.6f pairs=%d\n", summary.FinalEval.Loss, summary.FinalEval.ScoreMargin, summary.FinalEval.PairAccuracy, summary.FinalEval.ThresholdAccuracy, summary.FinalEval.ScoreThreshold, summary.FinalEval.ROCAUC, summary.FinalEval.Top1Accuracy, summary.FinalEval.Top5Accuracy, summary.FinalEval.Top10Accuracy, summary.FinalEval.MeanReciprocalRank, summary.FinalEval.MeanPositiveRank, summary.FinalEval.RetrievalNDCGAt10, summary.FinalEval.PairCount)
 	}
 	fmt.Printf("workload: %s\n", formatTrainWorkload(summary.Workload))
 	fmt.Printf("throughput: %s\n", formatTrainThroughput(summary))
