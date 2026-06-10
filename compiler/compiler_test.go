@@ -300,6 +300,36 @@ func TestBuildEncoderTrainableQ8x2Preset(t *testing.T) {
 	}
 }
 
+func TestBuildEncoderTrainableQ4x2Preset(t *testing.T) {
+	bundle, err := Build(nil, Options{ModuleName: "encoder_trainable_q4x2", Preset: PresetEncoderTrainableQ4x2})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if got := len(bundle.Artifact.Params); got != 7 {
+		t.Fatalf("param count = %d, want 7", got)
+	}
+	if got := len(bundle.Artifact.EntryPoints); got != 2 {
+		t.Fatalf("entrypoint count = %d, want 2", got)
+	}
+	if got := bundle.Artifact.EntryPoints[0].Name; got != "embed_pooled" {
+		t.Fatalf("entrypoint[0] = %q, want embed_pooled", got)
+	}
+	if got := strings.Join(bundle.Artifact.EntryPoints[0].Outputs[0].Type.Tensor.Shape, ","); got != "D" {
+		t.Fatalf("embed_pooled output shape = %q, want D", got)
+	}
+	if got := strings.Join(bundle.Artifact.EntryPoints[1].Outputs[0].Type.Tensor.Shape, ","); got != "B,D" {
+		t.Fatalf("embed_pooled_batch output shape = %q, want B,D", got)
+	}
+	for _, param := range bundle.Artifact.Params {
+		if !param.Trainable {
+			t.Fatalf("param %q is not trainable", param.Name)
+		}
+		if param.Type.Tensor == nil || param.Type.Tensor.DType != "q4" {
+			t.Fatalf("param %q dtype = %+v, want q4 tensor", param.Name, param.Type)
+		}
+	}
+}
+
 func TestBuildTinyAttentionEmbedSource(t *testing.T) {
 	src := []byte(`
 param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable

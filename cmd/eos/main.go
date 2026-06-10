@@ -1930,6 +1930,7 @@ func runInitModel(args []string) error {
 	var learningRate float64
 	var weightDecay float64
 	var weightBits int
+	var weightDType string
 	var optimizer string
 	var contrastiveLoss string
 	var temperature float64
@@ -1946,6 +1947,7 @@ func runInitModel(args []string) error {
 	fs.Float64Var(&learningRate, "lr", 0, "trainer learning rate")
 	fs.Float64Var(&weightDecay, "weight-decay", 0, "trainer weight decay")
 	fs.IntVar(&weightBits, "weight-bits", 0, "forward fake-quant bits")
+	fs.StringVar(&weightDType, "weight-dtype", "q8", "trainable weight dtype: q8 or q4")
 	fs.StringVar(&optimizer, "optimizer", "", "optimizer name")
 	fs.StringVar(&contrastiveLoss, "contrastive-loss", "", "contrastive loss: pair_mse, infonce, grouped_infonce, or hybrid_infonce")
 	fs.Float64Var(&temperature, "temperature", 0, "contrastive softmax temperature")
@@ -1988,6 +1990,7 @@ func runInitModel(args []string) error {
 		LearningRate:       float32(learningRate),
 		WeightDecay:        float32(weightDecay),
 		WeightBits:         weightBits,
+		WeightDType:        weightDType,
 		Optimizer:          optimizer,
 		ContrastiveLoss:    contrastiveLoss,
 		Temperature:        float32(temperature),

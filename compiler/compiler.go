@@ -26,6 +26,7 @@ const (
 	PresetTinyEmbedPooled       Preset = "tiny_embed_pooled"
 	PresetTinyEmbedMaskedPooled Preset = "tiny_embed_masked_pooled"
 	PresetEncoderTrainableQ8x2  Preset = "encoder_trainable_q8x2"
+	PresetEncoderTrainableQ4x2  Preset = "encoder_trainable_q4x2"
 	PresetTinyDecode            Preset = "tiny_decode"
 	PresetTinyScore             Preset = "tiny_score"
 	PresetTinyRerank            Preset = "tiny_rerank"
@@ -400,99 +401,9 @@ pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16
 }
 `
 	case PresetEncoderTrainableQ8x2:
-		return `
-param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable
-param attn_q: q8[D, D] @weight("weights/attn_q") @trainable
-param attn_k: q8[D, D] @weight("weights/attn_k") @trainable
-param attn_v: q8[D, D] @weight("weights/attn_v") @trainable
-param attn_o: q8[D, D] @weight("weights/attn_o") @trainable
-param ffn_up: q8[D, H] @weight("weights/ffn_up") @trainable
-param projection: q8[H, D] @weight("weights/projection") @trainable
-
-pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[D] {
-    let hidden_q = gather(token_embedding, tokens)
-    let hidden = dequant(hidden_q)
-    let wq_f = dequant(attn_q)
-    let wk_f = dequant(attn_k)
-    let wv_f = dequant(attn_v)
-    let wo_f = dequant(attn_o)
-    let ffn_up_f = dequant(ffn_up)
-    let projection_f = dequant(projection)
-
-    let q1 = @matmul(hidden, wq_f)
-    let k1 = @matmul(hidden, wk_f)
-    let v1 = @matmul(hidden, wv_f)
-    let kt1 = transpose(k1)
-    let scores1 = @matmul(q1, kt1)
-    let probs1 = softmax(scores1)
-    let mixed1 = @matmul(probs1, v1)
-    let attended1 = @matmul(mixed1, wo_f)
-    let attn_hidden1 = layernorm(attended1 + hidden)
-    let ffn_hidden1 = @matmul(attn_hidden1, ffn_up_f)
-    let activated1 = gelu(ffn_hidden1)
-    let projected1 = @matmul(activated1, projection_f)
-    let encoded1 = layernorm(projected1 + attn_hidden1)
-
-    let q2 = @matmul(encoded1, wq_f)
-    let k2 = @matmul(encoded1, wk_f)
-    let v2 = @matmul(encoded1, wv_f)
-    let kt2 = transpose(k2)
-    let scores2 = @matmul(q2, kt2)
-    let probs2 = softmax(scores2)
-    let mixed2 = @matmul(probs2, v2)
-    let attended2 = @matmul(mixed2, wo_f)
-    let attn_hidden2 = layernorm(attended2 + encoded1)
-    let ffn_hidden2 = @matmul(attn_hidden2, ffn_up_f)
-    let activated2 = gelu(ffn_hidden2)
-    let projected2 = @matmul(activated2, projection_f)
-    let encoded2 = layernorm(projected2 + attn_hidden2)
-
-    let normalized = normalize(encoded2)
-    return mean_pool(normalized, attention_mask)
-}
-
-pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, D] {
-    let hidden_q = gather(token_embedding, tokens)
-    let hidden = dequant(hidden_q)
-    let wq_f = dequant(attn_q)
-    let wk_f = dequant(attn_k)
-    let wv_f = dequant(attn_v)
-    let wo_f = dequant(attn_o)
-    let ffn_up_f = dequant(ffn_up)
-    let projection_f = dequant(projection)
-
-    let q1 = @matmul(hidden, wq_f)
-    let k1 = @matmul(hidden, wk_f)
-    let v1 = @matmul(hidden, wv_f)
-    let kt1 = transpose(k1)
-    let scores1 = @matmul(q1, kt1)
-    let probs1 = softmax(scores1)
-    let mixed1 = @matmul(probs1, v1)
-    let attended1 = @matmul(mixed1, wo_f)
-    let attn_hidden1 = layernorm(attended1 + hidden)
-    let ffn_hidden1 = @matmul(attn_hidden1, ffn_up_f)
-    let activated1 = gelu(ffn_hidden1)
-    let projected1 = @matmul(activated1, projection_f)
-    let encoded1 = layernorm(projected1 + attn_hidden1)
-
-    let q2 = @matmul(encoded1, wq_f)
-    let k2 = @matmul(encoded1, wk_f)
-    let v2 = @matmul(encoded1, wv_f)
-    let kt2 = transpose(k2)
-    let scores2 = @matmul(q2, kt2)
-    let probs2 = softmax(scores2)
-    let mixed2 = @matmul(probs2, v2)
-    let attended2 = @matmul(mixed2, wo_f)
-    let attn_hidden2 = layernorm(attended2 + encoded1)
-    let ffn_hidden2 = @matmul(attn_hidden2, ffn_up_f)
-    let activated2 = gelu(ffn_hidden2)
-    let projected2 = @matmul(activated2, projection_f)
-    let encoded2 = layernorm(projected2 + attn_hidden2)
-
-    let normalized = normalize(encoded2)
-    return mean_pool(normalized, attention_mask)
-}
-`
+		return encoderTrainableSource("q8")
+	case PresetEncoderTrainableQ4x2:
+		return encoderTrainableSource("q4")
 	case PresetTinyDecode:
 		return `
 param wq: f16[D, D] @weight("weights/wq")
@@ -582,6 +493,104 @@ pipeline rerank_candidates_packed(query: f16[D], docs: q4[N, D], candidate_ids: 
 	default:
 		return ""
 	}
+}
+
+// encoderTrainableSource renders the default two-layer tied-weight encoder
+// module with every trainable param declared at the given quantized dtype.
+func encoderTrainableSource(weightDType string) string {
+	return fmt.Sprintf(`
+param token_embedding: %[1]s[V, D] @weight("weights/token_embedding") @trainable
+param attn_q: %[1]s[D, D] @weight("weights/attn_q") @trainable
+param attn_k: %[1]s[D, D] @weight("weights/attn_k") @trainable
+param attn_v: %[1]s[D, D] @weight("weights/attn_v") @trainable
+param attn_o: %[1]s[D, D] @weight("weights/attn_o") @trainable
+param ffn_up: %[1]s[D, H] @weight("weights/ffn_up") @trainable
+param projection: %[1]s[H, D] @weight("weights/projection") @trainable
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[D] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let wq_f = dequant(attn_q)
+    let wk_f = dequant(attn_k)
+    let wv_f = dequant(attn_v)
+    let wo_f = dequant(attn_o)
+    let ffn_up_f = dequant(ffn_up)
+    let projection_f = dequant(projection)
+
+    let q1 = @matmul(hidden, wq_f)
+    let k1 = @matmul(hidden, wk_f)
+    let v1 = @matmul(hidden, wv_f)
+    let kt1 = transpose(k1)
+    let scores1 = @matmul(q1, kt1)
+    let probs1 = softmax(scores1)
+    let mixed1 = @matmul(probs1, v1)
+    let attended1 = @matmul(mixed1, wo_f)
+    let attn_hidden1 = layernorm(attended1 + hidden)
+    let ffn_hidden1 = @matmul(attn_hidden1, ffn_up_f)
+    let activated1 = gelu(ffn_hidden1)
+    let projected1 = @matmul(activated1, projection_f)
+    let encoded1 = layernorm(projected1 + attn_hidden1)
+
+    let q2 = @matmul(encoded1, wq_f)
+    let k2 = @matmul(encoded1, wk_f)
+    let v2 = @matmul(encoded1, wv_f)
+    let kt2 = transpose(k2)
+    let scores2 = @matmul(q2, kt2)
+    let probs2 = softmax(scores2)
+    let mixed2 = @matmul(probs2, v2)
+    let attended2 = @matmul(mixed2, wo_f)
+    let attn_hidden2 = layernorm(attended2 + encoded1)
+    let ffn_hidden2 = @matmul(attn_hidden2, ffn_up_f)
+    let activated2 = gelu(ffn_hidden2)
+    let projected2 = @matmul(activated2, projection_f)
+    let encoded2 = layernorm(projected2 + attn_hidden2)
+
+    let normalized = normalize(encoded2)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, D] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let wq_f = dequant(attn_q)
+    let wk_f = dequant(attn_k)
+    let wv_f = dequant(attn_v)
+    let wo_f = dequant(attn_o)
+    let ffn_up_f = dequant(ffn_up)
+    let projection_f = dequant(projection)
+
+    let q1 = @matmul(hidden, wq_f)
+    let k1 = @matmul(hidden, wk_f)
+    let v1 = @matmul(hidden, wv_f)
+    let kt1 = transpose(k1)
+    let scores1 = @matmul(q1, kt1)
+    let probs1 = softmax(scores1)
+    let mixed1 = @matmul(probs1, v1)
+    let attended1 = @matmul(mixed1, wo_f)
+    let attn_hidden1 = layernorm(attended1 + hidden)
+    let ffn_hidden1 = @matmul(attn_hidden1, ffn_up_f)
+    let activated1 = gelu(ffn_hidden1)
+    let projected1 = @matmul(activated1, projection_f)
+    let encoded1 = layernorm(projected1 + attn_hidden1)
+
+    let q2 = @matmul(encoded1, wq_f)
+    let k2 = @matmul(encoded1, wk_f)
+    let v2 = @matmul(encoded1, wv_f)
+    let kt2 = transpose(k2)
+    let scores2 = @matmul(q2, kt2)
+    let probs2 = softmax(scores2)
+    let mixed2 = @matmul(probs2, v2)
+    let attended2 = @matmul(mixed2, wo_f)
+    let attn_hidden2 = layernorm(attended2 + encoded1)
+    let ffn_hidden2 = @matmul(attn_hidden2, ffn_up_f)
+    let activated2 = gelu(ffn_hidden2)
+    let projected2 = @matmul(activated2, projection_f)
+    let encoded2 = layernorm(projected2 + attn_hidden2)
+
+    let normalized = normalize(encoded2)
+    return mean_pool(normalized, attention_mask)
+}
+`, weightDType)
 }
 
 func lowerTensorType(t syntax.TypeRef) hir.TensorType {

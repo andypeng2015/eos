@@ -26,6 +26,7 @@ type DefaultEmbeddingPackageConfig struct {
 	LearningRate       float32
 	WeightDecay        float32
 	WeightBits         int
+	WeightDType        string
 	Optimizer          string
 	ContrastiveLoss    string
 	Temperature        float32
@@ -51,7 +52,7 @@ func InitDefaultEmbeddingPackage(path string, cfg DefaultEmbeddingPackageConfig)
 	moduleName := moduleNameForModel(cfg.Name)
 	bundle, err := compiler.Build(nil, compiler.Options{
 		ModuleName: moduleName,
-		Preset:     compiler.PresetEncoderTrainableQ8x2,
+		Preset:     cfg.preset(),
 	})
 	if err != nil {
 		return eosruntime.EmbeddingTrainPackagePaths{}, err
@@ -133,8 +134,17 @@ func (cfg DefaultEmbeddingPackageConfig) normalized() DefaultEmbeddingPackageCon
 	if cfg.LearningRate == 0 {
 		cfg.LearningRate = 0.005
 	}
+	if cfg.WeightDType == "" {
+		cfg.WeightDType = "q8"
+	}
 	if cfg.WeightBits == 0 {
-		cfg.WeightBits = 8
+		// Default the fake-quant training grid to the declared param dtype so
+		// the sealed packed payload is a fixed point of the QAT forward.
+		if cfg.WeightDType == "q4" {
+			cfg.WeightBits = 4
+		} else {
+			cfg.WeightBits = 8
+		}
 	}
 	if cfg.Optimizer == "" {
 		cfg.Optimizer = "adamw"
@@ -170,6 +180,9 @@ func (cfg DefaultEmbeddingPackageConfig) validate() error {
 	if cfg.WeightBits <= 0 {
 		return fmt.Errorf("weight bits must be positive")
 	}
+	if cfg.WeightDType != "q8" && cfg.WeightDType != "q4" {
+		return fmt.Errorf("weight dtype must be q8 or q4, got %q", cfg.WeightDType)
+	}
 	if cfg.Temperature <= 0 {
 		return fmt.Errorf("temperature must be positive")
 	}
@@ -183,6 +196,13 @@ func (cfg DefaultEmbeddingPackageConfig) validate() error {
 		return fmt.Errorf("teacher temperature must be positive")
 	}
 	return nil
+}
+
+func (cfg DefaultEmbeddingPackageConfig) preset() compiler.Preset {
+	if cfg.WeightDType == "q4" {
+		return compiler.PresetEncoderTrainableQ4x2
+	}
+	return compiler.PresetEncoderTrainableQ8x2
 }
 
 func (cfg DefaultEmbeddingPackageConfig) trainConfig() eosruntime.EmbeddingTrainConfig {

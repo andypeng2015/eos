@@ -351,6 +351,44 @@ func TestRunInitModelHonorsEncoderRepeats(t *testing.T) {
 	}
 }
 
+func TestRunInitModelHonorsWeightDType(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manta-embed-v1.mll")
+	if err := run([]string{
+		"init-model",
+		"--vocab-size", "16",
+		"--max-seq", "8",
+		"--embedding-dim", "4",
+		"--hidden-dim", "8",
+		"--weight-dtype", "q4",
+		path,
+	}); err != nil {
+		t.Fatalf("run init-model: %v", err)
+	}
+	mod, err := eosartifact.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read artifact: %v", err)
+	}
+	for _, param := range mod.Params {
+		if param.Type.Tensor == nil || param.Type.Tensor.DType != "q4" {
+			t.Fatalf("param %q dtype = %+v, want q4 tensor", param.Name, param.Type)
+		}
+	}
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(eosruntime.DefaultEmbeddingCheckpointPath(path))
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if checkpoint.Config.WeightBits != 4 {
+		t.Fatalf("weight bits = %d, want 4", checkpoint.Config.WeightBits)
+	}
+	if err := run([]string{
+		"init-model",
+		"--weight-dtype", "int4",
+		filepath.Join(t.TempDir(), "bad.mll"),
+	}); err == nil {
+		t.Fatal("expected weight dtype error")
+	}
+}
+
 func TestRunInitMirageCreatesArtifact(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "mirage-v1.mll")
 	output := captureRunOutput(t, []string{

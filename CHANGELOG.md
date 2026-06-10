@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added the `encoder_trainable_q4x2` compiler preset (the default two-layer trainable encoder with every param declared `q4`) and `eos init-model --weight-dtype q4` / `DefaultEmbeddingPackageConfig.WeightDType` to initialize 4-bit QAT embedding packages. Training fake-quant defaults to 4 bits for q4 packages, and sealed exports pack the weights as true Q4 nibbles with per-tensor scales.
 - Added `relabel-teacher-negatives`: converts teacher-scored mined hard negatives into clean training rows by promoting teacher-confirmed-relevant candidates to positive rows, keeping teacher-confirmed-irrelevant candidates as negatives, and dropping the ambiguous band. Fixes the false-negative pollution that capped retrieval quality on sparse-label corpora.
 - Added `sample-corpus-negatives`: emits random non-qrel corpus documents per query for teacher scoring into a true-negative pool.
 - Sealed MLL exports now store q8/q4 fake-quantized weights as real packed payloads (int8 bytes or two offset-binary nibbles per byte) with per-tensor dequantization scales in XMTA metadata. The packed grid matches the QAT forward exactly, so retrieval metrics are bit-identical while sealed packages shrink ~3.8x (q8). `eos export-mll -pack-quantized=false` restores widened float32 storage.
