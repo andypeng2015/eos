@@ -11,3 +11,8 @@ docs/specs/
 docs/plans/
 *.spec.md
 *.plan.md
+
+# Local agent scratch/config and generated caches.
+.codex/
+.tiller/
+scripts/__pycache__/
