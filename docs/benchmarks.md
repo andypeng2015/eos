@@ -29,7 +29,7 @@ The sparse-attention harness first writes a routed preflight plan as `sparse-att
 Run the default-model training smoke from a local asset package:
 
 ```bash
-EOS_BENCH_ROOT=$PWD EOS_BENCH_MODEL_ASSETS=/path/to/assets/manta-embed-v1 ferrous-wheel run scripts/bench.fw
+EOS_BENCH_ROOT=$PWD EOS_BENCH_MODEL_ASSETS=/path/to/assets/eos-embed-v1 ferrous-wheel run scripts/bench.fw
 ```
 
 The model smoke copies the package into a temporary directory before training. It does not mutate the source asset directory.
@@ -37,7 +37,7 @@ The model smoke copies the package into a temporary directory before training. I
 Evaluate an existing candidate package against a token JSONL or text-pair JSONL eval file without running optimizer steps:
 
 ```bash
-go run ./cmd/eos train-embed --eval-only /path/to/manta-embed-v1.mll /path/to/eval-mini.jsonl
+go run ./cmd/eos train-embed --eval-only /path/to/eos-embed-v1.mll /path/to/eval-mini.jsonl
 ```
 
 When the package has a sibling `.tokenizer.mll`, text eval JSONL is tokenized automatically. Pass `--tokenizer /path/to/tokenizer.mll` to use an explicit tokenizer.
@@ -48,21 +48,154 @@ Build the long-context embedder wedge scoreboard from an existing sealed candida
 
 ```bash
 EOS_REPO_ROOT=$PWD \
-EOS_SCOREBOARD_ARTIFACT=/path/to/manta-embed-v1.sealed.mll \
-EOS_SCOREBOARD_PAIRWISE_JSONL=/data/manta/datasets/manta-embed-v1/processed/eval.jsonl \
-EOS_SCOREBOARD_HARD_JSONL=/data/manta/datasets/manta-embed-v1/processed/hard-eval.jsonl \
-EOS_SCOREBOARD_RETRIEVAL_ROOT=/data/manta/datasets/manta-embed-v1 \
+EOS_SCOREBOARD_ARTIFACT=/path/to/eos-embed-v1.sealed.mll \
+EOS_SCOREBOARD_PAIRWISE_JSONL=/data/manta/datasets/eos-embed-v1/processed/eval.jsonl \
+EOS_SCOREBOARD_HARD_JSONL=/data/manta/datasets/eos-embed-v1/processed/hard-eval.jsonl \
+EOS_SCOREBOARD_RETRIEVAL_ROOT=/data/manta/datasets/eos-embed-v1 \
 EOS_SCOREBOARD_RETRIEVAL_DATASETS=scifact,nfcorpus,fiqa \
 ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
 ```
 
-The scoreboard run writes `scoreboard.tsv`, `scoreboard.json`, per-task metrics JSON, command logs, and a run-local `eos` binary under `runs/<run-id>/`. Pairwise rows use `EOS_SCOREBOARD_PAIRWISE_ARTIFACT` when set, or infer the sibling trainable package from a sealed artifact path. Add `EOS_SCOREBOARD_LONG_ROOT` and `EOS_SCOREBOARD_LONG_DATASETS` when long-document retrieval datasets are prepared.
+The scoreboard run writes `scoreboard.tsv`, `scoreboard.json`, per-task metrics JSON, command logs, and a run-local `eos` binary under `runs/<run-id>/`. Dense local rows default to `baseline=eos`; hybrid rows default to `baseline=eos-hybrid`; local TurboQuant rows use `eos-turboquant` for direct quantized scoring and `eos-turboquant-rerank` for quantized candidate overfetch plus rerank storage modes such as fp16; external TurboQuant rows use `<external>-turboquant`. Set `EOS_SCOREBOARD_BASELINE_LABEL=manta` and `EOS_SCOREBOARD_HYBRID_BASELINE_LABEL=manta-hybrid` only when intentionally producing a legacy-labeled scoreboard. Pairwise rows use `EOS_SCOREBOARD_PAIRWISE_ARTIFACT` when set, or infer the sibling trainable package from a sealed artifact path. Add `EOS_SCOREBOARD_LONG_ROOT` and `EOS_SCOREBOARD_LONG_DATASETS` when long-document retrieval datasets are prepared.
+
+Calibrate hybrid retrieval before using `eos-hybrid` rows as product evidence:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+EOS_HYBRID_CAL_MODE=vectors \
+EOS_HYBRID_CAL_VECTOR_ROOT=runs/external-vector-caches/qwen3-0.6b \
+EOS_HYBRID_CAL_VECTOR_BACKEND=qwen3 \
+EOS_HYBRID_CAL_DATASETS=nfcorpus \
+EOS_HYBRID_CAL_DEV_SPLIT=dev \
+EOS_HYBRID_CAL_TEST_SPLIT=test \
+ferrous-wheel run scripts/calibrate_eos_embed_hybrid_retrieval.fw
+```
+
+The calibration run measures dense, BM25, and candidate hybrid settings on dev, chooses by nDCG@10 with MRR@10 and recall@100 tie-breakers, then evaluates only the selected setting on test. Its summary JSON/TSV/Markdown includes dense/BM25 comparisons, selected test metrics, protection gate deltas against dense, command logs, and optional sentinel query rows from `EOS_HYBRID_CAL_SENTINEL_QUERY_IDS`.
+
+Retrieval metric glossary:
+
+- `ndcg_at_10` and `ndcg_at_100`: rank-discounted relevance quality at shallow and broad retrieval depths.
+- `mrr_at_10`: reciprocal rank of the first relevant result within the first 10 results.
+- `precision_at_1`, `precision_at_5`, and `precision_at_10`: relevant results divided by the fixed cutoff.
+- `hit_at_1`, `hit_at_5`, and `hit_at_10`: whether at least one relevant result appears by the cutoff, averaged across queries.
+- `map_at_10` and `map_at_100`: mean average precision over relevant positives up to the cutoff.
+- `recall_at_10` and `recall_at_100`: fraction of qrels positives recovered by the cutoff.
+
+For default-shipping decisions, read these together. nDCG and MAP catch ranking quality, precision/hit@k reflect first-screen usefulness, and recall@100 protects downstream reranking or broader candidate generation. Compression rows (`vector_bytes`, `dense_vector_bytes`, `compression_ratio`) describe index footprint; throughput rows (`documents_per_second`, `queries_per_second`, `scores_per_second`, `docs_per_second`) describe encoder, cache-load, quantization, and scoring speed depending on the path. Cached external-vector rows do not measure live provider or model encoder throughput; they only measure loading/scoring the already-exported vectors.
+
+Score external embedders by exporting document and query vector JSONL caches, then run the same BEIR metric code:
+
+```bash
+python3 scripts/export_qwen3_retrieval_vectors.py \
+  --dataset-dir datasets/eos-embed-v1/raw/scifact/scifact \
+  --output-root runs/external-vector-caches/qwen3-0.6b \
+  --dataset-name scifact \
+  --model-name Qwen/Qwen3-Embedding-0.6B \
+  --batch-size 16
+
+go run ./cmd/eos eval-retrieval-vectors \
+  --dataset scifact \
+  --backend qwen3 \
+  --artifact Qwen/Qwen3-Embedding-0.6B \
+  --doc-vectors runs/external-vector-caches/qwen3-0.6b/scifact/doc-vectors.jsonl \
+  --query-vectors runs/external-vector-caches/qwen3-0.6b/scifact/query-vectors.jsonl \
+  --metrics-json runs/scifact.qwen3.retrieval.metrics.json \
+  datasets/eos-embed-v1/raw/scifact/scifact
+```
+
+`scripts/export_qwen3_retrieval_vectors.py` keeps Qwen3/SentenceTransformers dependencies outside the Go runtime. It writes `embedding` arrays and requests normalized embeddings by default; the Eos evaluator normalizes vectors again before scoring. Use caps such as `--max-docs 200 --max-queries 20` for smoke runs.
+
+Each vector cache row must contain `id` or `_id` plus one of `vector`, `embedding`, or `values`, for example `{"id":"doc-1","vector":[0.1,0.2]}`. The evaluator normalizes vectors, requires matching dimensions, scores cosine/dot-product ranking, and emits the same `manta.embedding_retrieval_metrics.v1` JSON as `eval-retrieval`. To add external rows to the Ferrous Wheel scoreboard, place caches at `<EOS_SCOREBOARD_EXTERNAL_VECTOR_ROOT>/<dataset>/doc-vectors.jsonl` and `query-vectors.jsonl`, then set `EOS_SCOREBOARD_EXTERNAL_VECTOR_DATASETS`, `EOS_SCOREBOARD_EXTERNAL_VECTOR_BASELINE`, `EOS_SCOREBOARD_EXTERNAL_VECTOR_BACKEND`, and optionally `EOS_SCOREBOARD_EXTERNAL_VECTOR_ARTIFACT`.
+
+Compare the same external caches after TurboQuant IP document-vector compression:
+
+```bash
+go run ./cmd/eos eval-retrieval-vectors-turboquant \
+  --dataset scifact \
+  --backend qwen3 \
+  --artifact Qwen/Qwen3-Embedding-0.6B \
+  --doc-vectors /data/external-vector-caches/scifact/doc-vectors.jsonl \
+  --query-vectors /data/external-vector-caches/scifact/query-vectors.jsonl \
+  --bits 2,4,8 \
+  --metrics-json runs/scifact.qwen3.turboquant.metrics.json \
+  --metrics-tsv runs/scifact.qwen3.turboquant.metrics.tsv \
+  /data/manta/datasets/eos-embed-v1/raw/scifact/scifact
+```
+
+This external-cache TurboQuant path is the main apples-to-apples comparison surface for CorkScrewDB default promotion: BGE, Qwen, Jina, Voyage, Cohere, OpenAI, and sealed Eos rows can all be scored as dense vectors and as q2/q4/q8 TurboQuant document indexes without adding provider SDKs to Eos.
+
+The scoreboard can append TurboQuant rows for the same external caches:
+
+```bash
+EOS_SCOREBOARD_EXTERNAL_VECTOR_ROOT=runs/external-vector-caches/qwen3-0.6b \
+EOS_SCOREBOARD_EXTERNAL_VECTOR_DATASETS=scifact \
+EOS_SCOREBOARD_EXTERNAL_VECTOR_BASELINE=qwen3 \
+EOS_SCOREBOARD_EXTERNAL_VECTOR_BACKEND=qwen3 \
+EOS_SCOREBOARD_EXTERNAL_VECTOR_ARTIFACT=Qwen/Qwen3-Embedding-0.6B \
+EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT=1 \
+EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT_BITS=2,4,8 \
+ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
+```
+
+Append local sealed Eos TurboQuant rows in the same scoreboard:
+
+```bash
+EOS_SCOREBOARD_TURBOQUANT=1 \
+EOS_SCOREBOARD_TURBOQUANT_BITS=8 \
+EOS_SCOREBOARD_TURBOQUANT_RERANK_OVERFETCH=200 \
+EOS_SCOREBOARD_TURBOQUANT_RERANK_STORAGE=fp16 \
+EOS_SCOREBOARD_TURBOQUANT_BASELINE=eos-turboquant \
+EOS_SCOREBOARD_TURBOQUANT_RERANK_BASELINE=eos-turboquant-rerank \
+ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
+```
+
+The direct and rerank rows share the same metrics JSON but use separate scoreboard baselines. Gate the current compact reranked candidate with `--baseline eos-turboquant-rerank --method turboquant_ip_b8_overfetch200_fp16_rerank --bits 8 --metrics ndcg_at_10,recall_at_100,total_compression_ratio`; gate direct q8 separately with `--baseline eos-turboquant --method turboquant_ip_b8 --bits 8`.
+
+Treat Qwen3 here as a leading-family external baseline until local SciFact dense and TurboQuant rows are measured. Do not infer Eos-versus-Qwen standing from model-card MTEB claims.
+
+Run the TurboQuant retrieval storage/scoring gate against the same sealed candidate and a capped BEIR-style corpus:
+
+```bash
+go run ./cmd/eos eval-retrieval-turboquant \
+  --dataset scifact \
+  --max-docs 200 \
+  --max-queries 20 \
+  --bits 2,4,8 \
+  --rerank-overfetch 200 \
+  --rerank-storage fp16 \
+  --metrics-json runs/turboquant-retrieval-scifact.json \
+  --metrics-tsv runs/turboquant-retrieval-scifact.tsv \
+  /path/to/eos-embed-v1.sealed.mll \
+  /data/manta/datasets/eos-embed-v1/raw/scifact
+```
+
+The TurboQuant gate embeds the corpus once, records the dense float32 reference nDCG@10/recall@100, then quantizes document vectors with `m31labs.dev/turboquant` IP-preserving quantizers and reports per-bit quality deltas, vector bytes, rerank storage, rerank sidecar bytes, total vector bytes, compression ratio, total compression ratio, docs/s, scores/s, and optional rerank overfetch/score counts. Use the capped command for smoke/release checks and remove the caps for a full CorkScrewDB-relevant vector-index promotion run.
+
+Current measured local result: direct q8 is rejected because it misses strict June 10 anchor recall@100 on NFCorpus. q8 overfetch200 exact dense rerank is quality evidence, but it is not a compact default candidate because its f32 sidecar brings total compression below 1. q8 overfetch200 fp16 sidecar rerank is the compact quality-repair candidate: it matched dense/exact rerank quality on SciFact, NFCorpus, and FiQA while preserving total compression above 1 in `runs/eos-embed-v1-fp16-rerank-sidecar-20260614T000000Z/`.
+
+Current sealed-verified local anchor:
+
+```text
+runs/manta-embed-v1-deephard-full-ft-20260610T0000Z/manta-embed-v1.sealed.mll
+```
+
+The June 10 deephard-full candidate is a legacy-named `manta-embed-v1` artifact for the `eos-embed-v1` lineage. It is sealed, inspected, and verified through the full scoreboard path. The sealed artifact SHA256 is `a7461b47784ea7434cf6048f33f6c281ef19887cfa9d0c699b6f2fba079f2b67`. The sealed scoreboard is under `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-sealed-scoreboard/`, and its sealed-vs-train-package comparison recorded zero nonzero quality or count deltas against `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-scoreboard/`.
+
+| Dataset | Previous sealed anchor nDCG@10 | Current sealed anchor nDCG@10 | Delta | Previous sealed anchor recall@100 | Current sealed anchor recall@100 | Delta |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| SciFact | 0.331139 | 0.482406 | +0.151267 | 0.724111 | 0.775778 | +0.051667 |
+| NFCorpus | 0.084325 | 0.197733 | +0.113408 | 0.129067 | 0.235557 | +0.106490 |
+| FiQA | 0.028967 | 0.117533 | +0.088566 | 0.164881 | 0.347197 | +0.182316 |
+| Macro | 0.148144 | 0.265891 | +0.117747 | 0.339353 | 0.452844 | +0.113491 |
+
+Pairwise eval-only rows completed with `optimizer_updates=0`, CUDA forward backend, eval AUC `0.825890`, and hard AUC `0.812725`.
 
 Run a full retrieval-alignment round from an existing candidate when retrieval is behind the BM25 or open-model baselines:
 
 ```bash
 EOS_REPO_ROOT=$PWD \
-EOS_ALIGN_INITIAL_ARTIFACT=/path/to/manta-embed-v1.sealed.mll \
+EOS_ALIGN_INITIAL_ARTIFACT=/path/to/eos-embed-v1.sealed.mll \
 EOS_ALIGN_DATASETS=scifact,nfcorpus,fiqa \
 ferrous-wheel run scripts/run_manta_embed_v1_retrieval_alignment_round.fw
 ```
@@ -115,7 +248,7 @@ For repeatable GPU A/B profiles, use the Ferrous Wheel harness:
 
 ```bash
 EOS_REPO_ROOT=$PWD \
-EOS_GPU_PROFILE_ASSETS=/path/to/assets/manta-embed-v1 \
+EOS_GPU_PROFILE_ASSETS=/path/to/assets/eos-embed-v1 \
 EOS_GPU_PROFILE_TRAIN=/path/to/train-mini.jsonl \
 EOS_GPU_PROFILE_EVAL=/path/to/eval-mini.jsonl \
 EOS_GPU_PROFILE_VARIANTS=default,disable-batched-forward \
@@ -130,7 +263,7 @@ Set `EOS_GPU_PROFILE_NO_TOKENIZER=1` when profiling already-tokenized JSONL so t
 
 The current reference smoke uses:
 
-- model package: `manta-embed-v1`
+- model package: `eos-embed-v1`
 - encoder repeats: `2`
 - tokenizer vocab: `2454`
 - max sequence length: `256`

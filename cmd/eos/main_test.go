@@ -292,7 +292,7 @@ func TestRunInitTrainAppliesTrainingConfigWithDefaultManifest(t *testing.T) {
 }
 
 func TestRunInitModelCreatesDefaultEmbeddingTrainingPackage(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "manta-embed-v1.mll")
+	path := filepath.Join(t.TempDir(), "eos-embed-v1.mll")
 	if err := run([]string{
 		"init-model",
 		"--vocab-size", "16",
@@ -308,8 +308,8 @@ func TestRunInitModelCreatesDefaultEmbeddingTrainingPackage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
-	if manifest.Name != "manta-embed-v1" {
-		t.Fatalf("model name = %q, want manta-embed-v1", manifest.Name)
+	if manifest.Name != "eos-embed-v1" {
+		t.Fatalf("model name = %q, want eos-embed-v1", manifest.Name)
 	}
 	if manifest.EncoderRepeats != 2 {
 		t.Fatalf("encoder repeats = %d, want 2", manifest.EncoderRepeats)
@@ -330,7 +330,7 @@ func TestRunInitModelCreatesDefaultEmbeddingTrainingPackage(t *testing.T) {
 }
 
 func TestRunInitModelHonorsEncoderRepeats(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "manta-embed-v1.mll")
+	path := filepath.Join(t.TempDir(), "eos-embed-v1.mll")
 	if err := run([]string{
 		"init-model",
 		"--vocab-size", "16",
@@ -352,7 +352,7 @@ func TestRunInitModelHonorsEncoderRepeats(t *testing.T) {
 }
 
 func TestRunInitModelHonorsWeightDType(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "manta-embed-v1.mll")
+	path := filepath.Join(t.TempDir(), "eos-embed-v1.mll")
 	if err := run([]string{
 		"init-model",
 		"--vocab-size", "16",
@@ -418,7 +418,7 @@ func TestRunInitMirageCreatesArtifact(t *testing.T) {
 
 func TestRunInitModelTrainCorpusExportFlow(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "manta-embed-v1.mll")
+	path := filepath.Join(dir, "eos-embed-v1.mll")
 	if err := run([]string{
 		"init-model",
 		"--vocab-size", "16",
@@ -460,7 +460,7 @@ func TestRunInitModelTrainCorpusExportFlow(t *testing.T) {
 		"embedding manifest: embedded",
 		"package: embedded sealed MLL",
 		"package verify: OK",
-		"embedding model: manta-embed-v1",
+		"embedding model: eos-embed-v1",
 	} {
 		if !strings.Contains(sealedInspect, want) {
 			t.Fatalf("sealed inspect output missing %q\noutput:\n%s", want, sealedInspect)
@@ -473,7 +473,7 @@ func TestRunInitModelTrainCorpusExportFlow(t *testing.T) {
 
 func TestRunEmbedTextLoadsSealedMLLTokenizer(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "manta-embed-v1.mll")
+	path := filepath.Join(dir, "eos-embed-v1.mll")
 	if err := run([]string{
 		"init-model",
 		"--vocab-size", "8",
@@ -495,14 +495,14 @@ func TestRunEmbedTextLoadsSealedMLLTokenizer(t *testing.T) {
 	if _, _, err := eosruntime.RebuildSiblingPackageManifest(path); err != nil {
 		t.Fatalf("rebuild package manifest: %v", err)
 	}
-	sealedPath := filepath.Join(dir, "manta-embed-v1.sealed.mll")
+	sealedPath := filepath.Join(dir, "eos-embed-v1.sealed.mll")
 	if err := run([]string{"export-mll", path, sealedPath}); err != nil {
 		t.Fatalf("run export-mll: %v", err)
 	}
 
 	output := captureRunOutput(t, []string{"embed-text", sealedPath, "a"})
 	for _, want := range []string{
-		"loaded embedding \"manta-embed-v1\"",
+		"loaded embedding \"eos-embed-v1\"",
 		"tokens: 1",
 		"output: result",
 		"embedding: f16[4]",
@@ -515,7 +515,7 @@ func TestRunEmbedTextLoadsSealedMLLTokenizer(t *testing.T) {
 
 func TestRunEvalRetrievalWritesMetricsJSON(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "manta-embed-v1.mll")
+	path := filepath.Join(dir, "eos-embed-v1.mll")
 	if err := run([]string{
 		"init-model",
 		"--vocab-size", "8",
@@ -537,7 +537,7 @@ func TestRunEvalRetrievalWritesMetricsJSON(t *testing.T) {
 	if _, _, err := eosruntime.RebuildSiblingPackageManifest(path); err != nil {
 		t.Fatalf("rebuild package manifest: %v", err)
 	}
-	sealedPath := filepath.Join(dir, "manta-embed-v1.sealed.mll")
+	sealedPath := filepath.Join(dir, "eos-embed-v1.sealed.mll")
 	if err := run([]string{"export-mll", path, sealedPath}); err != nil {
 		t.Fatalf("run export-mll: %v", err)
 	}
@@ -631,6 +631,269 @@ func TestRunEvalRetrievalBM25WritesMetricsJSON(t *testing.T) {
 	}
 }
 
+func TestRunEvalRetrievalVectorsWritesMetricsJSON(t *testing.T) {
+	dir := t.TempDir()
+	datasetDir := filepath.Join(dir, "dataset")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "corpus.jsonl"), []byte(
+		`{"_id":"d1","text":"alpha"}`+"\n"+
+			`{"_id":"d2","text":"beta"}`+"\n"+
+			`{"_id":"d3","text":"distractor"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "queries.jsonl"), []byte(
+		`{"_id":"q1","text":"alpha query"}`+"\n"+
+			`{"_id":"q2","text":"beta query"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "qrels", "test.tsv"), []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\nq2\td2\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	docVectorsPath := filepath.Join(dir, "doc-vectors.jsonl")
+	queryVectorsPath := filepath.Join(dir, "query-vectors.jsonl")
+	if err := os.WriteFile(docVectorsPath, []byte(
+		`{"_id":"d1","embedding":[1,0]}`+"\n"+
+			`{"_id":"d2","embedding":[0,1]}`+"\n"+
+			`{"_id":"d3","embedding":[0.8,0.6]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write doc vectors: %v", err)
+	}
+	if err := os.WriteFile(queryVectorsPath, []byte(
+		`{"_id":"q1","embedding":[0.7,0.7]}`+"\n"+
+			`{"_id":"q2","embedding":[0,1]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write query vectors: %v", err)
+	}
+	metricsPath := filepath.Join(dir, "vectors.retrieval.metrics.json")
+	perQueryPath := filepath.Join(dir, "vectors.retrieval.per-query.jsonl")
+
+	output := captureRunOutput(t, []string{
+		"eval-retrieval-vectors",
+		"--dataset", "tiny",
+		"--backend", "qwen-cache",
+		"--artifact", "qwen3-embedding",
+		"--doc-vectors", docVectorsPath,
+		"--query-vectors", queryVectorsPath,
+		"--metrics-json", metricsPath,
+		"--per-query-jsonl", perQueryPath,
+		datasetDir,
+	})
+	for _, want := range []string{
+		"retrieval vectors: dataset=tiny backend=qwen-cache",
+		"quality: ndcg@10=",
+		"metrics: " + metricsPath,
+		"per_query: " + perQueryPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("eval-retrieval-vectors output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	var metrics eosruntime.RetrievalEvalMetrics
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		t.Fatalf("decode metrics: %v", err)
+	}
+	wantNDCG := (1/math.Log2(3) + 1) / 2
+	if metrics.Schema != eosruntime.RetrievalEvalMetricsSchema || metrics.Dataset != "tiny" || metrics.Backend != "qwen-cache" || metrics.Artifact != "qwen3-embedding" {
+		t.Fatalf("metrics identity = %+v", metrics)
+	}
+	if math.Abs(metrics.Quality.NDCGAt10-wantNDCG) > 1e-12 || metrics.Quality.MRRAt10 != 0.75 {
+		t.Fatalf("quality = %+v, want ndcg %.12f mrr 0.75", metrics.Quality, wantNDCG)
+	}
+	if metrics.Inputs.Documents != 3 || metrics.Inputs.Queries != 2 || metrics.Inputs.ScoredPairs != 6 {
+		t.Fatalf("input metrics = %+v", metrics.Inputs)
+	}
+	perQueryData, err := os.ReadFile(perQueryPath)
+	if err != nil {
+		t.Fatalf("read per-query JSONL: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(perQueryData)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("per-query lines = %d, want 2\n%s", len(lines), perQueryData)
+	}
+	var first eosruntime.RetrievalEvalPerQueryRow
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
+		t.Fatalf("decode first per-query row: %v", err)
+	}
+	if first.Schema != eosruntime.RetrievalEvalPerQuerySchema || first.Dataset != "tiny" || first.QueryID != "q1" || first.FirstRelevantRank != 2 {
+		t.Fatalf("first per-query row = %+v", first)
+	}
+}
+
+func TestRunEvalRetrievalVectorsHybridWritesMetricsJSON(t *testing.T) {
+	dir := t.TempDir()
+	datasetDir := filepath.Join(dir, "dataset")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "corpus.jsonl"), []byte(
+		`{"_id":"d1","text":"alpha exact target"}`+"\n"+
+			`{"_id":"d2","text":"beta dense distractor"}`+"\n"+
+			`{"_id":"d3","text":"gamma fallback"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "queries.jsonl"), []byte(`{"_id":"q1","text":"alpha"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "qrels", "test.tsv"), []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	docVectorsPath := filepath.Join(dir, "doc-vectors.jsonl")
+	queryVectorsPath := filepath.Join(dir, "query-vectors.jsonl")
+	if err := os.WriteFile(docVectorsPath, []byte(
+		`{"_id":"d1","embedding":[0,1]}`+"\n"+
+			`{"_id":"d2","embedding":[1,0]}`+"\n"+
+			`{"_id":"d3","embedding":[0.5,0]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write doc vectors: %v", err)
+	}
+	if err := os.WriteFile(queryVectorsPath, []byte(`{"_id":"q1","embedding":[1,0]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write query vectors: %v", err)
+	}
+	metricsPath := filepath.Join(dir, "vectors.hybrid.metrics.json")
+	perQueryPath := filepath.Join(dir, "vectors.hybrid.per-query.jsonl")
+
+	output := captureRunOutput(t, []string{
+		"eval-retrieval-vectors-hybrid",
+		"--dataset", "tiny",
+		"--backend", "qwen-cache-hybrid",
+		"--artifact", "qwen3-embedding",
+		"--doc-vectors", docVectorsPath,
+		"--query-vectors", queryVectorsPath,
+		"--method", "minmax",
+		"--alpha", "0.75",
+		"--metrics-json", metricsPath,
+		"--per-query-jsonl", perQueryPath,
+		datasetDir,
+	})
+	for _, want := range []string{
+		"retrieval vectors hybrid: dataset=tiny backend=qwen-cache-hybrid",
+		"hybrid: method=minmax_blend alpha=0.75",
+		"quality: ndcg@10=1.000000",
+		"metrics: " + metricsPath,
+		"per_query: " + perQueryPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("eval-retrieval-vectors-hybrid output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	var metrics eosruntime.RetrievalEvalMetrics
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		t.Fatalf("decode metrics: %v", err)
+	}
+	if metrics.Schema != eosruntime.RetrievalEvalMetricsSchema || metrics.Dataset != "tiny" || metrics.Backend != "qwen-cache-hybrid" || metrics.Artifact != "qwen3-embedding" {
+		t.Fatalf("metrics identity = %+v", metrics)
+	}
+	if metrics.Config.Hybrid == nil || metrics.Config.Hybrid.Method != "minmax_blend" || metrics.Config.Hybrid.Alpha != 0.75 {
+		t.Fatalf("hybrid config = %+v", metrics.Config.Hybrid)
+	}
+	if metrics.Quality.NDCGAt10 != 1 || metrics.Quality.MRRAt10 != 1 {
+		t.Fatalf("quality = %+v, want perfect hybrid top hit", metrics.Quality)
+	}
+	perQueryData, err := os.ReadFile(perQueryPath)
+	if err != nil {
+		t.Fatalf("read per-query JSONL: %v", err)
+	}
+	var row eosruntime.RetrievalEvalPerQueryRow
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(perQueryData))), &row); err != nil {
+		t.Fatalf("decode per-query row: %v", err)
+	}
+	if row.FirstRelevantRank != 1 || len(row.TopK) == 0 || row.TopK[0].DocID != "d1" {
+		t.Fatalf("per-query row = %+v", row)
+	}
+}
+
+func TestRunEvalRetrievalVectorsTurboQuantWritesMetricsJSONAndTSV(t *testing.T) {
+	dir := t.TempDir()
+	datasetDir := filepath.Join(dir, "dataset")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "corpus.jsonl"), []byte(
+		`{"_id":"d1","text":"alpha"}`+"\n"+
+			`{"_id":"d2","text":"beta"}`+"\n"+
+			`{"_id":"d3","text":"gamma"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "queries.jsonl"), []byte(
+		`{"_id":"q1","text":"alpha query"}`+"\n"+
+			`{"_id":"q2","text":"beta query"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "qrels", "test.tsv"), []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\nq2\td2\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	docVectorsPath := filepath.Join(dir, "doc-vectors.jsonl")
+	queryVectorsPath := filepath.Join(dir, "query-vectors.jsonl")
+	if err := os.WriteFile(docVectorsPath, []byte(
+		`{"_id":"d1","embedding":[1,0,0,0,0,0,0,0]}`+"\n"+
+			`{"_id":"d2","embedding":[0,1,0,0,0,0,0,0]}`+"\n"+
+			`{"_id":"d3","embedding":[0,0,1,0,0,0,0,0]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write doc vectors: %v", err)
+	}
+	if err := os.WriteFile(queryVectorsPath, []byte(
+		`{"_id":"q1","embedding":[1,0,0,0,0,0,0,0]}`+"\n"+
+			`{"_id":"q2","embedding":[0,1,0,0,0,0,0,0]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write query vectors: %v", err)
+	}
+	metricsPath := filepath.Join(dir, "vectors.turboquant.metrics.json")
+	metricsTSVPath := filepath.Join(dir, "vectors.turboquant.metrics.tsv")
+
+	output := captureRunOutput(t, []string{
+		"eval-retrieval-vectors-turboquant",
+		"--dataset", "tiny",
+		"--backend", "bge-cache",
+		"--artifact", "bge-m3",
+		"--doc-vectors", docVectorsPath,
+		"--query-vectors", queryVectorsPath,
+		"--bits", "8",
+		"--metrics-json", metricsPath,
+		"--metrics-tsv", metricsTSVPath,
+		datasetDir,
+	})
+	for _, want := range []string{
+		"retrieval vectors turboquant: dataset=tiny backend=bge-cache",
+		"dense: ndcg@10=1.000000 ndcg@100=1.000000 map@10=1.000000 recall@100=1.000000",
+		"q8: ndcg@10=",
+		"metrics: " + metricsPath,
+		"metrics_tsv: " + metricsTSVPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("eval-retrieval-vectors-turboquant output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	var metrics eosruntime.TurboQuantRetrievalEvalMetrics
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		t.Fatalf("decode metrics: %v", err)
+	}
+	if metrics.Schema != eosruntime.TurboQuantRetrievalEvalMetricsSchema || metrics.Dataset != "tiny" || metrics.Backend != "bge-cache" || metrics.Artifact != "bge-m3" {
+		t.Fatalf("metrics identity = %+v", metrics)
+	}
+	if metrics.Inputs.DocVectorPath != docVectorsPath || metrics.Inputs.QueryVectorPath != queryVectorsPath {
+		t.Fatalf("vector paths = %+v", metrics.Inputs)
+	}
+	if metrics.Dense.Quality.NDCGAt10 != 1 || len(metrics.Rows) != 1 || metrics.Rows[0].Bits != 8 {
+		t.Fatalf("metrics = %+v", metrics)
+	}
+	tsv, err := os.ReadFile(metricsTSVPath)
+	if err != nil {
+		t.Fatalf("read metrics TSV: %v", err)
+	}
+	if !strings.Contains(string(tsv), "tiny\tquantized\t8\tturboquant_ip_b8") {
+		t.Fatalf("metrics TSV missing q8 row:\n%s", string(tsv))
+	}
+}
+
 func TestRunMineRetrievalHardNegativesWritesTextJSONL(t *testing.T) {
 	dir := t.TempDir()
 	datasetDir := filepath.Join(dir, "dataset")
@@ -674,7 +937,7 @@ func TestRunMineRetrievalHardNegativesWritesTextJSONL(t *testing.T) {
 
 func TestRunMineRetrievalModelHardNegativesWritesTextJSONL(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "manta-embed-v1.mll")
+	path := filepath.Join(dir, "eos-embed-v1.mll")
 	if err := run([]string{
 		"init-model",
 		"--vocab-size", "8",
@@ -696,7 +959,7 @@ func TestRunMineRetrievalModelHardNegativesWritesTextJSONL(t *testing.T) {
 	if _, _, err := eosruntime.RebuildSiblingPackageManifest(path); err != nil {
 		t.Fatalf("rebuild package manifest: %v", err)
 	}
-	sealedPath := filepath.Join(dir, "manta-embed-v1.sealed.mll")
+	sealedPath := filepath.Join(dir, "eos-embed-v1.sealed.mll")
 	if err := run([]string{"export-mll", path, sealedPath}); err != nil {
 		t.Fatalf("run export-mll: %v", err)
 	}
@@ -1189,6 +1452,214 @@ func TestRunCompareRetrievalMetricsCanRequireBaselineWin(t *testing.T) {
 		if !strings.Contains(output, want) {
 			t.Fatalf("compare-retrieval-metrics output missing %q\noutput:\n%s", want, output)
 		}
+	}
+}
+
+func TestRunGateScoreboardPassesAllSelectedDatasetMetrics(t *testing.T) {
+	dir := t.TempDir()
+	currentPath := filepath.Join(dir, "current.scoreboard.json")
+	anchorPath := filepath.Join(dir, "anchor.scoreboard.json")
+	writeScoreboardForTest(t, currentPath, []retrievalScoreboardRow{
+		{Category: "short_retrieval", Dataset: "scifact", Baseline: "eos", NDCGAt10: 0.51, RecallAt100: 0.80},
+		{Category: "short_retrieval", Dataset: "fiqa", Baseline: "eos", NDCGAt10: 0.12, RecallAt100: 0.35},
+	})
+	writeScoreboardForTest(t, anchorPath, []retrievalScoreboardRow{
+		{Category: "short_retrieval", Dataset: "scifact", Baseline: "eos", NDCGAt10: 0.50, RecallAt100: 0.79},
+		{Category: "short_retrieval", Dataset: "fiqa", Baseline: "eos", NDCGAt10: 0.12, RecallAt100: 0.35},
+	})
+
+	output := captureRunOutput(t, []string{
+		"gate-scoreboard",
+		"--datasets", "scifact,fiqa",
+		currentPath,
+		anchorPath,
+	})
+	for _, want := range []string{
+		"PASS dataset=scifact metric=ndcg_at_10 current=0.510000 anchor=0.500000 delta=+0.010000",
+		"PASS dataset=fiqa metric=recall_at_100 current=0.350000 anchor=0.350000 delta=+0.000000",
+		"macro metric=ndcg_at_10 current=0.315000 anchor=0.310000 delta=+0.005000",
+		"scoreboard gate: PASS checks=4",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("scoreboard gate output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
+func TestRunGateScoreboardEosSelectionFallsBackToLegacyMantaRows(t *testing.T) {
+	dir := t.TempDir()
+	currentPath := filepath.Join(dir, "current.scoreboard.json")
+	anchorPath := filepath.Join(dir, "anchor.scoreboard.json")
+	writeScoreboardForTest(t, currentPath, []retrievalScoreboardRow{
+		{Category: "short_retrieval", Dataset: "scifact", Baseline: "manta", NDCGAt10: 0.51, RecallAt100: 0.80},
+	})
+	writeScoreboardForTest(t, anchorPath, []retrievalScoreboardRow{
+		{Category: "short_retrieval", Dataset: "scifact", Baseline: "manta", NDCGAt10: 0.50, RecallAt100: 0.79},
+	})
+
+	output := captureRunOutput(t, []string{
+		"gate-scoreboard",
+		"--datasets", "scifact",
+		currentPath,
+		anchorPath,
+	})
+	for _, want := range []string{
+		"selection: category=short_retrieval baseline=eos",
+		"PASS dataset=scifact metric=ndcg_at_10 current=0.510000 anchor=0.500000 delta=+0.010000",
+		"scoreboard gate: PASS checks=2",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("scoreboard alias output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
+func TestRunGateScoreboardEosHybridSelectionFallsBackToLegacyMantaHybridRows(t *testing.T) {
+	dir := t.TempDir()
+	currentPath := filepath.Join(dir, "current.scoreboard.json")
+	anchorPath := filepath.Join(dir, "anchor.scoreboard.json")
+	writeScoreboardForTest(t, currentPath, []retrievalScoreboardRow{
+		{Category: "short_retrieval", Dataset: "scifact", Baseline: "manta-hybrid", Method: "hybrid_minmax_alpha0.75", NDCGAt10: 0.53, RecallAt100: 0.82},
+	})
+	writeScoreboardForTest(t, anchorPath, []retrievalScoreboardRow{
+		{Category: "short_retrieval", Dataset: "scifact", Baseline: "manta-hybrid", Method: "hybrid_minmax_alpha0.75", NDCGAt10: 0.52, RecallAt100: 0.81},
+	})
+
+	output := captureRunOutput(t, []string{
+		"gate-scoreboard",
+		"--baseline", "eos-hybrid",
+		"--method", "hybrid_minmax_alpha0.75",
+		"--datasets", "scifact",
+		currentPath,
+		anchorPath,
+	})
+	for _, want := range []string{
+		"selection: category=short_retrieval baseline=eos-hybrid method=hybrid_minmax_alpha0.75",
+		"PASS dataset=scifact metric=recall_at_100 current=0.820000 anchor=0.810000 delta=+0.010000",
+		"scoreboard gate: PASS checks=2",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("scoreboard hybrid alias output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
+func TestRunGateScoreboardPassesTurboQuantStorageMetrics(t *testing.T) {
+	dir := t.TempDir()
+	currentPath := filepath.Join(dir, "current.scoreboard.json")
+	anchorPath := filepath.Join(dir, "anchor.scoreboard.json")
+	method := "turboquant_ip_b8_overfetch200_fp16_rerank"
+	writeScoreboardForTest(t, currentPath, []retrievalScoreboardRow{
+		{
+			Category:              "short_retrieval",
+			Dataset:               "scifact",
+			Baseline:              "eos-turboquant-rerank",
+			Method:                method,
+			Bits:                  8,
+			RerankStorage:         "fp16",
+			NDCGAt10:              0.486955,
+			RecallAt100:           0.775778,
+			VectorBytes:           1347580,
+			DenseVectorBytes:      5307392,
+			RerankSidecarBytes:    2653696,
+			TotalVectorBytes:      4001276,
+			CompressionRatio:      3.938462,
+			TotalCompressionRatio: 1.326425,
+		},
+	})
+	writeScoreboardForTest(t, anchorPath, []retrievalScoreboardRow{
+		{
+			Category:              "short_retrieval",
+			Dataset:               "scifact",
+			Baseline:              "eos-turboquant-rerank",
+			Method:                method,
+			Bits:                  8,
+			RerankStorage:         "fp16",
+			NDCGAt10:              0.486955,
+			RecallAt100:           0.775778,
+			CompressionRatio:      3.938462,
+			TotalCompressionRatio: 1.326425,
+		},
+	})
+
+	output := captureRunOutput(t, []string{
+		"gate-scoreboard",
+		"--baseline", "eos-turboquant-rerank",
+		"--method", method,
+		"--bits", "8",
+		"--datasets", "scifact",
+		"--metrics", "ndcg_at_10,recall_at_100,total_compression_ratio",
+		currentPath,
+		anchorPath,
+	})
+	for _, want := range []string{
+		"selection: category=short_retrieval baseline=eos-turboquant-rerank method=turboquant_ip_b8_overfetch200_fp16_rerank bits=8",
+		"PASS dataset=scifact metric=total_compression_ratio current=1.326425 anchor=1.326425 delta=+0.000000",
+		"scoreboard gate: PASS checks=3",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("scoreboard storage metric output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
+func TestRunGateScoreboardFailsPerDatasetMissEvenWhenMacroWins(t *testing.T) {
+	dir := t.TempDir()
+	currentPath := filepath.Join(dir, "current.scoreboard.json")
+	anchorPath := filepath.Join(dir, "anchor.scoreboard.json")
+	writeScoreboardForTest(t, currentPath, []retrievalScoreboardRow{
+		{Category: "short_retrieval", Dataset: "scifact", Baseline: "manta", NDCGAt10: 0.70, RecallAt100: 0.90},
+		{Category: "short_retrieval", Dataset: "fiqa", Baseline: "manta", NDCGAt10: 0.11, RecallAt100: 0.34},
+	})
+	writeScoreboardForTest(t, anchorPath, []retrievalScoreboardRow{
+		{Category: "short_retrieval", Dataset: "scifact", Baseline: "manta", NDCGAt10: 0.50, RecallAt100: 0.79},
+		{Category: "short_retrieval", Dataset: "fiqa", Baseline: "manta", NDCGAt10: 0.12, RecallAt100: 0.35},
+	})
+
+	output, err := captureRunOutputAndError(t, []string{
+		"gate-retrieval-scoreboard",
+		"--datasets", "scifact,fiqa",
+		currentPath,
+		anchorPath,
+	})
+	if err == nil {
+		t.Fatalf("expected scoreboard gate failure\noutput:\n%s", output)
+	}
+	for _, want := range []string{
+		"FAIL dataset=fiqa metric=ndcg_at_10 current=0.110000 anchor=0.120000 delta=-0.010000",
+		"FAIL dataset=fiqa metric=recall_at_100 current=0.340000 anchor=0.350000 delta=-0.010000",
+		"macro metric=ndcg_at_10 current=0.405000 anchor=0.310000 delta=+0.095000",
+		"scoreboard gate: FAIL checks=4 failed=2",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("scoreboard gate failure output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
+func TestRunGateScoreboardFailsMissingDatasetRow(t *testing.T) {
+	dir := t.TempDir()
+	currentPath := filepath.Join(dir, "current.scoreboard.json")
+	anchorPath := filepath.Join(dir, "anchor.scoreboard.json")
+	writeScoreboardForTest(t, currentPath, []retrievalScoreboardRow{
+		{Category: "short_retrieval", Dataset: "scifact", Baseline: "manta", NDCGAt10: 0.51, RecallAt100: 0.80},
+	})
+	writeScoreboardForTest(t, anchorPath, []retrievalScoreboardRow{
+		{Category: "short_retrieval", Dataset: "scifact", Baseline: "manta", NDCGAt10: 0.50, RecallAt100: 0.79},
+		{Category: "short_retrieval", Dataset: "fiqa", Baseline: "manta", NDCGAt10: 0.12, RecallAt100: 0.35},
+	})
+
+	output, err := captureRunOutputAndError(t, []string{
+		"gate-scoreboard",
+		"--datasets", "scifact,fiqa",
+		currentPath,
+		anchorPath,
+	})
+	if err == nil {
+		t.Fatalf("expected missing row failure\noutput:\n%s", output)
+	}
+	if !strings.Contains(err.Error(), "scoreboard row missing") || !strings.Contains(err.Error(), "dataset=fiqa") {
+		t.Fatalf("unexpected missing row error: %v\noutput:\n%s", err, output)
 	}
 }
 
@@ -1857,6 +2328,20 @@ func clearRetrievalMetricGateEnv(t *testing.T) {
 	for _, threshold := range retrievalMetricThresholds {
 		t.Setenv(threshold.Env, "")
 		t.Setenv(threshold.Env+"_SCIFACT", "")
+	}
+}
+
+func writeScoreboardForTest(t *testing.T, path string, rows []retrievalScoreboardRow) {
+	t.Helper()
+	data, err := json.Marshal(retrievalScoreboard{
+		Schema: "manta.embedder_scoreboard.v1",
+		Rows:   rows,
+	})
+	if err != nil {
+		t.Fatalf("marshal scoreboard: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write scoreboard: %v", err)
 	}
 }
 

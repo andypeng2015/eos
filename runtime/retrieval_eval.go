@@ -20,18 +20,32 @@ import (
 )
 
 const RetrievalEvalMetricsSchema = "manta.embedding_retrieval_metrics.v1"
+const RetrievalEvalPerQuerySchema = "manta.embedding_retrieval_per_query.v1"
 
 // RetrievalEvalConfig describes a BEIR-style retrieval eval.
 type RetrievalEvalConfig struct {
-	DatasetName  string
-	ArtifactPath string
-	CorpusPath   string
-	QueriesPath  string
-	QrelsPath    string
-	BatchSize    int
-	TopK         int
-	MaxDocs      int
-	MaxQueries   int
+	DatasetName       string
+	ArtifactPath      string
+	CorpusPath        string
+	QueriesPath       string
+	QrelsPath         string
+	DocVectorPath     string
+	QueryVectorPath   string
+	BackendName       string
+	BatchSize         int
+	TopK              int
+	MaxDocs           int
+	MaxQueries        int
+	PerQueryJSONLPath string
+	Hybrid            RetrievalEvalHybridConfig
+}
+
+type RetrievalEvalHybridConfig struct {
+	Method    string
+	Alpha     float64
+	AlphaSet  bool
+	RRFK      float64
+	RRFLambda float64
 }
 
 // RetrievalEvalMetrics records standard retrieval metrics for one dataset split.
@@ -48,27 +62,46 @@ type RetrievalEvalMetrics struct {
 }
 
 type RetrievalEvalInputMetrics struct {
-	CorpusPath    string `json:"corpus_path,omitempty"`
-	QueriesPath   string `json:"queries_path,omitempty"`
-	QrelsPath     string `json:"qrels_path,omitempty"`
-	Documents     int    `json:"documents"`
-	Queries       int    `json:"queries"`
-	RelevantPairs int    `json:"relevant_pairs"`
-	ScoredPairs   int64  `json:"scored_pairs"`
+	CorpusPath      string `json:"corpus_path,omitempty"`
+	QueriesPath     string `json:"queries_path,omitempty"`
+	QrelsPath       string `json:"qrels_path,omitempty"`
+	DocVectorPath   string `json:"doc_vector_path,omitempty"`
+	QueryVectorPath string `json:"query_vector_path,omitempty"`
+	Documents       int    `json:"documents"`
+	Queries         int    `json:"queries"`
+	RelevantPairs   int    `json:"relevant_pairs"`
+	ScoredPairs     int64  `json:"scored_pairs"`
 }
 
 type RetrievalEvalConfigMetrics struct {
-	BatchSize  int `json:"batch_size"`
-	TopK       int `json:"top_k"`
-	MaxDocs    int `json:"max_docs,omitempty"`
-	MaxQueries int `json:"max_queries,omitempty"`
+	BatchSize  int                         `json:"batch_size"`
+	TopK       int                         `json:"top_k"`
+	MaxDocs    int                         `json:"max_docs,omitempty"`
+	MaxQueries int                         `json:"max_queries,omitempty"`
+	Hybrid     *RetrievalEvalHybridMetrics `json:"hybrid,omitempty"`
+}
+
+type RetrievalEvalHybridMetrics struct {
+	Method    string  `json:"method"`
+	Alpha     float64 `json:"alpha,omitempty"`
+	RRFK      float64 `json:"rrf_k,omitempty"`
+	RRFLambda float64 `json:"rrf_lambda,omitempty"`
 }
 
 type RetrievalEvalQualityMetrics struct {
-	NDCGAt10    float64 `json:"ndcg_at_10"`
-	MRRAt10     float64 `json:"mrr_at_10"`
-	RecallAt10  float64 `json:"recall_at_10"`
-	RecallAt100 float64 `json:"recall_at_100"`
+	NDCGAt10      float64 `json:"ndcg_at_10"`
+	NDCGAt100     float64 `json:"ndcg_at_100"`
+	MRRAt10       float64 `json:"mrr_at_10"`
+	PrecisionAt1  float64 `json:"precision_at_1"`
+	PrecisionAt5  float64 `json:"precision_at_5"`
+	PrecisionAt10 float64 `json:"precision_at_10"`
+	HitAt1        float64 `json:"hit_at_1"`
+	HitAt5        float64 `json:"hit_at_5"`
+	HitAt10       float64 `json:"hit_at_10"`
+	MAPAt10       float64 `json:"map_at_10"`
+	MAPAt100      float64 `json:"map_at_100"`
+	RecallAt10    float64 `json:"recall_at_10"`
+	RecallAt100   float64 `json:"recall_at_100"`
 }
 
 type RetrievalEvalThroughput struct {
@@ -85,6 +118,25 @@ type RetrievalEvalSkippedCounts struct {
 	QueriesWithoutText         int `json:"queries_without_text,omitempty"`
 	RelevantDocsWithoutText    int `json:"relevant_docs_without_text,omitempty"`
 	QueriesWithoutRelevantDocs int `json:"queries_without_relevant_docs,omitempty"`
+	QueriesWithoutVector       int `json:"queries_without_vector,omitempty"`
+	DocumentsWithoutVector     int `json:"documents_without_vector,omitempty"`
+}
+
+type RetrievalEvalPerQueryRow struct {
+	Schema            string                        `json:"schema"`
+	Dataset           string                        `json:"dataset"`
+	QueryID           string                        `json:"query_id"`
+	RelevantCount     int                           `json:"relevant_count"`
+	FirstRelevantRank int                           `json:"first_relevant_rank"`
+	Quality           RetrievalEvalQualityMetrics   `json:"quality"`
+	TopK              []RetrievalEvalPerQueryTopDoc `json:"top_k"`
+}
+
+type RetrievalEvalPerQueryTopDoc struct {
+	Rank      int     `json:"rank"`
+	DocID     string  `json:"doc_id"`
+	Score     float32 `json:"score"`
+	Relevance float64 `json:"relevance"`
 }
 
 type retrievalTextRecord struct {
@@ -104,6 +156,14 @@ type retrievalVectorRecord struct {
 }
 
 type retrievalQrels map[string]map[string]float64
+
+type retrievalVectorJSONRecord struct {
+	ID        string    `json:"id"`
+	BEIRID    string    `json:"_id"`
+	Vector    []float32 `json:"vector"`
+	Embedding []float32 `json:"embedding"`
+	Values    []float32 `json:"values"`
+}
 
 // BEIRRetrievalPaths resolves the conventional corpus/query/qrels files under a dataset directory.
 func BEIRRetrievalPaths(datasetDir, split string) (corpusPath, queriesPath, qrelsPath string) {
@@ -157,7 +217,10 @@ func EvaluateEmbeddingRetrieval(ctx context.Context, model *EmbeddingModel, cfg 
 	queryDuration := time.Since(queryStart)
 
 	scoreStart := time.Now()
-	quality, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant := computeRetrievalQuality(queryVectors, docVectors, qrels, cfg.TopK)
+	quality, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, err := computeRetrievalQualityWithPerQuery(queryVectors, docVectors, qrels, cfg.TopK, cfg.DatasetName, cfg.PerQueryJSONLPath)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
 	scoreDuration := time.Since(scoreStart)
 	if evaluatedQueries == 0 {
 		return RetrievalEvalMetrics{}, fmt.Errorf("no queries had relevant documents in the evaluated corpus")
@@ -199,6 +262,115 @@ func EvaluateEmbeddingRetrieval(ctx context.Context, model *EmbeddingModel, cfg 
 			QueriesWithoutText:         skippedQueries,
 			RelevantDocsWithoutText:    skippedRelevantDocs,
 			QueriesWithoutRelevantDocs: skippedNoRelevant,
+		},
+	}, nil
+}
+
+// EvaluateVectorCacheRetrieval evaluates precomputed document/query vectors against BEIR-style qrels.
+func EvaluateVectorCacheRetrieval(ctx context.Context, cfg RetrievalEvalConfig) (RetrievalEvalMetrics, error) {
+	cfg = normalizeRetrievalEvalConfig(cfg)
+	if cfg.CorpusPath == "" || cfg.QueriesPath == "" || cfg.QrelsPath == "" {
+		return RetrievalEvalMetrics{}, fmt.Errorf("corpus, queries, and qrels paths are required")
+	}
+	if cfg.DocVectorPath == "" || cfg.QueryVectorPath == "" {
+		return RetrievalEvalMetrics{}, fmt.Errorf("document and query vector paths are required")
+	}
+	if cfg.BackendName == "" {
+		cfg.BackendName = "vectors"
+	}
+	start := time.Now()
+	qrels, err := readBEIRQrels(cfg.QrelsPath)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
+	corpus, err := readBEIRCorpusWithRelevant(cfg.CorpusPath, cfg.MaxDocs, qrels)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
+	queries, skippedQueries, err := readBEIRQueries(cfg.QueriesPath, qrels, cfg.MaxQueries)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
+	if len(corpus) == 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("corpus is empty")
+	}
+	if len(queries) == 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("no qrels queries found in queries file")
+	}
+
+	docStart := time.Now()
+	docVectors, missingDocVectors, docDim, err := readRetrievalVectorCache(cfg.DocVectorPath, retrievalIDs(corpus))
+	if err != nil {
+		return RetrievalEvalMetrics{}, fmt.Errorf("read document vectors: %w", err)
+	}
+	docDuration := time.Since(docStart)
+	if len(docVectors) == 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("document vector cache has no vectors for the evaluated corpus")
+	}
+
+	queryStart := time.Now()
+	queryVectors, missingQueryVectors, queryDim, err := readRetrievalVectorCache(cfg.QueryVectorPath, retrievalIDs(queries))
+	if err != nil {
+		return RetrievalEvalMetrics{}, fmt.Errorf("read query vectors: %w", err)
+	}
+	queryDuration := time.Since(queryStart)
+	if len(queryVectors) == 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("query vector cache has no vectors for qrels queries")
+	}
+	if docDim != queryDim {
+		return RetrievalEvalMetrics{}, fmt.Errorf("document vectors have dimension %d but query vectors have dimension %d", docDim, queryDim)
+	}
+
+	scoreStart := time.Now()
+	quality, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, err := computeRetrievalQualityWithPerQuery(queryVectors, docVectors, qrels, cfg.TopK, cfg.DatasetName, cfg.PerQueryJSONLPath)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
+	scoreDuration := time.Since(scoreStart)
+	if evaluatedQueries == 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("no queries had relevant documents in the evaluated vector cache")
+	}
+
+	elapsed := time.Since(start)
+	scoredPairs := int64(evaluatedQueries) * int64(len(docVectors))
+	return RetrievalEvalMetrics{
+		Schema:   RetrievalEvalMetricsSchema,
+		Dataset:  cfg.DatasetName,
+		Artifact: cfg.ArtifactPath,
+		Backend:  cfg.BackendName,
+		Inputs: RetrievalEvalInputMetrics{
+			CorpusPath:      cfg.CorpusPath,
+			QueriesPath:     cfg.QueriesPath,
+			QrelsPath:       cfg.QrelsPath,
+			DocVectorPath:   cfg.DocVectorPath,
+			QueryVectorPath: cfg.QueryVectorPath,
+			Documents:       len(docVectors),
+			Queries:         evaluatedQueries,
+			RelevantPairs:   relevantPairs,
+			ScoredPairs:     scoredPairs,
+		},
+		Config: RetrievalEvalConfigMetrics{
+			BatchSize:  cfg.BatchSize,
+			TopK:       cfg.TopK,
+			MaxDocs:    cfg.MaxDocs,
+			MaxQueries: cfg.MaxQueries,
+		},
+		Quality: quality,
+		Throughput: RetrievalEvalThroughput{
+			ElapsedSeconds:       elapsed.Seconds(),
+			DocumentEmbedSeconds: docDuration.Seconds(),
+			QueryEmbedSeconds:    queryDuration.Seconds(),
+			ScoreSeconds:         scoreDuration.Seconds(),
+			DocumentsPerSecond:   ratePerSecond(float64(len(docVectors)), docDuration),
+			QueriesPerSecond:     ratePerSecond(float64(len(queryVectors)), queryDuration),
+			ScoresPerSecond:      ratePerSecond(float64(scoredPairs), scoreDuration),
+		},
+		SkippedCounts: RetrievalEvalSkippedCounts{
+			QueriesWithoutText:         skippedQueries,
+			RelevantDocsWithoutText:    skippedRelevantDocs,
+			QueriesWithoutRelevantDocs: skippedNoRelevant,
+			QueriesWithoutVector:       missingQueryVectors,
+			DocumentsWithoutVector:     missingDocVectors,
 		},
 	}, nil
 }
@@ -323,6 +495,91 @@ func readBEIRTextFile(path string, ids map[string]bool, limit int) ([]retrievalT
 		return nil, err
 	}
 	return out, nil
+}
+
+func retrievalIDs(records []retrievalTextRecord) []string {
+	out := make([]string, len(records))
+	for i, record := range records {
+		out[i] = record.ID
+	}
+	return out
+}
+
+func readRetrievalVectorCache(path string, orderedIDs []string) ([]retrievalVectorRecord, int, int, error) {
+	needed := make(map[string]int, len(orderedIDs))
+	for i, id := range orderedIDs {
+		if id != "" {
+			needed[id] = i
+		}
+	}
+	vectors := make(map[string][]float32, len(needed))
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
+	dim := 0
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var record retrievalVectorJSONRecord
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			return nil, 0, 0, fmt.Errorf("%s:%d: %w", path, lineNo, err)
+		}
+		id := strings.TrimSpace(record.ID)
+		if id == "" {
+			id = strings.TrimSpace(record.BEIRID)
+		}
+		if id == "" {
+			continue
+		}
+		if _, ok := needed[id]; !ok {
+			continue
+		}
+		vector := firstRetrievalVector(record)
+		if len(vector) == 0 {
+			return nil, 0, 0, fmt.Errorf("%s:%d: vector for %q is empty", path, lineNo, id)
+		}
+		if dim == 0 {
+			dim = len(vector)
+		} else if len(vector) != dim {
+			return nil, 0, 0, fmt.Errorf("%s:%d: vector for %q has dimension %d, want %d", path, lineNo, id, len(vector), dim)
+		}
+		if _, exists := vectors[id]; !exists {
+			vectors[id] = normalizeRetrievalVector(vector)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, 0, 0, err
+	}
+	out := make([]retrievalVectorRecord, 0, len(orderedIDs))
+	missing := 0
+	for _, id := range orderedIDs {
+		vector, ok := vectors[id]
+		if !ok {
+			missing++
+			continue
+		}
+		out = append(out, retrievalVectorRecord{ID: id, Vector: vector})
+	}
+	return out, missing, dim, nil
+}
+
+func firstRetrievalVector(record retrievalVectorJSONRecord) []float32 {
+	switch {
+	case len(record.Vector) > 0:
+		return record.Vector
+	case len(record.Embedding) > 0:
+		return record.Embedding
+	default:
+		return record.Values
+	}
 }
 
 func readBEIRQrels(path string) (retrievalQrels, error) {
@@ -583,6 +840,11 @@ type retrievalScoredDoc struct {
 }
 
 func computeRetrievalQuality(queries, docs []retrievalVectorRecord, qrels retrievalQrels, topK int) (RetrievalEvalQualityMetrics, int, int, int, int) {
+	quality, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, _ := computeRetrievalQualityWithPerQuery(queries, docs, qrels, topK, "", "")
+	return quality, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant
+}
+
+func computeRetrievalQualityWithPerQuery(queries, docs []retrievalVectorRecord, qrels retrievalQrels, topK int, datasetName, perQueryJSONLPath string) (RetrievalEvalQualityMetrics, int, int, int, int, error) {
 	docIDSet := make(map[string]bool, len(docs))
 	for _, doc := range docs {
 		docIDSet[doc.ID] = true
@@ -590,6 +852,11 @@ func computeRetrievalQuality(queries, docs []retrievalVectorRecord, qrels retrie
 	if topK < 100 {
 		topK = 100
 	}
+	writer, err := newRetrievalPerQueryWriter(perQueryJSONLPath)
+	if err != nil {
+		return RetrievalEvalQualityMetrics{}, 0, 0, 0, 0, err
+	}
+	defer writer.Close()
 	var totals RetrievalEvalQualityMetrics
 	evaluatedQueries := 0
 	relevantPairs := 0
@@ -612,19 +879,17 @@ func computeRetrievalQuality(queries, docs []retrievalVectorRecord, qrels retrie
 		scores := topRetrievalScores(query.Vector, docs, topK)
 		evaluatedQueries++
 		relevantPairs += len(filteredRels)
-		totals.NDCGAt10 += ndcgAt(scores, filteredRels, 10)
-		totals.MRRAt10 += mrrAt(scores, filteredRels, 10)
-		totals.RecallAt10 += recallAt(scores, filteredRels, 10)
-		totals.RecallAt100 += recallAt(scores, filteredRels, 100)
+		row := buildRetrievalPerQueryRow(datasetName, query.ID, scores, filteredRels)
+		addRetrievalPerQueryQuality(&totals, row.Quality)
+		if err := writer.Write(row); err != nil {
+			return RetrievalEvalQualityMetrics{}, 0, 0, 0, 0, err
+		}
 	}
-	if evaluatedQueries > 0 {
-		denom := float64(evaluatedQueries)
-		totals.NDCGAt10 /= denom
-		totals.MRRAt10 /= denom
-		totals.RecallAt10 /= denom
-		totals.RecallAt100 /= denom
+	if err := writer.Close(); err != nil {
+		return RetrievalEvalQualityMetrics{}, 0, 0, 0, 0, err
 	}
-	return totals, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant
+	averageRetrievalQuality(&totals, evaluatedQueries)
+	return totals, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, nil
 }
 
 func topRetrievalScores(query []float32, docs []retrievalVectorRecord, topK int) []retrievalScoredDoc {
@@ -704,6 +969,109 @@ func dotRetrievalVectors(a, b []float32) float32 {
 	return sum
 }
 
+type retrievalPerQueryWriter struct {
+	file   *os.File
+	writer *bufio.Writer
+	closed bool
+}
+
+func newRetrievalPerQueryWriter(path string) (*retrievalPerQueryWriter, error) {
+	if path == "" {
+		return &retrievalPerQueryWriter{}, nil
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		return nil, fmt.Errorf("create per-query retrieval JSONL: %w", err)
+	}
+	return &retrievalPerQueryWriter{file: file, writer: bufio.NewWriter(file)}, nil
+}
+
+func (w *retrievalPerQueryWriter) Write(row RetrievalEvalPerQueryRow) error {
+	if w == nil || w.writer == nil {
+		return nil
+	}
+	data, err := json.Marshal(row)
+	if err != nil {
+		return err
+	}
+	if _, err := w.writer.Write(data); err != nil {
+		return fmt.Errorf("write per-query retrieval JSONL: %w", err)
+	}
+	if err := w.writer.WriteByte('\n'); err != nil {
+		return fmt.Errorf("write per-query retrieval JSONL: %w", err)
+	}
+	return nil
+}
+
+func (w *retrievalPerQueryWriter) Close() error {
+	if w == nil || w.closed {
+		return nil
+	}
+	w.closed = true
+	var flushErr, closeErr error
+	if w.writer != nil {
+		flushErr = w.writer.Flush()
+	}
+	if w.file != nil {
+		closeErr = w.file.Close()
+	}
+	if flushErr != nil {
+		return fmt.Errorf("flush per-query retrieval JSONL: %w", flushErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close per-query retrieval JSONL: %w", closeErr)
+	}
+	return nil
+}
+
+func buildRetrievalPerQueryRow(datasetName, queryID string, scores []retrievalScoredDoc, rels map[string]float64) RetrievalEvalPerQueryRow {
+	row := RetrievalEvalPerQueryRow{
+		Schema:            RetrievalEvalPerQuerySchema,
+		Dataset:           datasetName,
+		QueryID:           queryID,
+		RelevantCount:     len(rels),
+		FirstRelevantRank: firstRelevantRank(scores, rels),
+		Quality:           retrievalQualityForQuery(scores, rels),
+		TopK:              make([]RetrievalEvalPerQueryTopDoc, 0, len(scores)),
+	}
+	for i, score := range scores {
+		row.TopK = append(row.TopK, RetrievalEvalPerQueryTopDoc{
+			Rank:      i + 1,
+			DocID:     score.ID,
+			Score:     score.Score,
+			Relevance: rels[score.ID],
+		})
+	}
+	return row
+}
+
+func firstRelevantRank(scores []retrievalScoredDoc, rels map[string]float64) int {
+	for i, score := range scores {
+		if rels[score.ID] > 0 {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+func retrievalQualityForQuery(scores []retrievalScoredDoc, rels map[string]float64) RetrievalEvalQualityMetrics {
+	return RetrievalEvalQualityMetrics{
+		NDCGAt10:      ndcgAt(scores, rels, 10),
+		NDCGAt100:     ndcgAt(scores, rels, 100),
+		MRRAt10:       mrrAt(scores, rels, 10),
+		PrecisionAt1:  precisionAt(scores, rels, 1),
+		PrecisionAt5:  precisionAt(scores, rels, 5),
+		PrecisionAt10: precisionAt(scores, rels, 10),
+		HitAt1:        hitAt(scores, rels, 1),
+		HitAt5:        hitAt(scores, rels, 5),
+		HitAt10:       hitAt(scores, rels, 10),
+		MAPAt10:       averagePrecisionAt(scores, rels, 10),
+		MAPAt100:      averagePrecisionAt(scores, rels, 100),
+		RecallAt10:    recallAt(scores, rels, 10),
+		RecallAt100:   recallAt(scores, rels, 100),
+	}
+}
+
 func ndcgAt(scores []retrievalScoredDoc, rels map[string]float64, k int) float64 {
 	dcg := 0.0
 	limit := min(k, len(scores))
@@ -755,10 +1123,89 @@ func mrrAt(scores []retrievalScoredDoc, rels map[string]float64, k int) float64 
 	return 0
 }
 
+func addRetrievalQuality(totals *RetrievalEvalQualityMetrics, scores []retrievalScoredDoc, rels map[string]float64) {
+	addRetrievalPerQueryQuality(totals, retrievalQualityForQuery(scores, rels))
+}
+
+func addRetrievalPerQueryQuality(totals *RetrievalEvalQualityMetrics, query RetrievalEvalQualityMetrics) {
+	totals.NDCGAt10 += query.NDCGAt10
+	totals.NDCGAt100 += query.NDCGAt100
+	totals.MRRAt10 += query.MRRAt10
+	totals.PrecisionAt1 += query.PrecisionAt1
+	totals.PrecisionAt5 += query.PrecisionAt5
+	totals.PrecisionAt10 += query.PrecisionAt10
+	totals.HitAt1 += query.HitAt1
+	totals.HitAt5 += query.HitAt5
+	totals.HitAt10 += query.HitAt10
+	totals.MAPAt10 += query.MAPAt10
+	totals.MAPAt100 += query.MAPAt100
+	totals.RecallAt10 += query.RecallAt10
+	totals.RecallAt100 += query.RecallAt100
+}
+
+func averageRetrievalQuality(totals *RetrievalEvalQualityMetrics, evaluatedQueries int) {
+	if evaluatedQueries <= 0 {
+		return
+	}
+	denom := float64(evaluatedQueries)
+	totals.NDCGAt10 /= denom
+	totals.NDCGAt100 /= denom
+	totals.MRRAt10 /= denom
+	totals.PrecisionAt1 /= denom
+	totals.PrecisionAt5 /= denom
+	totals.PrecisionAt10 /= denom
+	totals.HitAt1 /= denom
+	totals.HitAt5 /= denom
+	totals.HitAt10 /= denom
+	totals.MAPAt10 /= denom
+	totals.MAPAt100 /= denom
+	totals.RecallAt10 /= denom
+	totals.RecallAt100 /= denom
+}
+
+func precisionAt(scores []retrievalScoredDoc, rels map[string]float64, k int) float64 {
+	if k <= 0 {
+		return 0
+	}
+	hits := hitsAt(scores, rels, k)
+	return float64(hits) / float64(k)
+}
+
+func hitAt(scores []retrievalScoredDoc, rels map[string]float64, k int) float64 {
+	if hitsAt(scores, rels, k) > 0 {
+		return 1
+	}
+	return 0
+}
+
+func averagePrecisionAt(scores []retrievalScoredDoc, rels map[string]float64, k int) float64 {
+	if len(rels) == 0 || k <= 0 {
+		return 0
+	}
+	limit := min(k, len(scores))
+	hits := 0
+	sumPrecision := 0.0
+	for i := 0; i < limit; i++ {
+		if rels[scores[i].ID] > 0 {
+			hits++
+			sumPrecision += float64(hits) / float64(i+1)
+		}
+	}
+	denom := min(k, len(rels))
+	if denom == 0 {
+		return 0
+	}
+	return sumPrecision / float64(denom)
+}
+
 func recallAt(scores []retrievalScoredDoc, rels map[string]float64, k int) float64 {
 	if len(rels) == 0 {
 		return 0
 	}
+	return float64(hitsAt(scores, rels, k)) / float64(len(rels))
+}
+
+func hitsAt(scores []retrievalScoredDoc, rels map[string]float64, k int) int {
 	hits := 0
 	limit := min(k, len(scores))
 	for i := 0; i < limit; i++ {
@@ -766,7 +1213,7 @@ func recallAt(scores []retrievalScoredDoc, rels map[string]float64, k int) float
 			hits++
 		}
 	}
-	return float64(hits) / float64(len(rels))
+	return hits
 }
 
 func ratePerSecond(count float64, duration time.Duration) float64 {

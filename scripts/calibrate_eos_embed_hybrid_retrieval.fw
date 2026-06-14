@@ -1,0 +1,776 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type calConfig struct {
+	Root                 string
+	RunID                string
+	RunRoot              string
+	RunDir               string
+	LogDir               string
+	EosBin               string
+	Mode                 string
+	Artifact             string
+	VectorRoot           string
+	VectorBackend        string
+	VectorArtifact       string
+	DatasetRoot          string
+	Datasets             []string
+	DevSplit             string
+	TestSplit            string
+	Methods              []string
+	Alphas               []string
+	RRFKs                []string
+	RRFLambdas           []string
+	BatchSize            string
+	TopK                 string
+	MaxDocs              string
+	MaxQueries           string
+	MaxNDCG10Regression  float64
+	MaxRecallRegression  float64
+	FailOnProtection     bool
+	SentinelQueryIDs      []string
+	SummaryJSON          string
+	SummaryTSV           string
+	SummaryMarkdown      string
+}
+
+type qualityMetrics struct {
+	NDCGAt10    float64 `json:"ndcg_at_10"`
+	NDCGAt100   float64 `json:"ndcg_at_100"`
+	MRRAt10     float64 `json:"mrr_at_10"`
+	MAPAt10     float64 `json:"map_at_10"`
+	MAPAt100    float64 `json:"map_at_100"`
+	RecallAt10  float64 `json:"recall_at_10"`
+	RecallAt100 float64 `json:"recall_at_100"`
+}
+
+type retrievalMetrics struct {
+	Schema  string `json:"schema"`
+	Dataset string `json:"dataset"`
+	Backend string `json:"backend"`
+	Inputs  struct {
+		Documents     int   `json:"documents"`
+		Queries       int   `json:"queries"`
+		RelevantPairs int   `json:"relevant_pairs"`
+		ScoredPairs   int64 `json:"scored_pairs"`
+	} `json:"inputs"`
+	Quality qualityMetrics `json:"quality"`
+	Config  map[string]any `json:"config,omitempty"`
+}
+
+type setting struct {
+	Label     string `json:"label"`
+	Method    string `json:"method"`
+	Alpha     string `json:"alpha,omitempty"`
+	RRFK      string `json:"rrf_k,omitempty"`
+	RRFLambda string `json:"rrf_lambda,omitempty"`
+}
+
+type evalResult struct {
+	Dataset      string         `json:"dataset"`
+	Split        string         `json:"split"`
+	Baseline     string         `json:"baseline"`
+	Label        string         `json:"label"`
+	Setting      setting        `json:"setting"`
+	MetricsPath  string         `json:"metrics_path"`
+	PerQueryPath string         `json:"per_query_path"`
+	Metrics      retrievalMetrics `json:"metrics"`
+}
+
+type protectionResult struct {
+	Dataset                  string  `json:"dataset"`
+	Passed                   bool    `json:"passed"`
+	MaxNDCG10Regression      float64 `json:"max_ndcg_at_10_regression"`
+	MaxRecall100Regression   float64 `json:"max_recall_at_100_regression"`
+	NDCG10DeltaVsDense       float64 `json:"ndcg_at_10_delta_vs_dense"`
+	Recall100DeltaVsDense    float64 `json:"recall_at_100_delta_vs_dense"`
+	NDCG10RegressedTooMuch   bool    `json:"ndcg_at_10_regressed_too_much"`
+	Recall100RegressedTooMuch bool   `json:"recall_at_100_regressed_too_much"`
+}
+
+type datasetSummary struct {
+	Dataset        string             `json:"dataset"`
+	Selected       evalResult         `json:"selected_dev_setting"`
+	DevDense       evalResult         `json:"dev_dense"`
+	DevBM25        evalResult         `json:"dev_bm25"`
+	TestDense      evalResult         `json:"test_dense"`
+	TestBM25       evalResult         `json:"test_bm25"`
+	TestSelected   evalResult         `json:"test_selected"`
+	ProtectionGate protectionResult   `json:"protection_gate"`
+	DevSweep       []evalResult       `json:"dev_sweep"`
+	SentinelRows   []map[string]any   `json:"sentinel_rows,omitempty"`
+}
+
+type summaryManifest struct {
+	Schema              string           `json:"schema"`
+	RunID               string           `json:"run_id"`
+	RunDir              string           `json:"run_dir"`
+	GeneratedAt         string           `json:"generated_at"`
+	Mode                string           `json:"mode"`
+	DatasetRoot         string           `json:"dataset_root"`
+	Artifact            string           `json:"artifact,omitempty"`
+	VectorRoot          string           `json:"vector_root,omitempty"`
+	VectorBackend       string           `json:"vector_backend,omitempty"`
+	SelectionRule       string           `json:"selection_rule"`
+	ProtectionThreshold string           `json:"protection_threshold"`
+	Datasets            []datasetSummary `json:"datasets"`
+}
+
+func usage() {
+	fmt.Println(`Calibrate eos-embed-v1 lexical+dense hybrid retrieval on a dev split, then apply the selected setting unchanged to test.
+
+Required dense-artifact mode:
+  EOS_REPO_ROOT=$PWD
+  EOS_HYBRID_CAL_MODE=dense
+  EOS_HYBRID_CAL_ARTIFACT=/path/to/eos-embed-v1.sealed.mll
+  EOS_HYBRID_CAL_DATASETS=fiqa
+  ferrous-wheel run scripts/calibrate_eos_embed_hybrid_retrieval.fw
+
+Required external-vector-cache mode:
+  EOS_REPO_ROOT=$PWD
+  EOS_HYBRID_CAL_MODE=vectors
+  EOS_HYBRID_CAL_VECTOR_ROOT=runs/external-vector-caches/qwen3-0.6b
+  EOS_HYBRID_CAL_VECTOR_BACKEND=qwen3
+  EOS_HYBRID_CAL_DATASETS=nfcorpus
+  ferrous-wheel run scripts/calibrate_eos_embed_hybrid_retrieval.fw
+
+Common knobs:
+  EOS_HYBRID_CAL_DATASET_ROOT=datasets/manta-embed-v1
+  EOS_HYBRID_CAL_DEV_SPLIT=dev
+  EOS_HYBRID_CAL_TEST_SPLIT=test
+  EOS_HYBRID_CAL_METHODS=minmax,zscore,rrf
+  EOS_HYBRID_CAL_ALPHAS=0.25,0.50,0.75
+  EOS_HYBRID_CAL_RRF_K=30,60
+  EOS_HYBRID_CAL_RRF_LAMBDA=0.5,1.0
+  EOS_HYBRID_CAL_MAX_QUERIES=20
+  EOS_HYBRID_CAL_MAX_DOCS=0
+  EOS_HYBRID_CAL_MAX_NDCG10_REGRESSION=0
+  EOS_HYBRID_CAL_MAX_RECALL100_REGRESSION=0.01
+  EOS_HYBRID_CAL_SENTINEL_QUERY_IDS=7345,9556
+  EOS_HYBRID_CAL_FAIL_ON_PROTECTION=1`)
+}
+
+func getenv(name string, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func splitList(value string) []string {
+	out := []string{}
+	for _, raw := range strings.Split(value, ",") {
+		item := strings.TrimSpace(raw)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func parseFloatEnv(name string, fallback float64) (float64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	guard err == nil else return 0, fmt.Errorf("%s must be a float: %w", name, err)
+	return parsed, nil
+}
+
+func truthy(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func hasRepoRoot(path string) bool {
+	if path == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(path, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(path, "cmd", "eos")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findRoot() (string, error) {
+	if root := os.Getenv("EOS_REPO_ROOT"); root != "" {
+		abs, err := filepath.Abs(root)
+		guard err == nil else return "", err
+		guard hasRepoRoot(abs) else return "", fmt.Errorf("EOS_REPO_ROOT does not look like the Eos repo: %s", abs)
+		return abs, nil
+	}
+	pwd := os.Getenv("PWD")
+	if hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	guard err == nil else return "", err
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func absIfSet(value string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		return "", nil
+	}
+	return filepath.Abs(value)
+}
+
+func requireFile(label string, path string) error {
+	info, err := os.Stat(path)
+	guard err == nil else return fmt.Errorf("%s does not exist: %s", label, path)
+	guard !info.IsDir() else return fmt.Errorf("%s must be a file: %s", label, path)
+	return nil
+}
+
+func retrievalDatasetDir(root string, dataset string) string {
+	candidate := filepath.Join(root, "raw", dataset, dataset)
+	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+		return candidate
+	}
+	return filepath.Join(root, dataset)
+}
+
+func vectorCachePaths(root string, dataset string) (string, string) {
+	dir := filepath.Join(root, dataset)
+	return filepath.Join(dir, "doc-vectors.jsonl"), filepath.Join(dir, "query-vectors.jsonl")
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func renderCommand(name string, args []string) string {
+	parts := []string{shellQuote(name)}
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func safeName(value string) string {
+	out := strings.ReplaceAll(value, "/", "_")
+	out = strings.ReplaceAll(out, " ", "_")
+	out = strings.ReplaceAll(out, ".", "p")
+	out = strings.ReplaceAll(out, "-", "_")
+	return out
+}
+
+func runCmd(cfg calConfig, label string, logName string, name string, args []string) error {
+	logPath := filepath.Join(cfg.LogDir, logName)
+	rendered := renderCommand(name, args)
+	fmt.Println("+ " + rendered)
+	err := os.WriteFile(logPath+".cmd", []byte(rendered+"\n"), 0o644)
+	guard err == nil else return err
+	logFile, err := os.Create(logPath)
+	guard err == nil else return err
+	defer logFile.Close()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = cfg.Root
+	cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
+	cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
+	err = cmd.Run()
+	guard err == nil else return fmt.Errorf("%s failed; see %s: %w", label, logPath, err)
+	return nil
+}
+
+func prepareConfig(root string) (calConfig, error) {
+	mode := strings.ToLower(getenv("EOS_HYBRID_CAL_MODE", "dense"))
+	guard mode == "dense" || mode == "vectors" else return calConfig{}, fmt.Errorf("EOS_HYBRID_CAL_MODE must be dense or vectors")
+
+	runID := getenv("EOS_HYBRID_CAL_RUN_ID", "eos-embed-v1-hybrid-calibration-"+time.Now().UTC().Format("20060102T150405Z"))
+	runRoot, err := filepath.Abs(getenv("EOS_HYBRID_CAL_RUN_ROOT", filepath.Join(root, "runs")))
+	guard err == nil else return calConfig{}, err
+	runDir := filepath.Join(runRoot, runID)
+	if entries, err := os.ReadDir(runDir); err == nil && len(entries) > 0 {
+		return calConfig{}, fmt.Errorf("run directory already exists and is not empty: %s", runDir)
+	}
+	err = os.MkdirAll(filepath.Join(runDir, "bin"), 0o755)
+	guard err == nil else return calConfig{}, err
+	err = os.MkdirAll(filepath.Join(runDir, "logs"), 0o755)
+	guard err == nil else return calConfig{}, err
+
+	artifact, err := absIfSet(os.Getenv("EOS_HYBRID_CAL_ARTIFACT"))
+	guard err == nil else return calConfig{}, err
+	vectorRoot, err := absIfSet(os.Getenv("EOS_HYBRID_CAL_VECTOR_ROOT"))
+	guard err == nil else return calConfig{}, err
+	if mode == "dense" {
+		guard artifact != "" else return calConfig{}, fmt.Errorf("EOS_HYBRID_CAL_ARTIFACT is required in dense mode")
+		err = requireFile("EOS_HYBRID_CAL_ARTIFACT", artifact)
+		guard err == nil else return calConfig{}, err
+	} else {
+		guard vectorRoot != "" else return calConfig{}, fmt.Errorf("EOS_HYBRID_CAL_VECTOR_ROOT is required in vectors mode")
+	}
+
+	defaultDatasetRoot := filepath.Join(root, "datasets", "manta-embed-v1")
+	if _, err := os.Stat(filepath.Join(root, "datasets", "eos-embed-v1")); err == nil {
+		defaultDatasetRoot = filepath.Join(root, "datasets", "eos-embed-v1")
+	}
+	datasetRoot, err := filepath.Abs(getenv("EOS_HYBRID_CAL_DATASET_ROOT", defaultDatasetRoot))
+	guard err == nil else return calConfig{}, err
+	datasets := splitList(os.Getenv("EOS_HYBRID_CAL_DATASETS"))
+	guard len(datasets) > 0 else return calConfig{}, fmt.Errorf("EOS_HYBRID_CAL_DATASETS is required")
+
+	maxNDCG, err := parseFloatEnv("EOS_HYBRID_CAL_MAX_NDCG10_REGRESSION", 0.0)
+	guard err == nil else return calConfig{}, err
+	maxRecall, err := parseFloatEnv("EOS_HYBRID_CAL_MAX_RECALL100_REGRESSION", 0.0)
+	guard err == nil else return calConfig{}, err
+
+	return calConfig{
+		Root:                 root,
+		RunID:                runID,
+		RunRoot:              runRoot,
+		RunDir:               runDir,
+		LogDir:               filepath.Join(runDir, "logs"),
+		EosBin:               filepath.Join(runDir, "bin", "eos"),
+		Mode:                 mode,
+		Artifact:             artifact,
+		VectorRoot:           vectorRoot,
+		VectorBackend:        getenv("EOS_HYBRID_CAL_VECTOR_BACKEND", "external-vectors"),
+		VectorArtifact:       getenv("EOS_HYBRID_CAL_VECTOR_ARTIFACT", ""),
+		DatasetRoot:          datasetRoot,
+		Datasets:             datasets,
+		DevSplit:             getenv("EOS_HYBRID_CAL_DEV_SPLIT", "dev"),
+		TestSplit:            getenv("EOS_HYBRID_CAL_TEST_SPLIT", "test"),
+		Methods:              splitList(getenv("EOS_HYBRID_CAL_METHODS", "minmax,zscore,rrf")),
+		Alphas:               splitList(getenv("EOS_HYBRID_CAL_ALPHAS", "0.00,0.25,0.50,0.75,1.00")),
+		RRFKs:                splitList(getenv("EOS_HYBRID_CAL_RRF_K", "30,60")),
+		RRFLambdas:           splitList(getenv("EOS_HYBRID_CAL_RRF_LAMBDA", "0.5,1.0")),
+		BatchSize:            getenv("EOS_HYBRID_CAL_BATCH_SIZE", "64"),
+		TopK:                 getenv("EOS_HYBRID_CAL_TOP_K", "100"),
+		MaxDocs:              getenv("EOS_HYBRID_CAL_MAX_DOCS", "0"),
+		MaxQueries:           getenv("EOS_HYBRID_CAL_MAX_QUERIES", "0"),
+		MaxNDCG10Regression:  maxNDCG,
+		MaxRecallRegression:  maxRecall,
+		FailOnProtection:     truthy(os.Getenv("EOS_HYBRID_CAL_FAIL_ON_PROTECTION")),
+		SentinelQueryIDs:      splitList(os.Getenv("EOS_HYBRID_CAL_SENTINEL_QUERY_IDS")),
+		SummaryJSON:          filepath.Join(runDir, "hybrid_calibration_summary.json"),
+		SummaryTSV:           filepath.Join(runDir, "hybrid_calibration_summary.tsv"),
+		SummaryMarkdown:      filepath.Join(runDir, "hybrid_calibration_summary.md"),
+	}, nil
+}
+
+func buildSettings(cfg calConfig) []setting {
+	settings := []setting{}
+	for _, rawMethod := range cfg.Methods {
+		method := strings.ToLower(strings.TrimSpace(rawMethod))
+		if method == "minmax_blend" {
+			method = "minmax"
+		}
+		if method == "zscore_blend" {
+			method = "zscore"
+		}
+		if method == "rrf" {
+			for _, k := range cfg.RRFKs {
+				for _, lambda := range cfg.RRFLambdas {
+					settings = append(settings, setting{
+						Label:     "hybrid_rrf_k" + k + "_lambda" + lambda,
+						Method:    "rrf",
+						RRFK:      k,
+						RRFLambda: lambda,
+					})
+				}
+			}
+			continue
+		}
+		for _, alpha := range cfg.Alphas {
+			settings = append(settings, setting{
+				Label:  "hybrid_" + method + "_alpha" + alpha,
+				Method: method,
+				Alpha:  alpha,
+			})
+		}
+	}
+	return settings
+}
+
+func baseArgs(cfg calConfig, command string, dataset string, split string, metricsPath string, perQueryPath string, datasetDir string) []string {
+	args := []string{command, "--dataset", dataset, "--split", split, "--top-k", cfg.TopK, "--metrics-json", metricsPath, "--per-query-jsonl", perQueryPath}
+	if command == "eval-retrieval" || command == "eval-retrieval-hybrid" {
+		args = append(args, "--batch-size", cfg.BatchSize)
+	}
+	if cfg.MaxDocs != "" && cfg.MaxDocs != "0" {
+		args = append(args, "--max-docs", cfg.MaxDocs)
+	}
+	if cfg.MaxQueries != "" && cfg.MaxQueries != "0" {
+		args = append(args, "--max-queries", cfg.MaxQueries)
+	}
+	return args
+}
+
+func denseArgs(cfg calConfig, dataset string, split string, metricsPath string, perQueryPath string, datasetDir string) []string {
+	if cfg.Mode == "dense" {
+		args := baseArgs(cfg, "eval-retrieval", dataset, split, metricsPath, perQueryPath, datasetDir)
+		args = append(args, cfg.Artifact, datasetDir)
+		return args
+	}
+	docVectors, queryVectors := vectorCachePaths(cfg.VectorRoot, dataset)
+	args := baseArgs(cfg, "eval-retrieval-vectors", dataset, split, metricsPath, perQueryPath, datasetDir)
+	args = append(args, "--backend", cfg.VectorBackend, "--doc-vectors", docVectors, "--query-vectors", queryVectors)
+	if cfg.VectorArtifact != "" {
+		args = append(args, "--artifact", cfg.VectorArtifact)
+	}
+	args = append(args, datasetDir)
+	return args
+}
+
+func bm25Args(cfg calConfig, dataset string, split string, metricsPath string, perQueryPath string, datasetDir string) []string {
+	args := baseArgs(cfg, "eval-retrieval-bm25", dataset, split, metricsPath, perQueryPath, datasetDir)
+	args = append(args, datasetDir)
+	return args
+}
+
+func hybridArgs(cfg calConfig, st setting, dataset string, split string, metricsPath string, perQueryPath string, datasetDir string) []string {
+	command := "eval-retrieval-hybrid"
+	if cfg.Mode == "vectors" {
+		command = "eval-retrieval-vectors-hybrid"
+	}
+	args := baseArgs(cfg, command, dataset, split, metricsPath, perQueryPath, datasetDir)
+	args = append(args, "--method", st.Method)
+	if st.Method == "rrf" {
+		args = append(args, "--rrf-k", st.RRFK, "--rrf-lambda", st.RRFLambda)
+	} else {
+		args = append(args, "--alpha", st.Alpha)
+	}
+	if cfg.Mode == "dense" {
+		args = append(args, cfg.Artifact, datasetDir)
+		return args
+	}
+	docVectors, queryVectors := vectorCachePaths(cfg.VectorRoot, dataset)
+	args = append(args, "--backend", cfg.VectorBackend+"-hybrid", "--doc-vectors", docVectors, "--query-vectors", queryVectors)
+	if cfg.VectorArtifact != "" {
+		args = append(args, "--artifact", cfg.VectorArtifact)
+	}
+	args = append(args, datasetDir)
+	return args
+}
+
+func readMetrics(path string) (retrievalMetrics, error) {
+	data, err := os.ReadFile(path)
+	guard err == nil else return retrievalMetrics{}, err
+	var metrics retrievalMetrics
+	err = json.Unmarshal(data, &metrics)
+	guard err == nil else return retrievalMetrics{}, err
+	return metrics, nil
+}
+
+func evalOne(cfg calConfig, dataset string, split string, baseline string, st setting, datasetDir string) (evalResult, error) {
+	prefix := safeName(dataset + "." + split + "." + baseline + "." + st.Label)
+	metricsPath := filepath.Join(cfg.RunDir, prefix+".metrics.json")
+	perQueryPath := filepath.Join(cfg.RunDir, prefix+".per-query.jsonl")
+	var args []string
+	if baseline == "dense" {
+		args = denseArgs(cfg, dataset, split, metricsPath, perQueryPath, datasetDir)
+	} else if baseline == "bm25" {
+		args = bm25Args(cfg, dataset, split, metricsPath, perQueryPath, datasetDir)
+	} else {
+		args = hybridArgs(cfg, st, dataset, split, metricsPath, perQueryPath, datasetDir)
+	}
+	err := runCmd(cfg, "Evaluate "+dataset+" "+split+" "+baseline+" "+st.Label, prefix+".log", cfg.EosBin, args)
+	guard err == nil else return evalResult{}, err
+	metrics, err := readMetrics(metricsPath)
+	guard err == nil else return evalResult{}, err
+	return evalResult{
+		Dataset:      dataset,
+		Split:        split,
+		Baseline:     baseline,
+		Label:        st.Label,
+		Setting:      st,
+		MetricsPath:  metricsPath,
+		PerQueryPath: perQueryPath,
+		Metrics:      metrics,
+	}, nil
+}
+
+func better(a evalResult, b evalResult) bool {
+	aq := a.Metrics.Quality
+	bq := b.Metrics.Quality
+	if aq.NDCGAt10 != bq.NDCGAt10 {
+		return aq.NDCGAt10 > bq.NDCGAt10
+	}
+	if aq.MRRAt10 != bq.MRRAt10 {
+		return aq.MRRAt10 > bq.MRRAt10
+	}
+	if aq.RecallAt100 != bq.RecallAt100 {
+		return aq.RecallAt100 > bq.RecallAt100
+	}
+	return a.Label < b.Label
+}
+
+func protection(cfg calConfig, dataset string, dense evalResult, selected evalResult) protectionResult {
+	ndcgDelta := selected.Metrics.Quality.NDCGAt10 - dense.Metrics.Quality.NDCGAt10
+	recallDelta := selected.Metrics.Quality.RecallAt100 - dense.Metrics.Quality.RecallAt100
+	ndcgBad := ndcgDelta < -cfg.MaxNDCG10Regression
+	recallBad := recallDelta < -cfg.MaxRecallRegression
+	return protectionResult{
+		Dataset:                   dataset,
+		Passed:                    !ndcgBad && !recallBad,
+		MaxNDCG10Regression:       cfg.MaxNDCG10Regression,
+		MaxRecall100Regression:    cfg.MaxRecallRegression,
+		NDCG10DeltaVsDense:        ndcgDelta,
+		Recall100DeltaVsDense:     recallDelta,
+		NDCG10RegressedTooMuch:    ndcgBad,
+		Recall100RegressedTooMuch: recallBad,
+	}
+}
+
+func readSentinelRows(queryIDs []string, densePath string, hybridPath string) ([]map[string]any, error) {
+	if len(queryIDs) == 0 {
+		return nil, nil
+	}
+	allow := map[string]bool{}
+	for _, id := range queryIDs {
+		allow[id] = true
+	}
+	dense, err := readPerQuery(densePath, allow)
+	guard err == nil else return nil, err
+	hybrid, err := readPerQuery(hybridPath, allow)
+	guard err == nil else return nil, err
+	rows := []map[string]any{}
+	for _, id := range queryIDs {
+		row := map[string]any{"query_id": id}
+		if d, ok := dense[id]; ok {
+			row["dense"] = d
+		}
+		if h, ok := hybrid[id]; ok {
+			row["selected_hybrid"] = h
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
+func readPerQuery(path string, allow map[string]bool) (map[string]map[string]any, error) {
+	data, err := os.ReadFile(path)
+	guard err == nil else return nil, err
+	out := map[string]map[string]any{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var row map[string]any
+		err := json.Unmarshal([]byte(line), &row)
+		guard err == nil else return nil, err
+		id, ok := row["query_id"].(string)
+		if !ok {
+			continue
+		}
+		if allow[id] {
+			out[id] = row
+		}
+	}
+	return out, nil
+}
+
+func runDataset(cfg calConfig, dataset string, settings []setting) (datasetSummary, error) {
+	datasetDir := retrievalDatasetDir(cfg.DatasetRoot, dataset)
+	info, err := os.Stat(datasetDir)
+	guard err == nil && info.IsDir() else return datasetSummary{}, fmt.Errorf("dataset directory missing for %s: %s", dataset, datasetDir)
+	if cfg.Mode == "vectors" {
+		docVectors, queryVectors := vectorCachePaths(cfg.VectorRoot, dataset)
+		err = requireFile("document vector cache", docVectors)
+		guard err == nil else return datasetSummary{}, err
+		err = requireFile("query vector cache", queryVectors)
+		guard err == nil else return datasetSummary{}, err
+	}
+
+	denseSetting := setting{Label: "dense_only", Method: "dense_only"}
+	bm25Setting := setting{Label: "bm25_only", Method: "bm25_only"}
+	devDense, err := evalOne(cfg, dataset, cfg.DevSplit, "dense", denseSetting, datasetDir)
+	guard err == nil else return datasetSummary{}, err
+	devBM25, err := evalOne(cfg, dataset, cfg.DevSplit, "bm25", bm25Setting, datasetDir)
+	guard err == nil else return datasetSummary{}, err
+	devSweep := []evalResult{}
+	for _, st := range settings {
+		res, err := evalOne(cfg, dataset, cfg.DevSplit, "hybrid", st, datasetDir)
+		guard err == nil else return datasetSummary{}, err
+		devSweep = append(devSweep, res)
+	}
+	guard len(devSweep) > 0 else return datasetSummary{}, fmt.Errorf("no hybrid settings generated")
+	sort.SliceStable(devSweep, func(i int, j int) bool {
+		return better(devSweep[i], devSweep[j])
+	})
+	selectedDev := devSweep[0]
+
+	testDense, err := evalOne(cfg, dataset, cfg.TestSplit, "dense", denseSetting, datasetDir)
+	guard err == nil else return datasetSummary{}, err
+	testBM25, err := evalOne(cfg, dataset, cfg.TestSplit, "bm25", bm25Setting, datasetDir)
+	guard err == nil else return datasetSummary{}, err
+	testSelected, err := evalOne(cfg, dataset, cfg.TestSplit, "hybrid", selectedDev.Setting, datasetDir)
+	guard err == nil else return datasetSummary{}, err
+	gate := protection(cfg, dataset, testDense, testSelected)
+	sentinels, err := readSentinelRows(cfg.SentinelQueryIDs, testDense.PerQueryPath, testSelected.PerQueryPath)
+	guard err == nil else return datasetSummary{}, err
+
+	return datasetSummary{
+		Dataset:        dataset,
+		Selected:       selectedDev,
+		DevDense:       devDense,
+		DevBM25:        devBM25,
+		TestDense:      testDense,
+		TestBM25:       testBM25,
+		TestSelected:   testSelected,
+		ProtectionGate: gate,
+		DevSweep:       devSweep,
+		SentinelRows:   sentinels,
+	}, nil
+}
+
+func tsvHeader() string {
+	return "dataset\tdev_selected_label\tdev_selected_ndcg_at_10\tdev_dense_ndcg_at_10\tdev_bm25_ndcg_at_10\ttest_selected_ndcg_at_10\ttest_dense_ndcg_at_10\ttest_bm25_ndcg_at_10\ttest_selected_recall_at_100\ttest_dense_recall_at_100\tndcg_at_10_delta_vs_dense\trecall_at_100_delta_vs_dense\tprotection_passed\tmetrics_path\n"
+}
+
+func writeOutputs(cfg calConfig, datasets []datasetSummary) error {
+	manifest := summaryManifest{
+		Schema:              "eos.hybrid_calibration.v1",
+		RunID:               cfg.RunID,
+		RunDir:              cfg.RunDir,
+		GeneratedAt:         time.Now().UTC().Format(time.RFC3339),
+		Mode:                cfg.Mode,
+		DatasetRoot:         cfg.DatasetRoot,
+		Artifact:            cfg.Artifact,
+		VectorRoot:          cfg.VectorRoot,
+		VectorBackend:       cfg.VectorBackend,
+		SelectionRule:       "max dev ndcg_at_10; tie-break mrr_at_10 then recall_at_100",
+		ProtectionThreshold: fmt.Sprintf("selected test hybrid must not trail dense by more than ndcg_at_10=%.6f and recall_at_100=%.6f", cfg.MaxNDCG10Regression, cfg.MaxRecallRegression),
+		Datasets:            datasets,
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	guard err == nil else return err
+	err = os.WriteFile(cfg.SummaryJSON, append(data, '\n'), 0o644)
+	guard err == nil else return err
+
+	tsv := strings.Builder{}
+	tsv.WriteString(tsvHeader())
+	for _, ds := range datasets {
+		tsv.WriteString(fmt.Sprintf("%s\t%s\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%.15f\t%+.15f\t%+.15f\t%t\t%s\n",
+			ds.Dataset,
+			ds.Selected.Label,
+			ds.Selected.Metrics.Quality.NDCGAt10,
+			ds.DevDense.Metrics.Quality.NDCGAt10,
+			ds.DevBM25.Metrics.Quality.NDCGAt10,
+			ds.TestSelected.Metrics.Quality.NDCGAt10,
+			ds.TestDense.Metrics.Quality.NDCGAt10,
+			ds.TestBM25.Metrics.Quality.NDCGAt10,
+			ds.TestSelected.Metrics.Quality.RecallAt100,
+			ds.TestDense.Metrics.Quality.RecallAt100,
+			ds.ProtectionGate.NDCG10DeltaVsDense,
+			ds.ProtectionGate.Recall100DeltaVsDense,
+			ds.ProtectionGate.Passed,
+			ds.TestSelected.MetricsPath))
+	}
+	err = os.WriteFile(cfg.SummaryTSV, []byte(tsv.String()), 0o644)
+	guard err == nil else return err
+
+	md := []string{
+		"# eos-embed-v1 Hybrid Calibration",
+		"",
+		"Dev split selects the lexical+dense hybrid setting by nDCG@10, with MRR@10 and recall@100 tie-breakers. The selected setting is then applied unchanged to the test split.",
+		"",
+		"## Summary",
+		"",
+		"| dataset | selected | dev nDCG@10 | test nDCG@10 | dense test nDCG@10 | BM25 test nDCG@10 | recall@100 delta vs dense | protection |",
+		"| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+	}
+	for _, ds := range datasets {
+		status := "pass"
+		if !ds.ProtectionGate.Passed {
+			status = "fail"
+		}
+		md = append(md, fmt.Sprintf("| `%s` | `%s` | `%.15f` | `%.15f` | `%.15f` | `%.15f` | `%+.15f` | `%s` |",
+			ds.Dataset,
+			ds.Selected.Label,
+			ds.Selected.Metrics.Quality.NDCGAt10,
+			ds.TestSelected.Metrics.Quality.NDCGAt10,
+			ds.TestDense.Metrics.Quality.NDCGAt10,
+			ds.TestBM25.Metrics.Quality.NDCGAt10,
+			ds.ProtectionGate.Recall100DeltaVsDense,
+			status))
+	}
+	md = append(md,
+		"",
+		"## Artifacts",
+		"",
+		"- Summary JSON: `"+cfg.SummaryJSON+"`",
+		"- Summary TSV: `"+cfg.SummaryTSV+"`",
+		"- Command logs: `"+cfg.LogDir+"`",
+		"",
+		"Per-query protection sentinels are included in JSON when `EOS_HYBRID_CAL_SENTINEL_QUERY_IDS` is set. Broader per-query regression gating remains a next-step policy layer.",
+		"")
+	err = os.WriteFile(cfg.SummaryMarkdown, []byte(strings.Join(md, "\n")), 0o644)
+	guard err == nil else return err
+	return nil
+}
+
+func run(cfg calConfig) error {
+	settings := buildSettings(cfg)
+	guard len(settings) > 0 else return fmt.Errorf("no hybrid settings generated")
+	err := runCmd(cfg, "Build eos CLI", "go-build.log", "go", []string{"build", "-trimpath", "-o", cfg.EosBin, "./cmd/eos"})
+	guard err == nil else return err
+	datasets := []datasetSummary{}
+	protectionFailed := false
+	for _, dataset := range cfg.Datasets {
+		summary, err := runDataset(cfg, dataset, settings)
+		guard err == nil else return err
+		if !summary.ProtectionGate.Passed {
+			protectionFailed = true
+		}
+		datasets = append(datasets, summary)
+	}
+	err = writeOutputs(cfg, datasets)
+	guard err == nil else return err
+	fmt.Println("hybrid_calibration_json=" + cfg.SummaryJSON)
+	fmt.Println("hybrid_calibration_tsv=" + cfg.SummaryTSV)
+	fmt.Println("hybrid_calibration_markdown=" + cfg.SummaryMarkdown)
+	if protectionFailed && cfg.FailOnProtection {
+		return fmt.Errorf("hybrid protection gate failed")
+	}
+	return nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	cfg, err := prepareConfig(root)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	if err := run(cfg); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+}

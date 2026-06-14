@@ -1,0 +1,486 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type guardedConfig struct {
+	Root                 string            `json:"repo_root"`
+	RunID                string            `json:"run_id"`
+	RunDir               string            `json:"run_dir"`
+	LogDir               string            `json:"log_dir"`
+	CandidateRunID       string            `json:"candidate_run_id"`
+	CandidateDir         string            `json:"candidate_dir"`
+	CandidateArtifact    string            `json:"candidate_artifact"`
+	CandidateSealed      string            `json:"candidate_sealed_artifact"`
+	ScoreboardRunID      string            `json:"scoreboard_run_id"`
+	ScoreboardDir        string            `json:"scoreboard_dir"`
+	ScoreboardJSON       string            `json:"scoreboard_json"`
+	ScoreboardTSV        string            `json:"scoreboard_tsv"`
+	AnchorScoreboard     string            `json:"anchor_scoreboard"`
+	Datasets             string            `json:"datasets"`
+	Metrics              string            `json:"metrics"`
+	Category             string            `json:"category"`
+	Baseline             string            `json:"baseline"`
+	Method               string            `json:"method,omitempty"`
+	Bits                 string            `json:"bits,omitempty"`
+	Tolerance            string            `json:"tolerance"`
+	SkipTrain            bool              `json:"skip_train"`
+	SkipScore            bool              `json:"skip_score"`
+	FailOnGate           bool              `json:"fail_on_gate"`
+	GateStatus           string            `json:"gate_status"`
+	GateExitCode         int               `json:"gate_exit_code"`
+	GateCommand          []string          `json:"gate_command"`
+	Logs                 map[string]string `json:"logs"`
+	StartedUTC           string            `json:"started_utc"`
+	UpdatedUTC           string            `json:"updated_utc"`
+	ManifestJSON         string            `json:"manifest_json"`
+	SummaryTSV           string            `json:"summary_tsv"`
+	DirtyAllowedByGuard  bool              `json:"dirty_allowed_by_guard"`
+	TurboQuantPassthrough bool              `json:"turboquant_passthrough"`
+}
+
+func usage() {
+	fmt.Println(`Run one guarded eos-embed-v1 candidate attempt.
+
+Required:
+  EOS_GUARD_ANCHOR_SCOREBOARD=/path/to/current-anchor/scoreboard.json
+
+Training inputs are inherited by scripts/train_manta_embed_v1_candidate.fw.
+
+Run:
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/run_manta_embed_v1_guarded_candidate.fw
+
+Defaults:
+  EOS_GUARD_RUN_DIR=$PWD/runs/eos-embed-v1-guarded-<timestamp>
+  EOS_GUARD_DATASETS=scifact,nfcorpus,fiqa
+  EOS_GUARD_METRICS=ndcg_at_10,recall_at_100
+  EOS_GUARD_CATEGORY=short_retrieval
+  EOS_GUARD_BASELINE=eos
+  EOS_GUARD_FAIL_ON_GATE=1
+
+Smoke / dry-run:
+  EOS_GUARD_CANDIDATE_DIR=/path/to/candidate-run
+  EOS_GUARD_SCOREBOARD_JSON=/path/to/candidate-scoreboard/scoreboard.json
+  EOS_GUARD_FAIL_ON_GATE=0
+
+Dirty working trees remain blocked by the training script unless the caller
+sets EOS_ALLOW_DIRTY=1 or explicitly opts into the guarded passthrough with
+EOS_GUARD_ALLOW_DIRTY=1.`)
+}
+
+func getenv(name string, fallback string) string {
+	value := os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envEnabled(name string) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func envEnabledDefault(name string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	if value == "" {
+		return fallback
+	}
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
+func findRoot() (string, error) {
+	explicit := os.Getenv("EOS_REPO_ROOT")
+	if hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	pwd := os.Getenv("PWD")
+	if hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	guard err == nil else return "", err
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func requireFile(path string, label string) (string, error) {
+	guard path != "" else return "", fmt.Errorf("%s is required", label)
+	abs, err := filepath.Abs(path)
+	guard err == nil else return "", err
+	info, err := os.Stat(abs)
+	guard err == nil else return "", fmt.Errorf("%s does not exist: %s", label, abs)
+	guard !info.IsDir() else return "", fmt.Errorf("%s must be a file: %s", label, abs)
+	return abs, nil
+}
+
+func requireDir(path string, label string) (string, error) {
+	guard path != "" else return "", fmt.Errorf("%s is required", label)
+	abs, err := filepath.Abs(path)
+	guard err == nil else return "", err
+	info, err := os.Stat(abs)
+	guard err == nil else return "", fmt.Errorf("%s does not exist: %s", label, abs)
+	guard info.IsDir() else return "", fmt.Errorf("%s must be a directory: %s", label, abs)
+	return abs, nil
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func renderCommand(name string, args []string, env []string) string {
+	parts := []string{}
+	for _, item := range env {
+		parts = append(parts, shellQuote(item))
+	}
+	parts = append(parts, shellQuote(name))
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func step(label string) {
+	fmt.Println(f"\n== {label} ==")
+}
+
+func runLogged(cfg guardedConfig, label string, logKey string, name string, args []string, env []string) error {
+	step(label)
+	logPath := cfg.Logs[logKey]
+	rendered := renderCommand(name, args, env)
+	fmt.Println("+ " + rendered)
+	err := os.WriteFile(logPath+".cmd", []byte(rendered+"\n"), 0o644)
+	guard err == nil else return err
+	logFile, err := os.Create(logPath)
+	guard err == nil else return err
+	defer logFile.Close()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = cfg.Root
+	cmd.Env = append(os.Environ(), env...)
+	cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
+	cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
+	err = cmd.Run()
+	guard err == nil else return fmt.Errorf("%s failed; see %s: %w", label, logPath, err)
+	return nil
+}
+
+func runGateLogged(cfg guardedConfig) (int, error) {
+	step("Scoreboard promotion gate")
+	logPath := cfg.Logs["gate"]
+	args := append([]string{}, cfg.GateCommand...)
+	rendered := renderCommand("go", args, nil)
+	fmt.Println("+ " + rendered)
+	err := os.WriteFile(logPath+".cmd", []byte(rendered+"\n"), 0o644)
+	guard err == nil else return -1, err
+	logFile, err := os.Create(logPath)
+	guard err == nil else return -1, err
+	defer logFile.Close()
+	cmd := exec.Command("go", args...)
+	cmd.Dir = cfg.Root
+	cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
+	cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
+	err = cmd.Run()
+	if err == nil {
+		return 0, nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return exitErr.ExitCode(), err
+	}
+	return -1, err
+}
+
+func hasScoreboardTurboQuantEnv() bool {
+	for _, env := range os.Environ() {
+		if strings.HasPrefix(env, "EOS_SCOREBOARD_") && strings.Contains(env, "TURBOQUANT") {
+			return true
+		}
+	}
+	return false
+}
+
+func inferCandidateSealed(candidateDir string) string {
+	modelName := getenv("EOS_MODEL_NAME", "eos-embed-v1")
+	return filepath.Join(candidateDir, modelName+".sealed.mll")
+}
+
+func inferCandidateArtifact(candidateDir string) string {
+	modelName := getenv("EOS_MODEL_NAME", "eos-embed-v1")
+	return filepath.Join(candidateDir, modelName+".mll")
+}
+
+func buildGateCommand(cfg guardedConfig) []string {
+	args := []string{
+		"run", "./cmd/eos", "gate-scoreboard",
+		"--category", cfg.Category,
+		"--baseline", cfg.Baseline,
+		"--datasets", cfg.Datasets,
+		"--metrics", cfg.Metrics,
+		"--tolerance", cfg.Tolerance,
+	}
+	if cfg.Method != "" {
+		args = append(args, "--method", cfg.Method)
+	}
+	if cfg.Bits != "" {
+		args = append(args, "--bits", cfg.Bits)
+	}
+	return append(args, cfg.ScoreboardJSON, cfg.AnchorScoreboard)
+}
+
+func prepareConfig(root string) (guardedConfig, error) {
+	started := time.Now().UTC().Format(time.RFC3339)
+	runID := getenv("EOS_GUARD_RUN_ID", "eos-embed-v1-guarded-"+time.Now().UTC().Format("20060102T150405Z"))
+	runDir, err := filepath.Abs(getenv("EOS_GUARD_RUN_DIR", filepath.Join(root, "runs", runID)))
+	guard err == nil else return guardedConfig{}, err
+	if entries, err := os.ReadDir(runDir); err == nil && len(entries) > 0 && os.Getenv("EOS_GUARD_CANDIDATE_DIR") == "" && os.Getenv("EOS_GUARD_SCOREBOARD_JSON") == "" {
+		allowed := true
+		for _, entry := range entries {
+			if entry.Name() != "data" {
+				allowed = false
+				break
+			}
+		}
+		if !allowed {
+			return guardedConfig{}, fmt.Errorf("guard run directory already exists and is not empty: %s", runDir)
+		}
+	}
+	err = os.MkdirAll(filepath.Join(runDir, "logs"), 0o755)
+	guard err == nil else return guardedConfig{}, err
+
+	anchor, err := requireFile(os.Getenv("EOS_GUARD_ANCHOR_SCOREBOARD"), "EOS_GUARD_ANCHOR_SCOREBOARD")
+	guard err == nil else return guardedConfig{}, err
+
+	candidateRunID := getenv("EOS_GUARD_CANDIDATE_RUN_ID", "candidate")
+	candidateDir := filepath.Join(runDir, candidateRunID)
+	skipTrain := envEnabled("EOS_GUARD_SKIP_TRAIN") || os.Getenv("EOS_GUARD_CANDIDATE_DIR") != ""
+	if os.Getenv("EOS_GUARD_CANDIDATE_DIR") != "" {
+		candidateDir, err = requireDir(os.Getenv("EOS_GUARD_CANDIDATE_DIR"), "EOS_GUARD_CANDIDATE_DIR")
+		guard err == nil else return guardedConfig{}, err
+	}
+	candidateArtifact := getenv("EOS_GUARD_CANDIDATE_ARTIFACT", inferCandidateArtifact(candidateDir))
+	candidateSealed := getenv("EOS_GUARD_SEALED_ARTIFACT", inferCandidateSealed(candidateDir))
+	if skipTrain {
+		candidateSealed, err = requireFile(candidateSealed, "candidate sealed artifact")
+		guard err == nil else return guardedConfig{}, err
+	}
+
+	scoreboardRunID := getenv("EOS_GUARD_SCOREBOARD_RUN_ID", candidateRunID+"-scoreboard")
+	scoreboardDir := filepath.Join(runDir, scoreboardRunID)
+	scoreboardJSON := filepath.Join(scoreboardDir, "scoreboard.json")
+	scoreboardTSV := filepath.Join(scoreboardDir, "scoreboard.tsv")
+	skipScore := envEnabled("EOS_GUARD_SKIP_SCORE") || os.Getenv("EOS_GUARD_SCOREBOARD_JSON") != ""
+	if os.Getenv("EOS_GUARD_SCOREBOARD_JSON") != "" {
+		scoreboardJSON, err = requireFile(os.Getenv("EOS_GUARD_SCOREBOARD_JSON"), "EOS_GUARD_SCOREBOARD_JSON")
+		guard err == nil else return guardedConfig{}, err
+		scoreboardDir = filepath.Dir(scoreboardJSON)
+		scoreboardTSV = filepath.Join(scoreboardDir, "scoreboard.tsv")
+	}
+	if skipScore {
+		scoreboardJSON, err = requireFile(scoreboardJSON, "candidate scoreboard JSON")
+		guard err == nil else return guardedConfig{}, err
+	}
+
+	cfg := guardedConfig{
+		Root:                 root,
+		RunID:                runID,
+		RunDir:               runDir,
+		LogDir:               filepath.Join(runDir, "logs"),
+		CandidateRunID:       candidateRunID,
+		CandidateDir:         candidateDir,
+		CandidateArtifact:    candidateArtifact,
+		CandidateSealed:      candidateSealed,
+		ScoreboardRunID:      scoreboardRunID,
+		ScoreboardDir:        scoreboardDir,
+		ScoreboardJSON:       scoreboardJSON,
+		ScoreboardTSV:        scoreboardTSV,
+		AnchorScoreboard:     anchor,
+		Datasets:             getenv("EOS_GUARD_DATASETS", "scifact,nfcorpus,fiqa"),
+		Metrics:              getenv("EOS_GUARD_METRICS", "ndcg_at_10,recall_at_100"),
+		Category:             getenv("EOS_GUARD_CATEGORY", "short_retrieval"),
+		Baseline:             getenv("EOS_GUARD_BASELINE", "eos"),
+		Method:               os.Getenv("EOS_GUARD_METHOD"),
+		Bits:                 os.Getenv("EOS_GUARD_BITS"),
+		Tolerance:            getenv("EOS_GUARD_TOLERANCE", "0"),
+		SkipTrain:            skipTrain,
+		SkipScore:            skipScore,
+		FailOnGate:           envEnabledDefault("EOS_GUARD_FAIL_ON_GATE", true),
+		GateStatus:           "not_run",
+		GateExitCode:         -1,
+		StartedUTC:           started,
+		ManifestJSON:         filepath.Join(runDir, "manifest.json"),
+		SummaryTSV:           filepath.Join(runDir, "summary.tsv"),
+		DirtyAllowedByGuard:  envEnabled("EOS_GUARD_ALLOW_DIRTY") && os.Getenv("EOS_ALLOW_DIRTY") == "",
+		TurboQuantPassthrough: envEnabled("EOS_GUARD_TURBOQUANT") || hasScoreboardTurboQuantEnv(),
+		Logs: map[string]string{
+			"train": filepath.Join(runDir, "logs", "train-candidate.log"),
+			"score": filepath.Join(runDir, "logs", "score-candidate.log"),
+			"gate":  filepath.Join(runDir, "logs", "gate-scoreboard.log"),
+		},
+	}
+	cfg.GateCommand = buildGateCommand(cfg)
+	if cfg.Datasets == "" || cfg.Metrics == "" || cfg.Category == "" || cfg.Baseline == "" {
+		return guardedConfig{}, fmt.Errorf("guard datasets, metrics, category, and baseline must be non-empty")
+	}
+	if cfg.Bits != "" {
+		_, err = strconv.Atoi(cfg.Bits)
+		guard err == nil else return guardedConfig{}, fmt.Errorf("EOS_GUARD_BITS must be an integer: %s", cfg.Bits)
+	}
+	_, err = strconv.ParseFloat(cfg.Tolerance, 64)
+	guard err == nil else return guardedConfig{}, fmt.Errorf("EOS_GUARD_TOLERANCE must be a float: %s", cfg.Tolerance)
+	return cfg, nil
+}
+
+func trainEnv(cfg guardedConfig) []string {
+	env := []string{
+		"EOS_REPO_ROOT=" + cfg.Root,
+		"EOS_RUN_ROOT=" + cfg.RunDir,
+		"EOS_RUN_ID=" + cfg.CandidateRunID,
+		"EOS_RUN_DIR=" + cfg.CandidateDir,
+	}
+	if cfg.DirtyAllowedByGuard {
+		env = append(env, "EOS_ALLOW_DIRTY=1")
+	}
+	return env
+}
+
+func scoreEnv(cfg guardedConfig) []string {
+	baselineLabel := cfg.Baseline
+	hybridBaselineLabel := ""
+	if cfg.Baseline == "eos-hybrid" {
+		baselineLabel = "eos"
+		hybridBaselineLabel = "eos-hybrid"
+	}
+	if cfg.Baseline == "manta-hybrid" {
+		baselineLabel = "manta"
+		hybridBaselineLabel = "manta-hybrid"
+	}
+	env := []string{
+		"EOS_REPO_ROOT=" + cfg.Root,
+		"EOS_SCOREBOARD_ARTIFACT=" + cfg.CandidateSealed,
+		"EOS_SCOREBOARD_RUN_ROOT=" + cfg.RunDir,
+		"EOS_SCOREBOARD_RUN_ID=" + cfg.ScoreboardRunID,
+		"EOS_SCOREBOARD_RETRIEVAL_DATASETS=" + cfg.Datasets,
+		"EOS_SCOREBOARD_BASELINE_LABEL=" + baselineLabel,
+	}
+	if hybridBaselineLabel != "" {
+		env = append(env, "EOS_SCOREBOARD_HYBRID_RETRIEVAL=1")
+		env = append(env, "EOS_SCOREBOARD_HYBRID_BASELINE_LABEL="+hybridBaselineLabel)
+	}
+	if cfg.TurboQuantPassthrough && os.Getenv("EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT") == "" {
+		env = append(env, "EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT=1")
+	}
+	return env
+}
+
+func writeManifest(cfg guardedConfig) error {
+	cfg.UpdatedUTC = time.Now().UTC().Format(time.RFC3339)
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	guard err == nil else return err
+	data = append(data, '\n')
+	return os.WriteFile(cfg.ManifestJSON, data, 0o644)
+}
+
+func writeSummary(cfg guardedConfig) error {
+	header := "key\tvalue\n"
+	lines := []string{
+		"run_dir\t" + cfg.RunDir,
+		"candidate_dir\t" + cfg.CandidateDir,
+		"candidate_sealed_artifact\t" + cfg.CandidateSealed,
+		"scoreboard_json\t" + cfg.ScoreboardJSON,
+		"anchor_scoreboard\t" + cfg.AnchorScoreboard,
+		"gate_status\t" + cfg.GateStatus,
+		"gate_exit_code\t" + strconv.Itoa(cfg.GateExitCode),
+		"gate_log\t" + cfg.Logs["gate"],
+		"manifest_json\t" + cfg.ManifestJSON,
+	}
+	return os.WriteFile(cfg.SummaryTSV, []byte(header+strings.Join(lines, "\n")+"\n"), 0o644)
+}
+
+func runGuardedCandidate(cfg guardedConfig) error {
+	err := writeManifest(cfg)
+	guard err == nil else return err
+	if cfg.SkipTrain {
+		step("Skip candidate training")
+		fmt.Println("candidate_dir=" + cfg.CandidateDir)
+		fmt.Println("candidate_sealed_artifact=" + cfg.CandidateSealed)
+	} else {
+		err = runLogged(cfg, "Train candidate", "train", "ferrous-wheel", []string{"run", "scripts/train_manta_embed_v1_candidate.fw"}, trainEnv(cfg))
+		guard err == nil else return err
+	}
+	if cfg.SkipScore {
+		step("Skip candidate scoreboard")
+		fmt.Println("scoreboard_json=" + cfg.ScoreboardJSON)
+	} else {
+		err = runLogged(cfg, "Score candidate retrieval baselines", "score", "ferrous-wheel", []string{"run", "scripts/score_manta_embed_v1_baselines.fw"}, scoreEnv(cfg))
+		guard err == nil else return err
+	}
+
+	exitCode, gateErr := runGateLogged(cfg)
+	cfg.GateExitCode = exitCode
+	if gateErr == nil {
+		cfg.GateStatus = "accepted"
+	} else {
+		cfg.GateStatus = "rejected"
+	}
+	err = writeManifest(cfg)
+	guard err == nil else return err
+	err = writeSummary(cfg)
+	guard err == nil else return err
+	if gateErr != nil && cfg.FailOnGate {
+		return fmt.Errorf("scoreboard gate rejected candidate; see %s: %w", cfg.Logs["gate"], gateErr)
+	}
+	if gateErr != nil {
+		fmt.Println("scoreboard gate rejected candidate; EOS_GUARD_FAIL_ON_GATE=0 allowed completion")
+	}
+	fmt.Println("guard_manifest=" + cfg.ManifestJSON)
+	fmt.Println("guard_summary=" + cfg.SummaryTSV)
+	return nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	cfg, err := prepareConfig(root)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	if err := runGuardedCandidate(cfg); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+}

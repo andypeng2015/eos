@@ -72,7 +72,7 @@ func EvaluateBM25Retrieval(ctx context.Context, cfg RetrievalEvalConfig) (Retrie
 	queryDuration := time.Since(queryStart)
 
 	scoreStart := time.Now()
-	quality, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, err := computeBM25RetrievalQuality(ctx, tokenizedQueries, index, qrels, cfg.TopK)
+	quality, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, err := computeBM25RetrievalQuality(ctx, tokenizedQueries, index, qrels, cfg.TopK, cfg.DatasetName, cfg.PerQueryJSONLPath)
 	if err != nil {
 		return RetrievalEvalMetrics{}, err
 	}
@@ -182,7 +182,7 @@ func tokenizeBM25Queries(ctx context.Context, records []retrievalTextRecord) ([]
 	return out, nil
 }
 
-func computeBM25RetrievalQuality(ctx context.Context, queries []bm25Query, index bm25Index, qrels retrievalQrels, topK int) (RetrievalEvalQualityMetrics, int, int, int, int, error) {
+func computeBM25RetrievalQuality(ctx context.Context, queries []bm25Query, index bm25Index, qrels retrievalQrels, topK int, datasetName, perQueryJSONLPath string) (RetrievalEvalQualityMetrics, int, int, int, int, error) {
 	docIDSet := make(map[string]bool, len(index.Documents))
 	for _, doc := range index.Documents {
 		docIDSet[doc.ID] = true
@@ -190,6 +190,11 @@ func computeBM25RetrievalQuality(ctx context.Context, queries []bm25Query, index
 	if topK < 100 {
 		topK = 100
 	}
+	writer, err := newRetrievalPerQueryWriter(perQueryJSONLPath)
+	if err != nil {
+		return RetrievalEvalQualityMetrics{}, 0, 0, 0, 0, err
+	}
+	defer writer.Close()
 	var totals RetrievalEvalQualityMetrics
 	evaluatedQueries := 0
 	relevantPairs := 0
@@ -215,18 +220,16 @@ func computeBM25RetrievalQuality(ctx context.Context, queries []bm25Query, index
 		scores := topBM25Scores(query.Tokens, index, topK)
 		evaluatedQueries++
 		relevantPairs += len(filteredRels)
-		totals.NDCGAt10 += ndcgAt(scores, filteredRels, 10)
-		totals.MRRAt10 += mrrAt(scores, filteredRels, 10)
-		totals.RecallAt10 += recallAt(scores, filteredRels, 10)
-		totals.RecallAt100 += recallAt(scores, filteredRels, 100)
+		row := buildRetrievalPerQueryRow(datasetName, query.ID, scores, filteredRels)
+		addRetrievalPerQueryQuality(&totals, row.Quality)
+		if err := writer.Write(row); err != nil {
+			return RetrievalEvalQualityMetrics{}, 0, 0, 0, 0, err
+		}
 	}
-	if evaluatedQueries > 0 {
-		denom := float64(evaluatedQueries)
-		totals.NDCGAt10 /= denom
-		totals.MRRAt10 /= denom
-		totals.RecallAt10 /= denom
-		totals.RecallAt100 /= denom
+	if err := writer.Close(); err != nil {
+		return RetrievalEvalQualityMetrics{}, 0, 0, 0, 0, err
 	}
+	averageRetrievalQuality(&totals, evaluatedQueries)
 	return totals, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, nil
 }
 

@@ -109,6 +109,16 @@ func run(args []string) error {
 		return runEmbedText(args[1:])
 	case "eval-retrieval":
 		return runEvalRetrieval(args[1:])
+	case "eval-retrieval-hybrid":
+		return runEvalRetrievalHybrid(args[1:])
+	case "eval-retrieval-turboquant":
+		return runEvalRetrievalTurboQuant(args[1:])
+	case "eval-retrieval-vectors-turboquant":
+		return runEvalRetrievalVectorsTurboQuant(args[1:])
+	case "eval-retrieval-vectors":
+		return runEvalRetrievalVectors(args[1:])
+	case "eval-retrieval-vectors-hybrid":
+		return runEvalRetrievalVectorsHybrid(args[1:])
 	case "eval-retrieval-bm25":
 		return runEvalRetrievalBM25(args[1:])
 	case "mine-retrieval-hard-negatives":
@@ -163,6 +173,8 @@ func run(args []string) error {
 		return runGateTrainMetrics(args[1:])
 	case "gate-retrieval-metrics":
 		return runGateRetrievalMetrics(args[1:])
+	case "gate-scoreboard", "gate-retrieval-scoreboard":
+		return runGateScoreboard(args[1:])
 	default:
 		return fmt.Errorf("unknown subcommand %q", args[0])
 	}
@@ -391,6 +403,7 @@ func runEvalRetrieval(args []string) error {
 	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks")
 	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
 	metricsPath := fs.String("metrics-json", "", "write retrieval metrics JSON")
+	perQueryPath := fs.String("per-query-jsonl", "", "write one retrieval diagnostics JSONL row per evaluated query")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -413,15 +426,16 @@ func runEvalRetrieval(args []string) error {
 		return err
 	}
 	metrics, err := eosruntime.EvaluateEmbeddingRetrieval(context.Background(), model, eosruntime.RetrievalEvalConfig{
-		DatasetName:  *datasetName,
-		ArtifactPath: artifactPath,
-		CorpusPath:   corpusPath,
-		QueriesPath:  queriesPath,
-		QrelsPath:    *qrelsPath,
-		BatchSize:    *batchSize,
-		TopK:         *topK,
-		MaxDocs:      *maxDocs,
-		MaxQueries:   *maxQueries,
+		DatasetName:       *datasetName,
+		ArtifactPath:      artifactPath,
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         *qrelsPath,
+		BatchSize:         *batchSize,
+		TopK:              *topK,
+		MaxDocs:           *maxDocs,
+		MaxQueries:        *maxQueries,
+		PerQueryJSONLPath: *perQueryPath,
 	})
 	if err != nil {
 		return err
@@ -438,14 +452,534 @@ func runEvalRetrieval(args []string) error {
 	}
 	fmt.Printf("retrieval eval: dataset=%s backend=%s docs=%d queries=%d relevant_pairs=%d scored_pairs=%d\n",
 		metrics.Dataset, metrics.Backend, metrics.Inputs.Documents, metrics.Inputs.Queries, metrics.Inputs.RelevantPairs, metrics.Inputs.ScoredPairs)
-	fmt.Printf("quality: ndcg@10=%.6f mrr@10=%.6f recall@10=%.6f recall@100=%.6f\n",
-		metrics.Quality.NDCGAt10, metrics.Quality.MRRAt10, metrics.Quality.RecallAt10, metrics.Quality.RecallAt100)
+	fmt.Printf("quality: ndcg@10=%.6f ndcg@100=%.6f mrr@10=%.6f p@1=%.6f p@5=%.6f p@10=%.6f hit@1=%.6f hit@5=%.6f hit@10=%.6f map@10=%.6f map@100=%.6f recall@10=%.6f recall@100=%.6f\n",
+		metrics.Quality.NDCGAt10, metrics.Quality.NDCGAt100, metrics.Quality.MRRAt10, metrics.Quality.PrecisionAt1, metrics.Quality.PrecisionAt5, metrics.Quality.PrecisionAt10, metrics.Quality.HitAt1, metrics.Quality.HitAt5, metrics.Quality.HitAt10, metrics.Quality.MAPAt10, metrics.Quality.MAPAt100, metrics.Quality.RecallAt10, metrics.Quality.RecallAt100)
 	fmt.Printf("throughput: elapsed=%.3fs docs/s=%.2f queries/s=%.2f scores/s=%.2f\n",
 		metrics.Throughput.ElapsedSeconds, metrics.Throughput.DocumentsPerSecond, metrics.Throughput.QueriesPerSecond, metrics.Throughput.ScoresPerSecond)
 	if *metricsPath != "" {
 		fmt.Printf("metrics: %s\n", *metricsPath)
 	}
+	if *perQueryPath != "" {
+		fmt.Printf("per_query: %s\n", *perQueryPath)
+	}
 	return nil
+}
+
+func runEvalRetrievalVectors(args []string) error {
+	fs := flag.NewFlagSet("eval-retrieval-vectors", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	datasetName := fs.String("dataset", "", "dataset name for metrics output")
+	split := fs.String("split", "test", "qrels split under <dataset-dir>/qrels")
+	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path")
+	docVectorsPath := fs.String("doc-vectors", "", "document vector cache JSONL")
+	queryVectorsPath := fs.String("query-vectors", "", "query vector cache JSONL")
+	backendName := fs.String("backend", "vectors", "backend/provider label for metrics output")
+	artifactLabel := fs.String("artifact", "", "external artifact/model label for metrics output")
+	topK := fs.Int("top-k", 100, "retrieval depth for scoring")
+	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks")
+	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
+	metricsPath := fs.String("metrics-json", "", "write retrieval metrics JSON")
+	perQueryPath := fs.String("per-query-jsonl", "", "write one retrieval diagnostics JSONL row per evaluated query")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 || fs.Arg(0) == "" || *docVectorsPath == "" || *queryVectorsPath == "" {
+		return fmt.Errorf("usage: eos eval-retrieval-vectors [flags] --doc-vectors docs.jsonl --query-vectors queries.jsonl <beir-dataset-dir>")
+	}
+	datasetDir := fs.Arg(0)
+	corpusPath, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
+	if *qrelsPath == "" {
+		*qrelsPath = defaultQrelsPath
+	}
+	if *datasetName == "" {
+		*datasetName = filepath.Base(datasetDir)
+	}
+	metrics, err := eosruntime.EvaluateVectorCacheRetrieval(context.Background(), eosruntime.RetrievalEvalConfig{
+		DatasetName:       *datasetName,
+		ArtifactPath:      *artifactLabel,
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         *qrelsPath,
+		DocVectorPath:     *docVectorsPath,
+		QueryVectorPath:   *queryVectorsPath,
+		BackendName:       *backendName,
+		TopK:              *topK,
+		MaxDocs:           *maxDocs,
+		MaxQueries:        *maxQueries,
+		PerQueryJSONLPath: *perQueryPath,
+	})
+	if err != nil {
+		return err
+	}
+	if *metricsPath != "" {
+		data, err := json.MarshalIndent(metrics, "", "  ")
+		if err != nil {
+			return err
+		}
+		data = append(data, '\n')
+		if err := os.WriteFile(*metricsPath, data, 0o644); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("retrieval vectors: dataset=%s backend=%s docs=%d queries=%d relevant_pairs=%d scored_pairs=%d\n",
+		metrics.Dataset, metrics.Backend, metrics.Inputs.Documents, metrics.Inputs.Queries, metrics.Inputs.RelevantPairs, metrics.Inputs.ScoredPairs)
+	fmt.Printf("quality: ndcg@10=%.6f ndcg@100=%.6f mrr@10=%.6f p@1=%.6f p@5=%.6f p@10=%.6f hit@1=%.6f hit@5=%.6f hit@10=%.6f map@10=%.6f map@100=%.6f recall@10=%.6f recall@100=%.6f\n",
+		metrics.Quality.NDCGAt10, metrics.Quality.NDCGAt100, metrics.Quality.MRRAt10, metrics.Quality.PrecisionAt1, metrics.Quality.PrecisionAt5, metrics.Quality.PrecisionAt10, metrics.Quality.HitAt1, metrics.Quality.HitAt5, metrics.Quality.HitAt10, metrics.Quality.MAPAt10, metrics.Quality.MAPAt100, metrics.Quality.RecallAt10, metrics.Quality.RecallAt100)
+	fmt.Printf("throughput: elapsed=%.3fs docs/s=%.2f queries/s=%.2f scores/s=%.2f\n",
+		metrics.Throughput.ElapsedSeconds, metrics.Throughput.DocumentsPerSecond, metrics.Throughput.QueriesPerSecond, metrics.Throughput.ScoresPerSecond)
+	if *metricsPath != "" {
+		fmt.Printf("metrics: %s\n", *metricsPath)
+	}
+	if *perQueryPath != "" {
+		fmt.Printf("per_query: %s\n", *perQueryPath)
+	}
+	return nil
+}
+
+func runEvalRetrievalHybrid(args []string) error {
+	fs := flag.NewFlagSet("eval-retrieval-hybrid", flag.ContinueOnError)
+	datasetName := fs.String("dataset", "", "dataset name for metrics output")
+	split := fs.String("split", "test", "qrels split under <dataset-dir>/qrels")
+	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path")
+	batchSize := fs.Int("batch-size", 64, "embedding batch size")
+	topK := fs.Int("top-k", 100, "retrieval depth for scoring")
+	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks")
+	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
+	method := fs.String("method", "minmax", "hybrid fusion method: minmax, minmax_blend, zscore, zscore_blend, or rrf")
+	alpha := fs.Float64("alpha", 0.75, "BM25 weight for minmax/zscore hybrid blending")
+	rrfK := fs.Float64("rrf-k", 60, "RRF rank constant")
+	rrfLambda := fs.Float64("rrf-lambda", 1.0, "BM25 contribution multiplier for RRF")
+	metricsPath := fs.String("metrics-json", "", "write retrieval metrics JSON")
+	perQueryPath := fs.String("per-query-jsonl", "", "write one retrieval diagnostics JSONL row per evaluated query")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
+		return fmt.Errorf("usage: eos eval-retrieval-hybrid [flags] <artifact.mll> <beir-dataset-dir>")
+	}
+	artifactPath := fs.Arg(0)
+	datasetDir := fs.Arg(1)
+	corpusPath, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
+	if *qrelsPath == "" {
+		*qrelsPath = defaultQrelsPath
+	}
+	if *datasetName == "" {
+		*datasetName = filepath.Base(datasetDir)
+	}
+
+	rt := eosruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+	model, err := rt.LoadEmbeddingPackage(context.Background(), artifactPath)
+	if err != nil {
+		return err
+	}
+	metrics, err := eosruntime.EvaluateHybridRetrieval(context.Background(), model, eosruntime.RetrievalEvalConfig{
+		DatasetName:       *datasetName,
+		ArtifactPath:      artifactPath,
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         *qrelsPath,
+		BatchSize:         *batchSize,
+		TopK:              *topK,
+		MaxDocs:           *maxDocs,
+		MaxQueries:        *maxQueries,
+		PerQueryJSONLPath: *perQueryPath,
+		Hybrid: eosruntime.RetrievalEvalHybridConfig{
+			Method:    *method,
+			Alpha:     *alpha,
+			AlphaSet:  true,
+			RRFK:      *rrfK,
+			RRFLambda: *rrfLambda,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if *metricsPath != "" {
+		data, err := json.MarshalIndent(metrics, "", "  ")
+		if err != nil {
+			return err
+		}
+		data = append(data, '\n')
+		if err := os.WriteFile(*metricsPath, data, 0o644); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("retrieval hybrid: dataset=%s backend=%s docs=%d queries=%d relevant_pairs=%d scored_pairs=%d\n",
+		metrics.Dataset, metrics.Backend, metrics.Inputs.Documents, metrics.Inputs.Queries, metrics.Inputs.RelevantPairs, metrics.Inputs.ScoredPairs)
+	printRetrievalHybridConfig(metrics)
+	fmt.Printf("quality: ndcg@10=%.6f ndcg@100=%.6f mrr@10=%.6f p@1=%.6f p@5=%.6f p@10=%.6f hit@1=%.6f hit@5=%.6f hit@10=%.6f map@10=%.6f map@100=%.6f recall@10=%.6f recall@100=%.6f\n",
+		metrics.Quality.NDCGAt10, metrics.Quality.NDCGAt100, metrics.Quality.MRRAt10, metrics.Quality.PrecisionAt1, metrics.Quality.PrecisionAt5, metrics.Quality.PrecisionAt10, metrics.Quality.HitAt1, metrics.Quality.HitAt5, metrics.Quality.HitAt10, metrics.Quality.MAPAt10, metrics.Quality.MAPAt100, metrics.Quality.RecallAt10, metrics.Quality.RecallAt100)
+	fmt.Printf("throughput: elapsed=%.3fs docs/s=%.2f queries/s=%.2f scores/s=%.2f\n",
+		metrics.Throughput.ElapsedSeconds, metrics.Throughput.DocumentsPerSecond, metrics.Throughput.QueriesPerSecond, metrics.Throughput.ScoresPerSecond)
+	if *metricsPath != "" {
+		fmt.Printf("metrics: %s\n", *metricsPath)
+	}
+	if *perQueryPath != "" {
+		fmt.Printf("per_query: %s\n", *perQueryPath)
+	}
+	return nil
+}
+
+func runEvalRetrievalVectorsHybrid(args []string) error {
+	fs := flag.NewFlagSet("eval-retrieval-vectors-hybrid", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	datasetName := fs.String("dataset", "", "dataset name for metrics output")
+	split := fs.String("split", "test", "qrels split under <dataset-dir>/qrels")
+	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path")
+	docVectorsPath := fs.String("doc-vectors", "", "document vector cache JSONL")
+	queryVectorsPath := fs.String("query-vectors", "", "query vector cache JSONL")
+	backendName := fs.String("backend", "vectors-hybrid", "backend/provider label for metrics output")
+	artifactLabel := fs.String("artifact", "", "external artifact/model label for metrics output")
+	topK := fs.Int("top-k", 100, "retrieval depth for scoring")
+	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks")
+	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
+	method := fs.String("method", "minmax", "hybrid fusion method: minmax, minmax_blend, zscore, zscore_blend, or rrf")
+	alpha := fs.Float64("alpha", 0.75, "BM25 weight for minmax/zscore hybrid blending")
+	rrfK := fs.Float64("rrf-k", 60, "RRF rank constant")
+	rrfLambda := fs.Float64("rrf-lambda", 1.0, "BM25 contribution multiplier for RRF")
+	metricsPath := fs.String("metrics-json", "", "write retrieval metrics JSON")
+	perQueryPath := fs.String("per-query-jsonl", "", "write one retrieval diagnostics JSONL row per evaluated query")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 || fs.Arg(0) == "" || *docVectorsPath == "" || *queryVectorsPath == "" {
+		return fmt.Errorf("usage: eos eval-retrieval-vectors-hybrid [flags] --doc-vectors docs.jsonl --query-vectors queries.jsonl <beir-dataset-dir>")
+	}
+	datasetDir := fs.Arg(0)
+	corpusPath, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
+	if *qrelsPath == "" {
+		*qrelsPath = defaultQrelsPath
+	}
+	if *datasetName == "" {
+		*datasetName = filepath.Base(datasetDir)
+	}
+	metrics, err := eosruntime.EvaluateVectorCacheHybridRetrieval(context.Background(), eosruntime.RetrievalEvalConfig{
+		DatasetName:       *datasetName,
+		ArtifactPath:      *artifactLabel,
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         *qrelsPath,
+		DocVectorPath:     *docVectorsPath,
+		QueryVectorPath:   *queryVectorsPath,
+		BackendName:       *backendName,
+		TopK:              *topK,
+		MaxDocs:           *maxDocs,
+		MaxQueries:        *maxQueries,
+		PerQueryJSONLPath: *perQueryPath,
+		Hybrid: eosruntime.RetrievalEvalHybridConfig{
+			Method:    *method,
+			Alpha:     *alpha,
+			AlphaSet:  true,
+			RRFK:      *rrfK,
+			RRFLambda: *rrfLambda,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if *metricsPath != "" {
+		data, err := json.MarshalIndent(metrics, "", "  ")
+		if err != nil {
+			return err
+		}
+		data = append(data, '\n')
+		if err := os.WriteFile(*metricsPath, data, 0o644); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("retrieval vectors hybrid: dataset=%s backend=%s docs=%d queries=%d relevant_pairs=%d scored_pairs=%d\n",
+		metrics.Dataset, metrics.Backend, metrics.Inputs.Documents, metrics.Inputs.Queries, metrics.Inputs.RelevantPairs, metrics.Inputs.ScoredPairs)
+	printRetrievalHybridConfig(metrics)
+	fmt.Printf("quality: ndcg@10=%.6f ndcg@100=%.6f mrr@10=%.6f p@1=%.6f p@5=%.6f p@10=%.6f hit@1=%.6f hit@5=%.6f hit@10=%.6f map@10=%.6f map@100=%.6f recall@10=%.6f recall@100=%.6f\n",
+		metrics.Quality.NDCGAt10, metrics.Quality.NDCGAt100, metrics.Quality.MRRAt10, metrics.Quality.PrecisionAt1, metrics.Quality.PrecisionAt5, metrics.Quality.PrecisionAt10, metrics.Quality.HitAt1, metrics.Quality.HitAt5, metrics.Quality.HitAt10, metrics.Quality.MAPAt10, metrics.Quality.MAPAt100, metrics.Quality.RecallAt10, metrics.Quality.RecallAt100)
+	fmt.Printf("throughput: elapsed=%.3fs docs/s=%.2f queries/s=%.2f scores/s=%.2f\n",
+		metrics.Throughput.ElapsedSeconds, metrics.Throughput.DocumentsPerSecond, metrics.Throughput.QueriesPerSecond, metrics.Throughput.ScoresPerSecond)
+	if *metricsPath != "" {
+		fmt.Printf("metrics: %s\n", *metricsPath)
+	}
+	if *perQueryPath != "" {
+		fmt.Printf("per_query: %s\n", *perQueryPath)
+	}
+	return nil
+}
+
+func printRetrievalHybridConfig(metrics eosruntime.RetrievalEvalMetrics) {
+	if metrics.Config.Hybrid == nil {
+		return
+	}
+	hybrid := metrics.Config.Hybrid
+	fmt.Printf("hybrid: method=%s alpha=%.6g rrf_k=%.6g rrf_lambda=%.6g\n", hybrid.Method, hybrid.Alpha, hybrid.RRFK, hybrid.RRFLambda)
+}
+
+func runEvalRetrievalTurboQuant(args []string) error {
+	fs := flag.NewFlagSet("eval-retrieval-turboquant", flag.ContinueOnError)
+	datasetName := fs.String("dataset", "", "dataset name for metrics output")
+	split := fs.String("split", "test", "qrels split under <dataset-dir>/qrels")
+	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path")
+	batchSize := fs.Int("batch-size", 64, "embedding batch size")
+	topK := fs.Int("top-k", 100, "retrieval depth for scoring")
+	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks")
+	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
+	bitsRaw := fs.String("bits", "2,4,8", "comma-separated TurboQuant IP bit widths; supported: 2..8")
+	rerankOverfetchRaw := fs.String("rerank-overfetch", "", "optional comma-separated TurboQuant candidate depths to rerank, e.g. 200,500")
+	rerankStorage := fs.String("rerank-storage", eosruntime.TurboQuantRerankStorageDense, "rerank storage for --rerank-overfetch: dense, compact-reconstruct, or fp16")
+	metricsPath := fs.String("metrics-json", "", "write TurboQuant retrieval metrics JSON")
+	metricsTSVPath := fs.String("metrics-tsv", "", "write compact dense/quantized metrics TSV")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
+		return fmt.Errorf("usage: eos eval-retrieval-turboquant [flags] <artifact.mll> <beir-dataset-dir>")
+	}
+	bits, err := parsePositiveIntCSV(*bitsRaw, "bits")
+	if err != nil {
+		return fmt.Errorf("bits: %w", err)
+	}
+	rerankOverfetch, err := parseOptionalPositiveIntCSV(*rerankOverfetchRaw, "rerank-overfetch")
+	if err != nil {
+		return err
+	}
+	artifactPath := fs.Arg(0)
+	datasetDir := fs.Arg(1)
+	corpusPath, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
+	if *qrelsPath == "" {
+		*qrelsPath = defaultQrelsPath
+	}
+	if *datasetName == "" {
+		*datasetName = filepath.Base(datasetDir)
+	}
+
+	rt := eosruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+	model, err := rt.LoadEmbeddingPackage(context.Background(), artifactPath)
+	if err != nil {
+		return err
+	}
+	metrics, err := eosruntime.EvaluateTurboQuantRetrievalWithRerankStorage(context.Background(), model, eosruntime.RetrievalEvalConfig{
+		DatasetName:  *datasetName,
+		ArtifactPath: artifactPath,
+		CorpusPath:   corpusPath,
+		QueriesPath:  queriesPath,
+		QrelsPath:    *qrelsPath,
+		BatchSize:    *batchSize,
+		TopK:         *topK,
+		MaxDocs:      *maxDocs,
+		MaxQueries:   *maxQueries,
+	}, bits, rerankOverfetch, *rerankStorage)
+	if err != nil {
+		return err
+	}
+	if *metricsPath != "" {
+		data, err := json.MarshalIndent(metrics, "", "  ")
+		if err != nil {
+			return err
+		}
+		data = append(data, '\n')
+		if err := os.WriteFile(*metricsPath, data, 0o644); err != nil {
+			return err
+		}
+	}
+	if *metricsTSVPath != "" {
+		if err := writeTurboQuantRetrievalMetricsTSV(*metricsTSVPath, metrics); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("retrieval turboquant: dataset=%s backend=%s docs=%d queries=%d relevant_pairs=%d scored_pairs=%d\n",
+		metrics.Dataset, metrics.Backend, metrics.Inputs.Documents, metrics.Inputs.Queries, metrics.Inputs.RelevantPairs, metrics.Inputs.ScoredPairs)
+	fmt.Printf("dense: ndcg@10=%.6f ndcg@100=%.6f map@10=%.6f recall@100=%.6f vector_bytes=%d scores/s=%.2f\n",
+		metrics.Dense.Quality.NDCGAt10, metrics.Dense.Quality.NDCGAt100, metrics.Dense.Quality.MAPAt10, metrics.Dense.Quality.RecallAt100, metrics.Dense.VectorBytes, metrics.Dense.ScoresPerSecond)
+	for _, row := range metrics.Rows {
+		label := fmt.Sprintf("q%d", row.Bits)
+		if row.RerankOverfetch > 0 {
+			label = fmt.Sprintf("q%d-rerank%d", row.Bits, row.RerankOverfetch)
+		}
+		fmt.Printf("%s: ndcg@10=%.6f delta=%+.6f recall@100=%.6f delta=%+.6f vector_bytes=%d total_vector_bytes=%d compression=%.2fx total_compression=%.2fx scores/s=%.2f\n",
+			label,
+			row.Quality.NDCGAt10,
+			row.NDCGAt10Delta,
+			row.Quality.RecallAt100,
+			row.RecallAt100Delta,
+			row.VectorBytes,
+			row.TotalVectorBytes,
+			row.CompressionRatio,
+			row.TotalCompression,
+			row.ScoresPerSecond,
+		)
+	}
+	if *metricsPath != "" {
+		fmt.Printf("metrics: %s\n", *metricsPath)
+	}
+	if *metricsTSVPath != "" {
+		fmt.Printf("metrics_tsv: %s\n", *metricsTSVPath)
+	}
+	return nil
+}
+
+func runEvalRetrievalVectorsTurboQuant(args []string) error {
+	fs := flag.NewFlagSet("eval-retrieval-vectors-turboquant", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	datasetName := fs.String("dataset", "", "dataset name for metrics output")
+	split := fs.String("split", "test", "qrels split under <dataset-dir>/qrels")
+	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path")
+	docVectorsPath := fs.String("doc-vectors", "", "document vector cache JSONL")
+	queryVectorsPath := fs.String("query-vectors", "", "query vector cache JSONL")
+	backendName := fs.String("backend", "vectors", "backend/provider label for metrics output")
+	artifactLabel := fs.String("artifact", "", "external artifact/model label for metrics output")
+	topK := fs.Int("top-k", 100, "retrieval depth for scoring")
+	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks")
+	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
+	bitsRaw := fs.String("bits", "2,4,8", "comma-separated TurboQuant IP bit widths; supported: 2..8")
+	rerankOverfetchRaw := fs.String("rerank-overfetch", "", "optional comma-separated TurboQuant candidate depths to rerank, e.g. 200,500")
+	rerankStorage := fs.String("rerank-storage", eosruntime.TurboQuantRerankStorageDense, "rerank storage for --rerank-overfetch: dense, compact-reconstruct, or fp16")
+	metricsPath := fs.String("metrics-json", "", "write TurboQuant retrieval metrics JSON")
+	metricsTSVPath := fs.String("metrics-tsv", "", "write compact dense/quantized metrics TSV")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 || fs.Arg(0) == "" || *docVectorsPath == "" || *queryVectorsPath == "" {
+		return fmt.Errorf("usage: eos eval-retrieval-vectors-turboquant [flags] --doc-vectors docs.jsonl --query-vectors queries.jsonl <beir-dataset-dir>")
+	}
+	bits, err := parsePositiveIntCSV(*bitsRaw, "bits")
+	if err != nil {
+		return fmt.Errorf("bits: %w", err)
+	}
+	rerankOverfetch, err := parseOptionalPositiveIntCSV(*rerankOverfetchRaw, "rerank-overfetch")
+	if err != nil {
+		return err
+	}
+	datasetDir := fs.Arg(0)
+	corpusPath, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
+	if *qrelsPath == "" {
+		*qrelsPath = defaultQrelsPath
+	}
+	if *datasetName == "" {
+		*datasetName = filepath.Base(datasetDir)
+	}
+	metrics, err := eosruntime.EvaluateTurboQuantVectorCacheRetrievalWithRerankStorage(context.Background(), eosruntime.RetrievalEvalConfig{
+		DatasetName:     *datasetName,
+		ArtifactPath:    *artifactLabel,
+		CorpusPath:      corpusPath,
+		QueriesPath:     queriesPath,
+		QrelsPath:       *qrelsPath,
+		DocVectorPath:   *docVectorsPath,
+		QueryVectorPath: *queryVectorsPath,
+		BackendName:     *backendName,
+		TopK:            *topK,
+		MaxDocs:         *maxDocs,
+		MaxQueries:      *maxQueries,
+	}, bits, rerankOverfetch, *rerankStorage)
+	if err != nil {
+		return err
+	}
+	if *metricsPath != "" {
+		data, err := json.MarshalIndent(metrics, "", "  ")
+		if err != nil {
+			return err
+		}
+		data = append(data, '\n')
+		if err := os.WriteFile(*metricsPath, data, 0o644); err != nil {
+			return err
+		}
+	}
+	if *metricsTSVPath != "" {
+		if err := writeTurboQuantRetrievalMetricsTSV(*metricsTSVPath, metrics); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("retrieval vectors turboquant: dataset=%s backend=%s docs=%d queries=%d relevant_pairs=%d scored_pairs=%d\n",
+		metrics.Dataset, metrics.Backend, metrics.Inputs.Documents, metrics.Inputs.Queries, metrics.Inputs.RelevantPairs, metrics.Inputs.ScoredPairs)
+	fmt.Printf("dense: ndcg@10=%.6f ndcg@100=%.6f map@10=%.6f recall@100=%.6f vector_bytes=%d scores/s=%.2f\n",
+		metrics.Dense.Quality.NDCGAt10, metrics.Dense.Quality.NDCGAt100, metrics.Dense.Quality.MAPAt10, metrics.Dense.Quality.RecallAt100, metrics.Dense.VectorBytes, metrics.Dense.ScoresPerSecond)
+	for _, row := range metrics.Rows {
+		label := fmt.Sprintf("q%d", row.Bits)
+		if row.RerankOverfetch > 0 {
+			label = fmt.Sprintf("q%d-rerank%d", row.Bits, row.RerankOverfetch)
+		}
+		fmt.Printf("%s: ndcg@10=%.6f delta=%+.6f recall@100=%.6f delta=%+.6f vector_bytes=%d total_vector_bytes=%d compression=%.2fx total_compression=%.2fx scores/s=%.2f\n",
+			label,
+			row.Quality.NDCGAt10,
+			row.NDCGAt10Delta,
+			row.Quality.RecallAt100,
+			row.RecallAt100Delta,
+			row.VectorBytes,
+			row.TotalVectorBytes,
+			row.CompressionRatio,
+			row.TotalCompression,
+			row.ScoresPerSecond,
+		)
+	}
+	if *metricsPath != "" {
+		fmt.Printf("metrics: %s\n", *metricsPath)
+	}
+	if *metricsTSVPath != "" {
+		fmt.Printf("metrics_tsv: %s\n", *metricsTSVPath)
+	}
+	return nil
+}
+
+func writeTurboQuantRetrievalMetricsTSV(path string, metrics eosruntime.TurboQuantRetrievalEvalMetrics) error {
+	var b strings.Builder
+	b.WriteString("dataset\trow\tbits\tmethod\trerank_overfetch\trerank_storage\tndcg_at_10\tndcg_at_100\tmrr_at_10\tprecision_at_1\tprecision_at_5\tprecision_at_10\thit_at_1\thit_at_5\thit_at_10\tmap_at_10\tmap_at_100\trecall_at_10\trecall_at_100\tndcg_at_10_delta\trecall_at_100_delta\tvector_bytes\tdense_vector_bytes\trerank_sidecar_bytes\ttotal_vector_bytes\tcompression_ratio\ttotal_compression_ratio\tscores_per_second\tdocs_per_second\trerank_scores\n")
+	fmt.Fprintf(&b, "%s\tdense\t\tfloat32\t\t\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t\t\t%d\t%d\t0\t%d\t%.6f\t%.6f\t%.2f\t\t\n",
+		metrics.Dataset,
+		metrics.Dense.Quality.NDCGAt10,
+		metrics.Dense.Quality.NDCGAt100,
+		metrics.Dense.Quality.MRRAt10,
+		metrics.Dense.Quality.PrecisionAt1,
+		metrics.Dense.Quality.PrecisionAt5,
+		metrics.Dense.Quality.PrecisionAt10,
+		metrics.Dense.Quality.HitAt1,
+		metrics.Dense.Quality.HitAt5,
+		metrics.Dense.Quality.HitAt10,
+		metrics.Dense.Quality.MAPAt10,
+		metrics.Dense.Quality.MAPAt100,
+		metrics.Dense.Quality.RecallAt10,
+		metrics.Dense.Quality.RecallAt100,
+		metrics.Dense.VectorBytes,
+		metrics.Dense.VectorBytes,
+		metrics.Dense.VectorBytes,
+		1.0,
+		1.0,
+		metrics.Dense.ScoresPerSecond,
+	)
+	for _, row := range metrics.Rows {
+		rowKind := "quantized"
+		if row.RerankOverfetch > 0 {
+			rowKind = "quantized_rerank"
+		}
+		fmt.Fprintf(&b, "%s\t%s\t%d\t%s\t%d\t%s\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%+.6f\t%+.6f\t%d\t%d\t%d\t%d\t%.6f\t%.6f\t%.2f\t%.2f\t%d\n",
+			metrics.Dataset,
+			rowKind,
+			row.Bits,
+			row.Method,
+			row.RerankOverfetch,
+			row.RerankStorage,
+			row.Quality.NDCGAt10,
+			row.Quality.NDCGAt100,
+			row.Quality.MRRAt10,
+			row.Quality.PrecisionAt1,
+			row.Quality.PrecisionAt5,
+			row.Quality.PrecisionAt10,
+			row.Quality.HitAt1,
+			row.Quality.HitAt5,
+			row.Quality.HitAt10,
+			row.Quality.MAPAt10,
+			row.Quality.MAPAt100,
+			row.Quality.RecallAt10,
+			row.Quality.RecallAt100,
+			row.NDCGAt10Delta,
+			row.RecallAt100Delta,
+			row.VectorBytes,
+			row.DenseVectorBytes,
+			row.RerankSidecarBytes,
+			row.TotalVectorBytes,
+			row.CompressionRatio,
+			row.TotalCompression,
+			row.ScoresPerSecond,
+			row.DocsPerSecond,
+			row.RerankScores,
+		)
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
 func runEvalRetrievalBM25(args []string) error {
@@ -458,6 +992,7 @@ func runEvalRetrievalBM25(args []string) error {
 	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks")
 	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
 	metricsPath := fs.String("metrics-json", "", "write retrieval metrics JSON")
+	perQueryPath := fs.String("per-query-jsonl", "", "write one retrieval diagnostics JSONL row per evaluated query")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -473,13 +1008,14 @@ func runEvalRetrievalBM25(args []string) error {
 		*datasetName = filepath.Base(datasetDir)
 	}
 	metrics, err := eosruntime.EvaluateBM25Retrieval(context.Background(), eosruntime.RetrievalEvalConfig{
-		DatasetName: *datasetName,
-		CorpusPath:  corpusPath,
-		QueriesPath: queriesPath,
-		QrelsPath:   *qrelsPath,
-		TopK:        *topK,
-		MaxDocs:     *maxDocs,
-		MaxQueries:  *maxQueries,
+		DatasetName:       *datasetName,
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         *qrelsPath,
+		TopK:              *topK,
+		MaxDocs:           *maxDocs,
+		MaxQueries:        *maxQueries,
+		PerQueryJSONLPath: *perQueryPath,
 	})
 	if err != nil {
 		return err
@@ -496,12 +1032,15 @@ func runEvalRetrievalBM25(args []string) error {
 	}
 	fmt.Printf("retrieval bm25: dataset=%s backend=%s docs=%d queries=%d relevant_pairs=%d scored_pairs=%d\n",
 		metrics.Dataset, metrics.Backend, metrics.Inputs.Documents, metrics.Inputs.Queries, metrics.Inputs.RelevantPairs, metrics.Inputs.ScoredPairs)
-	fmt.Printf("quality: ndcg@10=%.6f mrr@10=%.6f recall@10=%.6f recall@100=%.6f\n",
-		metrics.Quality.NDCGAt10, metrics.Quality.MRRAt10, metrics.Quality.RecallAt10, metrics.Quality.RecallAt100)
+	fmt.Printf("quality: ndcg@10=%.6f ndcg@100=%.6f mrr@10=%.6f p@1=%.6f p@5=%.6f p@10=%.6f hit@1=%.6f hit@5=%.6f hit@10=%.6f map@10=%.6f map@100=%.6f recall@10=%.6f recall@100=%.6f\n",
+		metrics.Quality.NDCGAt10, metrics.Quality.NDCGAt100, metrics.Quality.MRRAt10, metrics.Quality.PrecisionAt1, metrics.Quality.PrecisionAt5, metrics.Quality.PrecisionAt10, metrics.Quality.HitAt1, metrics.Quality.HitAt5, metrics.Quality.HitAt10, metrics.Quality.MAPAt10, metrics.Quality.MAPAt100, metrics.Quality.RecallAt10, metrics.Quality.RecallAt100)
 	fmt.Printf("throughput: elapsed=%.3fs docs/s=%.2f queries/s=%.2f scores/s=%.2f\n",
 		metrics.Throughput.ElapsedSeconds, metrics.Throughput.DocumentsPerSecond, metrics.Throughput.QueriesPerSecond, metrics.Throughput.ScoresPerSecond)
 	if *metricsPath != "" {
 		fmt.Printf("metrics: %s\n", *metricsPath)
+	}
+	if *perQueryPath != "" {
+		fmt.Printf("per_query: %s\n", *perQueryPath)
 	}
 	return nil
 }
@@ -1307,6 +1846,13 @@ func parsePositiveIntCSV(raw, label string) ([]int, error) {
 		return nil, fmt.Errorf("%s must contain at least one positive integer", label)
 	}
 	return out, nil
+}
+
+func parseOptionalPositiveIntCSV(raw, label string) ([]int, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	return parsePositiveIntCSV(raw, label)
 }
 
 func evaluateSparseAttentionPlanGate(rows []sparseAttentionPlanRow, maxScoreFraction, maxTurboKVMiB float64, requireSubq bool) sparseAttentionPlanGate {
@@ -3928,6 +4474,300 @@ func runGateRetrievalMetrics(args []string) error {
 	return nil
 }
 
+type retrievalScoreboard struct {
+	Schema string                   `json:"schema"`
+	Rows   []retrievalScoreboardRow `json:"rows"`
+}
+
+type retrievalScoreboardRow struct {
+	Category              string  `json:"category"`
+	Dataset               string  `json:"dataset"`
+	Baseline              string  `json:"baseline"`
+	Status                string  `json:"status"`
+	Method                string  `json:"method,omitempty"`
+	Bits                  int     `json:"bits,omitempty"`
+	RerankStorage         string  `json:"rerank_storage,omitempty"`
+	NDCGAt10              float64 `json:"ndcg_at_10,omitempty"`
+	NDCGAt100             float64 `json:"ndcg_at_100,omitempty"`
+	MRRAt10               float64 `json:"mrr_at_10,omitempty"`
+	PrecisionAt1          float64 `json:"precision_at_1,omitempty"`
+	PrecisionAt5          float64 `json:"precision_at_5,omitempty"`
+	PrecisionAt10         float64 `json:"precision_at_10,omitempty"`
+	HitAt1                float64 `json:"hit_at_1,omitempty"`
+	HitAt5                float64 `json:"hit_at_5,omitempty"`
+	HitAt10               float64 `json:"hit_at_10,omitempty"`
+	MAPAt10               float64 `json:"map_at_10,omitempty"`
+	MAPAt100              float64 `json:"map_at_100,omitempty"`
+	RecallAt10            float64 `json:"recall_at_10,omitempty"`
+	RecallAt100           float64 `json:"recall_at_100,omitempty"`
+	VectorBytes           int64   `json:"vector_bytes,omitempty"`
+	DenseVectorBytes      int64   `json:"dense_vector_bytes,omitempty"`
+	RerankSidecarBytes    int64   `json:"rerank_sidecar_bytes,omitempty"`
+	TotalVectorBytes      int64   `json:"total_vector_bytes,omitempty"`
+	CompressionRatio      float64 `json:"compression_ratio,omitempty"`
+	TotalCompressionRatio float64 `json:"total_compression_ratio,omitempty"`
+	DocumentsPerSecond    float64 `json:"documents_per_second,omitempty"`
+	QueriesPerSecond      float64 `json:"queries_per_second,omitempty"`
+	ScoresPerSecond       float64 `json:"scores_per_second,omitempty"`
+}
+
+type scoreboardGateSelection struct {
+	Category string
+	Baseline string
+	Method   string
+	Bits     int
+}
+
+func runGateScoreboard(args []string) error {
+	fs := flag.NewFlagSet("gate-scoreboard", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	category := fs.String("category", "short_retrieval", "scoreboard category to compare")
+	rowBaseline := fs.String("baseline", "eos", "scoreboard row baseline label to compare")
+	method := fs.String("method", "", "optional scoreboard row method filter")
+	bits := fs.Int("bits", -1, "optional scoreboard row bit-width filter")
+	datasetsText := fs.String("datasets", "", "comma-separated datasets that must all pass")
+	metricsText := fs.String("metrics", "ndcg_at_10,recall_at_100", "comma-separated metrics that must all pass")
+	tolerance := fs.Float64("tolerance", 0, "allowed current metric drop below anchor")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
+		return fmt.Errorf("usage: eos gate-scoreboard [--category short_retrieval] [--baseline eos] --datasets scifact,nfcorpus,fiqa [--metrics ndcg_at_10,recall_at_100] [--tolerance 0] <current.scoreboard.json> <anchor.scoreboard.json>")
+	}
+	if *tolerance < 0 {
+		return fmt.Errorf("tolerance must be non-negative")
+	}
+	if *bits < -1 {
+		return fmt.Errorf("bits must be non-negative when set")
+	}
+	datasets := splitCommaList(*datasetsText)
+	if len(datasets) == 0 {
+		return fmt.Errorf("--datasets is required")
+	}
+	metrics := splitCommaList(*metricsText)
+	if len(metrics) == 0 {
+		return fmt.Errorf("--metrics must select at least one metric")
+	}
+	for _, metric := range metrics {
+		if !scoreboardRetrievalMetricSupported(metric) {
+			return fmt.Errorf("unsupported scoreboard metric %q", metric)
+		}
+	}
+	currentPath := fs.Arg(0)
+	anchorPath := fs.Arg(1)
+	current, err := readRetrievalScoreboard(currentPath)
+	if err != nil {
+		return err
+	}
+	anchor, err := readRetrievalScoreboard(anchorPath)
+	if err != nil {
+		return err
+	}
+	selection := scoreboardGateSelection{
+		Category: strings.TrimSpace(*category),
+		Baseline: strings.TrimSpace(*rowBaseline),
+		Method:   strings.TrimSpace(*method),
+		Bits:     *bits,
+	}
+	if selection.Category == "" || selection.Baseline == "" {
+		return fmt.Errorf("category and baseline must be non-empty")
+	}
+	fmt.Printf("current: %s\n", currentPath)
+	fmt.Printf("anchor: %s\n", anchorPath)
+	fmt.Printf("selection: category=%s baseline=%s", selection.Category, selection.Baseline)
+	if selection.Method != "" {
+		fmt.Printf(" method=%s", selection.Method)
+	}
+	if selection.Bits >= 0 {
+		fmt.Printf(" bits=%d", selection.Bits)
+	}
+	fmt.Printf("\n")
+	fmt.Printf("datasets: %s\n", strings.Join(datasets, ","))
+	fmt.Printf("metrics: %s tolerance=%.6g\n", strings.Join(metrics, ","), *tolerance)
+
+	failures := 0
+	checked := 0
+	macroCurrent := make(map[string]float64, len(metrics))
+	macroAnchor := make(map[string]float64, len(metrics))
+	for _, dataset := range datasets {
+		currentRow, err := selectRetrievalScoreboardRow(current.Rows, selection, dataset, currentPath)
+		if err != nil {
+			return err
+		}
+		anchorRow, err := selectRetrievalScoreboardRow(anchor.Rows, selection, dataset, anchorPath)
+		if err != nil {
+			return err
+		}
+		for _, metric := range metrics {
+			currentValue, _ := scoreboardRetrievalMetricValue(currentRow, metric)
+			anchorValue, _ := scoreboardRetrievalMetricValue(anchorRow, metric)
+			limit := anchorValue - *tolerance
+			passed := currentValue >= limit-1e-6
+			status := "PASS"
+			if !passed {
+				status = "FAIL"
+				failures++
+			}
+			checked++
+			macroCurrent[metric] += currentValue
+			macroAnchor[metric] += anchorValue
+			fmt.Printf("%s dataset=%s metric=%s current=%.6f anchor=%.6f delta=%+.6f required>=%.6f\n",
+				status, dataset, metric, currentValue, anchorValue, currentValue-anchorValue, limit)
+		}
+	}
+	for _, metric := range metrics {
+		currentMean := macroCurrent[metric] / float64(len(datasets))
+		anchorMean := macroAnchor[metric] / float64(len(datasets))
+		fmt.Printf("macro metric=%s current=%.6f anchor=%.6f delta=%+.6f\n", metric, currentMean, anchorMean, currentMean-anchorMean)
+	}
+	if failures > 0 {
+		fmt.Printf("scoreboard gate: FAIL checks=%d failed=%d\n", checked, failures)
+		return fmt.Errorf("scoreboard gate failed")
+	}
+	fmt.Printf("scoreboard gate: PASS checks=%d\n", checked)
+	return nil
+}
+
+func splitCommaList(text string) []string {
+	items := []string{}
+	for _, raw := range strings.Split(text, ",") {
+		item := strings.TrimSpace(raw)
+		if item != "" {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+func readRetrievalScoreboard(path string) (retrievalScoreboard, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return retrievalScoreboard{}, err
+	}
+	var scoreboard retrievalScoreboard
+	if err := json.Unmarshal(data, &scoreboard); err != nil {
+		return retrievalScoreboard{}, fmt.Errorf("parse scoreboard JSON %q: %w", path, err)
+	}
+	if scoreboard.Schema == "" {
+		return retrievalScoreboard{}, fmt.Errorf("scoreboard JSON %q is missing schema", path)
+	}
+	if len(scoreboard.Rows) == 0 {
+		return retrievalScoreboard{}, fmt.Errorf("scoreboard JSON %q has no rows", path)
+	}
+	return scoreboard, nil
+}
+
+func selectRetrievalScoreboardRow(rows []retrievalScoreboardRow, selection scoreboardGateSelection, dataset, path string) (retrievalScoreboardRow, error) {
+	matches := selectRetrievalScoreboardRows(rows, selection, dataset, []string{selection.Baseline})
+	if len(matches) == 0 {
+		aliases := scoreboardBaselineAliases(selection.Baseline)
+		if len(aliases) > 1 {
+			matches = selectRetrievalScoreboardRows(rows, selection, dataset, aliases[1:])
+		}
+	}
+	if len(matches) == 0 {
+		return retrievalScoreboardRow{}, fmt.Errorf("scoreboard row missing in %s: category=%s dataset=%s baseline=%s%s%s",
+			path, selection.Category, dataset, selection.Baseline, scoreboardMethodErrorSuffix(selection.Method), scoreboardBitsErrorSuffix(selection.Bits))
+	}
+	if len(matches) > 1 {
+		return retrievalScoreboardRow{}, fmt.Errorf("scoreboard row is ambiguous in %s: category=%s dataset=%s baseline=%s%s%s matches=%d",
+			path, selection.Category, dataset, selection.Baseline, scoreboardMethodErrorSuffix(selection.Method), scoreboardBitsErrorSuffix(selection.Bits), len(matches))
+	}
+	return matches[0], nil
+}
+
+func selectRetrievalScoreboardRows(rows []retrievalScoreboardRow, selection scoreboardGateSelection, dataset string, baselines []string) []retrievalScoreboardRow {
+	var matches []retrievalScoreboardRow
+	for _, row := range rows {
+		if row.Category != selection.Category || row.Dataset != dataset || !slices.Contains(baselines, row.Baseline) {
+			continue
+		}
+		if selection.Method != "" && row.Method != selection.Method {
+			continue
+		}
+		if selection.Bits >= 0 && row.Bits != selection.Bits {
+			continue
+		}
+		matches = append(matches, row)
+	}
+	return matches
+}
+
+func scoreboardBaselineAliases(baseline string) []string {
+	switch baseline {
+	case "eos":
+		return []string{"eos", "manta"}
+	case "eos-hybrid":
+		return []string{"eos-hybrid", "manta-hybrid"}
+	case "eos-turboquant":
+		return []string{"eos-turboquant", "manta-turboquant"}
+	default:
+		return []string{baseline}
+	}
+}
+
+func scoreboardMethodErrorSuffix(method string) string {
+	if method == "" {
+		return ""
+	}
+	return " method=" + method
+}
+
+func scoreboardBitsErrorSuffix(bits int) string {
+	if bits < 0 {
+		return ""
+	}
+	return fmt.Sprintf(" bits=%d", bits)
+}
+
+func scoreboardRetrievalMetricSupported(metric string) bool {
+	_, ok := scoreboardRetrievalMetricValue(retrievalScoreboardRow{}, metric)
+	return ok
+}
+
+func scoreboardRetrievalMetricValue(row retrievalScoreboardRow, metric string) (float64, bool) {
+	switch metric {
+	case "ndcg_at_10":
+		return row.NDCGAt10, true
+	case "ndcg_at_100":
+		return row.NDCGAt100, true
+	case "mrr_at_10":
+		return row.MRRAt10, true
+	case "precision_at_1":
+		return row.PrecisionAt1, true
+	case "precision_at_5":
+		return row.PrecisionAt5, true
+	case "precision_at_10":
+		return row.PrecisionAt10, true
+	case "hit_at_1":
+		return row.HitAt1, true
+	case "hit_at_5":
+		return row.HitAt5, true
+	case "hit_at_10":
+		return row.HitAt10, true
+	case "map_at_10":
+		return row.MAPAt10, true
+	case "map_at_100":
+		return row.MAPAt100, true
+	case "recall_at_10":
+		return row.RecallAt10, true
+	case "recall_at_100":
+		return row.RecallAt100, true
+	case "compression_ratio":
+		return row.CompressionRatio, true
+	case "total_compression_ratio":
+		return row.TotalCompressionRatio, true
+	case "documents/s", "documents_per_second":
+		return row.DocumentsPerSecond, true
+	case "queries/s", "queries_per_second":
+		return row.QueriesPerSecond, true
+	case "scores/s", "scores_per_second":
+		return row.ScoresPerSecond, true
+	default:
+		return 0, false
+	}
+}
+
 func readRetrievalMetricsJSON(path string) (eosruntime.RetrievalEvalMetrics, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -4212,6 +5052,11 @@ func printUsage() {
 	fmt.Println("  eos export-mll <artifact.mll> [output.mll]")
 	fmt.Println("  eos embed-text <artifact.mll> <text...>")
 	fmt.Println("  eos eval-retrieval [flags] <artifact.mll> <beir-dataset-dir>")
+	fmt.Println("  eos eval-retrieval-hybrid [flags] <artifact.mll> <beir-dataset-dir>")
+	fmt.Println("  eos eval-retrieval-turboquant [flags] <artifact.mll> <beir-dataset-dir>")
+	fmt.Println("  eos eval-retrieval-vectors [flags] --doc-vectors docs.jsonl --query-vectors queries.jsonl <beir-dataset-dir>")
+	fmt.Println("  eos eval-retrieval-vectors-hybrid [flags] --doc-vectors docs.jsonl --query-vectors queries.jsonl <beir-dataset-dir>")
+	fmt.Println("  eos eval-retrieval-vectors-turboquant [flags] --doc-vectors docs.jsonl --query-vectors queries.jsonl <beir-dataset-dir>")
 	fmt.Println("  eos eval-retrieval-bm25 [flags] <beir-dataset-dir>")
 	fmt.Println("  eos mine-retrieval-hard-negatives [flags] <beir-dataset-dir> <output.jsonl>")
 	fmt.Println("  eos mine-retrieval-model-hard-negatives [flags] <artifact.mll> <beir-dataset-dir> <output.jsonl>")
@@ -4235,6 +5080,7 @@ func printUsage() {
 	fmt.Println("  eos diagnose-train-metrics <metrics.json>")
 	fmt.Println("  eos gate-train-metrics [flags] <metrics.json>")
 	fmt.Println("  eos gate-retrieval-metrics [flags] <retrieval.metrics.json>")
+	fmt.Println("  eos gate-scoreboard [flags] --datasets dataset[,dataset...] <current.scoreboard.json> <anchor.scoreboard.json>")
 	fmt.Println("  eos run <artifact.mll> [entry]")
 	fmt.Println("  eos demo [module-name]")
 	fmt.Println()
@@ -4246,6 +5092,11 @@ func printUsage() {
 	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Eos metadata in XMTA.")
 	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
 	fmt.Println("eval-retrieval scores a sealed embedding .mll on BEIR-style corpus/query/qrels files with nDCG/MRR/Recall metrics.")
+	fmt.Println("eval-retrieval-hybrid fuses sealed embedding dense top-k with BM25 top-k using minmax, zscore, or RRF scoring.")
+	fmt.Println("eval-retrieval-turboquant compares dense retrieval quality/cost against TurboQuant IP-preserving quantized document vectors.")
+	fmt.Println("eval-retrieval-vectors scores precomputed document/query vector JSONL caches on the same BEIR metrics.")
+	fmt.Println("eval-retrieval-vectors-hybrid fuses external dense vector caches with BM25 top-k over the same BEIR files.")
+	fmt.Println("eval-retrieval-vectors-turboquant compares external vector caches against TurboQuant IP-preserving document-vector compression.")
 	fmt.Println("eval-retrieval-bm25 scores the same BEIR files with an in-repo BM25 lexical baseline.")
 	fmt.Println("mine-retrieval-hard-negatives creates text hard-negative training JSONL from BEIR qrels using the BM25 baseline.")
 	fmt.Println("mine-retrieval-model-hard-negatives creates text hard-negative training JSONL from BEIR qrels using a Eos embedding model's own misses.")
@@ -4269,6 +5120,7 @@ func printUsage() {
 	fmt.Println("diagnose-train-metrics explains backend use, transfer pressure, and suspicious training/eval counters from metrics JSON.")
 	fmt.Println("gate-train-metrics checks metrics JSON against EOS_* thresholds from the environment or a thresholds env file.")
 	fmt.Println("gate-retrieval-metrics checks BEIR retrieval metrics against dataset-specific EOS_* thresholds.")
+	fmt.Println("gate-scoreboard checks every selected retrieval scoreboard row and metric against an anchor scoreboard.")
 	fmt.Println("run loads an artifact, binds stub weights and inputs, and executes one entrypoint.")
 	fmt.Println("demo creates a tiny inference-style module and loads it through the runtime.")
 }

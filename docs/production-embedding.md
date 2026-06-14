@@ -1,6 +1,6 @@
 # Production Embedding Candidate
 
-Use `scripts/train_manta_embed_v1_candidate.fw` to create a release-grade `manta-embed-v1` candidate. The workflow wraps the current Eos CLI primitives with production guardrails:
+Use `scripts/train_manta_embed_v1_candidate.fw` to create a release-grade `eos-embed-v1` candidate. The workflow wraps the current Eos CLI primitives with production guardrails:
 
 - refuses temporary input paths unless explicitly overridden
 - refuses dirty repositories unless explicitly overridden
@@ -9,6 +9,7 @@ Use `scripts/train_manta_embed_v1_candidate.fw` to create a release-grade `manta
 - runs eval-only verification on a copied package and requires `optimizer_updates=0`
 - runs a separate hard holdout eval by default
 - exports and verifies a sealed MLL
+- compares dense retrieval against TurboQuant IP-preserving quantized document vectors before default CorkScrewDB embedder promotion
 - supports metric gates through environment variables
 
 ## Preflight
@@ -27,21 +28,80 @@ The default acquisition workflow downloads public BEIR retrieval datasets (`scif
 
 ```bash
 EOS_REPO_ROOT=$PWD \
-EOS_DATASET_ROOT=/data/manta/datasets/manta-embed-v1 \
+EOS_DATASET_ROOT=/data/manta/datasets/eos-embed-v1 \
 ferrous-wheel run scripts/acquire_manta_embed_v1_datasets.fw
 ```
 
 The processed outputs are:
 
 ```text
-/data/manta/datasets/manta-embed-v1/processed/train.jsonl
-/data/manta/datasets/manta-embed-v1/processed/eval.jsonl
-/data/manta/datasets/manta-embed-v1/processed/hard-eval.jsonl
-/data/manta/datasets/manta-embed-v1/processed/tokenizer-corpus.txt
-/data/manta/datasets/manta-embed-v1/processed/thresholds.env
+/data/manta/datasets/eos-embed-v1/processed/train.jsonl
+/data/manta/datasets/eos-embed-v1/processed/eval.jsonl
+/data/manta/datasets/eos-embed-v1/processed/hard-eval.jsonl
+/data/manta/datasets/eos-embed-v1/processed/tokenizer-corpus.txt
+/data/manta/datasets/eos-embed-v1/processed/thresholds.env
 ```
 
 Review dataset licenses before commercial use. The default avoids MS MARCO because it is commonly distributed with non-commercial research terms.
+
+## Process Corpus Pretraining
+
+Use the process-doc lane when a candidate should include local Tiller/Codex operating language before BEIR alignment. The builder reads local process files such as `AGENTS.md`, `.codex/agents/*.toml`, and `.codex/skills/**/SKILL.md`, chunks them, and emits text hard-negative JSONL with:
+
+```json
+{"query":"process guidance in AGENTS.md","positive":"...","negatives":["..."],"source":"process:agents","group_id":"process-agents-md-0"}
+```
+
+For a small local smoke:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+EOS_PRETRAIN_BEIR=0 \
+EOS_PROCESS_PRETRAIN=1 \
+EOS_PROCESS_PRETRAIN_MAX_DOCS=8 \
+EOS_PROCESS_PRETRAIN_MAX_ROWS=16 \
+EOS_PRETRAIN_OUT=$PWD/datasets/eos-embed-v1/processed/process-pretrain-smoke.jsonl \
+ferrous-wheel run scripts/build_pretrain_pairs.fw
+```
+
+For the normal Stage A pretraining file, add process rows alongside the existing BEIR synthetic rows:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+EOS_DATASET_ROOT=/data/manta/datasets/eos-embed-v1/raw \
+EOS_PROCESS_PRETRAIN=1 \
+EOS_PROCESS_PRETRAIN_INCLUDE_DOCS=1 \
+EOS_PRETRAIN_OUT=/data/manta/datasets/eos-embed-v1/processed/pretrain-pairs.jsonl \
+ferrous-wheel run scripts/build_pretrain_pairs.fw
+```
+
+`EOS_PROCESS_PRETRAIN_INCLUDE_DOCS=1` adds `docs/**/*.md`. Use `EOS_PROCESS_PRETRAIN_PATHS=path1,path2` for extra files or directories, `EOS_PROCESS_PRETRAIN_MAX_DOCS` and `EOS_PROCESS_PRETRAIN_MAX_ROWS` for bounded probes, and `EOS_PROCESS_PRETRAIN_CHUNK_WORDS` when the default `220`-word chunks are too large or small.
+
+A bounded end-to-end process-corpus smoke generated `12` process rows, trained through the hard-negative path with `optimizer_updates=42`, and completed a separate eval-only pass with `optimizer_updates=0`. Treat this as plumbing proof only, not a quality result.
+
+The shipping pipeline reads `/data/manta/datasets/eos-embed-v1/processed/pretrain-pairs.jsonl` when it builds `shipping-mixed-pretrain-plus-beir.jsonl`. If that file already exists, rebuild it with the command above before running:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+EOS_DATASET_ROOT=/data/manta/datasets/eos-embed-v1 \
+EOS_SHIP_RUN_ROOT=/data/manta/runs/eos-embed-v1-process-pretrain \
+ferrous-wheel run scripts/train_manta_embed_v1_shipping_pipeline.fw
+```
+
+For a direct candidate experiment, feed the process JSONL through the existing hard-negative path:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+EOS_RUN_ROOT=/data/manta/runs \
+EOS_RUN_ID=eos-embed-v1-process-pretrain-a \
+EOS_TRAIN_JSONL=/data/manta/datasets/eos-embed-v1/processed/pretrain-pairs.jsonl \
+EOS_EVAL_JSONL=/data/manta/datasets/eos-embed-v1/processed/eval.jsonl \
+EOS_HARD_EVAL_JSONL=/data/manta/datasets/eos-embed-v1/processed/hard-eval.jsonl \
+EOS_HARD_NEGATIVE_TRAIN=1 \
+EOS_HARD_NEGATIVES_PER_QUERY=1 \
+EOS_EPOCHS=1 \
+ferrous-wheel run scripts/train_manta_embed_v1_candidate.fw
+```
 
 ## Prepared JSONL Path
 
@@ -50,12 +110,12 @@ Prepared JSONL is the preferred path for production because train/eval splits ar
 ```bash
 EOS_RUN_ROOT=/data/manta/runs \
 EOS_REPO_ROOT=$PWD \
-EOS_RUN_ID=manta-embed-v1-20260412-a \
-EOS_TRAIN_JSONL=/data/manta/datasets/manta-embed-v1/processed/train.jsonl \
-EOS_EVAL_JSONL=/data/manta/datasets/manta-embed-v1/processed/eval.jsonl \
-EOS_HARD_EVAL_JSONL=/data/manta/datasets/manta-embed-v1/processed/hard-eval.jsonl \
-EOS_TOKENIZER_CORPUS=/data/manta/datasets/manta-embed-v1/processed/tokenizer-corpus.txt \
-EOS_THRESHOLDS_ENV=/data/manta/datasets/manta-embed-v1/processed/thresholds.env \
+EOS_RUN_ID=eos-embed-v1-20260412-a \
+EOS_TRAIN_JSONL=/data/manta/datasets/eos-embed-v1/processed/train.jsonl \
+EOS_EVAL_JSONL=/data/manta/datasets/eos-embed-v1/processed/eval.jsonl \
+EOS_HARD_EVAL_JSONL=/data/manta/datasets/eos-embed-v1/processed/hard-eval.jsonl \
+EOS_TOKENIZER_CORPUS=/data/manta/datasets/eos-embed-v1/processed/tokenizer-corpus.txt \
+EOS_THRESHOLDS_ENV=/data/manta/datasets/eos-embed-v1/processed/thresholds.env \
 EOS_EPOCHS=3 \
 EOS_BATCH_SIZE=1024 \
 EOS_LR=0.005 \
@@ -74,6 +134,108 @@ ferrous-wheel run scripts/train_manta_embed_v1_candidate.fw
 When prepared JSONL is text and a tokenizer is available, the production workflow tokenizes train, validation, and hard-eval JSONL into run-local token files before training. Training and eval then read token JSONL directly, which front-loads BPE cost, makes the optimizer profile reflect model work, and records the generated token files in `datasets.sha256`.
 Use `eos train-embed --no-tokenizer` when directly training token JSONL beside a sibling tokenizer; otherwise the CLI intentionally auto-discovers that tokenizer and treats the JSONL as text.
 Use `eos diagnose-train-metrics /path/to/train.metrics.json` to explain backend use, transfer pressure, and suspicious training/eval counters from any run. Use `eos gate-train-metrics --thresholds /path/to/thresholds.env --scope quality /path/to/final-eval.metrics.json` to apply the same quality gate outside the production workflow. Use `--scope efficiency` for training throughput and backend counters, and `--scope eval-only` to enforce zero optimizer updates on validation runs.
+
+## TurboQuant Retrieval Gate
+
+Default CorkScrewDB embedder promotion requires a vector-index cost check in addition to dense retrieval quality. Run `eos eval-retrieval-turboquant` on at least one capped BEIR-style dataset for release smoke, and on the full selected retrieval set before updating the `corkscrewdb-default-embedder` alias:
+
+```bash
+go run ./cmd/eos eval-retrieval-turboquant \
+  --dataset scifact \
+  --max-docs 200 \
+  --max-queries 20 \
+  --bits 2,4,8 \
+  --rerank-overfetch 200 \
+  --rerank-storage fp16 \
+  --metrics-json /data/manta/runs/<run-id>/turboquant-scifact.json \
+  --metrics-tsv /data/manta/runs/<run-id>/turboquant-scifact.tsv \
+  /data/manta/runs/<run-id>/eos-embed-v1.sealed.mll \
+  /data/manta/datasets/eos-embed-v1/raw/scifact
+```
+
+The JSON/TSV rows include the dense float32 reference, TurboQuant bit width, nDCG@10/nDCG@100, MRR@10, precision@1/5/10, hit@1/5/10, MAP@10/MAP@100, recall@10/100, quality deltas, vector bytes, rerank storage, rerank sidecar bytes, total vector bytes, compression ratio, total compression ratio, quantization docs/s, direct IP scoring throughput, and optional rerank overfetch/score counts. CorkScrewDB integration is optional for this gate; these are the CorkScrewDB-relevant storage and scoring metrics that must stay attached to a promoted default embedder.
+
+Interpret the metric groups separately for promotion. Quality metrics decide whether the candidate ranks relevant documents well enough: nDCG and MAP capture ordering, precision/hit@k capture first-screen success, and recall@100 captures candidate-pool coverage. Compression metrics decide whether q4/q8 are worth the footprint reduction. Throughput metrics are path-specific: sealed Eos evals can include local encoder time, while cached external-vector rows only measure cache load/scoring and do not represent live provider or external model encoding throughput.
+
+For hosted or open external embedders, export BEIR-aligned `doc-vectors.jsonl` and `query-vectors.jsonl` caches and run both `eos eval-retrieval-vectors` and `eos eval-retrieval-vectors-turboquant`. `scripts/export_qwen3_retrieval_vectors.py` is the first provider-boundary exporter for the leading Qwen3 family baseline:
+
+```bash
+python3 scripts/export_qwen3_retrieval_vectors.py \
+  --dataset-dir datasets/eos-embed-v1/raw/scifact/scifact \
+  --output-root runs/external-vector-caches/qwen3-0.6b \
+  --dataset-name scifact \
+  --model-name Qwen/Qwen3-Embedding-0.6B
+```
+
+Use `--backend` and `--artifact` labels to keep BGE, Qwen, Jina, Voyage, Cohere, OpenAI, and sealed Eos rows comparable. In the scoreboard harness, set `EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT=1` and `EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT_BITS=2,4,8` to append q2/q4/q8 rows for the same cache; add `EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT_RERANK_OVERFETCH=200` and `EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT_RERANK_STORAGE=fp16` when fp16 sidecar rerank rows should be emitted for an external cache. External baseline rows remain `not_scored` until the dense and TurboQuant cache metrics are present.
+
+Hybrid lexical+dense retrieval is a separate retrieval/rerank product surface, not a model-promotion shortcut. Before using hybrid rows as CorkScrewDB default-embedder evidence, select fusion parameters on a dev split and apply the selected setting unchanged to test:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+EOS_HYBRID_CAL_MODE=dense \
+EOS_HYBRID_CAL_ARTIFACT=/path/to/eos-embed-v1.sealed.mll \
+EOS_HYBRID_CAL_DATASET_ROOT=/data/manta/datasets/eos-embed-v1 \
+EOS_HYBRID_CAL_DATASETS=fiqa \
+EOS_HYBRID_CAL_DEV_SPLIT=dev \
+EOS_HYBRID_CAL_TEST_SPLIT=test \
+ferrous-wheel run scripts/calibrate_eos_embed_hybrid_retrieval.fw
+```
+
+For external vector caches, set `EOS_HYBRID_CAL_MODE=vectors`, `EOS_HYBRID_CAL_VECTOR_ROOT`, `EOS_HYBRID_CAL_VECTOR_BACKEND`, and optionally `EOS_HYBRID_CAL_VECTOR_ARTIFACT`. The calibration harness writes JSON, TSV, Markdown, per-setting metrics, per-query JSONL, and command logs under `runs/<run-id>/`. It selects by dev `ndcg_at_10`, tie-breaks by `mrr_at_10` then `recall_at_100`, reports dense and BM25 sanity checks, and records a protection gate showing whether selected test hybrid regresses against dense by more than `EOS_HYBRID_CAL_MAX_NDCG10_REGRESSION` or `EOS_HYBRID_CAL_MAX_RECALL100_REGRESSION`.
+
+Use `eos eval-retrieval-hybrid` for sealed Eos artifacts and `eos eval-retrieval-vectors-hybrid` for external vector caches when applying a calibrated setting; both fuse dense top-k and BM25 top-k over their union. The prior FiQA-selected setting was `--method minmax --alpha 0.75`, where `alpha` is the BM25 weight, but new default claims should cite the current calibration summary rather than reusing that setting blindly. RRF is available with `--method rrf --rrf-k 60 --rrf-lambda 1.0`. In scoreboards, set the selected values explicitly:
+
+```bash
+EOS_SCOREBOARD_HYBRID_RETRIEVAL=1
+EOS_SCOREBOARD_HYBRID_METHOD=minmax
+EOS_SCOREBOARD_HYBRID_ALPHA=0.75
+EOS_SCOREBOARD_HYBRID_RRF_K=60
+EOS_SCOREBOARD_HYBRID_RRF_LAMBDA=1.0
+```
+
+This appends `eos-hybrid` rows by default and, when external vector datasets are configured, `<external>-hybrid` rows. Scoreboard `method` is explicit, such as `hybrid_minmax_alpha0.75` or `hybrid_rrf_k60_lambda1.0`, so gates can select the hybrid mode independently from dense Eos, BM25, and TurboQuant rows. Set `EOS_SCOREBOARD_HYBRID_BASELINE_LABEL=manta-hybrid` only when intentionally producing a legacy-labeled scoreboard. The FiQA dev-selected `minmax_alpha0.75` result is evidence for guarded hybrid retrieval because it improved held-out FiQA test nDCG@10 over dense v2, strict anchor, and BM25-only; it is not evidence that the dense model itself should be promoted.
+
+Before updating the default-shipping anchor, run the scoreboard-level promotion gate against the current sealed anchor scoreboard:
+
+```bash
+go run ./cmd/eos gate-scoreboard \
+  --category short_retrieval \
+  --baseline eos \
+  --datasets scifact,nfcorpus,fiqa \
+  --metrics ndcg_at_10,recall_at_100 \
+  /data/manta/runs/<candidate-scoreboard>/scoreboard.json \
+  /data/manta/runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-sealed-scoreboard/scoreboard.json
+```
+
+The command fails on any missing selected row or any dataset metric below the anchor minus `--tolerance`. Macro deltas are printed only as summary evidence; they are not a substitute for every selected dataset metric passing.
+
+Compatibility note: older scoreboards and run directories use the legacy `manta` / `manta-hybrid` row labels and `manta-embed-v1` artifact names for the same embedder lineage. `eos gate-scoreboard --baseline eos` falls back to legacy `manta` rows when exact `eos` rows are absent, and `--baseline eos-hybrid` similarly falls back to `manta-hybrid`.
+
+Canonical active row labels are `eos` for dense `eos-embed-v1`, `eos-hybrid` for lexical+dense hybrid retrieval, `eos-turboquant` for local direct TurboQuant rows, and `eos-turboquant-rerank` for local TurboQuant candidate overfetch plus rerank rows. Enable the local fp16 sidecar rows in the scoreboard with `EOS_SCOREBOARD_TURBOQUANT=1`, `EOS_SCOREBOARD_TURBOQUANT_BITS=8`, `EOS_SCOREBOARD_TURBOQUANT_RERANK_OVERFETCH=200`, `EOS_SCOREBOARD_TURBOQUANT_RERANK_STORAGE=fp16`, `EOS_SCOREBOARD_TURBOQUANT_BASELINE=eos-turboquant`, and `EOS_SCOREBOARD_TURBOQUANT_RERANK_BASELINE=eos-turboquant-rerank`. Gate the compact candidate with `--baseline eos-turboquant-rerank --method turboquant_ip_b8_overfetch200_fp16_rerank --bits 8 --metrics ndcg_at_10,recall_at_100,total_compression_ratio`. The CorkScrewDB shipping alias should point at the promoted `corkscrewdb-default-embedder` artifact only after the dense, hybrid where relevant, and TurboQuant gates have passed.
+
+Current measured TurboQuant promotion surface: direct q8 is rejected because it misses the strict June 10 anchor on NFCorpus recall@100. q8 overfetch200 exact dense rerank is quality evidence, but it is not a compact default candidate because its f32 sidecar brings total compression below 1. q8 overfetch200 fp16 sidecar rerank is the compact quality-repair candidate: it matched dense/exact rerank quality on SciFact, NFCorpus, and FiQA while preserving total compression above 1 in `runs/eos-embed-v1-fp16-rerank-sidecar-20260614T000000Z/`.
+
+For candidate iteration, prefer the guarded runner so training, scoring, and the scoreboard gate produce one acceptance manifest:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+EOS_GUARD_ANCHOR_SCOREBOARD=runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-sealed-scoreboard/scoreboard.json \
+ferrous-wheel run scripts/run_manta_embed_v1_guarded_candidate.fw
+```
+
+The runner inherits the normal `EOS_TRAIN_JSONL`, `EOS_EVAL_JSONL`, `EOS_HARD_EVAL_JSONL`, tokenizer, training, and scoreboard knobs. It defaults to `scifact,nfcorpus,fiqa`, `ndcg_at_10,recall_at_100`, `short_retrieval`, and `eos`, writes `runs/eos-embed-v1-guarded-<timestamp>/manifest.json`, and exits nonzero when the candidate is rejected. Set `EOS_GUARD_BASELINE=manta` only for legacy-labeled candidate scoreboards. Set `EOS_GUARD_FAIL_ON_GATE=0` only when you need a non-failing smoke that still records `"gate_status": "rejected"`. Dirty working trees remain blocked by the training script unless the caller sets `EOS_ALLOW_DIRTY=1` or explicitly sets `EOS_GUARD_ALLOW_DIRTY=1`.
+
+For a dry smoke with existing artifacts:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+EOS_GUARD_CANDIDATE_DIR=runs/<candidate-run> \
+EOS_GUARD_SCOREBOARD_JSON=runs/<candidate-scoreboard>/scoreboard.json \
+EOS_GUARD_ANCHOR_SCOREBOARD=runs/<anchor-scoreboard>/scoreboard.json \
+EOS_GUARD_FAIL_ON_GATE=0 \
+ferrous-wheel run scripts/run_manta_embed_v1_guarded_candidate.fw
+```
 
 Contrastive training uses pair-length-aware bucketing by default so batches reach larger exact-length matmul groups. `EOS_TRAIN_LENGTH_BUCKET_WINDOW` controls the shuffled sort window; larger values can improve grouping but must be profiled because they reduce local length randomness and can increase per-batch working-set pressure.
 
@@ -118,9 +280,9 @@ Use corpus mode only when you intentionally want this run to mine the train/eval
 ```bash
 EOS_RUN_ROOT=/data/manta/runs \
 EOS_REPO_ROOT=$PWD \
-EOS_RUN_ID=manta-embed-v1-20260412-corpus-a \
+EOS_RUN_ID=eos-embed-v1-20260412-corpus-a \
 EOS_CORPUS=/data/manta/corpus/prod-corpus.txt \
-EOS_HARD_EVAL_JSONL=/data/manta/datasets/manta-embed-v1/hard-eval.jsonl \
+EOS_HARD_EVAL_JSONL=/data/manta/datasets/eos-embed-v1/hard-eval.jsonl \
 EOS_EPOCHS=3 \
 EOS_BATCH_SIZE=1024 \
 EOS_MAX_PAIRS=0 \
@@ -156,6 +318,10 @@ Token-pair eval JSONL:
 
 ## Release Gate
 
+Current sealed-verified local anchor: `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z/manta-embed-v1.sealed.mll`, SHA256 `a7461b47784ea7434cf6048f33f6c281ef19887cfa9d0c699b6f2fba079f2b67`. This is a legacy-named `manta-embed-v1` artifact for the `eos-embed-v1` lineage. It scores above the previous sealed anchor on all retrieval rows, with macro nDCG@10 `0.265891` versus `0.148144` and macro recall@100 `0.452844` versus `0.339353`. The sealed scoreboard is under `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-sealed-scoreboard/`.
+
+The sealed-vs-train-package comparison recorded zero nonzero quality or count deltas against `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-scoreboard/`. Treat this as the local sealed anchor; broader release claims still require the normal release-gate evidence below.
+
 A candidate is releasable only when:
 
 - `manifest.json` status is `success`
@@ -164,11 +330,12 @@ A candidate is releasable only when:
 - `logs/inspect-package.log` reports `package verify: OK`
 - `logs/inspect-sealed.log` reports `package verify: OK`
 - `artifacts.sha256` contains the sealed MLL hash
+- `eos gate-scoreboard --datasets scifact,nfcorpus,fiqa --metrics ndcg_at_10,recall_at_100 <candidate-scoreboard>/scoreboard.json <sealed-anchor-scoreboard>/scoreboard.json` passes
 
 The release artifact is:
 
 ```text
-<run-dir>/manta-embed-v1.sealed.mll
+<run-dir>/eos-embed-v1.sealed.mll
 ```
 
 Keep the full run directory with the released artifact. It is the audit trail for reproducing or rejecting the candidate later.
