@@ -108,16 +108,16 @@ type alignmentManifest struct {
 }
 
 func usage() {
-	fmt.Println(`Run one retrieval-alignment round for manta-embed-v1.
+	fmt.Println(`Run one retrieval-alignment round for eos-embed-v1.
 
 Required:
-  EOS_ALIGN_INITIAL_ARTIFACT=/path/to/manta-embed-v1.sealed.mll
+  EOS_ALIGN_INITIAL_ARTIFACT=/path/to/eos-embed-v1.sealed.mll
 
 Run:
   EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/run_manta_embed_v1_retrieval_alignment_round.fw
 
 Defaults:
-  EOS_DATASET_ROOT=$PWD/datasets/manta-embed-v1
+  EOS_DATASET_ROOT=$PWD/datasets/eos-embed-v1
   EOS_ALIGN_DATASETS=scifact,nfcorpus,fiqa
   EOS_ALIGN_SCORE_BASELINE=1
   EOS_ALIGN_MINE_MODEL_HARD_NEGATIVES=1
@@ -273,6 +273,8 @@ func inferTokenizer(trainArtifact string, sealedArtifact string) string {
 	for _, candidate := range []string{
 		trimMLLSuffix(trainArtifact) + ".tokenizer.mll",
 		trimMLLSuffix(sealedArtifact) + ".tokenizer.mll",
+		filepath.Join(filepath.Dir(trainArtifact), "eos-embed-v1.tokenizer.mll"),
+		filepath.Join(filepath.Dir(sealedArtifact), "eos-embed-v1.tokenizer.mll"),
 		filepath.Join(filepath.Dir(trainArtifact), "manta-embed-v1.tokenizer.mll"),
 		filepath.Join(filepath.Dir(sealedArtifact), "manta-embed-v1.tokenizer.mll"),
 	} {
@@ -281,6 +283,15 @@ func inferTokenizer(trainArtifact string, sealedArtifact string) string {
 		}
 	}
 	return ""
+}
+
+func firstExistingDir(paths []string, fallback string) string {
+	for _, path := range paths {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return path
+		}
+	}
+	return fallback
 }
 
 func shellQuote(value string) string {
@@ -335,10 +346,14 @@ func prepareConfig(root string) (alignConfig, error) {
 	tokenizer, err = requireFile(tokenizer, "EOS_ALIGN_TOKENIZER")
 	guard err == nil else return alignConfig{}, err
 
-	datasetRoot, err := filepath.Abs(getenv("EOS_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1")))
+	defaultDatasetRoot := firstExistingDir([]string{
+		filepath.Join(root, "datasets", "eos-embed-v1"),
+		filepath.Join(root, "datasets", "manta-embed-v1"),
+	}, filepath.Join(root, "datasets", "eos-embed-v1"))
+	datasetRoot, err := filepath.Abs(getenv("EOS_DATASET_ROOT", defaultDatasetRoot))
 	guard err == nil else return alignConfig{}, err
 	processedDir := filepath.Join(datasetRoot, "processed")
-	runID := getenv("EOS_ALIGN_RUN_ID", "manta-embed-v1-retrieval-align-"+time.Now().UTC().Format("20060102T150405Z"))
+	runID := getenv("EOS_ALIGN_RUN_ID", "eos-embed-v1-retrieval-align-"+time.Now().UTC().Format("20060102T150405Z"))
 	runRoot, err := filepath.Abs(getenv("EOS_ALIGN_RUN_ROOT", filepath.Join(root, "runs")))
 	guard err == nil else return alignConfig{}, err
 	runDir := filepath.Join(runRoot, runID)
@@ -350,7 +365,7 @@ func prepareConfig(root string) (alignConfig, error) {
 	err = os.MkdirAll(filepath.Join(runDir, "mined"), 0o755)
 	guard err == nil else return alignConfig{}, err
 
-	modelName := getenv("EOS_ALIGN_MODEL_NAME", "manta-embed-v1")
+	modelName := getenv("EOS_ALIGN_MODEL_NAME", "eos-embed-v1")
 	candidateRunID := getenv("EOS_ALIGN_CANDIDATE_RUN_ID", "candidate")
 	candidateDir := filepath.Join(runDir, candidateRunID)
 	baselineScoreboardRunID := getenv("EOS_ALIGN_BASELINE_SCOREBOARD_RUN_ID", "baseline-scoreboard")
@@ -555,18 +570,29 @@ func readScoreboard(path string) (map[string]retrievalScore, error) {
 			continue
 		}
 		cols := strings.Split(scanner.Text(), "\t")
-		if len(cols) < 9 || cols[0] != "short_retrieval" || cols[2] != "manta" {
+		if len(cols) < 9 || cols[0] != "short_retrieval" {
+			continue
+		}
+		baseline := cols[2]
+		if baseline != "eos" && baseline != "manta" {
 			continue
 		}
 		score := retrievalScore{
 			Dataset:     cols[1],
-			Baseline:    cols[2],
+			Baseline:    baseline,
 			NDCGAt10:    parseFloatCell(cols[5]),
 			MRRAt10:     parseFloatCell(cols[6]),
 			RecallAt10:  parseFloatCell(cols[7]),
 			RecallAt100: parseFloatCell(cols[8]),
 		}
-		out[score.Dataset] = score
+		if baseline == "eos" {
+			out[score.Dataset] = score
+		}
+		if baseline == "manta" {
+			if _, ok := out[score.Dataset]; !ok {
+				out[score.Dataset] = score
+			}
+		}
 	}
 	guard scanner.Err() == nil else return nil, scanner.Err()
 	return out, nil
@@ -675,7 +701,7 @@ func writeSummary(cfg alignConfig) error {
 			RecallAt100Ratio:     recallRatio,
 		})
 	}
-	guard len(rows) > 0 else return fmt.Errorf("no comparable manta retrieval rows found")
+	guard len(rows) > 0 else return fmt.Errorf("no comparable eos or legacy manta retrieval rows found")
 	gate := evaluateAlignmentGate(cfg, rows)
 	tsv := "dataset\tbaseline_ndcg_at_10\tcandidate_ndcg_at_10\tndcg_at_10_delta\tndcg_at_10_ratio\tbaseline_recall_at_100\tcandidate_recall_at_100\trecall_at_100_delta\trecall_at_100_ratio\n"
 	for _, row := range rows {
