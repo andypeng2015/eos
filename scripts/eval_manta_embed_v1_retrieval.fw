@@ -57,17 +57,17 @@ type retrievalMetrics struct {
 }
 
 func usage() {
-	fmt.Println(`Evaluate a sealed manta-embed-v1 .mll on BEIR-style retrieval metrics.
+	fmt.Println(`Evaluate a sealed eos-embed-v1 .mll on BEIR-style retrieval metrics.
 
 Run:
   EOS_REPO_ROOT=$PWD \
-  EOS_EVAL_ARTIFACT=/path/to/manta-embed-v1.sealed.mll \
+  EOS_EVAL_ARTIFACT=/path/to/eos-embed-v1.sealed.mll \
   ferrous-wheel run scripts/eval_manta_embed_v1_retrieval.fw
 
 Optional:
   EOS_EVAL_RUN_ROOT=$PWD/runs
-  EOS_EVAL_RUN_ID=manta-embed-v1-retrieval-20260414
-  EOS_DATASET_ROOT=$PWD/datasets/manta-embed-v1
+  EOS_EVAL_RUN_ID=eos-embed-v1-retrieval-20260414
+  EOS_DATASET_ROOT=$PWD/datasets/eos-embed-v1
   EOS_EVAL_DATASETS=scifact,nfcorpus,fiqa
   EOS_EVAL_SPLIT=test
   EOS_EVAL_BATCH_SIZE=512
@@ -170,6 +170,15 @@ func splitList(value string) []string {
 	return out
 }
 
+func firstExistingDir(paths []string, fallback string) string {
+	for _, path := range paths {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return path
+		}
+	}
+	return fallback
+}
+
 func prepareConfig(root string) (evalConfig, error) {
 	artifact := os.Getenv("EOS_EVAL_ARTIFACT")
 	guard artifact != "" else return evalConfig{}, fmt.Errorf("EOS_EVAL_ARTIFACT is required")
@@ -177,7 +186,7 @@ func prepareConfig(root string) (evalConfig, error) {
 	guard err == nil else return evalConfig{}, err
 	_, err = os.Stat(artifactAbs)
 	guard err == nil else return evalConfig{}, fmt.Errorf("EOS_EVAL_ARTIFACT does not exist: %s", artifactAbs)
-	runID := getenv("EOS_EVAL_RUN_ID", "manta-embed-v1-retrieval-"+time.Now().UTC().Format("20060102T150405Z"))
+	runID := getenv("EOS_EVAL_RUN_ID", "eos-embed-v1-retrieval-"+time.Now().UTC().Format("20060102T150405Z"))
 	runRoot := getenv("EOS_EVAL_RUN_ROOT", filepath.Join(root, "runs"))
 	runDir, err := filepath.Abs(filepath.Join(runRoot, runID))
 	guard err == nil else return evalConfig{}, err
@@ -188,7 +197,11 @@ func prepareConfig(root string) (evalConfig, error) {
 	guard err == nil else return evalConfig{}, err
 	err = os.MkdirAll(filepath.Join(runDir, "logs"), 0o755)
 	guard err == nil else return evalConfig{}, err
-	datasetRoot, err := filepath.Abs(getenv("EOS_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1")))
+	defaultDatasetRoot := firstExistingDir([]string{
+		filepath.Join(root, "datasets", "eos-embed-v1"),
+		filepath.Join(root, "datasets", "manta-embed-v1"),
+	}, filepath.Join(root, "datasets", "eos-embed-v1"))
+	datasetRoot, err := filepath.Abs(getenv("EOS_DATASET_ROOT", defaultDatasetRoot))
 	guard err == nil else return evalConfig{}, err
 	datasets := splitList(getenv("EOS_EVAL_DATASETS", "scifact,nfcorpus,fiqa"))
 	guard len(datasets) > 0 else return evalConfig{}, fmt.Errorf("EOS_EVAL_DATASETS is empty")

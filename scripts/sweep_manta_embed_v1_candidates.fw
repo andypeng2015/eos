@@ -31,7 +31,7 @@ type trainMetrics struct {
 }
 
 func usage() {
-	fmt.Println(`Run a hard-negative manta-embed-v1 multi-seed candidate sweep.
+	fmt.Println(`Run a hard-negative eos-embed-v1 multi-seed candidate sweep.
 
 Required:
   EOS_TRAIN_JSONL=/path/to/train-pairs-or-train-hard-negatives.jsonl
@@ -44,7 +44,7 @@ Run:
 
 Optional:
   EOS_SWEEP_SEEDS=1,2,3
-  EOS_SWEEP_RUN_ROOT=$PWD/runs/manta-embed-v1-sweep-20260414
+  EOS_SWEEP_RUN_ROOT=$PWD/runs/eos-embed-v1-sweep-20260414
   EOS_HARD_NEGATIVES_PER_QUERY=1`)
 }
 
@@ -105,7 +105,7 @@ func prepareConfig(root string) (sweepConfig, error) {
 	}
 	seeds := splitList(getenv("EOS_SWEEP_SEEDS", "1,2,3"))
 	guard len(seeds) > 0 else return sweepConfig{}, fmt.Errorf("EOS_SWEEP_SEEDS is empty")
-	runRoot, err := filepath.Abs(getenv("EOS_SWEEP_RUN_ROOT", filepath.Join(root, "runs", "manta-embed-v1-sweep-"+time.Now().UTC().Format("20060102T150405Z"))))
+	runRoot, err := filepath.Abs(getenv("EOS_SWEEP_RUN_ROOT", filepath.Join(root, "runs", "eos-embed-v1-sweep-"+time.Now().UTC().Format("20060102T150405Z"))))
 	guard err == nil else return sweepConfig{}, err
 	err = os.MkdirAll(runRoot, 0o755)
 	guard err == nil else return sweepConfig{}, err
@@ -127,7 +127,7 @@ func readMetrics(path string) (trainMetrics, error) {
 }
 
 func runSeed(cfg sweepConfig, seed string) error {
-	runID := "manta-embed-v1-seed-" + seed
+	runID := "eos-embed-v1-seed-" + seed
 	runDir := filepath.Join(cfg.RunRoot, runID)
 	logPath := filepath.Join(cfg.RunRoot, runID+".log")
 	logFile, err := os.Create(logPath)

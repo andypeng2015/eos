@@ -48,7 +48,7 @@ Open/local baselines:
 - `Qwen/Qwen3-Embedding-0.6B`
 - `Qwen/Qwen3-Embedding-4B` where hardware allows
 - `Qwen/Qwen3-Embedding-8B` as an aspirational high-quality reference
-- current `manta-embed-v1` package
+- current `eos-embed-v1` package
 
 API baselines for context, not release dependency:
 
@@ -98,7 +98,7 @@ Work:
 
 Pass:
 
-- beats `manta-embed-v1` by a meaningful margin on hard eval
+- beats `eos-embed-v1` by a meaningful margin on hard eval
 - is competitive with BGE-M3-class retrieval on selected BEIR/MTEB retrieval tasks
 - exports as sealed `.mll`
 
@@ -230,22 +230,25 @@ Build the first scoreboard with:
 
 ```bash
 EOS_REPO_ROOT=$PWD \
-EOS_SCOREBOARD_ARTIFACT=/path/to/manta-embed-v1.sealed.mll \
-EOS_SCOREBOARD_PAIRWISE_JSONL=/data/manta/datasets/manta-embed-v1/processed/eval.jsonl \
-EOS_SCOREBOARD_HARD_JSONL=/data/manta/datasets/manta-embed-v1/processed/hard-eval.jsonl \
-EOS_SCOREBOARD_RETRIEVAL_ROOT=/data/manta/datasets/manta-embed-v1 \
+EOS_SCOREBOARD_ARTIFACT=/path/to/eos-embed-v1.sealed.mll \
+EOS_SCOREBOARD_PAIRWISE_JSONL=/data/manta/datasets/eos-embed-v1/processed/eval.jsonl \
+EOS_SCOREBOARD_HARD_JSONL=/data/manta/datasets/eos-embed-v1/processed/hard-eval.jsonl \
+EOS_SCOREBOARD_RETRIEVAL_ROOT=/data/manta/datasets/eos-embed-v1 \
 EOS_SCOREBOARD_RETRIEVAL_DATASETS=scifact,nfcorpus,fiqa \
 ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
 ```
 
 The scoreboard harness writes `runs/<run-id>/scoreboard.tsv`, `runs/<run-id>/scoreboard.json`, per-task metrics JSON, command logs, and the exact `eos` binary used for the run. Enable `EOS_SCOREBOARD_BM25_BASELINE=1` to include the in-repo BM25 baseline beside Eos retrieval scores.
+External embedder baselines can be added without provider API calls by exporting BEIR-aligned vector caches and setting `EOS_SCOREBOARD_EXTERNAL_VECTOR_ROOT`, `EOS_SCOREBOARD_EXTERNAL_VECTOR_DATASETS`, `EOS_SCOREBOARD_EXTERNAL_VECTOR_BASELINE`, and `EOS_SCOREBOARD_EXTERNAL_VECTOR_BACKEND`. The harness expects `<vector-root>/<dataset>/doc-vectors.jsonl` and `query-vectors.jsonl`; each row needs `id` or `_id` plus `vector`, `embedding`, or `values`. These rows use `eos eval-retrieval-vectors` and emit the same retrieval metrics JSON/scoreboard columns as sealed Eos and BM25 rows.
+Use `eos eval-retrieval-vectors-turboquant` on those same caches to compare q2/q4/q8 TurboQuant IP document-vector indexes without adding provider SDKs. This is the key CorkScrewDB default-promotion comparison surface because every candidate, including external BGE/Qwen/Jina/Voyage/Cohere/OpenAI caches and sealed local Eos embeddings, can be judged by dense quality plus compressed vector-index quality and cost.
+Enable `EOS_SCOREBOARD_HYBRID_RETRIEVAL=1` to add lexical+dense hybrid rows without removing dense, BM25, or TurboQuant rows. The harness runs `eos eval-retrieval-hybrid` for local Eos rows and `eos eval-retrieval-vectors-hybrid` for external vector caches, using `EOS_SCOREBOARD_HYBRID_METHOD`, `EOS_SCOREBOARD_HYBRID_ALPHA`, `EOS_SCOREBOARD_HYBRID_RRF_K`, and `EOS_SCOREBOARD_HYBRID_RRF_LAMBDA`. Treat the FiQA dev-selected `minmax`/`alpha=0.75` setting as guarded hybrid retrieval evidence only; it does not promote the dense embedder.
 For pairwise `train-embed --eval-only` rows, the harness uses `EOS_SCOREBOARD_PAIRWISE_ARTIFACT` when set; otherwise it infers the sibling trainable package when `EOS_SCOREBOARD_ARTIFACT` points at a sealed `.mll`.
 
 Run a closed retrieval-alignment round when the scoreboard shows a retrieval gap:
 
 ```bash
 EOS_REPO_ROOT=$PWD \
-EOS_ALIGN_INITIAL_ARTIFACT=/path/to/manta-embed-v1.sealed.mll \
+EOS_ALIGN_INITIAL_ARTIFACT=/path/to/eos-embed-v1.sealed.mll \
 EOS_ALIGN_DATASETS=scifact,nfcorpus,fiqa \
 ferrous-wheel run scripts/run_manta_embed_v1_retrieval_alignment_round.fw
 ```

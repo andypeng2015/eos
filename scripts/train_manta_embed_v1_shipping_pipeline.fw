@@ -62,7 +62,7 @@ type retrievalScore struct {
 }
 
 func usage() {
-	fmt.Println(`Train a CorkScrew-shippable manta-embed-v1 candidate from local pipeline data.
+	fmt.Println(`Train a CorkScrew-shippable eos-embed-v1 candidate from local pipeline data.
 
 Stages:
   A. Train from mixed synthetic pretraining + BEIR hard-negative rows.
@@ -76,8 +76,8 @@ Run:
   EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/train_manta_embed_v1_shipping_pipeline.fw
 
 Useful knobs:
-  EOS_SHIP_RUN_ROOT=$PWD/runs/manta-embed-v1-shipping-20260424
-  EOS_SHIP_TOKENIZER=/path/to/manta-embed-v1.tokenizer.mll
+  EOS_SHIP_RUN_ROOT=$PWD/runs/eos-embed-v1-shipping-20260424
+  EOS_SHIP_TOKENIZER=/path/to/eos-embed-v1.tokenizer.mll
   EOS_SHIP_FIQA_WEIGHT=5
   EOS_SHIP_NFCORPUS_WEIGHT=2
   EOS_SHIP_SCIFACT_WEIGHT=1
@@ -165,6 +165,15 @@ func requireFile(path string, label string) (string, error) {
 	return abs, nil
 }
 
+func firstExistingDir(paths []string, fallback string) string {
+	for _, path := range paths {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return path
+		}
+	}
+	return fallback
+}
+
 func shellQuote(value string) string {
 	if value == "" {
 		return "''"
@@ -203,7 +212,7 @@ func runCmd(cfg shippingConfig, label string, logName string, name string, args 
 }
 
 func prepareConfig(root string) (shippingConfig, error) {
-	runID := getenv("EOS_SHIP_RUN_ID", "manta-embed-v1-shipping-"+time.Now().UTC().Format("20060102T150405Z"))
+	runID := getenv("EOS_SHIP_RUN_ID", "eos-embed-v1-shipping-"+time.Now().UTC().Format("20060102T150405Z"))
 	runRoot, err := filepath.Abs(getenv("EOS_SHIP_RUN_ROOT", filepath.Join(root, "runs", runID)))
 	guard err == nil else return shippingConfig{}, err
 	if entries, err := os.ReadDir(runRoot); err == nil && len(entries) > 0 {
@@ -211,10 +220,14 @@ func prepareConfig(root string) (shippingConfig, error) {
 	}
 	err = os.MkdirAll(filepath.Join(runRoot, "logs"), 0o755)
 	guard err == nil else return shippingConfig{}, err
-	datasetRoot, err := filepath.Abs(getenv("EOS_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1")))
+	defaultDatasetRoot := firstExistingDir([]string{
+		filepath.Join(root, "datasets", "eos-embed-v1"),
+		filepath.Join(root, "datasets", "manta-embed-v1"),
+	}, filepath.Join(root, "datasets", "eos-embed-v1"))
+	datasetRoot, err := filepath.Abs(getenv("EOS_DATASET_ROOT", defaultDatasetRoot))
 	guard err == nil else return shippingConfig{}, err
 	processedDir := filepath.Join(datasetRoot, "processed")
-	modelName := getenv("EOS_MODEL_NAME", "manta-embed-v1")
+	modelName := getenv("EOS_MODEL_NAME", "eos-embed-v1")
 	stageAID := getenv("EOS_SHIP_STAGE_A_ID", "stage-a-mixed-pretrain")
 	stageBID := getenv("EOS_SHIP_STAGE_B_ID", "stage-b-balanced-beir")
 	stageCID := getenv("EOS_SHIP_STAGE_C_ID", "stage-c-fiqa-rescue")

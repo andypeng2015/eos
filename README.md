@@ -372,7 +372,7 @@ and JSON/DOT surfaces.
 
 Before a candidate run, use `ferrous-wheel run scripts/verify_manta_production.fw` to preflight the local `.mll` training, eval-only, sealed export, and inspect path.
 
-For production-grade `manta-embed-v1` candidate training, use `scripts/acquire_manta_embed_v1_datasets.fw` followed by `scripts/train_manta_embed_v1_candidate.fw`; they record dataset hashes, repo provenance, eval-only gates, sealed export, and artifact hashes. See `docs/production-embedding.md`.
+For production-grade `eos-embed-v1` candidate training, use `scripts/acquire_manta_embed_v1_datasets.fw` followed by `scripts/train_manta_embed_v1_candidate.fw`; they record dataset hashes, repo provenance, eval-only gates, sealed export, and artifact hashes. See `docs/production-embedding.md`.
 
 For the local long-context embedder wedge scoreboard, run `scripts/score_manta_embed_v1_baselines.fw` against a sealed candidate plus pairwise, hard, retrieval, and optional long-document eval sets. It writes `scoreboard.tsv` and `scoreboard.json` under `runs/<run-id>/`. See `docs/benchmarks.md` and `docs/local-long-context-embedder-wedge.md`.
 
@@ -401,10 +401,10 @@ Eos keeps reproducible perf checks as Ferrous Wheel workflows.
 ```bash
 EOS_BENCH_ROOT=$PWD ferrous-wheel run scripts/bench.fw
 EOS_BENCH_ROOT=$PWD EOS_BENCH_CUDA=1 ferrous-wheel run scripts/bench.fw
-EOS_BENCH_ROOT=$PWD EOS_BENCH_MODEL_ASSETS=/path/to/assets/manta-embed-v1 ferrous-wheel run scripts/bench.fw
+EOS_BENCH_ROOT=$PWD EOS_BENCH_MODEL_ASSETS=/path/to/assets/eos-embed-v1 ferrous-wheel run scripts/bench.fw
 ```
 
-Current `manta-embed-v1` CUDA smoke: `845.15` train examples/s and `865437.87` train pairs/s on batch `1024`, with the promoted grouped CUDA training path enabled by default. See `docs/benchmarks.md` for the full profile and the next perf targets.
+Current `eos-embed-v1` CUDA smoke: `845.15` train examples/s and `865437.87` train pairs/s on batch `1024`, with the promoted grouped CUDA training path enabled by default. See `docs/benchmarks.md` for the full profile and the next perf targets.
 
 ## License
 

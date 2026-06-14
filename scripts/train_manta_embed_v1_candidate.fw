@@ -79,7 +79,7 @@ type candidateConfig struct {
 }
 
 func usage() {
-	fmt.Println(`Train and package a production candidate for manta-embed-v1.
+	fmt.Println(`Train and package a production candidate for eos-embed-v1.
 
 Required input mode, choose one:
   EOS_CORPUS=/path/to/corpus.txt
@@ -97,11 +97,11 @@ Run:
   EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/train_manta_embed_v1_candidate.fw
 
 Common knobs:
-  EOS_REPO_ROOT=/path/to/manta
+  EOS_REPO_ROOT=/path/to/eos
   EOS_RUN_ROOT=/data/manta/runs
-  EOS_RUN_ID=manta-embed-v1-20260412
+  EOS_RUN_ID=eos-embed-v1-20260412
   EOS_ENCODER_REPEATS=2
-  EOS_INITIAL_ARTIFACT=/path/to/previous-stage/manta-embed-v1.mll
+  EOS_INITIAL_ARTIFACT=/path/to/previous-stage/eos-embed-v1.mll
   EOS_EPOCHS=3
   EOS_BATCH_SIZE=1024
   EOS_LR=0.005
@@ -630,7 +630,7 @@ func copyPackageForEval(cfg candidateConfig, name string) (string, error) {
 }
 
 func prepareConfig(root string) (candidateConfig, error) {
-	let modelName = getenv("EOS_MODEL_NAME", "manta-embed-v1")
+	let modelName = getenv("EOS_MODEL_NAME", "eos-embed-v1")
 	let runID = getenv("EOS_RUN_ID", modelName+"-"+time.Now().UTC().Format("20060102T150405Z"))
 	let runRoot = getenv("EOS_RUN_ROOT", filepath.Join(root, "runs"))
 	runDir, err := filepath.Abs(getenv("EOS_RUN_DIR", filepath.Join(runRoot, runID)))

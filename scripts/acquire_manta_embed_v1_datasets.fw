@@ -99,13 +99,13 @@ type acquireConfig struct {
 }
 
 func usage() {
-	fmt.Println(`Acquire public retrieval data for manta-embed-v1.
+	fmt.Println(`Acquire public retrieval data for eos-embed-v1.
 
 Run:
   EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/acquire_manta_embed_v1_datasets.fw
 
 Defaults:
-  EOS_DATASET_ROOT=$PWD/datasets/manta-embed-v1
+  EOS_DATASET_ROOT=$PWD/datasets/eos-embed-v1
   EOS_BEIR_DATASETS=scifact,nfcorpus,fiqa
   EOS_DATASET_MAX_HARD_TRAIN=6000
   EOS_DATASET_BM25_CANDIDATE_TOP_K=25
@@ -226,7 +226,7 @@ func parseDatasets() ([]datasetSpec, error) {
 }
 
 func prepareConfig(root string) (acquireConfig, error) {
-	outRoot, err := filepath.Abs(getenv("EOS_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1")))
+	outRoot, err := filepath.Abs(getenv("EOS_DATASET_ROOT", filepath.Join(root, "datasets", "eos-embed-v1")))
 	guard err == nil else return acquireConfig{}, err
 	err = rejectTmpPath("dataset root", outRoot)
 	guard err == nil else return acquireConfig{}, err

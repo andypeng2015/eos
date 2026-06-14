@@ -26,24 +26,32 @@ Sources consulted:
 
 ## Current Anchor
 
-The current in-repo best is:
+The previous sealed in-repo anchor was:
 
 ```text
 runs/manta-embed-v1-teacher-hybrid-w005-tw020-tt150-nf3train-lr10-20260507T053803Z/candidate/manta-embed-v1.sealed.mll
 ```
 
-Compared with the previous fresh-mined hybrid best:
+The current sealed-verified local anchor is:
 
-| Dataset | Previous nDCG@10 | Candidate nDCG@10 | Delta | Previous recall@100 | Candidate recall@100 | Delta |
+```text
+runs/manta-embed-v1-deephard-full-ft-20260610T0000Z/manta-embed-v1.sealed.mll
+```
+
+Status: sealed, inspected, and full-scoreboard verified after the 2026-06-10 deephard-full run. The sealed artifact SHA256 is `a7461b47784ea7434cf6048f33f6c281ef19887cfa9d0c699b6f2fba079f2b67`. The sealed scoreboard is under `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-sealed-scoreboard/`, and the sealed-vs-train-package comparison recorded zero nonzero quality or count deltas.
+
+Scoreboard comparison against the previous sealed anchor:
+
+| Dataset | Previous sealed anchor nDCG@10 | Current sealed anchor nDCG@10 | Delta | Previous sealed anchor recall@100 | Current sealed anchor recall@100 | Delta |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| SciFact | 0.324437 | 0.331139 | +0.006702 | 0.725222 | 0.724111 | -0.001111 |
-| NFCorpus | 0.084556 | 0.084325 | -0.000231 | 0.128650 | 0.129067 | +0.000417 |
-| FiQA | 0.027711 | 0.028967 | +0.001256 | 0.164380 | 0.164881 | +0.000501 |
-| Macro | 0.145568 | 0.148143 | +0.002575 | - | - | - |
+| SciFact | 0.331139 | 0.482406 | +0.151267 | 0.724111 | 0.775778 | +0.051667 |
+| NFCorpus | 0.084325 | 0.197733 | +0.113408 | 0.129067 | 0.235557 | +0.106490 |
+| FiQA | 0.028967 | 0.117533 | +0.088566 | 0.164881 | 0.347197 | +0.182316 |
+| Macro | 0.148144 | 0.265891 | +0.117747 | 0.339353 | 0.452844 | +0.113491 |
 
-This passes the current gate criteria: macro nDCG delta `>= 0.0005`, per-dataset nDCG regression no worse than `0.001`, per-dataset nDCG ratio `>= 0.98`, recall@100 regression no worse than `0.004`, and recall@100 ratio `>= 0.96`.
+Pairwise eval-only rows completed with `optimizer_updates=0` and CUDA forward backend: eval AUC `0.825890`, hard AUC `0.812725`.
 
-Rejected nearby probe:
+Historical rejected probes from the prior sealed-anchor lane:
 
 | Probe | Macro | Reason |
 | --- | ---: | --- |
@@ -91,7 +99,7 @@ Sweep:
 
 Gate:
 
-- candidate macro nDCG@10 beats `0.148143`
+- candidate macro nDCG@10 beats the previous sealed anchor `0.148144` and the current June 10 sealed anchor `0.265891`
 - no dataset violates nDCG or recall floors
 - pairwise AUC does not fall below `0.818`
 
@@ -232,6 +240,8 @@ Add a data builder for:
 - domain-specific questions for CorkScrewDB and code/document retrieval
 
 Gate synthetic data by retrieval scoreboards, not by generated-data volume.
+
+Status: local process-doc pretraining now has a first landing zone in `scripts/build_pretrain_pairs.fw`. Set `EOS_PROCESS_PRETRAIN=1` to add chunks from `AGENTS.md`, `.codex/agents/*.toml`, and `.codex/skills/**/SKILL.md` to the hard-negative pretraining JSONL; set `EOS_PROCESS_PRETRAIN_INCLUDE_DOCS=1` to include `docs/**/*.md`. The output uses the existing text hard-negative fields (`query`, `positive`, `negatives`, `source`, `group_id`), so it can be blended into `processed/pretrain-pairs.jsonl` before the shipping pipeline or used directly with `EOS_HARD_NEGATIVE_TRAIN=1` for a candidate smoke. A bounded process-corpus smoke generated `12` process rows, reached hard-negative training with `optimizer_updates=42`, and completed a separate eval-only pass with `optimizer_updates=0`; this proves the plumbing path only, not model quality. This is not generated query data and has no quality claim yet; it is the local-process corpus lane needed before synthetic Tiller/Codex questions or external teacher scoring are layered on.
 
 ### Lane H: Matryoshka Loss
 

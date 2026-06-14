@@ -47,7 +47,7 @@ Common:
   EOS_REPO_ROOT=$PWD
   EOS_GPU_PROFILE_RUN_ROOT=$PWD/runs
   EOS_GPU_PROFILE_RUN_ID=gpu-efficiency-20260412
-  EOS_GPU_PROFILE_MODEL=manta-embed-v1
+  EOS_GPU_PROFILE_MODEL=eos-embed-v1
   EOS_GPU_PROFILE_NO_TOKENIZER=1
   EOS_GPU_PROFILE_BATCH=256
   EOS_GPU_PROFILE_EPOCHS=1
@@ -224,7 +224,7 @@ func prepareConfig(root string) (profileConfig, error) {
 		RunID:          runID,
 		RunDir:         runDir,
 		AssetsDir:      assets,
-		ModelName:      getenv("EOS_GPU_PROFILE_MODEL", "manta-embed-v1"),
+		ModelName:      getenv("EOS_GPU_PROFILE_MODEL", "eos-embed-v1"),
 		TrainJSONL:     train,
 		EvalJSONL:      eval,
 		TokenizerPath:  tokenizer,

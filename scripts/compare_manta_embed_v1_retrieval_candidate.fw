@@ -89,7 +89,7 @@ type comparisonManifest struct {
 }
 
 func usage() {
-	fmt.Println(`Compare a Manta retrieval scoreboard against a baseline alignment summary.
+	fmt.Println(`Compare an Eos retrieval scoreboard against a baseline alignment summary.
 
 Required:
   EOS_COMPARE_BASELINE_SUMMARY_JSON=/path/to/retrieval-alignment-summary.json
@@ -226,10 +226,17 @@ func baselineRowsByDataset(summary baselineSummary) (map[string]baselineRow, []s
 func candidateRowsByDataset(scoreboard scoreboardManifest) map[string]scoreboardRow {
 	out := map[string]scoreboardRow{}
 	for _, row := range scoreboard.Rows {
-		if row.Category != "short_retrieval" || row.Baseline != "manta" || row.Dataset == "" {
+		if row.Category != "short_retrieval" || row.Dataset == "" {
 			continue
 		}
-		out[row.Dataset] = row
+		if row.Baseline == "eos" {
+			out[row.Dataset] = row
+		}
+		if row.Baseline == "manta" {
+			if _, ok := out[row.Dataset]; !ok {
+				out[row.Dataset] = row
+			}
+		}
 	}
 	return out
 }

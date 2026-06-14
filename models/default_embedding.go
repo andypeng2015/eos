@@ -11,7 +11,7 @@ import (
 	eosruntime "m31labs.dev/eos/runtime"
 )
 
-const DefaultEmbeddingModelName = "manta-embed-v1"
+const DefaultEmbeddingModelName = "eos-embed-v1"
 
 // DefaultEmbeddingPackageConfig controls Eos's built-in default
 // embedding-model package initialization.

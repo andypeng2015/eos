@@ -48,16 +48,16 @@ type mineConfig struct {
 }
 
 func usage() {
-	fmt.Println(`Mine retrieval hard negatives with an existing manta-embed-v1 .mll.
+	fmt.Println(`Mine retrieval hard negatives with an existing eos-embed-v1 .mll.
 
 Required:
-  EOS_MODEL_HARD_NEGATIVE_ARTIFACT=/path/to/manta-embed-v1.sealed.mll
+  EOS_MODEL_HARD_NEGATIVE_ARTIFACT=/path/to/eos-embed-v1.sealed.mll
 
 Run:
   EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/mine_manta_embed_v1_model_hard_negatives.fw
 
 Defaults:
-  EOS_DATASET_ROOT=$PWD/datasets/manta-embed-v1
+  EOS_DATASET_ROOT=$PWD/datasets/eos-embed-v1
   EOS_MODEL_HARD_NEGATIVE_DATASETS=scifact,nfcorpus,fiqa
   EOS_MODEL_HARD_NEGATIVE_DATASET_WEIGHTS=
   EOS_MODEL_HARD_NEGATIVE_SPLIT=train
@@ -179,6 +179,15 @@ func parseDatasetWeights(value string) (map[string]int, error) {
 	return weights, nil
 }
 
+func firstExistingDir(paths []string, fallback string) string {
+	for _, path := range paths {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return path
+		}
+	}
+	return fallback
+}
+
 func shellQuote(value string) string {
 	if value == "" {
 		return "''"
@@ -221,7 +230,11 @@ func prepareConfig(root string) (mineConfig, error) {
 	guard err == nil else return mineConfig{}, err
 	err = rejectTmpPath("model hard-negative artifact", artifact)
 	guard err == nil else return mineConfig{}, err
-	datasetRoot, err := filepath.Abs(getenv("EOS_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1")))
+	defaultDatasetRoot := firstExistingDir([]string{
+		filepath.Join(root, "datasets", "eos-embed-v1"),
+		filepath.Join(root, "datasets", "manta-embed-v1"),
+	}, filepath.Join(root, "datasets", "eos-embed-v1"))
+	datasetRoot, err := filepath.Abs(getenv("EOS_DATASET_ROOT", defaultDatasetRoot))
 	guard err == nil else return mineConfig{}, err
 	err = rejectTmpPath("dataset root", datasetRoot)
 	guard err == nil else return mineConfig{}, err
@@ -250,7 +263,7 @@ func prepareConfig(root string) (mineConfig, error) {
 	processedDir := filepath.Join(datasetRoot, "processed")
 	err = os.MkdirAll(processedDir, 0o755)
 	guard err == nil else return mineConfig{}, err
-	runID := getenv("EOS_MODEL_HARD_NEGATIVE_RUN_ID", "manta-embed-v1-model-hard-negatives-"+time.Now().UTC().Format("20060102T150405Z"))
+	runID := getenv("EOS_MODEL_HARD_NEGATIVE_RUN_ID", "eos-embed-v1-model-hard-negatives-"+time.Now().UTC().Format("20060102T150405Z"))
 	runRoot := getenv("EOS_MODEL_HARD_NEGATIVE_RUN_ROOT", filepath.Join(root, "runs"))
 	runDir, err := filepath.Abs(filepath.Join(runRoot, runID))
 	guard err == nil else return mineConfig{}, err

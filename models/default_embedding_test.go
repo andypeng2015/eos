@@ -11,7 +11,7 @@ import (
 )
 
 func TestInitDefaultEmbeddingPackageCreatesTrainablePackage(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "manta-embed-v1.mll")
+	path := filepath.Join(t.TempDir(), "eos-embed-v1.mll")
 	paths, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
 		VocabSize:    16,
 		MaxSequence:  8,
@@ -68,7 +68,7 @@ func TestInitDefaultEmbeddingPackageCreatesTrainablePackage(t *testing.T) {
 }
 
 func TestInitDefaultEmbeddingPackageQ4DeclaresQ4Params(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "manta-embed-v1.mll")
+	path := filepath.Join(t.TempDir(), "eos-embed-v1.mll")
 	paths, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
 		VocabSize:    16,
 		MaxSequence:  8,
@@ -108,7 +108,7 @@ func TestInitDefaultEmbeddingPackageQ4DeclaresQ4Params(t *testing.T) {
 }
 
 func TestInitDefaultEmbeddingPackageRejectsUnknownWeightDType(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "manta-embed-v1.mll")
+	path := filepath.Join(t.TempDir(), "eos-embed-v1.mll")
 	if _, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
 		VocabSize:    16,
 		MaxSequence:  8,
@@ -121,7 +121,7 @@ func TestInitDefaultEmbeddingPackageRejectsUnknownWeightDType(t *testing.T) {
 }
 
 func TestDefaultEmbeddingPackageQ4TrainsContrastive(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "manta-embed-v1.mll")
+	path := filepath.Join(t.TempDir(), "eos-embed-v1.mll")
 	if _, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
 		VocabSize:    16,
 		MaxSequence:  8,
@@ -161,7 +161,7 @@ func TestDefaultEmbeddingPackageQ4TrainsContrastive(t *testing.T) {
 }
 
 func TestExportDefaultEmbeddingPackageQ4SealsPackedTensors(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "manta-embed-v1.mll")
+	path := filepath.Join(t.TempDir(), "eos-embed-v1.mll")
 	if _, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
 		VocabSize:    16,
 		MaxSequence:  8,
@@ -235,7 +235,7 @@ func TestExportDefaultEmbeddingPackageQ4SealsPackedTensors(t *testing.T) {
 }
 
 func TestInitDefaultEmbeddingPackageHonorsEncoderRepeats(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "manta-embed-v1.mll")
+	path := filepath.Join(t.TempDir(), "eos-embed-v1.mll")
 	paths, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
 		VocabSize:      16,
 		MaxSequence:    8,

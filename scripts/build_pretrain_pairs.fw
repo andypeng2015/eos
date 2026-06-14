@@ -2,6 +2,8 @@ package main
 
 // build_pretrain_pairs emits a hard-negative-JSONL of synthetic (title->body
 // and body-first-half -> body-second-half) pairs drawn from BEIR corpora.
+// It can also add a local process-doc lane for AGENTS.md, Codex agent configs,
+// Codex skills, and optionally repo docs.
 // The resulting dataset is used for a contrastive pretraining stage before
 // fine-tuning on the hand-annotated BEIR training pairs.
 //
@@ -10,8 +12,15 @@ package main
 //
 // Usage:
 //   EOS_REPO_ROOT=$PWD \
-//   EOS_DATASET_ROOT=$PWD/datasets/manta-embed-v1/raw \
-//   EOS_PRETRAIN_OUT=$PWD/datasets/manta-embed-v1/processed/pretrain-pairs.jsonl \
+//   EOS_DATASET_ROOT=$PWD/datasets/eos-embed-v1/raw \
+//   EOS_PRETRAIN_OUT=$PWD/datasets/eos-embed-v1/processed/pretrain-pairs.jsonl \
+//     ferrous-wheel run scripts/build_pretrain_pairs.fw
+//
+// Process-doc lane:
+//   EOS_PRETRAIN_BEIR=0 \
+//   EOS_PROCESS_PRETRAIN=1 \
+//   EOS_PROCESS_PRETRAIN_MAX_DOCS=16 \
+//   EOS_PRETRAIN_OUT=$PWD/datasets/eos-embed-v1/processed/process-pretrain-smoke.jsonl \
 //     ferrous-wheel run scripts/build_pretrain_pairs.fw
 
 import (
@@ -21,6 +30,8 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -38,12 +49,43 @@ type pretrainRow struct {
 	GroupID   string   `json:"group_id"`
 }
 
+type processDoc struct {
+	Path     string
+	RelPath  string
+	Category string
+	Text     string
+}
+
+type processChunk struct {
+	RelPath  string
+	Category string
+	Index    int
+	Text     string
+}
+
 func getenv(name string, fallback string) string {
 	let v = os.Getenv(name)
 	if v != "" {
 		return v
 	}
 	return fallback
+}
+
+func envEnabled(name string) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func parseIntEnv(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
 }
 
 func readBEIRCorpus(path string) ([]beirDoc, error) {
@@ -66,6 +108,257 @@ func readBEIRCorpus(path string) ([]beirDoc, error) {
 	return out, scanner.Err()
 }
 
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func normalizeText(text string) string {
+	lines := []string{}
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func relPath(root string, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err == nil {
+		return filepath.ToSlash(rel)
+	}
+	return filepath.ToSlash(path)
+}
+
+func processCategory(rel string) string {
+	if rel == "AGENTS.md" {
+		return "agents"
+	}
+	if strings.HasPrefix(rel, ".codex/agents/") {
+		return "codex-agent"
+	}
+	if strings.HasPrefix(rel, ".codex/skills/") {
+		return "codex-skill"
+	}
+	if strings.HasPrefix(rel, "docs/") {
+		return "repo-doc"
+	}
+	return "process-doc"
+}
+
+func addProcessFile(root string, path string, docs []processDoc) []processDoc {
+	if !fileExists(path) {
+		return docs
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Println(f"[process] read failed: {path}: {err}")
+		return docs
+	}
+	text := normalizeText(string(data))
+	if strings.TrimSpace(text) == "" {
+		return docs
+	}
+	rel := relPath(root, path)
+	docs = append(docs, processDoc{
+		Path:     path,
+		RelPath:  rel,
+		Category: processCategory(rel),
+		Text:     text,
+	})
+	return docs
+}
+
+func addProcessTree(root string, dir string, docs []processDoc, include func(string) bool) []processDoc {
+	if _, err := os.Stat(dir); err != nil {
+		return docs
+	}
+	filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			name := entry.Name()
+			if name == ".git" || name == "datasets" || name == "runs" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if include(path) {
+			docs = addProcessFile(root, path, docs)
+		}
+		return nil
+	})
+	return docs
+}
+
+func collectProcessDocs(root string) []processDoc {
+	docs := []processDoc{}
+	docs = addProcessFile(root, filepath.Join(root, "AGENTS.md"), docs)
+
+	agentFiles, _ := filepath.Glob(filepath.Join(root, ".codex", "agents", "*.toml"))
+	sort.Strings(agentFiles)
+	for _, path := range agentFiles {
+		docs = addProcessFile(root, path, docs)
+	}
+
+	docs = addProcessTree(root, filepath.Join(root, ".codex", "skills"), docs, func(path string) bool {
+		return filepath.Base(path) == "SKILL.md"
+	})
+
+	if envEnabled("EOS_PROCESS_PRETRAIN_INCLUDE_DOCS") {
+		docs = addProcessTree(root, filepath.Join(root, "docs"), docs, func(path string) bool {
+			return strings.EqualFold(filepath.Ext(path), ".md")
+		})
+	}
+
+	extra := strings.TrimSpace(os.Getenv("EOS_PROCESS_PRETRAIN_PATHS"))
+	if extra != "" {
+		for _, raw := range strings.Split(extra, ",") {
+			path := strings.TrimSpace(raw)
+			if path == "" {
+				continue
+			}
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(root, path)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				fmt.Println(f"[process] missing extra path: {path}")
+				continue
+			}
+			if info.IsDir() {
+				docs = addProcessTree(root, path, docs, func(candidate string) bool {
+					ext := strings.ToLower(filepath.Ext(candidate))
+					return ext == ".md" || ext == ".toml" || filepath.Base(candidate) == "SKILL.md"
+				})
+			} else {
+				docs = addProcessFile(root, path, docs)
+			}
+		}
+	}
+
+	sort.Slice(docs, func(i int, j int) bool {
+		return docs[i].RelPath < docs[j].RelPath
+	})
+	maxDocs := parseIntEnv("EOS_PROCESS_PRETRAIN_MAX_DOCS", 0)
+	if maxDocs > 0 && len(docs) > maxDocs {
+		docs = docs[:maxDocs]
+	}
+	return docs
+}
+
+func chunkProcessDoc(doc processDoc, maxWords int, minWords int) []processChunk {
+	words := strings.Fields(doc.Text)
+	if len(words) < minWords {
+		return nil
+	}
+	chunks := []processChunk{}
+	for start := 0; start < len(words); start += maxWords {
+		end := start + maxWords
+		if end > len(words) {
+			end = len(words)
+		}
+		if end-start < minWords {
+			continue
+		}
+		chunks = append(chunks, processChunk{
+			RelPath:  doc.RelPath,
+			Category: doc.Category,
+			Index:    len(chunks),
+			Text:     strings.Join(words[start:end], " "),
+		})
+	}
+	return chunks
+}
+
+func processQuery(chunk processChunk) string {
+	if chunk.Index == 0 {
+		return "process guidance in " + chunk.RelPath
+	}
+	return fmt.Sprintf("process guidance in %s part %d", chunk.RelPath, chunk.Index+1)
+}
+
+func sanitizeID(value string) string {
+	value = strings.ToLower(value)
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if ok {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "doc"
+	}
+	return out
+}
+
+func pickRandomOtherProcessChunk(chunks []processChunk, excludeIdx int, rng *rand.Rand) string {
+	if len(chunks) <= 1 {
+		return ""
+	}
+	for attempts := 0; attempts < 8; attempts++ {
+		j := rng.Intn(len(chunks))
+		if j != excludeIdx {
+			return chunks[j].Text
+		}
+	}
+	j := (excludeIdx + 1) % len(chunks)
+	return chunks[j].Text
+}
+
+func emitProcessRows(root string, enc *json.Encoder, rng *rand.Rand) (int, int, error) {
+	docs := collectProcessDocs(root)
+	fmt.Println(f"[process] {len(docs)} docs")
+	maxWords := parseIntEnv("EOS_PROCESS_PRETRAIN_CHUNK_WORDS", 220)
+	if maxWords < 40 {
+		maxWords = 40
+	}
+	minWords := parseIntEnv("EOS_PROCESS_PRETRAIN_MIN_WORDS", 24)
+	if minWords < 8 {
+		minWords = 8
+	}
+	chunks := []processChunk{}
+	for _, doc := range docs {
+		chunks = append(chunks, chunkProcessDoc(doc, maxWords, minWords)...)
+	}
+	maxRows := parseIntEnv("EOS_PROCESS_PRETRAIN_MAX_ROWS", 0)
+	if maxRows > 0 && len(chunks) > maxRows {
+		chunks = chunks[:maxRows]
+	}
+	if len(chunks) < 2 {
+		return len(docs), 0, nil
+	}
+	for i, chunk := range chunks {
+		neg := pickRandomOtherProcessChunk(chunks, i, rng)
+		if neg == "" {
+			continue
+		}
+		row := pretrainRow{
+			Query:     processQuery(chunk),
+			Positive:  chunk.Text,
+			Negatives: []string{neg},
+			Source:    "process:" + chunk.Category,
+			GroupID:   fmt.Sprintf("process-%s-%d", sanitizeID(chunk.RelPath), chunk.Index),
+		}
+		err := enc.Encode(row)
+		guard err == nil else return len(docs), i, err
+	}
+	return len(docs), len(chunks), nil
+}
+
 // splitBody returns (firstHalf, secondHalf) of a body string, split at a
 // word boundary near the midpoint. Returns empty strings if the body is
 // too short to split meaningfully.
@@ -76,6 +369,15 @@ func splitBody(body string) (string, string) {
 	}
 	mid := len(words) / 2
 	return strings.Join(words[:mid], " "), strings.Join(words[mid:], " ")
+}
+
+func firstExistingDir(paths []string, fallback string) string {
+	for _, path := range paths {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return path
+		}
+	}
+	return fallback
 }
 
 // pickRandomOtherBody returns a body from docs that isn't the excluded one.
@@ -107,8 +409,12 @@ func main() {
 		}
 		root = cwd
 	}
-	let datasetRoot = getenv("EOS_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1", "raw"))
-	let outPath = getenv("EOS_PRETRAIN_OUT", filepath.Join(root, "datasets", "manta-embed-v1", "processed", "pretrain-pairs.jsonl"))
+	let defaultDatasetRoot = firstExistingDir([]string{
+		filepath.Join(root, "datasets", "eos-embed-v1", "raw"),
+		filepath.Join(root, "datasets", "manta-embed-v1", "raw"),
+	}, filepath.Join(root, "datasets", "eos-embed-v1", "raw"))
+	let datasetRoot = getenv("EOS_DATASET_ROOT", defaultDatasetRoot)
+	let outPath = getenv("EOS_PRETRAIN_OUT", filepath.Join(root, "datasets", "eos-embed-v1", "processed", "pretrain-pairs.jsonl"))
 	let seedStr = getenv("EOS_PRETRAIN_SEED", "42")
 	seed := int64(42)
 	_, scanErr := fmt.Sscan(seedStr, &seed)
@@ -145,60 +451,73 @@ func main() {
 	rng := rand.New(rand.NewSource(seed))
 	titleBodyRows := 0
 	segmentRows := 0
+	processRows := 0
 
-	for _, ds := range datasets {
-		let path = filepath.Join(datasetRoot, ds.Path)
-		docs, err := readBEIRCorpus(path)
-		if err != nil {
-			fmt.Println(f"[{ds.Name}] read failed: {err}")
-			continue
-		}
-		fmt.Println(f"[{ds.Name}] {len(docs)} docs")
-
-		for i, doc := range docs {
-			title := strings.TrimSpace(doc.Title)
-			body := strings.TrimSpace(doc.Text)
-			if body == "" {
+	if getenv("EOS_PRETRAIN_BEIR", "1") != "0" {
+		for _, ds := range datasets {
+			let path = filepath.Join(datasetRoot, ds.Path)
+			docs, err := readBEIRCorpus(path)
+			if err != nil {
+				fmt.Println(f"[{ds.Name}] read failed: {err}")
 				continue
 			}
-			if title != "" {
-				neg := pickRandomOtherBody(docs, i, rng)
-				row := pretrainRow{
-					Query:     title,
-					Positive:  body,
-					Negatives: []string{neg},
-					Source:    ds.Name + ":title_body",
-					GroupID:   fmt.Sprintf("pretrain-%s-tb-%s", ds.Name, doc.ID),
+			fmt.Println(f"[{ds.Name}] {len(docs)} docs")
+
+			for i, doc := range docs {
+				title := strings.TrimSpace(doc.Title)
+				body := strings.TrimSpace(doc.Text)
+				if body == "" {
+					continue
 				}
-				err := enc.Encode(row)
-				guard err == nil else {
-					fmt.Println(err)
-					os.Exit(1)
+				if title != "" {
+					neg := pickRandomOtherBody(docs, i, rng)
+					row := pretrainRow{
+						Query:     title,
+						Positive:  body,
+						Negatives: []string{neg},
+						Source:    ds.Name + ":title_body",
+						GroupID:   fmt.Sprintf("pretrain-%s-tb-%s", ds.Name, doc.ID),
+					}
+					err := enc.Encode(row)
+					guard err == nil else {
+						fmt.Println(err)
+						os.Exit(1)
+					}
+					titleBodyRows++
 				}
-				titleBodyRows++
-			}
-			first, second := splitBody(body)
-			if first != "" && second != "" {
-				neg := pickRandomOtherBody(docs, i, rng)
-				row := pretrainRow{
-					Query:     first,
-					Positive:  second,
-					Negatives: []string{neg},
-					Source:    ds.Name + ":segment",
-					GroupID:   fmt.Sprintf("pretrain-%s-seg-%s", ds.Name, doc.ID),
+				first, second := splitBody(body)
+				if first != "" && second != "" {
+					neg := pickRandomOtherBody(docs, i, rng)
+					row := pretrainRow{
+						Query:     first,
+						Positive:  second,
+						Negatives: []string{neg},
+						Source:    ds.Name + ":segment",
+						GroupID:   fmt.Sprintf("pretrain-%s-seg-%s", ds.Name, doc.ID),
+					}
+					err := enc.Encode(row)
+					guard err == nil else {
+						fmt.Println(err)
+						os.Exit(1)
+					}
+					segmentRows++
 				}
-				err := enc.Encode(row)
-				guard err == nil else {
-					fmt.Println(err)
-					os.Exit(1)
-				}
-				segmentRows++
 			}
 		}
+	}
+
+	if envEnabled("EOS_PROCESS_PRETRAIN") {
+		_, rows, err := emitProcessRows(root, enc, rng)
+		guard err == nil else {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		processRows = rows
 	}
 
 	fmt.Println(f"\nwrote {outPath}")
 	fmt.Println(f"title_body_rows={titleBodyRows}")
 	fmt.Println(f"segment_rows={segmentRows}")
-	fmt.Println(f"total_rows={titleBodyRows + segmentRows}")
+	fmt.Println(f"process_rows={processRows}")
+	fmt.Println(f"total_rows={titleBodyRows + segmentRows + processRows}")
 }

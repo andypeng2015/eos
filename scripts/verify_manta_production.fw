@@ -149,7 +149,7 @@ func prepareConfig(root string) (verifyConfig, error) {
 	guard err == nil else return verifyConfig{}, err
 	err = os.MkdirAll(filepath.Join(runDir, "logs"), 0o755)
 	guard err == nil else return verifyConfig{}, err
-	modelName := getenv("EOS_VERIFY_MODEL_NAME", "manta-embed-v1")
+	modelName := getenv("EOS_VERIFY_MODEL_NAME", "eos-embed-v1")
 	return verifyConfig{
 		Root:           root,
 		RunID:          runID,
