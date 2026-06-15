@@ -1014,6 +1014,7 @@ func runEvalRetrievalMultiVectorTurboQuant(args []string) error {
 	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
 	bitsRaw := fs.String("bits", "2,4,8", "comma-separated TurboQuant IP bit widths; supported: 2..8")
 	quantizerSeed := fs.Int64("quantizer-seed", eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed, "TurboQuant IP quantizer seed for deterministic rows")
+	baselineDim := fs.Int("baseline-dim", 0, "dense fp32 baseline dimension for one-parent-vector budget; 0 uses child vector dimension")
 	allowMissingRelevant := fs.Bool("allow-missing-relevant", false, "allow qrels-relevant parent IDs missing from the child-vector cache")
 	metricsPath := fs.String("metrics-json", "", "write parent-child TurboQuant retrieval metrics JSON")
 	metricsTSVPath := fs.String("metrics-tsv", "", "write compact parent-child dense/quantized metrics TSV")
@@ -1049,6 +1050,7 @@ func runEvalRetrievalMultiVectorTurboQuant(args []string) error {
 		MaxQueries:           *maxQueries,
 		AllowMissingRelevant: *allowMissingRelevant,
 		QuantizerSeed:        *quantizerSeed,
+		BaselineDim:          *baselineDim,
 	}, bits)
 	if err != nil {
 		return err
@@ -1070,18 +1072,20 @@ func runEvalRetrievalMultiVectorTurboQuant(args []string) error {
 	}
 	fmt.Printf("retrieval multivector turboquant: dataset=%s backend=%s parents=%d child_vectors=%d avg_children=%.2f queries=%d relevant_pairs=%d scored_child_pairs=%d\n",
 		metrics.Dataset, metrics.Backend, metrics.Inputs.Parents, metrics.Inputs.ChildVectors, metrics.Inputs.AverageChildrenPerParent, metrics.Inputs.Queries, metrics.Inputs.RelevantPairs, metrics.Inputs.ScoredChildPairs)
-	fmt.Printf("dense-child: ndcg@10=%.6f ndcg@100=%.6f map@10=%.6f recall@100=%.6f dense_parent_bytes=%d dense_child_bytes=%d scores/s=%.2f query_p95_ms=%.3f\n",
-		metrics.Dense.Quality.NDCGAt10, metrics.Dense.Quality.NDCGAt100, metrics.Dense.Quality.MAPAt10, metrics.Dense.Quality.RecallAt100, metrics.Dense.DenseParentBytes, metrics.Dense.DenseChildBytes, metrics.Dense.ScoresPerSecond, metrics.Dense.QueryLatency.P95MS)
+	fmt.Printf("dense-child: ndcg@10=%.6f ndcg@100=%.6f map@10=%.6f recall@100=%.6f baseline_dim=%d dense_baseline_bytes=%d dense_baseline_total_bytes=%d dense_child_bytes=%d storage_multiple=%.2fx scores/s=%.2f query_p95_ms=%.3f\n",
+		metrics.Dense.Quality.NDCGAt10, metrics.Dense.Quality.NDCGAt100, metrics.Dense.Quality.MAPAt10, metrics.Dense.Quality.RecallAt100, metrics.Dense.BaselineDim, metrics.Dense.DenseBaselineBytes, metrics.Dense.DenseBaselineTotalBytes, metrics.Dense.DenseChildBytes, metrics.Dense.StorageMultipleOfDenseBaseline, metrics.Dense.ScoresPerSecond, metrics.Dense.QueryLatency.P95MS)
 	for _, row := range metrics.Rows {
-		fmt.Printf("q%d: ndcg@10=%.6f delta=%+.6f recall@100=%.6f delta=%+.6f quantized_child_bytes=%d dense_child_compression=%.2fx parent_budget_multiple=%.2fx scores/s=%.2f query_p95_ms=%.3f\n",
+		fmt.Printf("q%d: ndcg@10=%.6f delta=%+.6f recall@100=%.6f delta=%+.6f quantized_child_bytes=%d quantized_vector_bytes=%d vectors_per_baseline=%d dense_child_compression=%.2fx storage_multiple=%.2fx scores/s=%.2f query_p95_ms=%.3f\n",
 			row.Bits,
 			row.Quality.NDCGAt10,
 			row.NDCGAt10Delta,
 			row.Quality.RecallAt100,
 			row.RecallAt100Delta,
 			row.QuantizedChildBytes,
+			row.QuantizedVectorBytes,
+			row.VectorsThatFitInOneDenseBaseline,
 			row.DenseChildCompression,
-			row.ParentBudgetStorageMultiple,
+			row.StorageMultipleOfDenseBaseline,
 			row.ScoresPerSecond,
 			row.QueryLatency.P95MS,
 		)
@@ -1171,14 +1175,16 @@ func writeTurboQuantRetrievalMetricsTSV(path string, metrics eosruntime.TurboQua
 
 func writeTurboQuantMultiVectorRetrievalMetricsTSV(path string, metrics eosruntime.TurboQuantMultiVectorRetrievalEvalMetrics) error {
 	var b strings.Builder
-	b.WriteString("dataset\trow\tbits\tmethod\tquantizer_seed\tallow_missing_relevant\tparents\tchild_vectors\tavg_children_per_parent\tqueries\trelevant_pairs\tscored_child_pairs\tndcg_at_10\tndcg_at_100\tmrr_at_10\tprecision_at_1\tprecision_at_5\tprecision_at_10\thit_at_1\thit_at_5\thit_at_10\tmap_at_10\tmap_at_100\trecall_at_10\trecall_at_100\tndcg_at_10_delta\trecall_at_100_delta\tdense_parent_bytes\tdense_child_bytes\tquantized_child_bytes\tdense_child_compression_ratio\tparent_budget_storage_multiple\tscores_per_second\tquery_latency_p50_ms\tquery_latency_p95_ms\tquery_latency_p99_ms\tquery_latency_max_ms\tchildren_per_second\n")
-	fmt.Fprintf(&b, "%s\tdense-child\t\tfloat32_child_max\t%d\t%t\t%d\t%d\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t\t\t%d\t%d\t\t\t\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t\n",
+	b.WriteString("dataset\trow\tbits\tmethod\tquantizer_seed\tallow_missing_relevant\tbaseline_dim\tparent_count\tchild_count\tavg_children_per_parent\tmax_children_per_parent\tqueries\trelevant_pairs\tscored_child_pairs\tndcg_at_10\tndcg_at_100\tmrr_at_10\tprecision_at_1\tprecision_at_5\tprecision_at_10\thit_at_1\thit_at_5\thit_at_10\tmap_at_10\tmap_at_100\trecall_at_10\trecall_at_100\tndcg_at_10_delta\trecall_at_100_delta\tdense_baseline_bytes\tdense_baseline_total_bytes\tdense_parent_bytes\tdense_child_bytes\tquantized_vector_bytes\tquantized_child_bytes\tdense_child_compression_ratio\tvectors_that_fit_in_one_dense_baseline\tstorage_multiple_of_dense_baseline\tparent_budget_storage_multiple\tscores_per_second\tquery_latency_p50_ms\tquery_latency_p95_ms\tquery_latency_p99_ms\tquery_latency_max_ms\tchildren_per_second\n")
+	fmt.Fprintf(&b, "%s\tdense-child\t\tfloat32_child_max\t%d\t%t\t%d\t%d\t%d\t%.6f\t%d\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t\t\t%d\t%d\t%d\t%d\t%d\t%d\t\t%d\t%.6f\t%.6f\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t\n",
 		metrics.Dataset,
 		metrics.Config.QuantizerSeed,
 		metrics.Config.AllowMissingRelevant,
-		metrics.Inputs.Parents,
-		metrics.Inputs.ChildVectors,
-		metrics.Inputs.AverageChildrenPerParent,
+		metrics.Config.BaselineDim,
+		metrics.Inputs.ParentCount,
+		metrics.Inputs.ChildCount,
+		metrics.Inputs.AvgChildrenPerParent,
+		metrics.Inputs.MaxChildrenPerParent,
 		metrics.Inputs.Queries,
 		metrics.Inputs.RelevantPairs,
 		metrics.Inputs.ScoredChildPairs,
@@ -1195,8 +1201,15 @@ func writeTurboQuantMultiVectorRetrievalMetricsTSV(path string, metrics eosrunti
 		metrics.Dense.Quality.MAPAt100,
 		metrics.Dense.Quality.RecallAt10,
 		metrics.Dense.Quality.RecallAt100,
+		metrics.Dense.DenseBaselineBytes,
+		metrics.Dense.DenseBaselineTotalBytes,
 		metrics.Dense.DenseParentBytes,
 		metrics.Dense.DenseChildBytes,
+		metrics.Dense.QuantizedVectorBytes,
+		metrics.Dense.DenseChildBytes,
+		metrics.Dense.VectorsThatFitInOneDenseBaseline,
+		metrics.Dense.StorageMultipleOfDenseBaseline,
+		metrics.Dense.ParentBudgetStorageMultiple,
 		metrics.Dense.ScoresPerSecond,
 		metrics.Dense.QueryLatency.P50MS,
 		metrics.Dense.QueryLatency.P95MS,
@@ -1204,15 +1217,17 @@ func writeTurboQuantMultiVectorRetrievalMetricsTSV(path string, metrics eosrunti
 		metrics.Dense.QueryLatency.MaxMS,
 	)
 	for _, row := range metrics.Rows {
-		fmt.Fprintf(&b, "%s\tquantized-child\t%d\t%s\t%d\t%t\t%d\t%d\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%+.6f\t%+.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%.2f\n",
+		fmt.Fprintf(&b, "%s\tquantized-child\t%d\t%s\t%d\t%t\t%d\t%d\t%d\t%.6f\t%d\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%+.6f\t%+.6f\t%d\t%d\t%d\t%d\t%d\t%d\t%.6f\t%d\t%.6f\t%.6f\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%.2f\n",
 			metrics.Dataset,
 			row.Bits,
 			row.Method,
 			row.QuantizerSeed,
 			metrics.Config.AllowMissingRelevant,
-			metrics.Inputs.Parents,
-			metrics.Inputs.ChildVectors,
-			metrics.Inputs.AverageChildrenPerParent,
+			row.BaselineDim,
+			row.ParentCount,
+			row.ChildCount,
+			row.AvgChildrenPerParent,
+			row.MaxChildrenPerParent,
 			metrics.Inputs.Queries,
 			metrics.Inputs.RelevantPairs,
 			metrics.Inputs.ScoredChildPairs,
@@ -1231,10 +1246,15 @@ func writeTurboQuantMultiVectorRetrievalMetricsTSV(path string, metrics eosrunti
 			row.Quality.RecallAt100,
 			row.NDCGAt10Delta,
 			row.RecallAt100Delta,
+			row.DenseBaselineBytes,
+			row.DenseBaselineTotalBytes,
 			row.DenseParentBytes,
 			row.DenseChildBytes,
+			row.QuantizedVectorBytes,
 			row.QuantizedChildBytes,
 			row.DenseChildCompression,
+			row.VectorsThatFitInOneDenseBaseline,
+			row.StorageMultipleOfDenseBaseline,
 			row.ParentBudgetStorageMultiple,
 			row.ScoresPerSecond,
 			row.QueryLatency.P50MS,

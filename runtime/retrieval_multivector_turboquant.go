@@ -33,8 +33,12 @@ type TurboQuantMultiVectorRetrievalInputMetrics struct {
 	DocVectorPath            string  `json:"doc_vector_path,omitempty"`
 	QueryVectorPath          string  `json:"query_vector_path,omitempty"`
 	Parents                  int     `json:"parents"`
+	ParentCount              int     `json:"parent_count"`
 	ChildVectors             int     `json:"child_vectors"`
+	ChildCount               int     `json:"child_count"`
 	AverageChildrenPerParent float64 `json:"average_children_per_parent"`
+	AvgChildrenPerParent     float64 `json:"avg_children_per_parent"`
+	MaxChildrenPerParent     int     `json:"max_children_per_parent"`
 	Queries                  int     `json:"queries"`
 	RelevantPairs            int     `json:"relevant_pairs"`
 	ScoredChildPairs         int64   `json:"scored_child_pairs"`
@@ -47,36 +51,59 @@ type TurboQuantMultiVectorRetrievalConfigMetrics struct {
 	Bits                 []int `json:"bits"`
 	AllowMissingRelevant bool  `json:"allow_missing_relevant"`
 	QuantizerSeed        int64 `json:"quantizer_seed"`
+	BaselineDim          int   `json:"baseline_dim"`
 }
 
 type TurboQuantMultiVectorDenseMetrics struct {
-	Quality          RetrievalEvalQualityMetrics `json:"quality"`
-	DenseParentBytes int64                       `json:"dense_parent_bytes"`
-	DenseChildBytes  int64                       `json:"dense_child_bytes"`
-	ScoreSeconds     float64                     `json:"score_seconds"`
-	ScoresPerSecond  float64                     `json:"scores_per_second"`
-	QueryLatency     RetrievalEvalLatencyMetrics `json:"query_latency"`
+	Quality                          RetrievalEvalQualityMetrics `json:"quality"`
+	BaselineDim                      int                         `json:"baseline_dim"`
+	ParentCount                      int                         `json:"parent_count"`
+	ChildCount                       int                         `json:"child_count"`
+	AvgChildrenPerParent             float64                     `json:"avg_children_per_parent"`
+	MaxChildrenPerParent             int                         `json:"max_children_per_parent"`
+	DenseBaselineBytes               int64                       `json:"dense_baseline_bytes"`
+	DenseBaselineTotalBytes          int64                       `json:"dense_baseline_total_bytes"`
+	ChildVectorBytes                 int64                       `json:"child_vector_bytes"`
+	QuantizedVectorBytes             int64                       `json:"quantized_vector_bytes"`
+	DenseParentBytes                 int64                       `json:"dense_parent_bytes"`
+	DenseChildBytes                  int64                       `json:"dense_child_bytes"`
+	VectorsThatFitInOneDenseBaseline int64                       `json:"vectors_that_fit_in_one_dense_baseline"`
+	StorageMultipleOfDenseBaseline   float64                     `json:"storage_multiple_of_dense_baseline"`
+	ParentBudgetStorageMultiple      float64                     `json:"parent_budget_storage_multiple"`
+	ScoreSeconds                     float64                     `json:"score_seconds"`
+	ScoresPerSecond                  float64                     `json:"scores_per_second"`
+	QueryLatency                     RetrievalEvalLatencyMetrics `json:"query_latency"`
 }
 
 type TurboQuantMultiVectorBitMetrics struct {
-	Bits                        int                         `json:"bits"`
-	Method                      string                      `json:"method"`
-	QuantizerSeed               int64                       `json:"quantizer_seed"`
-	Quality                     RetrievalEvalQualityMetrics `json:"quality"`
-	NDCGAt10Delta               float64                     `json:"ndcg_at_10_delta"`
-	RecallAt100Delta            float64                     `json:"recall_at_100_delta"`
-	QuantizedChildBytes         int64                       `json:"quantized_child_bytes"`
-	DenseParentBytes            int64                       `json:"dense_parent_bytes"`
-	DenseChildBytes             int64                       `json:"dense_child_bytes"`
-	DenseChildCompression       float64                     `json:"dense_child_compression_ratio"`
-	ParentBudgetStorageMultiple float64                     `json:"parent_budget_storage_multiple"`
-	QuantizeSeconds             float64                     `json:"quantize_seconds"`
-	ScoreSeconds                float64                     `json:"score_seconds"`
-	ChildrenPerSecond           float64                     `json:"children_per_second"`
-	ScoresPerSecond             float64                     `json:"scores_per_second"`
-	QueryLatency                RetrievalEvalLatencyMetrics `json:"query_latency"`
-	SkippedRelevantDocs         int                         `json:"skipped_relevant_docs,omitempty"`
-	SkippedQueries              int                         `json:"skipped_queries_without_relevant_docs,omitempty"`
+	Bits                             int                         `json:"bits"`
+	Method                           string                      `json:"method"`
+	QuantizerSeed                    int64                       `json:"quantizer_seed"`
+	Quality                          RetrievalEvalQualityMetrics `json:"quality"`
+	NDCGAt10Delta                    float64                     `json:"ndcg_at_10_delta"`
+	RecallAt100Delta                 float64                     `json:"recall_at_100_delta"`
+	BaselineDim                      int                         `json:"baseline_dim"`
+	ParentCount                      int                         `json:"parent_count"`
+	ChildCount                       int                         `json:"child_count"`
+	AvgChildrenPerParent             float64                     `json:"avg_children_per_parent"`
+	MaxChildrenPerParent             int                         `json:"max_children_per_parent"`
+	QuantizedVectorBytes             int64                       `json:"quantized_vector_bytes"`
+	QuantizedChildBytes              int64                       `json:"quantized_child_bytes"`
+	DenseBaselineBytes               int64                       `json:"dense_baseline_bytes"`
+	DenseBaselineTotalBytes          int64                       `json:"dense_baseline_total_bytes"`
+	DenseParentBytes                 int64                       `json:"dense_parent_bytes"`
+	DenseChildBytes                  int64                       `json:"dense_child_bytes"`
+	DenseChildCompression            float64                     `json:"dense_child_compression_ratio"`
+	VectorsThatFitInOneDenseBaseline int64                       `json:"vectors_that_fit_in_one_dense_baseline"`
+	StorageMultipleOfDenseBaseline   float64                     `json:"storage_multiple_of_dense_baseline"`
+	ParentBudgetStorageMultiple      float64                     `json:"parent_budget_storage_multiple"`
+	QuantizeSeconds                  float64                     `json:"quantize_seconds"`
+	ScoreSeconds                     float64                     `json:"score_seconds"`
+	ChildrenPerSecond                float64                     `json:"children_per_second"`
+	ScoresPerSecond                  float64                     `json:"scores_per_second"`
+	QueryLatency                     RetrievalEvalLatencyMetrics `json:"query_latency"`
+	SkippedRelevantDocs              int                         `json:"skipped_relevant_docs,omitempty"`
+	SkippedQueries                   int                         `json:"skipped_queries_without_relevant_docs,omitempty"`
 }
 
 // EvaluateTurboQuantMultiVectorCacheRetrieval evaluates precomputed child
@@ -172,6 +199,13 @@ func evaluateTurboQuantMultiVectorRetrieval(ctx context.Context, cfg RetrievalEv
 	if dim == 0 {
 		return TurboQuantMultiVectorRetrievalEvalMetrics{}, fmt.Errorf("child vector dimension is zero")
 	}
+	baselineDim := cfg.BaselineDim
+	if baselineDim == 0 {
+		baselineDim = dim
+	}
+	if baselineDim < 0 {
+		return TurboQuantMultiVectorRetrievalEvalMetrics{}, fmt.Errorf("baseline dim must be positive or zero to use child vector dimension")
+	}
 	for _, child := range children {
 		if child.ParentID == "" {
 			return TurboQuantMultiVectorRetrievalEvalMetrics{}, fmt.Errorf("child vector has empty parent id")
@@ -187,6 +221,8 @@ func evaluateTurboQuantMultiVectorRetrieval(ctx context.Context, cfg RetrievalEv
 	}
 
 	parentCount := countRetrievalParents(children)
+	maxChildrenPerParent := maxRetrievalChildrenPerParent(children)
+	avgChildrenPerParent := ratioFloat64(float64(len(children)), float64(parentCount))
 	if !cfg.AllowMissingRelevant {
 		missingRelevantDocs, missingRelevantQueries := countMissingRelevantParents(queries, children, qrels)
 		if missingRelevantDocs > 0 {
@@ -201,15 +237,22 @@ func evaluateTurboQuantMultiVectorRetrieval(ctx context.Context, cfg RetrievalEv
 	}
 
 	scoredPairs := int64(evaluatedQueries) * int64(len(children))
-	denseParentBytes := int64(parentCount * dim * 4)
+	denseBaselineBytes := int64(baselineDim * 4)
+	denseParentBytes := int64(parentCount) * denseBaselineBytes
 	denseChildBytes := int64(len(children) * dim * 4)
+	denseChildVectorBytes := int64(dim * 4)
+	denseStorageMultiple := ratioFloat64(float64(denseChildBytes), float64(denseParentBytes))
 	out := TurboQuantMultiVectorRetrievalEvalMetrics{
 		Schema:  TurboQuantMultiVectorRetrievalEvalMetricsSchema,
 		Dataset: cfg.DatasetName,
 		Inputs: TurboQuantMultiVectorRetrievalInputMetrics{
 			Parents:                  parentCount,
+			ParentCount:              parentCount,
 			ChildVectors:             len(children),
-			AverageChildrenPerParent: ratioFloat64(float64(len(children)), float64(parentCount)),
+			ChildCount:               len(children),
+			AverageChildrenPerParent: avgChildrenPerParent,
+			AvgChildrenPerParent:     avgChildrenPerParent,
+			MaxChildrenPerParent:     maxChildrenPerParent,
 			Queries:                  evaluatedQueries,
 			RelevantPairs:            relevantPairs,
 			ScoredChildPairs:         scoredPairs,
@@ -221,19 +264,32 @@ func evaluateTurboQuantMultiVectorRetrieval(ctx context.Context, cfg RetrievalEv
 			Bits:                 append([]int(nil), bits...),
 			AllowMissingRelevant: cfg.AllowMissingRelevant,
 			QuantizerSeed:        cfg.QuantizerSeed,
+			BaselineDim:          baselineDim,
 		},
 		Dense: TurboQuantMultiVectorDenseMetrics{
-			Quality:          denseQuality,
-			DenseParentBytes: denseParentBytes,
-			DenseChildBytes:  denseChildBytes,
-			ScoreSeconds:     denseScoreDuration.Seconds(),
-			ScoresPerSecond:  ratePerSecond(float64(scoredPairs), denseScoreDuration),
-			QueryLatency:     denseLatency,
+			Quality:                          denseQuality,
+			BaselineDim:                      baselineDim,
+			ParentCount:                      parentCount,
+			ChildCount:                       len(children),
+			AvgChildrenPerParent:             avgChildrenPerParent,
+			MaxChildrenPerParent:             maxChildrenPerParent,
+			DenseBaselineBytes:               denseBaselineBytes,
+			DenseBaselineTotalBytes:          denseParentBytes,
+			ChildVectorBytes:                 denseChildVectorBytes,
+			QuantizedVectorBytes:             denseChildVectorBytes,
+			DenseParentBytes:                 denseParentBytes,
+			DenseChildBytes:                  denseChildBytes,
+			VectorsThatFitInOneDenseBaseline: denseBaselineBytes / denseChildVectorBytes,
+			StorageMultipleOfDenseBaseline:   denseStorageMultiple,
+			ParentBudgetStorageMultiple:      denseStorageMultiple,
+			ScoreSeconds:                     denseScoreDuration.Seconds(),
+			ScoresPerSecond:                  ratePerSecond(float64(scoredPairs), denseScoreDuration),
+			QueryLatency:                     denseLatency,
 		},
 		Rows: make([]TurboQuantMultiVectorBitMetrics, 0, len(bits)),
 	}
 	for _, bitWidth := range bits {
-		row, err := evaluateTurboQuantMultiVectorBits(ctx, dim, bitWidth, cfg.TopK, cfg.QuantizerSeed, children, queries, qrels, denseQuality, denseParentBytes, denseChildBytes, scoredPairs)
+		row, err := evaluateTurboQuantMultiVectorBits(ctx, dim, baselineDim, bitWidth, cfg.TopK, cfg.QuantizerSeed, children, queries, qrels, denseQuality, parentCount, maxChildrenPerParent, denseBaselineBytes, denseParentBytes, denseChildBytes, scoredPairs)
 		if err != nil {
 			return TurboQuantMultiVectorRetrievalEvalMetrics{}, err
 		}
@@ -250,10 +306,12 @@ type turboQuantMultiVectorChild struct {
 	Vector   turboquant.IPQuantized
 }
 
-func evaluateTurboQuantMultiVectorBits(ctx context.Context, dim, bitWidth, topK int, quantizerSeed int64, children []retrievalChildVectorRecord, queries []retrievalVectorRecord, qrels retrievalQrels, denseQuality RetrievalEvalQualityMetrics, denseParentBytes, denseChildBytes, scoredPairs int64) (TurboQuantMultiVectorBitMetrics, error) {
+func evaluateTurboQuantMultiVectorBits(ctx context.Context, dim, baselineDim, bitWidth, topK int, quantizerSeed int64, children []retrievalChildVectorRecord, queries []retrievalVectorRecord, qrels retrievalQrels, denseQuality RetrievalEvalQualityMetrics, parentCount, maxChildrenPerParent int, denseBaselineBytes, denseParentBytes, denseChildBytes, scoredPairs int64) (TurboQuantMultiVectorBitMetrics, error) {
 	q := turboquant.NewIPWithSeed(dim, bitWidth, quantizerSeed)
 	quantizeStart := time.Now()
 	qchildren := make([]turboQuantMultiVectorChild, len(children))
+	mseBytes, signBytes := turboquant.IPQuantizedSizes(dim, bitWidth)
+	quantizedVectorBytes := int64(mseBytes + signBytes + 4)
 	var quantizedBytes int64
 	for i, child := range children {
 		if err := ctx.Err(); err != nil {
@@ -261,7 +319,7 @@ func evaluateTurboQuantMultiVectorBits(ctx context.Context, dim, bitWidth, topK 
 		}
 		qx := q.Quantize(child.Vector)
 		qchildren[i] = turboQuantMultiVectorChild{ParentID: child.ParentID, ChildID: child.ChildID, Vector: qx}
-		quantizedBytes += int64(len(qx.MSE) + len(qx.Signs) + 4)
+		quantizedBytes += quantizedVectorBytes
 	}
 	quantizeDuration := time.Since(quantizeStart)
 
@@ -272,24 +330,34 @@ func evaluateTurboQuantMultiVectorBits(ctx context.Context, dim, bitWidth, topK 
 	}
 	scoreDuration := time.Since(scoreStart)
 	return TurboQuantMultiVectorBitMetrics{
-		Bits:                        bitWidth,
-		Method:                      fmt.Sprintf("turboquant_ip_b%d_child_max", bitWidth),
-		QuantizerSeed:               q.Seed(),
-		Quality:                     quality,
-		NDCGAt10Delta:               quality.NDCGAt10 - denseQuality.NDCGAt10,
-		RecallAt100Delta:            quality.RecallAt100 - denseQuality.RecallAt100,
-		QuantizedChildBytes:         quantizedBytes,
-		DenseParentBytes:            denseParentBytes,
-		DenseChildBytes:             denseChildBytes,
-		DenseChildCompression:       ratioFloat64(float64(denseChildBytes), float64(quantizedBytes)),
-		ParentBudgetStorageMultiple: ratioFloat64(float64(quantizedBytes), float64(denseParentBytes)),
-		QuantizeSeconds:             quantizeDuration.Seconds(),
-		ScoreSeconds:                scoreDuration.Seconds(),
-		ChildrenPerSecond:           ratePerSecond(float64(len(children)), quantizeDuration),
-		ScoresPerSecond:             ratePerSecond(float64(scoredPairs), scoreDuration),
-		QueryLatency:                queryLatency,
-		SkippedRelevantDocs:         skippedRelevantDocs,
-		SkippedQueries:              skippedNoRelevant,
+		Bits:                             bitWidth,
+		Method:                           fmt.Sprintf("turboquant_ip_b%d_child_max", bitWidth),
+		QuantizerSeed:                    q.Seed(),
+		Quality:                          quality,
+		NDCGAt10Delta:                    quality.NDCGAt10 - denseQuality.NDCGAt10,
+		RecallAt100Delta:                 quality.RecallAt100 - denseQuality.RecallAt100,
+		BaselineDim:                      baselineDim,
+		ParentCount:                      parentCount,
+		ChildCount:                       len(children),
+		AvgChildrenPerParent:             ratioFloat64(float64(len(children)), float64(parentCount)),
+		MaxChildrenPerParent:             maxChildrenPerParent,
+		QuantizedVectorBytes:             quantizedVectorBytes,
+		QuantizedChildBytes:              quantizedBytes,
+		DenseBaselineBytes:               denseBaselineBytes,
+		DenseBaselineTotalBytes:          denseParentBytes,
+		DenseParentBytes:                 denseParentBytes,
+		DenseChildBytes:                  denseChildBytes,
+		DenseChildCompression:            ratioFloat64(float64(denseChildBytes), float64(quantizedBytes)),
+		VectorsThatFitInOneDenseBaseline: denseBaselineBytes / quantizedVectorBytes,
+		StorageMultipleOfDenseBaseline:   ratioFloat64(float64(quantizedBytes), float64(denseParentBytes)),
+		ParentBudgetStorageMultiple:      ratioFloat64(float64(quantizedBytes), float64(denseParentBytes)),
+		QuantizeSeconds:                  quantizeDuration.Seconds(),
+		ScoreSeconds:                     scoreDuration.Seconds(),
+		ChildrenPerSecond:                ratePerSecond(float64(len(children)), quantizeDuration),
+		ScoresPerSecond:                  ratePerSecond(float64(scoredPairs), scoreDuration),
+		QueryLatency:                     queryLatency,
+		SkippedRelevantDocs:              skippedRelevantDocs,
+		SkippedQueries:                   skippedNoRelevant,
 	}, nil
 }
 
@@ -321,6 +389,18 @@ func countRetrievalParents(children []retrievalChildVectorRecord) int {
 		seen[child.ParentID] = true
 	}
 	return len(seen)
+}
+
+func maxRetrievalChildrenPerParent(children []retrievalChildVectorRecord) int {
+	counts := make(map[string]int, len(children))
+	maxCount := 0
+	for _, child := range children {
+		counts[child.ParentID]++
+		if counts[child.ParentID] > maxCount {
+			maxCount = counts[child.ParentID]
+		}
+	}
+	return maxCount
 }
 
 func computeDenseMultiVectorRetrievalQuality(ctx context.Context, queries []retrievalVectorRecord, children []retrievalChildVectorRecord, qrels retrievalQrels, topK int) (RetrievalEvalQualityMetrics, int, int, int, int, RetrievalEvalLatencyMetrics) {

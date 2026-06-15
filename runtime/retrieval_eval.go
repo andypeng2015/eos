@@ -39,6 +39,7 @@ type RetrievalEvalConfig struct {
 	PerQueryJSONLPath    string
 	AllowMissingRelevant bool
 	QuantizerSeed        int64
+	BaselineDim          int
 	Hybrid               RetrievalEvalHybridConfig
 }
 

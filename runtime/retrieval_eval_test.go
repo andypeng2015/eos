@@ -801,6 +801,7 @@ func TestEvaluateTurboQuantMultiVectorRetrievalAggregatesChildrenByParent(t *tes
 	metrics, err := evaluateTurboQuantMultiVectorRetrieval(context.Background(), RetrievalEvalConfig{
 		DatasetName: "tiny-multivector",
 		TopK:        100,
+		BaselineDim: 32,
 	}, []int{8}, children, queries, qrels)
 	if err != nil {
 		t.Fatalf("evaluate multivector turboquant retrieval: %v", err)
@@ -808,11 +809,17 @@ func TestEvaluateTurboQuantMultiVectorRetrievalAggregatesChildrenByParent(t *tes
 	if metrics.Schema != TurboQuantMultiVectorRetrievalEvalMetricsSchema || metrics.Dataset != "tiny-multivector" {
 		t.Fatalf("metrics identity = schema:%q dataset:%q", metrics.Schema, metrics.Dataset)
 	}
-	if metrics.Inputs.Parents != 2 || metrics.Inputs.ChildVectors != 3 || metrics.Inputs.AverageChildrenPerParent != 1.5 || metrics.Inputs.ScoredChildPairs != 3 {
+	if metrics.Inputs.Parents != 2 || metrics.Inputs.ParentCount != 2 || metrics.Inputs.ChildVectors != 3 || metrics.Inputs.ChildCount != 3 || metrics.Inputs.AverageChildrenPerParent != 1.5 || metrics.Inputs.AvgChildrenPerParent != 1.5 || metrics.Inputs.MaxChildrenPerParent != 2 || metrics.Inputs.ScoredChildPairs != 3 {
 		t.Fatalf("input accounting = %+v", metrics.Inputs)
 	}
-	if metrics.Dense.DenseParentBytes != int64(2*8*4) || metrics.Dense.DenseChildBytes != int64(3*8*4) {
+	if metrics.Config.BaselineDim != 32 {
+		t.Fatalf("baseline dim = %d", metrics.Config.BaselineDim)
+	}
+	if metrics.Dense.BaselineDim != 32 || metrics.Dense.DenseBaselineBytes != int64(32*4) || metrics.Dense.DenseParentBytes != int64(2*32*4) || metrics.Dense.DenseChildBytes != int64(3*8*4) {
 		t.Fatalf("dense bytes = %+v", metrics.Dense)
+	}
+	if metrics.Dense.VectorsThatFitInOneDenseBaseline != 4 || metrics.Dense.StorageMultipleOfDenseBaseline != 0.375 {
+		t.Fatalf("dense baseline accounting = %+v", metrics.Dense)
 	}
 	if metrics.Dense.Quality.NDCGAt10 != 1 || metrics.Dense.Quality.MRRAt10 != 1 || metrics.Dense.Quality.RecallAt100 != 1 {
 		t.Fatalf("dense quality = %+v, want parent p1 top-ranked by second child", metrics.Dense.Quality)
@@ -827,8 +834,11 @@ func TestEvaluateTurboQuantMultiVectorRetrievalAggregatesChildrenByParent(t *tes
 	if metrics.Config.QuantizerSeed != DefaultTurboQuantMultiVectorQuantizerSeed || row.QuantizerSeed != DefaultTurboQuantMultiVectorQuantizerSeed {
 		t.Fatalf("quantizer seeds = config:%d row:%d", metrics.Config.QuantizerSeed, row.QuantizerSeed)
 	}
-	if row.ParentBudgetStorageMultiple <= 0 || row.DenseParentBytes != metrics.Dense.DenseParentBytes || row.DenseChildBytes != metrics.Dense.DenseChildBytes {
+	if row.ParentBudgetStorageMultiple <= 0 || row.StorageMultipleOfDenseBaseline != row.ParentBudgetStorageMultiple || row.DenseParentBytes != metrics.Dense.DenseParentBytes || row.DenseBaselineBytes != metrics.Dense.DenseBaselineBytes || row.DenseChildBytes != metrics.Dense.DenseChildBytes {
 		t.Fatalf("row storage = %+v", row)
+	}
+	if row.BaselineDim != 32 || row.ParentCount != 2 || row.ChildCount != 3 || row.AvgChildrenPerParent != 1.5 || row.MaxChildrenPerParent != 2 || row.QuantizedVectorBytes <= 0 || row.VectorsThatFitInOneDenseBaseline <= 0 {
+		t.Fatalf("row baseline accounting = %+v", row)
 	}
 	if row.Quality.NDCGAt10 < 0.99 || row.Quality.RecallAt100 != 1 {
 		t.Fatalf("quantized quality = %+v, want near-perfect", row.Quality)

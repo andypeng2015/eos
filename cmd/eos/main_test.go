@@ -389,6 +389,7 @@ func TestRunEvalRetrievalMultiVectorTurboQuantWritesMetrics(t *testing.T) {
 		"--artifact", "unit-cache",
 		"--bits", "8",
 		"--quantizer-seed", "99",
+		"--baseline-dim", "32",
 		"--doc-vectors", docVectorsPath,
 		"--query-vectors", queryVectorsPath,
 		"--metrics-json", metricsPath,
@@ -398,6 +399,7 @@ func TestRunEvalRetrievalMultiVectorTurboQuantWritesMetrics(t *testing.T) {
 	for _, want := range []string{
 		"retrieval multivector turboquant: dataset=tiny-multivector backend=unit parents=2 child_vectors=3 avg_children=1.50",
 		"dense-child: ndcg@10=1.000000",
+		"baseline_dim=32 dense_baseline_bytes=128 dense_baseline_total_bytes=256 dense_child_bytes=96 storage_multiple=0.38x",
 		"q8: ndcg@10=",
 		"metrics: " + metricsPath,
 		"metrics_tsv: " + tsvPath,
@@ -420,18 +422,27 @@ func TestRunEvalRetrievalMultiVectorTurboQuantWritesMetrics(t *testing.T) {
 	if metrics.Inputs.Parents != 2 || metrics.Inputs.ChildVectors != 3 || metrics.Inputs.ScoredChildPairs != 3 || metrics.Dense.Quality.NDCGAt10 != 1 {
 		t.Fatalf("metrics accounting/quality = %+v dense=%+v", metrics.Inputs, metrics.Dense.Quality)
 	}
+	if metrics.Config.BaselineDim != 32 || metrics.Inputs.ParentCount != 2 || metrics.Inputs.ChildCount != 3 || metrics.Inputs.MaxChildrenPerParent != 2 {
+		t.Fatalf("baseline/count accounting = config:%+v inputs:%+v", metrics.Config, metrics.Inputs)
+	}
+	if metrics.Dense.DenseBaselineBytes != 128 || metrics.Dense.DenseBaselineTotalBytes != 256 || metrics.Dense.StorageMultipleOfDenseBaseline != 0.375 {
+		t.Fatalf("dense storage accounting = %+v", metrics.Dense)
+	}
 	if metrics.Config.AllowMissingRelevant || metrics.Config.QuantizerSeed != 99 || len(metrics.Rows) != 1 || metrics.Rows[0].QuantizerSeed != 99 {
 		t.Fatalf("seed/strict config = config:%+v rows:%+v", metrics.Config, metrics.Rows)
+	}
+	if metrics.Rows[0].BaselineDim != 32 || metrics.Rows[0].QuantizedVectorBytes <= 0 || metrics.Rows[0].VectorsThatFitInOneDenseBaseline <= 0 || metrics.Rows[0].StorageMultipleOfDenseBaseline <= 0 {
+		t.Fatalf("row storage accounting = %+v", metrics.Rows[0])
 	}
 	tsv, err := os.ReadFile(tsvPath)
 	if err != nil {
 		t.Fatalf("read tsv: %v", err)
 	}
 	for _, want := range []string{
-		"quantizer_seed\tallow_missing_relevant",
-		"parent_budget_storage_multiple",
+		"quantizer_seed\tallow_missing_relevant\tbaseline_dim\tparent_count\tchild_count",
+		"vectors_that_fit_in_one_dense_baseline\tstorage_multiple_of_dense_baseline\tparent_budget_storage_multiple",
 		"tiny-multivector\tdense-child",
-		"tiny-multivector\tquantized-child\t8\tturboquant_ip_b8_child_max\t99\tfalse",
+		"tiny-multivector\tquantized-child\t8\tturboquant_ip_b8_child_max\t99\tfalse\t32\t2\t3",
 	} {
 		if !strings.Contains(string(tsv), want) {
 			t.Fatalf("tsv missing %q\n%s", want, tsv)
