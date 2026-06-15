@@ -25,6 +25,7 @@ type RetrievalVectorExportConfig struct {
 	BatchSize             int
 	MaxDocs               int
 	MaxQueries            int
+	OutputDim             int
 	DocumentChunkWords    int
 	DocumentChunkOverlap  int
 	DocumentChunkMinWords int
@@ -43,6 +44,8 @@ type RetrievalVectorExportSummary struct {
 	Queries               int       `json:"queries"`
 	ChildVectors          int       `json:"child_vectors,omitempty"`
 	Dimension             int       `json:"dimension"`
+	ModelDimension        int       `json:"model_dimension,omitempty"`
+	OutputDimension       int       `json:"output_dimension,omitempty"`
 	DocVectorPath         string    `json:"doc_vector_path,omitempty"`
 	ChildDocVectorPath    string    `json:"child_doc_vector_path,omitempty"`
 	QueryVectorPath       string    `json:"query_vector_path"`
@@ -116,31 +119,34 @@ func ExportEmbeddingRetrievalVectors(ctx context.Context, model *EmbeddingModel,
 
 	queryVectorPath := filepath.Join(cfg.OutputDir, "query-vectors.jsonl")
 	var docVectorPath, childDocVectorPath string
-	var dim, childCount int
+	var dim, modelDim, childCount int
 	if cfg.DocumentChunkWords > 0 {
 		chunks := chunkRetrievalDocuments(corpus, cfg.DocumentChunkWords, cfg.DocumentChunkOverlap, cfg.DocumentChunkMinWords)
 		if len(chunks) == 0 {
 			return RetrievalVectorExportSummary{}, fmt.Errorf("document chunking selected no chunks")
 		}
 		childDocVectorPath = filepath.Join(cfg.OutputDir, "child-doc-vectors.jsonl")
-		dim, err = writeRetrievalChildVectorCache(ctx, model, chunks, childDocVectorPath, cfg.BatchSize, cfg.DocumentPrefix)
+		dim, modelDim, err = writeRetrievalChildVectorCache(ctx, model, chunks, childDocVectorPath, cfg.BatchSize, cfg.DocumentPrefix, cfg.OutputDim)
 		if err != nil {
 			return RetrievalVectorExportSummary{}, fmt.Errorf("write child document vectors: %w", err)
 		}
 		childCount = len(chunks)
 	} else {
 		docVectorPath = filepath.Join(cfg.OutputDir, "doc-vectors.jsonl")
-		dim, err = writeRetrievalVectorCache(ctx, model, corpus, docVectorPath, cfg.BatchSize, cfg.DocumentPrefix)
+		dim, modelDim, err = writeRetrievalVectorCache(ctx, model, corpus, docVectorPath, cfg.BatchSize, cfg.DocumentPrefix, cfg.OutputDim)
 		if err != nil {
 			return RetrievalVectorExportSummary{}, fmt.Errorf("write document vectors: %w", err)
 		}
 	}
-	queryDim, err := writeRetrievalVectorCache(ctx, model, queries, queryVectorPath, cfg.BatchSize, cfg.QueryPrefix)
+	queryDim, queryModelDim, err := writeRetrievalVectorCache(ctx, model, queries, queryVectorPath, cfg.BatchSize, cfg.QueryPrefix, cfg.OutputDim)
 	if err != nil {
 		return RetrievalVectorExportSummary{}, fmt.Errorf("write query vectors: %w", err)
 	}
 	if dim != queryDim {
 		return RetrievalVectorExportSummary{}, fmt.Errorf("document vectors have dimension %d but query vectors have dimension %d", dim, queryDim)
+	}
+	if modelDim != queryModelDim {
+		return RetrievalVectorExportSummary{}, fmt.Errorf("document vectors have encoded dimension %d but query vectors have encoded dimension %d", modelDim, queryModelDim)
 	}
 
 	summary := RetrievalVectorExportSummary{
@@ -152,6 +158,8 @@ func ExportEmbeddingRetrievalVectors(ctx context.Context, model *EmbeddingModel,
 		Queries:               len(queries),
 		ChildVectors:          childCount,
 		Dimension:             dim,
+		ModelDimension:        modelDim,
+		OutputDimension:       dim,
 		DocVectorPath:         docVectorPath,
 		ChildDocVectorPath:    childDocVectorPath,
 		QueryVectorPath:       queryVectorPath,
@@ -207,6 +215,9 @@ func validateRetrievalVectorChunkConfig(cfg RetrievalVectorExportConfig) error {
 	}
 	if cfg.MaxDocs < 0 || cfg.MaxQueries < 0 {
 		return fmt.Errorf("max-docs and max-queries must be non-negative")
+	}
+	if cfg.OutputDim < 0 {
+		return fmt.Errorf("output-dim must be non-negative")
 	}
 	if cfg.DocumentChunkWords < 0 {
 		return fmt.Errorf("document-chunk-words must be non-negative")
@@ -284,85 +295,116 @@ func chunkRetrievalDocumentText(parentID, text string, chunkWords, overlap, minW
 	return chunks
 }
 
-func writeRetrievalVectorCache(ctx context.Context, model *EmbeddingModel, records []retrievalTextRecord, path string, batchSize int, prefix string) (int, error) {
+func writeRetrievalVectorCache(ctx context.Context, model *EmbeddingModel, records []retrievalTextRecord, path string, batchSize int, prefix string, outputDim int) (int, int, error) {
 	prefixed := prefixRetrievalRecords(records, prefix)
 	vectors, err := embedRetrievalTexts(ctx, model, prefixed, batchSize)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	file, err := os.Create(path)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer file.Close()
 	writer := bufio.NewWriter(file)
-	dim := 0
+	dim, modelDim := 0, 0
 	for _, vector := range vectors {
 		if len(vector.Vector) == 0 {
-			return 0, fmt.Errorf("vector for %q is empty", vector.ID)
+			return 0, 0, fmt.Errorf("vector for %q is empty", vector.ID)
+		}
+		if modelDim == 0 {
+			modelDim = len(vector.Vector)
+		} else if len(vector.Vector) != modelDim {
+			return 0, 0, fmt.Errorf("vector for %q has encoded dimension %d, want %d", vector.ID, len(vector.Vector), modelDim)
+		}
+		embedding, err := transformRetrievalExportVector(vector.Vector, outputDim)
+		if err != nil {
+			return 0, 0, fmt.Errorf("vector for %q: %w", vector.ID, err)
 		}
 		if dim == 0 {
-			dim = len(vector.Vector)
-		} else if len(vector.Vector) != dim {
-			return 0, fmt.Errorf("vector for %q has dimension %d, want %d", vector.ID, len(vector.Vector), dim)
+			dim = len(embedding)
+		} else if len(embedding) != dim {
+			return 0, 0, fmt.Errorf("vector for %q has dimension %d, want %d", vector.ID, len(embedding), dim)
 		}
-		row := retrievalVectorExportRow{ID: vector.ID, Embedding: vector.Vector}
+		row := retrievalVectorExportRow{ID: vector.ID, Embedding: embedding}
 		data, err := json.Marshal(row)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		if _, err := writer.Write(append(data, '\n')); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 	}
 	if err := writer.Flush(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return dim, nil
+	return dim, modelDim, nil
 }
 
-func writeRetrievalChildVectorCache(ctx context.Context, model *EmbeddingModel, chunks []retrievalDocumentChunk, path string, batchSize int, prefix string) (int, error) {
+func writeRetrievalChildVectorCache(ctx context.Context, model *EmbeddingModel, chunks []retrievalDocumentChunk, path string, batchSize int, prefix string, outputDim int) (int, int, error) {
 	records := make([]retrievalTextRecord, len(chunks))
 	for i, chunk := range chunks {
 		records[i] = retrievalTextRecord{ID: chunk.ChildID, Text: chunk.Text}
 	}
 	vectors, err := embedRetrievalTexts(ctx, model, prefixRetrievalRecords(records, prefix), batchSize)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	file, err := os.Create(path)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer file.Close()
 	writer := bufio.NewWriter(file)
-	dim := 0
+	dim, modelDim := 0, 0
 	for i, vector := range vectors {
 		if len(vector.Vector) == 0 {
-			return 0, fmt.Errorf("vector for %q is empty", vector.ID)
+			return 0, 0, fmt.Errorf("vector for %q is empty", vector.ID)
+		}
+		if modelDim == 0 {
+			modelDim = len(vector.Vector)
+		} else if len(vector.Vector) != modelDim {
+			return 0, 0, fmt.Errorf("vector for %q has encoded dimension %d, want %d", vector.ID, len(vector.Vector), modelDim)
+		}
+		embedding, err := transformRetrievalExportVector(vector.Vector, outputDim)
+		if err != nil {
+			return 0, 0, fmt.Errorf("vector for %q: %w", vector.ID, err)
 		}
 		if dim == 0 {
-			dim = len(vector.Vector)
-		} else if len(vector.Vector) != dim {
-			return 0, fmt.Errorf("vector for %q has dimension %d, want %d", vector.ID, len(vector.Vector), dim)
+			dim = len(embedding)
+		} else if len(embedding) != dim {
+			return 0, 0, fmt.Errorf("vector for %q has dimension %d, want %d", vector.ID, len(embedding), dim)
 		}
 		row := retrievalVectorExportRow{
 			ParentID:  chunks[i].ParentID,
 			ChildID:   chunks[i].ChildID,
-			Embedding: vector.Vector,
+			Embedding: embedding,
 		}
 		data, err := json.Marshal(row)
 		if err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 		if _, err := writer.Write(append(data, '\n')); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
 	}
 	if err := writer.Flush(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return dim, nil
+	return dim, modelDim, nil
+}
+
+func transformRetrievalExportVector(vector []float32, outputDim int) ([]float32, error) {
+	if outputDim == 0 || outputDim == len(vector) {
+		return append([]float32(nil), vector...), nil
+	}
+	if outputDim > len(vector) {
+		return nil, fmt.Errorf("output-dim %d exceeds encoded vector dimension %d", outputDim, len(vector))
+	}
+	if outputDim < 0 {
+		return nil, fmt.Errorf("output-dim must be non-negative")
+	}
+	return normalizeRetrievalVector(vector[:outputDim]), nil
 }
 
 func prefixRetrievalRecords(records []retrievalTextRecord, prefix string) []retrievalTextRecord {

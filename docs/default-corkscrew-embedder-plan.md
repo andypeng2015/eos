@@ -170,14 +170,17 @@ For Eos-owned parent-child evidence, enable deterministic word chunking. This wr
 go run ./cmd/eos export-retrieval-vectors \
   --dataset scifact \
   --batch-size 64 \
+  --output-dim 128 \
   --document-chunk-words 128 \
   --document-chunk-overlap 32 \
   --document-chunk-min-words 16 \
-  --manifest-json runs/eos-vector-caches/eos-embed-v1-scifact-child-w128-o32/manifest.json \
+  --manifest-json runs/eos-vector-caches/eos-embed-v1-scifact-child-w128-o32-128d/manifest.json \
   runs/default-embedder/eos-embed-v1.sealed.mll \
   data/beir/scifact \
-  runs/eos-vector-caches/eos-embed-v1-scifact-child-w128-o32/scifact
+  runs/eos-vector-caches/eos-embed-v1-scifact-child-w128-o32-128d/scifact
 ```
+
+`--output-dim 128` writes a prefix-truncated compact child cache and L2-renormalizes the truncated vectors before writing. The manifest keeps `dimension` as the written vector dimension and records `model_dimension`/`output_dimension` so the truncation is auditable. Treat this as a measurement bridge for the compact-child thesis, not as a trained Matryoshka embedding or native 128d Eos head; the trained compact head remains the stronger future path.
 
 Record, per dataset and candidate:
 
@@ -224,14 +227,14 @@ The first quality harness for that lane is cache-only and still outside the Cork
 ```bash
 go run ./cmd/eos eval-retrieval-multivector-turboquant \
   --dataset scifact \
-  --backend qwen3-child-cache \
-  --artifact Qwen/Qwen3-Embedding-0.6B \
-  --doc-vectors runs/external-vector-caches/qwen3-0.6b-scifact-child-w128-o32/scifact/child-doc-vectors.jsonl \
-  --query-vectors runs/external-vector-caches/qwen3-0.6b-scifact-child-w128-o32/scifact/query-vectors.jsonl \
+  --backend eos-child-cache-128d \
+  --artifact eos-embed-v1-prefix128 \
+  --doc-vectors runs/eos-vector-caches/eos-embed-v1-scifact-child-w128-o32-128d/scifact/child-doc-vectors.jsonl \
+  --query-vectors runs/eos-vector-caches/eos-embed-v1-scifact-child-w128-o32-128d/scifact/query-vectors.jsonl \
   --bits 2,4,8 \
   --baseline-dim 3072 \
-  --metrics-json runs/scifact.multivector-turboquant.metrics.json \
-  --metrics-tsv runs/scifact.multivector-turboquant.metrics.tsv \
+  --metrics-json runs/scifact.128d-child.multivector-turboquant.metrics.json \
+  --metrics-tsv runs/scifact.128d-child.multivector-turboquant.metrics.tsv \
   datasets/manta-embed-v1/raw/scifact/scifact
 ```
 

@@ -839,6 +839,7 @@ func TestRunExportRetrievalVectorsWritesChildCaches(t *testing.T) {
 		"export-retrieval-vectors",
 		"--dataset", "tiny-export",
 		"--batch-size", "1",
+		"--output-dim", "2",
 		"--document-chunk-words", "4",
 		"--document-chunk-overlap", "1",
 		"--document-chunk-min-words", "2",
@@ -852,6 +853,8 @@ func TestRunExportRetrievalVectorsWritesChildCaches(t *testing.T) {
 	for _, want := range []string{
 		"exported retrieval vectors: dataset=tiny-export",
 		"child_vectors=4",
+		"dim=2",
+		"model_dim: 4",
 		"child_doc_vectors: " + childPath,
 		"query_vectors: " + queryPath,
 		"manifest: " + manifestPath,
@@ -882,7 +885,7 @@ func TestRunExportRetrievalVectorsWritesChildCaches(t *testing.T) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatalf("decode manifest: %v", err)
 	}
-	if manifest.Schema != eosruntime.RetrievalVectorExportManifestSchema || manifest.Dataset != "tiny-export" || manifest.ChildVectors != 4 || manifest.QueryVectorPath != queryPath {
+	if manifest.Schema != eosruntime.RetrievalVectorExportManifestSchema || manifest.Dataset != "tiny-export" || manifest.ChildVectors != 4 || manifest.QueryVectorPath != queryPath || manifest.Dimension != 2 || manifest.ModelDimension != 4 || manifest.OutputDimension != 2 {
 		t.Fatalf("manifest = %+v", manifest)
 	}
 }

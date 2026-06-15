@@ -408,6 +408,7 @@ func runExportRetrievalVectors(args []string) error {
 	batchSize := fs.Int("batch-size", 64, "embedding batch size")
 	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke exports")
 	maxQueries := fs.Int("max-queries", 0, "limit queries for smoke exports")
+	outputDim := fs.Int("output-dim", 0, "when positive, prefix-truncate embeddings to this dimension and L2-renormalize before writing")
 	documentChunkWords := fs.Int("document-chunk-words", 0, "when positive, export parent-child document word chunks")
 	documentChunkOverlap := fs.Int("document-chunk-overlap", 0, "word overlap between adjacent document chunks")
 	documentChunkMinWords := fs.Int("document-chunk-min-words", 1, "minimum words for a trailing document chunk")
@@ -446,6 +447,7 @@ func runExportRetrievalVectors(args []string) error {
 		BatchSize:             *batchSize,
 		MaxDocs:               *maxDocs,
 		MaxQueries:            *maxQueries,
+		OutputDim:             *outputDim,
 		DocumentChunkWords:    *documentChunkWords,
 		DocumentChunkOverlap:  *documentChunkOverlap,
 		DocumentChunkMinWords: *documentChunkMinWords,
@@ -461,6 +463,9 @@ func runExportRetrievalVectors(args []string) error {
 		fmt.Printf(" child_vectors=%d", summary.ChildVectors)
 	}
 	fmt.Printf(" dim=%d\n", summary.Dimension)
+	if summary.ModelDimension != 0 && summary.ModelDimension != summary.Dimension {
+		fmt.Printf("model_dim: %d\n", summary.ModelDimension)
+	}
 	if summary.DocVectorPath != "" {
 		fmt.Printf("doc_vectors: %s\n", summary.DocVectorPath)
 	}

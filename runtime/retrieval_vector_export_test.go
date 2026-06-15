@@ -41,7 +41,7 @@ func TestRetrievalVectorExportWritesChildCachesAndManifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("export vectors: %v", err)
 	}
-	if summary.Schema != RetrievalVectorExportManifestSchema || summary.Dataset != "tiny-export" || summary.Documents != 2 || summary.Queries != 1 || summary.ChildVectors != 4 || summary.Dimension != 2 {
+	if summary.Schema != RetrievalVectorExportManifestSchema || summary.Dataset != "tiny-export" || summary.Documents != 2 || summary.Queries != 1 || summary.ChildVectors != 4 || summary.Dimension != 2 || summary.ModelDimension != 2 || summary.OutputDimension != 2 {
 		t.Fatalf("summary = %+v", summary)
 	}
 	if summary.ChildDocVectorPath != filepath.Join(outputDir, "child-doc-vectors.jsonl") || summary.QueryVectorPath != filepath.Join(outputDir, "query-vectors.jsonl") {
@@ -60,6 +60,9 @@ func TestRetrievalVectorExportWritesChildCachesAndManifest(t *testing.T) {
 		if _, ok := row["embedding"].([]any); !ok {
 			t.Fatalf("child row %d missing embedding array: %+v", i, row)
 		}
+		if got := len(row["embedding"].([]any)); got != 2 {
+			t.Fatalf("child row %d embedding dim = %d, want 2", i, got)
+		}
 	}
 	if childRows[0]["parent_id"] != "d1" || childRows[3]["parent_id"] != "d2" {
 		t.Fatalf("parent ids = %v / %v", childRows[0]["parent_id"], childRows[3]["parent_id"])
@@ -70,6 +73,9 @@ func TestRetrievalVectorExportWritesChildCachesAndManifest(t *testing.T) {
 		t.Fatalf("query rows = %+v", queryRows)
 	}
 	queryEmbedding := queryRows[0]["embedding"].([]any)
+	if len(queryEmbedding) != 2 {
+		t.Fatalf("query embedding dim = %d, want 2", len(queryEmbedding))
+	}
 	var norm float64
 	for _, value := range queryEmbedding {
 		v := value.(float64)
@@ -87,8 +93,38 @@ func TestRetrievalVectorExportWritesChildCachesAndManifest(t *testing.T) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		t.Fatalf("decode manifest: %v", err)
 	}
-	if manifest.ChildVectors != summary.ChildVectors || manifest.Dimension != summary.Dimension {
+	if manifest.ChildVectors != summary.ChildVectors || manifest.Dimension != summary.Dimension || manifest.ModelDimension != 2 || manifest.OutputDimension != 2 {
 		t.Fatalf("manifest = %+v, summary = %+v", manifest, summary)
+	}
+}
+
+func TestRetrievalVectorExportRejectsInvalidOutputDim(t *testing.T) {
+	_, err := ExportEmbeddingRetrievalVectors(context.Background(), loadTinyRetrievalExportModel(t), RetrievalVectorExportConfig{
+		CorpusPath:  "corpus.jsonl",
+		QueriesPath: "queries.jsonl",
+		OutputDir:   t.TempDir(),
+		OutputDim:   -1,
+		BatchSize:   1,
+		MaxDocs:     1,
+		MaxQueries:  1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "output-dim must be non-negative") {
+		t.Fatalf("error = %v", err)
+	}
+
+	dir := t.TempDir()
+	datasetDir := writeTinyRetrievalExportDataset(t, dir)
+	corpusPath, queriesPath, qrelsPath := BEIRRetrievalPaths(datasetDir, "test")
+	_, err = ExportEmbeddingRetrievalVectors(context.Background(), loadTinyRetrievalExportModel(t), RetrievalVectorExportConfig{
+		CorpusPath:  corpusPath,
+		QueriesPath: queriesPath,
+		QrelsPath:   qrelsPath,
+		OutputDir:   filepath.Join(dir, "vectors"),
+		OutputDim:   3,
+		BatchSize:   1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "output-dim 3 exceeds encoded vector dimension 2") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

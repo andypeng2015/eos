@@ -185,28 +185,29 @@ For Eos-owned/default embedders, create the cache with the Go-native exporter so
 go run ./cmd/eos export-retrieval-vectors \
   --dataset scifact \
   --batch-size 64 \
+  --output-dim 128 \
   --document-chunk-words 128 \
   --document-chunk-overlap 32 \
   --document-chunk-min-words 16 \
-  --manifest-json /data/manta/runs/<run-id>/scifact-child-vector-export.json \
+  --manifest-json /data/manta/runs/<run-id>/scifact-child-vector-export-128d.json \
   /data/manta/runs/<run-id>/eos-embed-v1.sealed.mll \
   /data/manta/datasets/eos-embed-v1/raw/scifact \
-  /data/manta/runs/<run-id>/scifact-child-cache
+  /data/manta/runs/<run-id>/scifact-child-cache-128d
 ```
 
-Without `--document-chunk-words`, the exporter writes `doc-vectors.jsonl` and `query-vectors.jsonl` for `eval-retrieval-vectors` or `eval-retrieval-vectors-turboquant`. With chunking enabled, it writes `child-doc-vectors.jsonl` and `query-vectors.jsonl`; child IDs are deterministic `parent#chunk-0000` word windows and the manifest records document count, query count, child-vector count, dimension, backend, artifact, and output paths.
+Without `--document-chunk-words`, the exporter writes `doc-vectors.jsonl` and `query-vectors.jsonl` for `eval-retrieval-vectors` or `eval-retrieval-vectors-turboquant`. With chunking enabled, it writes `child-doc-vectors.jsonl` and `query-vectors.jsonl`; child IDs are deterministic `parent#chunk-0000` word windows and the manifest records document count, query count, child-vector count, written dimension, model dimension, backend, artifact, and output paths. `--output-dim 128` is a prefix-truncated compact cache followed by L2 renormalization. It is a measurement bridge for storage/quality evidence, not a trained Matryoshka or native 128d projection head; a trained compact head is the stronger future path before promotion claims.
 
 ```bash
 go run ./cmd/eos eval-retrieval-multivector-turboquant \
   --dataset scifact \
   --backend child-cache \
   --artifact <embedder-label> \
-  --doc-vectors /data/manta/runs/<run-id>/scifact-child-cache/child-doc-vectors.jsonl \
-  --query-vectors /data/manta/runs/<run-id>/scifact-child-cache/query-vectors.jsonl \
+  --doc-vectors /data/manta/runs/<run-id>/scifact-child-cache-128d/child-doc-vectors.jsonl \
+  --query-vectors /data/manta/runs/<run-id>/scifact-child-cache-128d/query-vectors.jsonl \
   --bits 2,4,8 \
   --baseline-dim 3072 \
-  --metrics-json /data/manta/runs/<run-id>/multivector-turboquant.json \
-  --metrics-tsv /data/manta/runs/<run-id>/multivector-turboquant.tsv \
+  --metrics-json /data/manta/runs/<run-id>/multivector-turboquant-128d.json \
+  --metrics-tsv /data/manta/runs/<run-id>/multivector-turboquant-128d.tsv \
   /data/manta/datasets/eos-embed-v1/raw/scifact
 ```
 
