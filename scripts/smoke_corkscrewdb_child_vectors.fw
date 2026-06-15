@@ -1,0 +1,1109 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const defaultCorkScrewDBRepo = "/home/draco/work/corkscrewdb"
+const defaultQuantizerSeed int64 = 5581486560434873699
+
+type latencyMetrics struct {
+	P50MS float64 `json:"p50_ms"`
+	P95MS float64 `json:"p95_ms"`
+	P99MS float64 `json:"p99_ms"`
+	MaxMS float64 `json:"max_ms"`
+}
+
+type qualityMetrics struct {
+	NDCGAt10    float64 `json:"ndcg_at_10"`
+	RecallAt100 float64 `json:"recall_at_100"`
+}
+
+type bitMetrics struct {
+	Bits                         int            `json:"bits"`
+	Dimension                    int            `json:"dimension"`
+	InsertCount                  int            `json:"insert_count"`
+	ParentCount                  int            `json:"parent_count"`
+	QueryCount                   int            `json:"query_count"`
+	RelevantPairs                int            `json:"relevant_pairs"`
+	OverfetchChildren            int            `json:"overfetch_children"`
+	TopKParents                  int            `json:"top_k_parents"`
+	Collection                   string         `json:"collection"`
+	Dataset                      string         `json:"dataset"`
+	LoadSeconds                  float64        `json:"load_seconds"`
+	SearchSeconds                float64        `json:"search_seconds"`
+	DBBytesAfterClose            int64          `json:"db_bytes_after_close"`
+	QuantizedVectorBytes         int64          `json:"quantized_vector_bytes"`
+	QuantizedChildBytes          int64          `json:"quantized_child_bytes"`
+	DenseParentBaselineBytes     int64          `json:"dense_parent_baseline_bytes"`
+	VectorPayloadStorageMultiple float64        `json:"vector_payload_storage_multiple"`
+	DBDirectoryStorageMultiple   float64        `json:"db_directory_storage_multiple"`
+	SearchLatency                latencyMetrics `json:"search_latency"`
+	Quality                      qualityMetrics `json:"quality"`
+	QuantizerSeed                int64          `json:"quantizer_seed"`
+	QuantizedOnly                bool           `json:"quantized_only"`
+}
+
+type summaryRow struct {
+	Bits                         int
+	NDCGAt10                     float64
+	RecallAt100                  float64
+	VectorPayloadStorageMultiple float64
+	DBDirectoryStorageMultiple   float64
+	QuantizedVectorBytes         int64
+	QuantizedChildBytes          int64
+	DBBytesAfterClose            int64
+	LoadSeconds                  float64
+	SearchSeconds                float64
+	P50MS                        float64
+	P95MS                        float64
+	P99MS                        float64
+	MaxMS                        float64
+}
+
+type manifest struct {
+	Schema              string       `json:"schema"`
+	GeneratedAt         string       `json:"generated_at"`
+	RunDir              string       `json:"run_dir"`
+	RepoRoot            string       `json:"repo_root"`
+	CorkScrewDBRepo     string       `json:"corkscrewdb_repo"`
+	Dataset             string       `json:"dataset"`
+	Collection          string       `json:"collection"`
+	ChildVectors        string       `json:"child_vectors"`
+	QueryVectors        string       `json:"query_vectors"`
+	Qrels               string       `json:"qrels"`
+	GeneratedInputs     bool         `json:"generated_inputs"`
+	Bits                string       `json:"bits"`
+	QuantizerSeed       int64        `json:"quantizer_seed"`
+	QuantizedOnly       bool         `json:"quantized_only"`
+	OverfetchChildren   int          `json:"overfetch_children"`
+	TopKParents         int          `json:"top_k_parents"`
+	BaselineDim         int          `json:"baseline_dim"`
+	HarnessDir          string       `json:"harness_dir"`
+	SummaryTSV          string       `json:"summary_tsv"`
+	MetricFiles         []string     `json:"metric_files"`
+	TimeseriesCommand   []string     `json:"timeseries_command,omitempty"`
+	GoModTidyCommand    []string     `json:"go_mod_tidy_command"`
+	HarnessCommands     [][]string   `json:"harness_commands"`
+	Rows                []summaryRow `json:"rows"`
+	Gates               []string     `json:"gates"`
+	Caveats             []string     `json:"caveats"`
+}
+
+func usage() {
+	fmt.Println(`CorkScrewDB child-vector API smoke for Eos multi-vector/TurboQuant paths.
+
+Run:
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_corkscrewdb_child_vectors.fw
+
+Default behavior generates a tiny synthetic time-series child-vector cache with
+scripts/smoke_eos_timeseries_window_vectors.fw, then loads it into a local flat
+CorkScrewDB collection with PutVector and queries it with SearchVector.
+
+Environment:
+  EOS_CORKSCREW_SMOKE_RUN_ROOT=runs
+  EOS_CORKSCREW_SMOKE_RUN_DIR=runs/eos-corkscrewdb-child-vector-smoke-<timestamp>
+  EOS_CORKSCREW_SMOKE_CORKSCREWDB_REPO=/home/draco/work/corkscrewdb
+  EOS_CORKSCREW_SMOKE_CHILD_VECTORS=/path/to/child-doc-vectors.jsonl
+  EOS_CORKSCREW_SMOKE_QUERY_VECTORS=/path/to/query-vectors.jsonl
+  EOS_CORKSCREW_SMOKE_QRELS=/path/to/qrels.tsv
+  EOS_CORKSCREW_SMOKE_BITS=2,4,8
+  EOS_CORKSCREW_SMOKE_QUANTIZER_SEED=5581486560434873699
+  EOS_CORKSCREW_SMOKE_QUANTIZED_ONLY=1
+  EOS_CORKSCREW_SMOKE_OVERFETCH=100
+  EOS_CORKSCREW_SMOKE_TOP_PARENTS=100
+  EOS_CORKSCREW_SMOKE_BASELINE_DIM=3072
+  EOS_CORKSCREW_SMOKE_COLLECTION=eos_child_vector_smoke
+  EOS_CORKSCREW_SMOKE_DATASET=synthetic-timeseries-windows
+  EOS_CORKSCREW_SMOKE_Q8_MAX_VECTOR_PAYLOAD_MULTIPLE=0.10
+  EOS_CORKSCREW_SMOKE_MIN_NDCG_AT_10=0
+  EOS_CORKSCREW_SMOKE_MIN_RECALL_AT_100=0`)
+}
+
+func getenv(name string, fallback string) string {
+	value := os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envBool(name string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	if value == "" {
+		return fallback
+	}
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	if pwd := os.Getenv("PWD"); hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func parseIntEnv(name string, fallback int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parseInt64Env(name string, fallback int64) (int64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parseFloatEnv(name string, fallback float64) (float64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a float: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parseBits(value string) ([]int, error) {
+	parts := strings.Split(value, ",")
+	bits := []int{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		parsed, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, fmt.Errorf("invalid bit width %q: %w", part, err)
+		}
+		if parsed <= 0 {
+			return nil, fmt.Errorf("bit width must be positive: %d", parsed)
+		}
+		bits = append(bits, parsed)
+	}
+	if len(bits) == 0 {
+		return nil, fmt.Errorf("no bit widths configured")
+	}
+	return bits, nil
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func renderCommand(args []string) string {
+	parts := []string{}
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func runCommand(dir string, logDir string, label string, args []string, env []string) error {
+	fmt.Println("\n== " + label + " ==")
+	fmt.Println("+ " + renderCommand(args))
+	if err := os.WriteFile(filepath.Join(logDir, label+".cmd"), []byte(renderCommand(args)+"\n"), 0o644); err != nil {
+		return err
+	}
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = dir
+	cmd.Env = env
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s failed: %w", label, err)
+	}
+	return nil
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func requireCorkScrewDBRepo(path string) error {
+	if !hasRepoRoot(path) {
+		return fmt.Errorf("local CorkScrewDB repo is required at %s; set EOS_CORKSCREW_SMOKE_CORKSCREWDB_REPO to a checkout of m31labs.dev/corkscrewdb", path)
+	}
+	if !fileExists(filepath.Join(path, "go.mod")) {
+		return fmt.Errorf("CorkScrewDB repo has no go.mod: %s", path)
+	}
+	return nil
+}
+
+func writeHarnessModule(harnessDir string, corkscrewRepo string) error {
+	if err := os.MkdirAll(harnessDir, 0o755); err != nil {
+		return err
+	}
+	goMod := "module eos-corkscrewdb-child-vector-smoke\n\ngo 1.23\n\nrequire m31labs.dev/corkscrewdb v0.0.0\n\nreplace m31labs.dev/corkscrewdb => " + corkscrewRepo + "\n"
+	if err := os.WriteFile(filepath.Join(harnessDir, "go.mod"), []byte(goMod), 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(harnessDir, "main.go"), []byte(harnessSource), 0o644)
+}
+
+func readMetrics(path string) (bitMetrics, error) {
+	var metrics bitMetrics
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return metrics, err
+	}
+	return metrics, json.Unmarshal(data, &metrics)
+}
+
+func writeSummaryTSV(path string, rows []summaryRow) error {
+	var b strings.Builder
+	b.WriteString("bits\tndcg_at_10\trecall_at_100\tvector_payload_storage_multiple\tdb_directory_storage_multiple\tquantized_vector_bytes\tquantized_child_bytes\tdb_bytes_after_close\tload_seconds\tsearch_seconds\tp50_ms\tp95_ms\tp99_ms\tmax_ms\n")
+	for _, row := range rows {
+		fmt.Fprintf(&b, "%d\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\n",
+			row.Bits,
+			row.NDCGAt10,
+			row.RecallAt100,
+			row.VectorPayloadStorageMultiple,
+			row.DBDirectoryStorageMultiple,
+			row.QuantizedVectorBytes,
+			row.QuantizedChildBytes,
+			row.DBBytesAfterClose,
+			row.LoadSeconds,
+			row.SearchSeconds,
+			row.P50MS,
+			row.P95MS,
+			row.P99MS,
+			row.MaxMS)
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func checkGates(rows []summaryRow, maxQ8PayloadMultiple float64, minNDCG float64, minRecall float64) error {
+	for _, row := range rows {
+		if minNDCG > 0 && row.NDCGAt10 < minNDCG {
+			return fmt.Errorf("q%d ndcg@10 %.6f is below %.6f", row.Bits, row.NDCGAt10, minNDCG)
+		}
+		if minRecall > 0 && row.RecallAt100 < minRecall {
+			return fmt.Errorf("q%d recall@100 %.6f is below %.6f", row.Bits, row.RecallAt100, minRecall)
+		}
+		if row.Bits == 8 && maxQ8PayloadMultiple > 0 && row.VectorPayloadStorageMultiple > maxQ8PayloadMultiple {
+			return fmt.Errorf("q8 vector payload multiple %.6f exceeds %.6f", row.VectorPayloadStorageMultiple, maxQ8PayloadMultiple)
+		}
+	}
+	return nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	runRoot := getenv("EOS_CORKSCREW_SMOKE_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir := getenv("EOS_CORKSCREW_SMOKE_RUN_DIR", filepath.Join(runRoot, "eos-corkscrewdb-child-vector-smoke-"+time.Now().UTC().Format("20060102T150405Z")))
+	runDir, err = filepath.Abs(runDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	logDir := filepath.Join(runDir, "logs")
+	harnessDir := filepath.Join(runDir, "harness")
+	metricsDir := filepath.Join(runDir, "metrics")
+	dbRoot := filepath.Join(runDir, "db")
+	for _, dir := range []string{logDir, harnessDir, metricsDir, dbRoot} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+
+	corkscrewRepo := getenv("EOS_CORKSCREW_SMOKE_CORKSCREWDB_REPO", defaultCorkScrewDBRepo)
+	corkscrewRepo, err = filepath.Abs(corkscrewRepo)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := requireCorkScrewDBRepo(corkscrewRepo); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	childVectors := os.Getenv("EOS_CORKSCREW_SMOKE_CHILD_VECTORS")
+	queryVectors := os.Getenv("EOS_CORKSCREW_SMOKE_QUERY_VECTORS")
+	qrels := os.Getenv("EOS_CORKSCREW_SMOKE_QRELS")
+	generatedInputs := false
+	var timeseriesCommand []string
+	if childVectors == "" || queryVectors == "" || qrels == "" {
+		timeseriesDir := filepath.Join(runDir, "timeseries")
+		timeseriesCommand = []string{"ferrous-wheel", "run", "scripts/smoke_eos_timeseries_window_vectors.fw"}
+		env := append(os.Environ(), "EOS_REPO_ROOT="+root, "EOS_TS_WINDOW_SMOKE_RUN_DIR="+timeseriesDir)
+		if err := runCommand(root, logDir, "generate-timeseries-child-vectors", timeseriesCommand, env); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		childVectors = filepath.Join(timeseriesDir, "window-cache", "child-doc-vectors.jsonl")
+		queryVectors = filepath.Join(timeseriesDir, "window-cache", "query-vectors.jsonl")
+		qrels = filepath.Join(timeseriesDir, "qrels.tsv")
+		generatedInputs = true
+	}
+	for _, path := range []string{childVectors, queryVectors, qrels} {
+		if !fileExists(path) {
+			fmt.Fprintf(os.Stderr, "required input does not exist: %s\n", path)
+			os.Exit(1)
+		}
+	}
+
+	bitsValue := getenv("EOS_CORKSCREW_SMOKE_BITS", "2,4,8")
+	bits, err := parseBits(bitsValue)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	seed, err := parseInt64Env("EOS_CORKSCREW_SMOKE_QUANTIZER_SEED", defaultQuantizerSeed)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	overfetch, err := parseIntEnv("EOS_CORKSCREW_SMOKE_OVERFETCH", 100)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	topParents, err := parseIntEnv("EOS_CORKSCREW_SMOKE_TOP_PARENTS", 100)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	baselineDim, err := parseIntEnv("EOS_CORKSCREW_SMOKE_BASELINE_DIM", 3072)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	maxQ8PayloadMultiple, err := parseFloatEnv("EOS_CORKSCREW_SMOKE_Q8_MAX_VECTOR_PAYLOAD_MULTIPLE", 0.10)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	minNDCG, err := parseFloatEnv("EOS_CORKSCREW_SMOKE_MIN_NDCG_AT_10", 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	minRecall, err := parseFloatEnv("EOS_CORKSCREW_SMOKE_MIN_RECALL_AT_100", 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	quantizedOnly := envBool("EOS_CORKSCREW_SMOKE_QUANTIZED_ONLY", true)
+	dataset := getenv("EOS_CORKSCREW_SMOKE_DATASET", "synthetic-timeseries-windows")
+	collection := getenv("EOS_CORKSCREW_SMOKE_COLLECTION", "eos_child_vector_smoke")
+
+	if err := writeHarnessModule(harnessDir, corkscrewRepo); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	goModTidyCommand := []string{"go", "mod", "tidy"}
+	if err := runCommand(harnessDir, logDir, "harness-go-mod-tidy", goModTidyCommand, os.Environ()); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	rows := []summaryRow{}
+	metricFiles := []string{}
+	harnessCommands := [][]string{}
+	for _, bit := range bits {
+		metricsPath := filepath.Join(metricsDir, fmt.Sprintf("q%d.metrics.json", bit))
+		dbPath := filepath.Join(dbRoot, fmt.Sprintf("q%d", bit))
+		args := []string{
+			"go", "run", ".",
+			"--child-vectors", childVectors,
+			"--query-vectors", queryVectors,
+			"--qrels", qrels,
+			"--db", dbPath,
+			"--bits", strconv.Itoa(bit),
+			"--overfetch", strconv.Itoa(overfetch),
+			"--top-parents", strconv.Itoa(topParents),
+			"--baseline-dim", strconv.Itoa(baselineDim),
+			"--collection", collection,
+			"--dataset", dataset,
+			"--quantizer-seed", strconv.FormatInt(seed, 10),
+			"--metrics-json", metricsPath,
+		}
+		if quantizedOnly {
+			args = append(args, "--quantized-only")
+		}
+		if err := runCommand(harnessDir, logDir, fmt.Sprintf("harness-q%d", bit), args, os.Environ()); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		metrics, err := readMetrics(metricsPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		rows = append(rows, summaryRow{
+			Bits:                         metrics.Bits,
+			NDCGAt10:                     metrics.Quality.NDCGAt10,
+			RecallAt100:                  metrics.Quality.RecallAt100,
+			VectorPayloadStorageMultiple: metrics.VectorPayloadStorageMultiple,
+			DBDirectoryStorageMultiple:   metrics.DBDirectoryStorageMultiple,
+			QuantizedVectorBytes:         metrics.QuantizedVectorBytes,
+			QuantizedChildBytes:          metrics.QuantizedChildBytes,
+			DBBytesAfterClose:            metrics.DBBytesAfterClose,
+			LoadSeconds:                  metrics.LoadSeconds,
+			SearchSeconds:                metrics.SearchSeconds,
+			P50MS:                        metrics.SearchLatency.P50MS,
+			P95MS:                        metrics.SearchLatency.P95MS,
+			P99MS:                        metrics.SearchLatency.P99MS,
+			MaxMS:                        metrics.SearchLatency.MaxMS,
+		})
+		metricFiles = append(metricFiles, metricsPath)
+		harnessCommands = append(harnessCommands, args)
+	}
+
+	if err := checkGates(rows, maxQ8PayloadMultiple, minNDCG, minRecall); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	summaryTSV := filepath.Join(runDir, "summary.tsv")
+	if err := writeSummaryTSV(summaryTSV, rows); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	manifestJSON := filepath.Join(runDir, "manifest.json")
+	out := manifest{
+		Schema:            "eos.corkscrewdb_child_vector_smoke.v1",
+		GeneratedAt:       time.Now().UTC().Format(time.RFC3339),
+		RunDir:            runDir,
+		RepoRoot:          root,
+		CorkScrewDBRepo:   corkscrewRepo,
+		Dataset:           dataset,
+		Collection:        collection,
+		ChildVectors:      childVectors,
+		QueryVectors:      queryVectors,
+		Qrels:             qrels,
+		GeneratedInputs:   generatedInputs,
+		Bits:              bitsValue,
+		QuantizerSeed:     seed,
+		QuantizedOnly:     quantizedOnly,
+		OverfetchChildren: overfetch,
+		TopKParents:       topParents,
+		BaselineDim:       baselineDim,
+		HarnessDir:        harnessDir,
+		SummaryTSV:        summaryTSV,
+		MetricFiles:       metricFiles,
+		TimeseriesCommand: timeseriesCommand,
+		GoModTidyCommand:  goModTidyCommand,
+		HarnessCommands:   harnessCommands,
+		Rows:              rows,
+		Gates: []string{
+			fmt.Sprintf("command success required for every configured bit width (%s)", bitsValue),
+			fmt.Sprintf("q8 vector payload multiple <= %.6f when q8 is included and the limit is positive", maxQ8PayloadMultiple),
+			fmt.Sprintf("optional ndcg@10 floor %.6f; disabled when 0", minNDCG),
+			fmt.Sprintf("optional recall@100 floor %.6f; disabled when 0", minRecall),
+		},
+		Caveats: []string{
+			"Local flat CorkScrewDB API smoke only: PutVector/SearchVector, not remote mode, federation, or HNSW.",
+			"Default generated inputs are tiny synthetic text-rendered time-series windows, not a model-quality benchmark.",
+			"Storage gates use quantized vector payload accounting by default; DB directory multiples are recorded but not gated because tiny DB overhead dominates.",
+			"The run fails if a local CorkScrewDB checkout is missing instead of pulling an unknown network dependency.",
+		},
+	}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(manifestJSON, append(data, '\n'), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("\nsummary_tsv: %s\n", summaryTSV)
+	fmt.Printf("manifest: %s\n", manifestJSON)
+	for _, row := range rows {
+		fmt.Printf("q%d: ndcg@10=%.6f recall@100=%.6f vector_payload_multiple=%.6fx db_dir_multiple=%.6fx p95=%.6fms\n",
+			row.Bits,
+			row.NDCGAt10,
+			row.RecallAt100,
+			row.VectorPayloadStorageMultiple,
+			row.DBDirectoryStorageMultiple,
+			row.P95MS)
+	}
+}
+
+const harnessSource = `package main
+
+import (
+	"bufio"
+	"container/heap"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"math"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	corkscrewdb "m31labs.dev/corkscrewdb"
+)
+
+type vectorRow struct {
+	ID        string    ` + "`json:\"id\"`" + `
+	ParentID  string    ` + "`json:\"parent_id\"`" + `
+	ChildID   string    ` + "`json:\"child_id\"`" + `
+	Vector    []float32 ` + "`json:\"vector\"`" + `
+	Embedding []float32 ` + "`json:\"embedding\"`" + `
+	Values    []float32 ` + "`json:\"values\"`" + `
+}
+
+type scoredDoc struct {
+	ID    string
+	Score float32
+}
+
+type parentCandidate struct {
+	id    string
+	score float32
+}
+
+type parentHeap []parentCandidate
+
+func (h parentHeap) Len() int           { return len(h) }
+func (h parentHeap) Less(i, j int) bool { return h[i].score < h[j].score }
+func (h parentHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *parentHeap) Push(x any)        { *h = append(*h, x.(parentCandidate)) }
+func (h *parentHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+
+type latencyMetrics struct {
+	P50MS float64 ` + "`json:\"p50_ms\"`" + `
+	P95MS float64 ` + "`json:\"p95_ms\"`" + `
+	P99MS float64 ` + "`json:\"p99_ms\"`" + `
+	MaxMS float64 ` + "`json:\"max_ms\"`" + `
+}
+
+type qualityMetrics struct {
+	NDCGAt10    float64 ` + "`json:\"ndcg_at_10\"`" + `
+	RecallAt100 float64 ` + "`json:\"recall_at_100\"`" + `
+}
+
+type smokeMetrics struct {
+	Bits                         int            ` + "`json:\"bits\"`" + `
+	Dimension                    int            ` + "`json:\"dimension\"`" + `
+	InsertCount                  int            ` + "`json:\"insert_count\"`" + `
+	ParentCount                  int            ` + "`json:\"parent_count\"`" + `
+	QueryCount                   int            ` + "`json:\"query_count\"`" + `
+	RelevantPairs                int            ` + "`json:\"relevant_pairs\"`" + `
+	OverfetchChildren            int            ` + "`json:\"overfetch_children\"`" + `
+	TopKParents                  int            ` + "`json:\"top_k_parents\"`" + `
+	Collection                   string         ` + "`json:\"collection\"`" + `
+	Dataset                      string         ` + "`json:\"dataset\"`" + `
+	LoadSeconds                  float64        ` + "`json:\"load_seconds\"`" + `
+	SearchSeconds                float64        ` + "`json:\"search_seconds\"`" + `
+	DBBytesAfterClose            int64          ` + "`json:\"db_bytes_after_close\"`" + `
+	QuantizedVectorBytes         int64          ` + "`json:\"quantized_vector_bytes\"`" + `
+	QuantizedChildBytes          int64          ` + "`json:\"quantized_child_bytes\"`" + `
+	DenseParentBaselineBytes     int64          ` + "`json:\"dense_parent_baseline_bytes\"`" + `
+	VectorPayloadStorageMultiple float64        ` + "`json:\"vector_payload_storage_multiple\"`" + `
+	DBDirectoryStorageMultiple   float64        ` + "`json:\"db_directory_storage_multiple\"`" + `
+	SearchLatency                latencyMetrics ` + "`json:\"search_latency\"`" + `
+	Quality                      qualityMetrics ` + "`json:\"quality\"`" + `
+	QuantizerSeed                int64          ` + "`json:\"quantizer_seed\"`" + `
+	QuantizedOnly                bool           ` + "`json:\"quantized_only\"`" + `
+}
+
+type childVector struct {
+	ParentID string
+	ChildID  string
+	Vector   []float32
+}
+
+type queryVector struct {
+	ID     string
+	Vector []float32
+}
+
+func main() {
+	var (
+		childPath   = flag.String("child-vectors", "", "child vector JSONL")
+		queryPath   = flag.String("query-vectors", "", "query vector JSONL")
+		qrelsPath   = flag.String("qrels", "", "qrels TSV")
+		dbPath      = flag.String("db", "", "CorkScrewDB directory")
+		bits        = flag.Int("bits", 8, "CorkScrewDB quantization bit width")
+		overfetch   = flag.Int("overfetch", 100, "child hits to fetch before parent rollup")
+		topParents  = flag.Int("top-parents", 100, "parent hits retained for metric evaluation")
+		baselineDim = flag.Int("baseline-dim", 3072, "dense one-vector-per-parent baseline dimension")
+		collection  = flag.String("collection", "eos_child_vector_smoke", "CorkScrewDB collection name")
+		dataset     = flag.String("dataset", "synthetic-timeseries-windows", "dataset label")
+		outPath     = flag.String("metrics-json", "", "output metrics JSON path")
+		seed        = flag.Int64("quantizer-seed", 0, "CorkScrewDB quantizer seed")
+		quantOnly   = flag.Bool("quantized-only", false, "store only quantized vector payloads")
+	)
+	flag.Parse()
+
+	if *childPath == "" || *queryPath == "" || *qrelsPath == "" || *dbPath == "" || *outPath == "" {
+		fatalf("--child-vectors, --query-vectors, --qrels, --db, and --metrics-json are required")
+	}
+	if *overfetch < *topParents {
+		fatalf("--overfetch must be >= --top-parents")
+	}
+	if err := os.RemoveAll(*dbPath); err != nil {
+		fatalf("remove db dir: %v", err)
+	}
+
+	children, dim, parentCount, err := readChildVectors(*childPath)
+	if err != nil {
+		fatalf("read child vectors: %v", err)
+	}
+	queries, queryDim, err := readQueryVectors(*queryPath)
+	if err != nil {
+		fatalf("read query vectors: %v", err)
+	}
+	if dim != queryDim {
+		fatalf("dimension mismatch: child=%d query=%d", dim, queryDim)
+	}
+	qrels, relevantPairs, err := readQrels(*qrelsPath)
+	if err != nil {
+		fatalf("read qrels: %v", err)
+	}
+
+	db, err := corkscrewdb.Open(*dbPath)
+	if err != nil {
+		fatalf("open corkscrewdb: %v", err)
+	}
+	options := []corkscrewdb.CollectionOption{corkscrewdb.WithBitWidth(*bits)}
+	if *seed != 0 {
+		options = append(options, corkscrewdb.WithQuantizerSeed(*seed))
+	}
+	if *quantOnly {
+		options = append(options, corkscrewdb.WithQuantizedOnlyPersistence())
+	}
+	coll := db.Collection(*collection, options...)
+	loadStart := time.Now()
+	for _, child := range children {
+		meta := map[string]string{
+			"parent_id": child.ParentID,
+			"child_id":  child.ChildID,
+			"dataset":   *dataset,
+		}
+		if err := coll.PutVector(child.ChildID, child.Vector, corkscrewdb.WithMetadata(meta)); err != nil {
+			_ = db.Close()
+			fatalf("put vector %q: %v", child.ChildID, err)
+		}
+	}
+	loadSeconds := time.Since(loadStart).Seconds()
+
+	var totals qualityMetrics
+	latencies := make([]time.Duration, 0, len(queries))
+	searchStart := time.Now()
+	for _, query := range queries {
+		start := time.Now()
+		hits, err := coll.SearchVector(query.Vector, *overfetch)
+		latencies = append(latencies, time.Since(start))
+		if err != nil {
+			_ = db.Close()
+			fatalf("search query %q: %v", query.ID, err)
+		}
+		ranked := rollupParents(hits, *topParents)
+		rels := qrels[query.ID]
+		totals.NDCGAt10 += ndcgAt(ranked, rels, 10)
+		totals.RecallAt100 += recallAt(ranked, rels, 100)
+	}
+	searchSeconds := time.Since(searchStart).Seconds()
+	queryCount := len(queries)
+	if queryCount > 0 {
+		totals.NDCGAt10 /= float64(queryCount)
+		totals.RecallAt100 /= float64(queryCount)
+	}
+
+	if err := db.Close(); err != nil {
+		fatalf("close corkscrewdb: %v", err)
+	}
+	dbBytes, err := dirSize(*dbPath)
+	if err != nil {
+		fatalf("size db dir: %v", err)
+	}
+
+	quantizedVectorBytes := int64((dim**bits + 7) / 8)
+	quantizedVectorBytes += int64((dim + 7) / 8)
+	quantizedVectorBytes += 4
+	quantizedChildBytes := quantizedVectorBytes * int64(len(children))
+	baselineBytes := int64(parentCount * *baselineDim * 4)
+	if baselineBytes <= 0 {
+		fatalf("baseline bytes must be positive")
+	}
+
+	metrics := smokeMetrics{
+		Bits:                         *bits,
+		Dimension:                    dim,
+		InsertCount:                  len(children),
+		ParentCount:                  parentCount,
+		QueryCount:                   queryCount,
+		RelevantPairs:                relevantPairs,
+		OverfetchChildren:            *overfetch,
+		TopKParents:                  *topParents,
+		Collection:                   *collection,
+		Dataset:                      *dataset,
+		LoadSeconds:                  loadSeconds,
+		SearchSeconds:                searchSeconds,
+		DBBytesAfterClose:            dbBytes,
+		QuantizedVectorBytes:         quantizedVectorBytes,
+		QuantizedChildBytes:          quantizedChildBytes,
+		DenseParentBaselineBytes:     baselineBytes,
+		VectorPayloadStorageMultiple: float64(quantizedChildBytes) / float64(baselineBytes),
+		DBDirectoryStorageMultiple:   float64(dbBytes) / float64(baselineBytes),
+		SearchLatency:                summarizeLatencies(latencies),
+		Quality:                      totals,
+		QuantizerSeed:                *seed,
+		QuantizedOnly:                *quantOnly,
+	}
+	data, err := json.MarshalIndent(metrics, "", "  ")
+	if err != nil {
+		fatalf("marshal metrics: %v", err)
+	}
+	if err := os.WriteFile(*outPath, append(data, '\n'), 0o644); err != nil {
+		fatalf("write metrics: %v", err)
+	}
+	fmt.Println(string(data))
+}
+
+func readChildVectors(path string) ([]childVector, int, int, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024), 16*1024*1024)
+	children := []childVector{}
+	parents := map[string]struct{}{}
+	dim := 0
+	for scanner.Scan() {
+		var row vectorRow
+		if err := json.Unmarshal(scanner.Bytes(), &row); err != nil {
+			return nil, 0, 0, err
+		}
+		vec := firstVector(row)
+		if len(vec) == 0 {
+			return nil, 0, 0, fmt.Errorf("child %q has empty vector", row.ChildID)
+		}
+		if dim == 0 {
+			dim = len(vec)
+		}
+		if len(vec) != dim {
+			return nil, 0, 0, fmt.Errorf("child %q dimension %d, want %d", row.ChildID, len(vec), dim)
+		}
+		parentID := row.ParentID
+		if parentID == "" {
+			parentID = row.ID
+		}
+		childID := row.ChildID
+		if childID == "" {
+			childID = row.ID
+		}
+		if parentID == "" || childID == "" {
+			return nil, 0, 0, fmt.Errorf("child row missing parent_id/child_id or id")
+		}
+		children = append(children, childVector{ParentID: parentID, ChildID: childID, Vector: vec})
+		parents[parentID] = struct{}{}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, 0, 0, err
+	}
+	return children, dim, len(parents), nil
+}
+
+func readQueryVectors(path string) ([]queryVector, int, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024), 16*1024*1024)
+	queries := []queryVector{}
+	dim := 0
+	for scanner.Scan() {
+		var row vectorRow
+		if err := json.Unmarshal(scanner.Bytes(), &row); err != nil {
+			return nil, 0, err
+		}
+		vec := firstVector(row)
+		if len(vec) == 0 {
+			return nil, 0, fmt.Errorf("query %q has empty vector", row.ID)
+		}
+		if dim == 0 {
+			dim = len(vec)
+		}
+		if len(vec) != dim {
+			return nil, 0, fmt.Errorf("query %q dimension %d, want %d", row.ID, len(vec), dim)
+		}
+		if row.ID == "" {
+			return nil, 0, fmt.Errorf("query row missing id")
+		}
+		queries = append(queries, queryVector{ID: row.ID, Vector: vec})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, 0, err
+	}
+	return queries, dim, nil
+}
+
+func firstVector(row vectorRow) []float32 {
+	switch {
+	case len(row.Embedding) > 0:
+		return row.Embedding
+	case len(row.Vector) > 0:
+		return row.Vector
+	default:
+		return row.Values
+	}
+}
+
+func readQrels(path string) (map[string]map[string]float64, int, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer file.Close()
+	qrels := map[string]map[string]float64{}
+	relevantPairs := 0
+	reader := bufio.NewReader(file)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return nil, 0, err
+		}
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "query-id") {
+			fields := strings.Fields(line)
+			if len(fields) < 3 {
+				return nil, 0, fmt.Errorf("malformed qrels line %q", line)
+			}
+			score, parseErr := strconv.ParseFloat(fields[2], 64)
+			if parseErr != nil {
+				return nil, 0, parseErr
+			}
+			if score > 0 {
+				if qrels[fields[0]] == nil {
+					qrels[fields[0]] = map[string]float64{}
+				}
+				qrels[fields[0]][fields[1]] = score
+				relevantPairs++
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+	}
+	return qrels, relevantPairs, nil
+}
+
+func rollupParents(hits []corkscrewdb.SearchResult, k int) []scoredDoc {
+	best := make(map[string]float32, len(hits))
+	for _, hit := range hits {
+		parentID := hit.Metadata["parent_id"]
+		if parentID == "" {
+			parentID = hit.ID
+		}
+		if score, ok := best[parentID]; !ok || hit.Score > score {
+			best[parentID] = hit.Score
+		}
+	}
+	h := &parentHeap{}
+	for id, score := range best {
+		if h.Len() < k {
+			heap.Push(h, parentCandidate{id: id, score: score})
+			continue
+		}
+		if score > (*h)[0].score || (score == (*h)[0].score && id < (*h)[0].id) {
+			(*h)[0] = parentCandidate{id: id, score: score}
+			heap.Fix(h, 0)
+		}
+	}
+	out := make([]scoredDoc, h.Len())
+	for i := len(out) - 1; i >= 0; i-- {
+		item := heap.Pop(h).(parentCandidate)
+		out[i] = scoredDoc{ID: item.id, Score: item.score}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Score != out[j].Score {
+			return out[i].Score > out[j].Score
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
+func ndcgAt(scores []scoredDoc, rels map[string]float64, k int) float64 {
+	if len(rels) == 0 {
+		return 0
+	}
+	dcg := 0.0
+	limit := min(k, len(scores))
+	for i := 0; i < limit; i++ {
+		rel := rels[scores[i].ID]
+		if rel <= 0 {
+			continue
+		}
+		dcg += (math.Pow(2, rel) - 1) / math.Log2(float64(i)+2)
+	}
+	ideal := make([]float64, 0, len(rels))
+	for _, rel := range rels {
+		if rel > 0 {
+			ideal = append(ideal, rel)
+		}
+	}
+	sort.Slice(ideal, func(i, j int) bool { return ideal[i] > ideal[j] })
+	idcg := 0.0
+	limit = min(k, len(ideal))
+	for i := 0; i < limit; i++ {
+		idcg += (math.Pow(2, ideal[i]) - 1) / math.Log2(float64(i)+2)
+	}
+	if idcg == 0 {
+		return 0
+	}
+	return dcg / idcg
+}
+
+func recallAt(scores []scoredDoc, rels map[string]float64, k int) float64 {
+	if len(rels) == 0 {
+		return 0
+	}
+	hits := 0
+	limit := min(k, len(scores))
+	for i := 0; i < limit; i++ {
+		if rels[scores[i].ID] > 0 {
+			hits++
+		}
+	}
+	relevant := 0
+	for _, rel := range rels {
+		if rel > 0 {
+			relevant++
+		}
+	}
+	if relevant == 0 {
+		return 0
+	}
+	return float64(hits) / float64(relevant)
+}
+
+func summarizeLatencies(latencies []time.Duration) latencyMetrics {
+	if len(latencies) == 0 {
+		return latencyMetrics{}
+	}
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	return latencyMetrics{
+		P50MS: durationMillis(percentile(latencies, 0.50)),
+		P95MS: durationMillis(percentile(latencies, 0.95)),
+		P99MS: durationMillis(percentile(latencies, 0.99)),
+		MaxMS: durationMillis(latencies[len(latencies)-1]),
+	}
+}
+
+func percentile(values []time.Duration, p float64) time.Duration {
+	if len(values) == 0 {
+		return 0
+	}
+	idx := int(math.Ceil(p*float64(len(values)))) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(values) {
+		idx = len(values) - 1
+	}
+	return values[idx]
+}
+
+func durationMillis(d time.Duration) float64 {
+	return float64(d.Nanoseconds()) / 1_000_000
+}
+
+func dirSize(root string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(root, func(_ string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		total += info.Size()
+		return nil
+	})
+	return total, err
+}
+
+func fatalf(format string, args ...any) {
+	_, _ = fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(1)
+}
+`

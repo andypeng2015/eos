@@ -201,7 +201,14 @@ EOS_REPO_ROOT=$PWD \
 ferrous-wheel run scripts/smoke_eos_default_embedder_serving.fw
 ```
 
-The smoke compares `turboquant_ip_b4_overfetch250_fp16_rerank` against the lower-risk fallback `turboquant_ip_b8_overfetch125_fp16_rerank`, writes a summary TSV and manifest under `runs/eos-default-embedder-serving-smoke-<timestamp>/`, and can gate total compression plus optional p95 latency. This is CorkScrewDB-relevant TurboQuant serving evidence only; do not claim CorkScrewDB load/index/search has passed until an external or in-repo CorkScrewDB harness runs that API path.
+The smoke compares `turboquant_ip_b4_overfetch250_fp16_rerank` against the lower-risk fallback `turboquant_ip_b8_overfetch125_fp16_rerank`, writes a summary TSV and manifest under `runs/eos-default-embedder-serving-smoke-<timestamp>/`, and can gate total compression plus optional p95 latency. This is CorkScrewDB-relevant TurboQuant serving evidence only. Use the local flat CorkScrewDB API smoke when the actual `PutVector`/`SearchVector` integration path needs to pass:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+ferrous-wheel run scripts/smoke_corkscrewdb_child_vectors.fw
+```
+
+That smoke defaults to a tiny synthetic time-series child-vector cache, can consume externally prepared child/query/qrels paths with `EOS_CORKSCREW_SMOKE_CHILD_VECTORS`, `EOS_CORKSCREW_SMOKE_QUERY_VECTORS`, and `EOS_CORKSCREW_SMOKE_QRELS`, and requires a local CorkScrewDB checkout rather than silently pulling a network dependency. Treat it as local flat CorkScrewDB load/index/search/storage accounting evidence, not remote/federation/HNSW evidence or a model-quality benchmark.
 
 Current local Eos TurboQuant result: q4/fp16 sidecar rerank at overfetch250 is the promoted compact retrieval profile. It passed the selected-vs-anchor scoreboard gate on SciFact, NFCorpus, and FiQA for `ndcg_at_10,recall_at_100,total_compression_ratio` as `eos-turboquant-rerank` / `turboquant_ip_b4_overfetch250_fp16_rerank` / bits `4`, with total compression `1.590062x`, in `runs/eos-q4-fp16-overfetch250-gate-20260615T000000Z/`. This is a two-stage compact retrieval profile, not q4-only retrieval: direct q4 loses quality on SciFact and FiQA and is not a default-promotion candidate. Direct q8 also remains outside the promoted default path because the useful lower-risk compact fallback is the two-stage q8/fp16 sidecar profile.
 
@@ -348,13 +355,13 @@ Do not promote a default CorkScrewDB embedder until all of these are true:
 
 - The sealed `.mll` package verifies by SHA256 and package metadata.
 - The baseline matrix has explicit dense, direct TurboQuant, and TurboQuant rerank rows, with missing external rows still visible as `not_scored`.
-- A CorkScrewDB load/index/search smoke has passed with the candidate vectors.
+- A CorkScrewDB load/index/search smoke has passed with the candidate vectors; use `scripts/smoke_corkscrewdb_child_vectors.fw` for the local flat API path and override its input-cache env vars for candidate-specific child vectors.
 - q4 and q8 default choices are measured on the same datasets, with quality deltas, vector bytes, compression, docs/s, scores/s, rerank overfetch where applicable, and serving p50/p95/p99/max attached.
 - The docs name the measured default and avoid unsupported standing claims.
 
 ## Next Actions
 
-1. Run a CorkScrewDB load/index/search smoke for the q4/fp16/overfetch250 compact retrieval profile.
+1. Run `scripts/smoke_corkscrewdb_child_vectors.fw` with candidate child/query/qrels inputs for the compact retrieval profile; keep q4/fp16 rerank quality evidence separate because this API smoke currently exercises direct quantized child-vector search.
 2. Measure p95 serving latency for q4/fp16/overfetch250 and decide whether the q8/fp16/overfetch125 fallback is needed for lower rerank cost.
 3. Keep the full short-set external matrix current, with Qwen3 FiQA labeled as full exportable-text rather than raw-row-complete or judged-coverage complete.
 4. Run a protected teacher/data experiment targeted at the remaining quality gap.

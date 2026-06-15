@@ -179,7 +179,16 @@ EOS_REPO_ROOT=$PWD \
 ferrous-wheel run scripts/smoke_eos_default_embedder_serving.fw
 ```
 
-It compares q4/fp16/overfetch250 with q8/fp16/overfetch125 and writes `summary.tsv` plus `manifest.json` under `runs/eos-default-embedder-serving-smoke-<timestamp>/`. This is not an actual CorkScrewDB API smoke; it is the in-repo TurboQuant proxy until a CorkScrewDB dependency or harness exists.
+It compares q4/fp16/overfetch250 with q8/fp16/overfetch125 and writes `summary.tsv` plus `manifest.json` under `runs/eos-default-embedder-serving-smoke-<timestamp>/`. This is not an actual CorkScrewDB API smoke; it is the in-repo TurboQuant serving proxy.
+
+For the local flat CorkScrewDB child-vector API path, run:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+ferrous-wheel run scripts/smoke_corkscrewdb_child_vectors.fw
+```
+
+The default run generates a tiny synthetic time-series child-vector cache, loads children into CorkScrewDB with `PutVector`, searches query vectors with `SearchVector`, rolls child hits up to parent IDs by max score, and writes per-bit metrics, `summary.tsv`, and `manifest.json` under `runs/eos-corkscrewdb-child-vector-smoke-<timestamp>/`. Set `EOS_CORKSCREW_SMOKE_CHILD_VECTORS`, `EOS_CORKSCREW_SMOKE_QUERY_VECTORS`, and `EOS_CORKSCREW_SMOKE_QRELS` to reuse a full child-vector cache. This is local flat API/storage/latency/quality smoke evidence only; it is not remote mode, federation, HNSW, or a model-quality benchmark.
 
 Current measured local result: q4/fp16 sidecar rerank at overfetch250 is the promoted compact retrieval profile. It passed the selected-vs-anchor scoreboard gate on SciFact, NFCorpus, and FiQA for `ndcg_at_10,recall_at_100,total_compression_ratio` as `eos-turboquant-rerank` / `turboquant_ip_b4_overfetch250_fp16_rerank` / bits `4`, with total compression `1.590062x`, in `runs/eos-q4-fp16-overfetch250-gate-20260615T000000Z/`. This is not q4-only retrieval: direct q4 misses dense quality on SciFact and FiQA, and direct q8 is not the promoted default path. Keep q8/fp16 sidecar rerank at overfetch125 as the lower-risk, lower-rerank-cost fallback: `turboquant_ip_b8_overfetch125_fp16_rerank`, total compression `1.326425x`, evidence in `runs/eos-fp16-overfetch125-gate-20260614T000000Z/`.
 
