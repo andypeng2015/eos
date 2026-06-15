@@ -229,7 +229,18 @@ Mixedbread `mixedbread-ai/mxbai-embed-large-v1` is the stronger current external
 | q4 | 0.739489 | 0.965000 | 7.94x | 0.30x | 77.250 ms |
 | q8 | 0.747799 | 0.966667 | 3.98x | 0.60x | 157.876 ms |
 
-mxbai is higher than Qwen3 child-max on dense, q2, q4, and q8 nDCG@10 and recall@100. The q8 mxbai row beats Qwen3 q8 by `+0.031489` nDCG@10 and `+0.013334` recall@100. Keep Qwen3 as a compact leading-family baseline, but use mxbai as the stronger external SciFact child-cache quality target. The Eos/default path is now unblocked by the Go-native exporter, but still needs a measured sealed-artifact child export and eval run.
+mxbai is higher than Qwen3 child-max on dense, q2, q4, and q8 nDCG@10 and recall@100. The q8 mxbai row beats Qwen3 q8 by `+0.031489` nDCG@10 and `+0.013334` recall@100. Keep Qwen3 as a compact leading-family baseline, but use mxbai as the stronger external SciFact child-cache quality target.
+
+The sealed Eos/default path is now measured end-to-end for the same strict lane. `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z/manta-embed-v1.sealed.mll` exported a full Go-native SciFact child cache from `datasets/manta-embed-v1/raw/scifact/scifact` with `128` word chunks, `32` overlap, and `16` minimum trailing words: `5,183` docs, `300` queries, `12,468` children, dim `256`, CUDA backend, and `57.771s` elapsed. Strict eval used `allow_missing_relevant=false`, `339` relevant pairs, `3,740,400` scored child pairs, and quantizer seed `5581486560434873699`.
+
+| row | Eos child nDCG@10 | Eos child recall@100 | compression | parent-budget multiple | p95 latency |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| dense-child | 0.462489 | 0.778111 | n/a | n/a | 3.129 ms |
+| q2 | 0.383295 | 0.719667 | 15.06x | 0.16x | 1.159 ms |
+| q4 | 0.449435 | 0.773111 | 7.76x | 0.31x | 17.819 ms |
+| q8 | 0.461862 | 0.774778 | 3.94x | 0.61x | 39.192 ms |
+
+This proves the sealed `.mll` -> Go-native child vector cache -> strict TurboQuant multivector eval path, but it also shows the current sealed Eos anchor is materially below full mxbai and Qwen3 child-cache evidence on SciFact. q8 preserves Eos dense-child quality closely, and q4 is near but drops more; the main deficit is model quality, not TurboQuant storage or scoring.
 
 The strategic TurboQuant lane is multi-vector object design, not only compressing one vector. Direct compact child vectors can make windows, spans, time-series slices, and other child schemas practical per parent object. Same-dimension child vectors do not fit hundreds of children inside one same-dimension fp32 parent-vector budget; tens to hundreds should be treated as a measured planner/eval target when compact child dimensions are compared against 1024 to 3072 dimensional fp32 baselines with `--baseline-dim` or when the product budgets multiple dense-parent equivalents.
 
