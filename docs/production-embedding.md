@@ -179,13 +179,30 @@ This planner answers a different question from `eval-retrieval-turboquant`: how 
 
 After storage planning, run the cache-only parent-child quality harness before making product claims:
 
+For Eos-owned/default embedders, create the cache with the Go-native exporter so the sealed `.mll` runtime path, tokenizer, batching, and normalization match `eval-retrieval` without Python or SentenceTransformers:
+
+```bash
+go run ./cmd/eos export-retrieval-vectors \
+  --dataset scifact \
+  --batch-size 64 \
+  --document-chunk-words 128 \
+  --document-chunk-overlap 32 \
+  --document-chunk-min-words 16 \
+  --manifest-json /data/manta/runs/<run-id>/scifact-child-vector-export.json \
+  /data/manta/runs/<run-id>/eos-embed-v1.sealed.mll \
+  /data/manta/datasets/eos-embed-v1/raw/scifact \
+  /data/manta/runs/<run-id>/scifact-child-cache
+```
+
+Without `--document-chunk-words`, the exporter writes `doc-vectors.jsonl` and `query-vectors.jsonl` for `eval-retrieval-vectors` or `eval-retrieval-vectors-turboquant`. With chunking enabled, it writes `child-doc-vectors.jsonl` and `query-vectors.jsonl`; child IDs are deterministic `parent#chunk-0000` word windows and the manifest records document count, query count, child-vector count, dimension, backend, artifact, and output paths.
+
 ```bash
 go run ./cmd/eos eval-retrieval-multivector-turboquant \
   --dataset scifact \
   --backend child-cache \
   --artifact <embedder-label> \
-  --doc-vectors /data/manta/runs/<run-id>/child-doc-vectors.jsonl \
-  --query-vectors /data/manta/runs/<run-id>/query-vectors.jsonl \
+  --doc-vectors /data/manta/runs/<run-id>/scifact-child-cache/child-doc-vectors.jsonl \
+  --query-vectors /data/manta/runs/<run-id>/scifact-child-cache/query-vectors.jsonl \
   --bits 2,4,8 \
   --metrics-json /data/manta/runs/<run-id>/multivector-turboquant.json \
   --metrics-tsv /data/manta/runs/<run-id>/multivector-turboquant.tsv \
@@ -217,6 +234,8 @@ python3 scripts/export_retrieval_vectors.py \
   --document-chunk-overlap 32 \
   --document-chunk-min-words 16
 ```
+
+Current external SciFact child-cache evidence uses `datasets/manta-embed-v1/raw/scifact/scifact`, because `datasets/eos-embed-v1/raw/scifact/scifact` was absent for the local runs. With `128` word chunks, `32` overlap, `16` minimum trailing words, `5,183` parents, `12,468` child vectors, and strict qrels coverage (`allow_missing_relevant=false`), `mixedbread-ai/mxbai-embed-large-v1` is stronger than Qwen3 0.6B at dense, q2, q4, and q8 child-max retrieval. Its q8 row scored `0.747799` nDCG@10 / `0.966667` recall@100, beating Qwen3 q8 by `+0.031489` nDCG@10 and `+0.013334` recall@100. Treat this as external cache evidence only; the Eos/default sealed-artifact path still needs its own Go-native child export and eval run.
 
 Use `--backend` and `--artifact` labels to keep BGE, Qwen, Jina, Voyage, Cohere, OpenAI, and sealed Eos rows comparable. In the scoreboard harness, set `EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT=1` and `EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT_BITS=2,4,8` to append q2/q4/q8 rows for the same cache; add `EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT_RERANK_OVERFETCH=200` and `EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT_RERANK_STORAGE=fp16` when fp16 sidecar rerank rows should be emitted for an external cache. External baseline rows remain `not_scored` until the dense and TurboQuant cache metrics are present.
 

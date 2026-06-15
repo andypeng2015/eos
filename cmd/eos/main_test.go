@@ -778,6 +778,104 @@ func TestRunEvalRetrievalWritesMetricsJSON(t *testing.T) {
 	}
 }
 
+func TestRunExportRetrievalVectorsWritesChildCaches(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "eos-embed-v1.mll")
+	if err := run([]string{
+		"init-model",
+		"--vocab-size", "16",
+		"--max-seq", "8",
+		"--embedding-dim", "4",
+		"--hidden-dim", "8",
+		path,
+	}); err != nil {
+		t.Fatalf("run init-model: %v", err)
+	}
+	tokenizer := eosruntime.TokenizerFile{
+		Version:      eosruntime.TokenizerFileVersion,
+		Tokens:       []string{"[PAD]", "[UNK]", "one", "two", "three", "four", "five", "six", "seven", "eight", "query"},
+		UnknownToken: "[UNK]",
+	}
+	if err := tokenizer.WriteFile(eosruntime.DefaultTokenizerPath(path)); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	if _, _, err := eosruntime.RebuildSiblingPackageManifest(path); err != nil {
+		t.Fatalf("rebuild package manifest: %v", err)
+	}
+	sealedPath := filepath.Join(dir, "eos-embed-v1.sealed.mll")
+	if err := run([]string{"export-mll", path, sealedPath}); err != nil {
+		t.Fatalf("run export-mll: %v", err)
+	}
+	datasetDir := filepath.Join(dir, "dataset")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "corpus.jsonl"), []byte(
+		`{"_id":"d1","text":"one two three four five six seven eight"}`+"\n"+
+			`{"_id":"d2","text":"one two"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "queries.jsonl"), []byte(`{"_id":"q1","text":"one query"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "qrels", "test.tsv"), []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	outputDir := filepath.Join(dir, "vector-cache")
+	manifestPath := filepath.Join(dir, "vector-cache.manifest.json")
+
+	output := captureRunOutput(t, []string{
+		"export-retrieval-vectors",
+		"--dataset", "tiny-export",
+		"--batch-size", "1",
+		"--document-chunk-words", "4",
+		"--document-chunk-overlap", "1",
+		"--document-chunk-min-words", "2",
+		"--manifest-json", manifestPath,
+		sealedPath,
+		datasetDir,
+		outputDir,
+	})
+	childPath := filepath.Join(outputDir, "child-doc-vectors.jsonl")
+	queryPath := filepath.Join(outputDir, "query-vectors.jsonl")
+	for _, want := range []string{
+		"exported retrieval vectors: dataset=tiny-export",
+		"child_vectors=4",
+		"child_doc_vectors: " + childPath,
+		"query_vectors: " + queryPath,
+		"manifest: " + manifestPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("export output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	childData, err := os.ReadFile(childPath)
+	if err != nil {
+		t.Fatalf("read child vectors: %v", err)
+	}
+	if !strings.Contains(string(childData), `"parent_id":"d1"`) || !strings.Contains(string(childData), `"child_id":"d1#chunk-0001"`) || !strings.Contains(string(childData), `"embedding"`) {
+		t.Fatalf("unexpected child vector rows:\n%s", string(childData))
+	}
+	queryData, err := os.ReadFile(queryPath)
+	if err != nil {
+		t.Fatalf("read query vectors: %v", err)
+	}
+	if !strings.Contains(string(queryData), `"id":"q1"`) || !strings.Contains(string(queryData), `"embedding"`) {
+		t.Fatalf("unexpected query vector rows:\n%s", string(queryData))
+	}
+	var manifest eosruntime.RetrievalVectorExportSummary
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if manifest.Schema != eosruntime.RetrievalVectorExportManifestSchema || manifest.Dataset != "tiny-export" || manifest.ChildVectors != 4 || manifest.QueryVectorPath != queryPath {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+}
+
 func TestRunEvalRetrievalBM25WritesMetricsJSON(t *testing.T) {
 	dir := t.TempDir()
 	datasetDir := filepath.Join(dir, "dataset")

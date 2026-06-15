@@ -220,6 +220,17 @@ Use this for the CorkScrewDB direct multi-vector lane: many quantized child vect
 
 First measured SciFact evidence for this lane used Qwen3 0.6B child chunks at `128` words, `32` overlap, and `16` minimum trailing words. The cache has `5,183` parents, `12,468` children, and `2.41` average children per parent. On `300` strict-coverage qrels queries, dense child-max scored `0.717467` nDCG@10 / `0.953333` recall@100; direct q8 scored `0.716310` / `0.953333` at `3.98x` child compression and `0.60x` of one dense-parent-vector budget. That improves over the one-vector Qwen3 SciFact dense row `0.702026` / `0.946667` and q8 row `0.702657` / `0.946667`.
 
+Mixedbread `mixedbread-ai/mxbai-embed-large-v1` is the stronger current external SciFact child-cache baseline on this lane. The requested `datasets/eos-embed-v1/raw/scifact/scifact` path was absent, so the run used `datasets/manta-embed-v1/raw/scifact/scifact`, matching the Qwen3 child evidence. With `128` word chunks, `32` overlap, and `16` minimum trailing words, it produced `5,183` parents, `12,468` child vectors, `2.405557` average children per parent, and `300` evaluated qrels queries with strict coverage (`allow_missing_relevant=false`).
+
+| row | child nDCG@10 | child recall@100 | compression | parent-budget multiple | p95 latency |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| dense-child | 0.747175 | 0.970000 | n/a | n/a | 12.497 ms |
+| q2 | 0.712790 | 0.956667 | 15.75x | 0.15x | 4.754 ms |
+| q4 | 0.739489 | 0.965000 | 7.94x | 0.30x | 77.250 ms |
+| q8 | 0.747799 | 0.966667 | 3.98x | 0.60x | 157.876 ms |
+
+mxbai is higher than Qwen3 child-max on dense, q2, q4, and q8 nDCG@10 and recall@100. The q8 mxbai row beats Qwen3 q8 by `+0.031489` nDCG@10 and `+0.013334` recall@100. Keep Qwen3 as a compact leading-family baseline, but use mxbai as the stronger external SciFact child-cache quality target. The Eos/default path is now unblocked by the Go-native exporter, but still needs a measured sealed-artifact child export and eval run.
+
 The strategic TurboQuant lane is multi-vector object design, not only compressing one vector. Direct compact child vectors can make windows, spans, time-series slices, and other child schemas practical per parent object. Same-dimension child vectors do not fit hundreds of children inside one same-dimension fp32 parent-vector budget; tens to hundreds should be treated as a measured planner/eval target when compact child dimensions are compared against 1024 to 3072 dimensional fp32 baselines with `--baseline-dim` or when the product budgets multiple dense-parent equivalents.
 
 ## Code Lanes To Unlock

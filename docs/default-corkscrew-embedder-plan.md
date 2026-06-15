@@ -153,6 +153,32 @@ ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
 
 This produces direct `eos-turboquant` rows and fp16 sidecar rerank `eos-turboquant-rerank` rows from one `eval-retrieval-turboquant` metrics file. Use `--baseline eos-turboquant --method turboquant_ip_b4 --bits 4` to inspect direct q4, but do not treat direct q4 or direct q8 as default-promotion candidates. Gate the promoted compact profile with `--baseline eos-turboquant-rerank --method turboquant_ip_b4_overfetch250_fp16_rerank --bits 4 --metrics ndcg_at_10,recall_at_100,total_compression_ratio`.
 
+When the default embedder needs to feed the vector-cache evaluators instead of live `eval-retrieval`, use the Go-native exporter. It loads packaged or sealed Eos embedding artifacts through the runtime tokenizer/batch path and writes the same JSONL shape as external caches:
+
+```bash
+go run ./cmd/eos export-retrieval-vectors \
+  --dataset scifact \
+  --batch-size 64 \
+  runs/default-embedder/eos-embed-v1.sealed.mll \
+  data/beir/scifact \
+  runs/eos-vector-caches/eos-embed-v1/scifact
+```
+
+For Eos-owned parent-child evidence, enable deterministic word chunking. This writes `child-doc-vectors.jsonl` rows with `parent_id`, `child_id`, and `embedding`, plus the unchanged query cache for `eval-retrieval-multivector-turboquant`:
+
+```bash
+go run ./cmd/eos export-retrieval-vectors \
+  --dataset scifact \
+  --batch-size 64 \
+  --document-chunk-words 128 \
+  --document-chunk-overlap 32 \
+  --document-chunk-min-words 16 \
+  --manifest-json runs/eos-vector-caches/eos-embed-v1-scifact-child-w128-o32/manifest.json \
+  runs/default-embedder/eos-embed-v1.sealed.mll \
+  data/beir/scifact \
+  runs/eos-vector-caches/eos-embed-v1-scifact-child-w128-o32/scifact
+```
+
 Record, per dataset and candidate:
 
 - Dense nDCG@10/nDCG@100, MRR@10, precision@1/5/10, hit@1/5/10, MAP@10/MAP@100, and recall@10/100.
@@ -220,6 +246,17 @@ First measured SciFact parent-child evidence: Qwen3 0.6B child cache, `128` word
 | q8 | 0.716310 | 0.953333 | 3.98x | 0.60x |
 
 Compared with the existing one-vector Qwen3 SciFact evidence, dense child-max improves over dense `0.702026` nDCG@10 / `0.946667` recall@100, and direct q8 child-max improves over q8 `0.702657` nDCG@10 / `0.946667` recall@100 while storing q8 children below one dense-parent-vector budget.
+
+Mixedbread `mixedbread-ai/mxbai-embed-large-v1` is the current stronger external SciFact child-cache baseline on the same parent-child lane. The requested `datasets/eos-embed-v1/raw/scifact/scifact` path was absent, so the run used `datasets/manta-embed-v1/raw/scifact/scifact`, matching the Qwen3 child evidence. It used `128` word chunks, `32` overlap, and `16` minimum trailing words, producing `5,183` parents, `12,468` child vectors, `2.405557` average children per parent, and `300` evaluated qrels queries with strict coverage (`allow_missing_relevant=false`).
+
+| row | child nDCG@10 | child recall@100 | compression | parent-budget multiple | p95 latency |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| dense-child | 0.747175 | 0.970000 | n/a | n/a | 12.497 ms |
+| q2 | 0.712790 | 0.956667 | 15.75x | 0.15x | 4.754 ms |
+| q4 | 0.739489 | 0.965000 | 7.94x | 0.30x | 77.250 ms |
+| q8 | 0.747799 | 0.966667 | 3.98x | 0.60x | 157.876 ms |
+
+mxbai is higher than Qwen3 child-max on dense, q2, q4, and q8 nDCG@10 and recall@100. The q8 mxbai row beats Qwen3 q8 by `+0.031489` nDCG@10 and `+0.013334` recall@100. Treat mxbai as the stronger external SciFact child-cache baseline, while Qwen3 remains useful as a compact leading-family baseline. The Eos/default path is unblocked by the Go-native exporter above, but still needs a measured sealed-artifact child export and eval run before it can make this claim for the default embedder.
 
 TurboQuant's strategic win for CorkScrewDB is not only q4/q8 compression of one vector. Direct compact child vectors let a parent object carry many cheap vectors for windows, spans, time-series slices, events, and other multi-vector schemas. Be precise in product planning: same-dimension child vectors do not fit hundreds of children inside the budget of one same-dimension fp32 parent vector. Tens to hundreds become plausible when compact child dimensions are planned against a 1024 to 3072 dimensional fp32 baseline with `--baseline-dim` or when the product explicitly budgets multiple dense-parent equivalents. That needs a measured planner and eval lane, not hand-wavy storage copy.
 

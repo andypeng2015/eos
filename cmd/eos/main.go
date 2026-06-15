@@ -107,6 +107,8 @@ func run(args []string) error {
 		return runArtifact(args[1:])
 	case "embed-text":
 		return runEmbedText(args[1:])
+	case "export-retrieval-vectors":
+		return runExportRetrievalVectors(args[1:])
 	case "eval-retrieval":
 		return runEvalRetrieval(args[1:])
 	case "eval-retrieval-hybrid":
@@ -394,6 +396,81 @@ func runEmbedText(args []string) error {
 	fmt.Printf("tokens: %d\n", len(tokens))
 	fmt.Printf("output: %s\n", displayManifestName(result.OutputName))
 	fmt.Printf("embedding: %s%v\n", result.Embeddings.DType, result.Embeddings.Shape)
+	return nil
+}
+
+func runExportRetrievalVectors(args []string) error {
+	fs := flag.NewFlagSet("export-retrieval-vectors", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	datasetName := fs.String("dataset", "", "dataset name for manifest/status output")
+	split := fs.String("split", "test", "qrels split under <dataset-dir>/qrels")
+	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path; when present, export keeps qrels-relevant docs/queries under caps")
+	batchSize := fs.Int("batch-size", 64, "embedding batch size")
+	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke exports")
+	maxQueries := fs.Int("max-queries", 0, "limit queries for smoke exports")
+	documentChunkWords := fs.Int("document-chunk-words", 0, "when positive, export parent-child document word chunks")
+	documentChunkOverlap := fs.Int("document-chunk-overlap", 0, "word overlap between adjacent document chunks")
+	documentChunkMinWords := fs.Int("document-chunk-min-words", 1, "minimum words for a trailing document chunk")
+	documentPrefix := fs.String("document-prefix", "", "prefix prepended to document/chunk text before embedding")
+	queryPrefix := fs.String("query-prefix", "", "prefix prepended to query text before embedding")
+	manifestPath := fs.String("manifest-json", "", "write export summary JSON manifest")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 3 || fs.Arg(0) == "" || fs.Arg(1) == "" || fs.Arg(2) == "" {
+		return fmt.Errorf("usage: eos export-retrieval-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
+	}
+	artifactPath := fs.Arg(0)
+	datasetDir := fs.Arg(1)
+	outputDir := fs.Arg(2)
+	corpusPath, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
+	if *qrelsPath == "" {
+		*qrelsPath = defaultQrelsPath
+	}
+	if *datasetName == "" {
+		*datasetName = filepath.Base(datasetDir)
+	}
+
+	rt := eosruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+	model, err := rt.LoadEmbeddingPackage(context.Background(), artifactPath)
+	if err != nil {
+		return err
+	}
+	summary, err := eosruntime.ExportEmbeddingRetrievalVectors(context.Background(), model, eosruntime.RetrievalVectorExportConfig{
+		DatasetName:           *datasetName,
+		ArtifactPath:          artifactPath,
+		CorpusPath:            corpusPath,
+		QueriesPath:           queriesPath,
+		QrelsPath:             *qrelsPath,
+		OutputDir:             outputDir,
+		BatchSize:             *batchSize,
+		MaxDocs:               *maxDocs,
+		MaxQueries:            *maxQueries,
+		DocumentChunkWords:    *documentChunkWords,
+		DocumentChunkOverlap:  *documentChunkOverlap,
+		DocumentChunkMinWords: *documentChunkMinWords,
+		DocumentPrefix:        *documentPrefix,
+		QueryPrefix:           *queryPrefix,
+		ManifestJSONPath:      *manifestPath,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("exported retrieval vectors: dataset=%s backend=%s docs=%d queries=%d", summary.Dataset, summary.Backend, summary.Documents, summary.Queries)
+	if summary.ChildVectors > 0 {
+		fmt.Printf(" child_vectors=%d", summary.ChildVectors)
+	}
+	fmt.Printf(" dim=%d\n", summary.Dimension)
+	if summary.DocVectorPath != "" {
+		fmt.Printf("doc_vectors: %s\n", summary.DocVectorPath)
+	}
+	if summary.ChildDocVectorPath != "" {
+		fmt.Printf("child_doc_vectors: %s\n", summary.ChildDocVectorPath)
+	}
+	fmt.Printf("query_vectors: %s\n", summary.QueryVectorPath)
+	if *manifestPath != "" {
+		fmt.Printf("manifest: %s\n", *manifestPath)
+	}
 	return nil
 }
 
@@ -5318,6 +5395,7 @@ func printUsage() {
 	fmt.Println("  eos inspect <artifact.mll>")
 	fmt.Println("  eos export-mll <artifact.mll> [output.mll]")
 	fmt.Println("  eos embed-text <artifact.mll> <text...>")
+	fmt.Println("  eos export-retrieval-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
 	fmt.Println("  eos eval-retrieval [flags] <artifact.mll> <beir-dataset-dir>")
 	fmt.Println("  eos eval-retrieval-hybrid [flags] <artifact.mll> <beir-dataset-dir>")
 	fmt.Println("  eos eval-retrieval-turboquant [flags] <artifact.mll> <beir-dataset-dir>")
@@ -5360,6 +5438,7 @@ func printUsage() {
 	fmt.Println("inspect summarizes an artifact and verifies its sibling package manifest when present.")
 	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Eos metadata in XMTA.")
 	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
+	fmt.Println("export-retrieval-vectors writes BEIR document/query vector caches from a packaged or sealed Eos embedding .mll, optionally as parent-child document chunks.")
 	fmt.Println("eval-retrieval scores a sealed embedding .mll on BEIR-style corpus/query/qrels files with nDCG/MRR/Recall metrics.")
 	fmt.Println("eval-retrieval-hybrid fuses sealed embedding dense top-k with BM25 top-k using minmax, zscore, or RRF scoring.")
 	fmt.Println("eval-retrieval-turboquant compares dense retrieval quality/cost against TurboQuant IP-preserving quantized document vectors.")
