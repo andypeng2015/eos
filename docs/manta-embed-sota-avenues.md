@@ -169,15 +169,22 @@ Status:
 - The cached-tokenizer `embed-m` shape (`16384` vocab, max sequence `512`, dim `192`, hidden `384`, repeats `3`) trains and seals on the desktop GPU at batch `64`, but the current-best fine-tune recipe is invalid from random initialization: validation/hard AUC `0.595854` / `0.598887`, macro nDCG@10 `0.078073`, and `1460.78` train pairs/s.
 - A scratch `infonce` LR `0.002` pass also failed as a bootstrap: validation/hard AUC `0.495137` / `0.498731` with `1259.54` train pairs/s. The next `embed-m` attempt should use staged pretraining or dimension-compatible weight expansion, then apply the teacher-distilled recipe as a fine-tune.
 
-2026-06-15 `embed-m` frontier checkpoint: protective replay is the current local `embed-m` benchmark, but it is evidence only. It is not the promoted default model, and it does not replace the compact q4 + fp16 sidecar rerank default path. Direct retrieval remains the gate; pairwise AUC is not sufficient.
+2026-06-15 `embed-m` frontier checkpoint: the half-frontier triple-SciFact guard run is the current local dense `embed-m` frontier, but it is evidence only. It is not the promoted default model, does not replace the CorkScrewDB/default `eos-embed-v1` q4 + fp16 sidecar rerank overfetch-250 path, and should be treated as an `embed-m` validation candidate rather than default alias promotion. Direct retrieval remains the gate; pairwise AUC is not sufficient.
 
 | Candidate | SciFact nDCG@10 | NFCorpus nDCG@10 | FiQA nDCG@10 | Macro nDCG@10 | Macro recall@100 | Status |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | balanced Stage B `embed-m` baseline | 0.365649 | 0.152246 | 0.040103 | 0.185999 | 0.331780 | stronger staged baseline, still below anchor |
-| protective replay `embed-m` continuation | 0.365697 | 0.152673 | 0.040820 | 0.186397 | 0.331876 | current local `embed-m` benchmark |
+| protective replay `embed-m` continuation | 0.365697 | 0.152673 | 0.040820 | 0.186397 | 0.331876 | prior local `embed-m` benchmark |
+| prior best local `embed-m` LR `0.0000025` | 0.365759 | 0.152676 | 0.040834 | 0.186423 | 0.331864 | comparison point for the dense local gate |
+| half-frontier triple-SciFact guard `embed-m` | 0.366213 | 0.152950 | 0.040485 | 0.186549 | 0.333135 | current local dense `embed-m` frontier; passes previous-best macro and SciFact floor |
+| half-frontier compact q8/fp16 overfetch-200 | 0.366273 | 0.152950 | 0.040485 | 0.186569 | 0.333135 | selected compact profile for this artifact only; `1.324138x` total compression |
 | current dense anchor | 0.482406 | 0.197733 | 0.117533 | 0.265891 | 0.452844 | remains far ahead |
 
-The protective replay continuation is `runs/eos-embed-m-fiqa-dev-toprank-protective-replay-probe-20260615T000000Z/`. It starts from the balanced Stage B baseline and trains one LR `0.000002`, HN3, no-teacher continuation on a 96-row blend: `48` FiQA dev top-rank rows, `24` SciFact replay rows, and `24` NFCorpus replay rows.
+The half-frontier triple-SciFact guard run is `runs/eos-embed-m-half-frontier-triple-scifact-guard-20260615T000000Z/stage-c-half-frontier-triple-scifact-guard-lr25e-7-hn3-b16/`, sealed SHA256 `58b5b80a71520342062c6e6b7062b35ff95a425cccf9a683d23608192e2ac876`. It starts from the balanced Stage B baseline and trains one LR `0.0000025`, HN3, no-teacher continuation on `240` rows: `48` FiQA dev-frontier rows, `48` NFCorpus dev-frontier rows, and `144` SciFact protective replay rows. It passes the dense local `embed-m` gate against prior best macro nDCG `0.186423` and SciFact floor `0.365459`, but remains far below the current dense anchor macro nDCG `0.265891`.
+
+The selected compact profile for this exact artifact is q8/fp16 rerank overfetch-200, method `turboquant_ip_b8_overfetch200_fp16_rerank`, with total compression `1.324138x`. q4/fp16 overfetch `300`, `400`, and `500` preserved nDCG but missed FiQA recall by `-0.000257`, so q4 is not selected for this `embed-m` artifact despite better compression `1.586777x`.
+
+The prior protective replay continuation is `runs/eos-embed-m-fiqa-dev-toprank-protective-replay-probe-20260615T000000Z/`. It starts from the balanced Stage B baseline and trains one LR `0.000002`, HN3, no-teacher continuation on a 96-row blend: `48` FiQA dev top-rank rows, `24` SciFact replay rows, and `24` NFCorpus replay rows.
 
 Negative findings for this branch: FiQA source oversampling regressed; the test-selected microrepair was diagnostic only; dev-heldout top-rank selection generalized directionally but was weaker without protective replay; and the larger scale96 blend was worse than the 96-row protective blend on macro and FiQA nDCG. Future `embed-m` work should treat protective replay as the local comparison point, not as a promotion candidate.
 
