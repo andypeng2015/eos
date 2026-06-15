@@ -227,6 +227,15 @@ EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_corkscrewdb_budget_qualit
 
 The default run feeds the Eos 128d SciFact child cache and qrels into `scripts/smoke_corkscrewdb_child_vectors.fw` with q4 overfetch `100,12468`, then joins those `PutVector`/`SearchVector` metrics to `plan-multivector-storage` with `--dim 128 --baseline-dim 3072 --vector-overhead-bytes 32 --sidecar-storage none`. It writes a combined `summary.tsv`, `manifest.json`, command logs, nested `corkscrewdb/` run artifacts, and `planner.json` under `runs/eos-corkscrewdb-budget-quality-smoke-<timestamp>/`. Current default API evidence: q4 overfetch100 has `ndcg@10=0.407586`, `recall@100=0.724111`, DB directory multiple `0.048935x`, and p95 search latency about `11.8ms`; q4 full overfetch has `recall@100=0.741889`; the planner fit is `123` q4 children, so the 100-child target fits. Treat this as the local flat CorkScrewDB API counterpart to the cache-only budget-quality smoke and pure planner smoke, not remote mode, federation, HNSW, or native Matryoshka evidence.
 
+Use the HNSW/raw CorkScrewDB budget-quality smoke when the same compact cache must validate HNSW index search rather than compact persistence:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+ferrous-wheel run scripts/smoke_eos_corkscrewdb_hnsw_quality.fw
+```
+
+The HNSW wrapper feeds the same Eos 128d SciFact child cache into `scripts/smoke_corkscrewdb_child_vectors.fw` with `index_type=hnsw`, `vector_storage=raw`, and a post-load HNSW rebuild, then joins the same q4 planner row. Current default evidence: q4 overfetch100 has `ndcg@10=0.392775`, `recall@100=0.685778`, raw HNSW DB directory multiple `0.347691x`, rebuild time about `20.9s`, and p95 search latency about `1.78ms`; q4 full overfetch has `recall@100=0.741889` and p95 about `33.1ms`. CorkScrewDB rejects HNSW with `quantized_only`, so this is raw-vector index-search validation. It intentionally does not claim the flat quantized-only DB-size multiple; use the vector payload/planner columns only for compact q4 planning comparisons.
+
 To move from storage math to a cache-only quality harness for time-series windows, export text-rendered numeric windows and reuse the existing multivector TurboQuant evaluator. The series JSONL has one parent series per row with `id` or `_id` and numeric `values`; qrels must use the parent series IDs as corpus IDs:
 
 ```bash

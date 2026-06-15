@@ -270,6 +270,14 @@ EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_corkscrewdb_budget_qualit
 
 The wrapper runs `scripts/smoke_corkscrewdb_child_vectors.fw` against the Eos 128d SciFact child/query cache and test qrels with q4 overfetch `100,12468`, then joins the resulting local `PutVector`/`SearchVector` metrics to the overhead-aware planner row for `--dim 128 --baseline-dim 3072 --vector-overhead-bytes 32 --sidecar-storage none`. It writes `summary.tsv`, `manifest.json`, command logs, nested `corkscrewdb/` artifacts, and `planner.json` under `runs/eos-corkscrewdb-budget-quality-smoke-<timestamp>/`. Current default result: q4 overfetch100 records `ndcg@10=0.407586`, `recall@100=0.724111`, DB directory multiple `0.048935x`, and p95 search latency about `11.8ms`; q4 full overfetch records `recall@100=0.741889`; planner fit remains `123` q4 children, so the `100` child target fits. Read this beside the cache-only smoke and pure planner smoke as actual local flat CorkScrewDB API evidence for the compact Eos child cache, not remote serving, federation, HNSW, or native Matryoshka proof.
 
+For HNSW index-search validation on the same compact cache, run:
+
+```bash
+EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_corkscrewdb_hnsw_quality.fw
+```
+
+This wrapper runs the child-vector smoke with `index_type=hnsw`, `vector_storage=raw`, and a post-load HNSW rebuild, then joins the same overhead-aware q4 planner row under `runs/eos-corkscrewdb-hnsw-quality-smoke-<timestamp>/`. Current default result: q4 overfetch100 records `ndcg@10=0.392775`, `recall@100=0.685778`, raw HNSW DB directory multiple `0.347691x`, rebuild time about `20.9s`, and p95 search latency about `1.78ms`; q4 full overfetch records `recall@100=0.741889` and p95 about `33.1ms`. CorkScrewDB rejects HNSW with `quantized_only`, so this smoke deliberately trades compact quantized-only persistence for raw-vector HNSW validation. Keep the raw HNSW DB-directory multiple separate from the flat q4 quantized-only storage multiple; the q4 vector payload/planner columns are planner comparisons, not HNSW persistence claims.
+
 For a first time-series/window quality seam, export text-rendered numeric windows and run the existing parent-child evaluator against parent-series qrels:
 
 ```bash

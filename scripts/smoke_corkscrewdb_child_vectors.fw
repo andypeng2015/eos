@@ -49,11 +49,17 @@ type bitMetrics struct {
 	Quality                      qualityMetrics `json:"quality"`
 	QuantizerSeed                int64          `json:"quantizer_seed"`
 	QuantizedOnly                bool           `json:"quantized_only"`
+	IndexType                    string         `json:"index_type"`
+	VectorStorage                string         `json:"vector_storage"`
+	RebuildIndex                 bool           `json:"rebuild_index"`
+	RebuildSeconds               float64        `json:"rebuild_seconds"`
 }
 
 type summaryRow struct {
 	Bits                         int
 	OverfetchChildren            int
+	IndexType                    string
+	VectorStorage                string
 	NDCGAt10                     float64
 	RecallAt100                  float64
 	VectorPayloadStorageMultiple float64
@@ -62,6 +68,7 @@ type summaryRow struct {
 	QuantizedChildBytes          int64
 	DBBytesAfterClose            int64
 	LoadSeconds                  float64
+	RebuildSeconds               float64
 	SearchSeconds                float64
 	P50MS                        float64
 	P95MS                        float64
@@ -84,6 +91,9 @@ type manifest struct {
 	Bits                string       `json:"bits"`
 	QuantizerSeed       int64        `json:"quantizer_seed"`
 	QuantizedOnly       bool         `json:"quantized_only"`
+	IndexType           string       `json:"index_type"`
+	VectorStorage       string       `json:"vector_storage"`
+	RebuildIndex        bool         `json:"rebuild_index"`
 	OverfetchChildren   string       `json:"overfetch_children"`
 	OverfetchValues     []int        `json:"overfetch_values"`
 	TopKParents         int          `json:"top_k_parents"`
@@ -119,6 +129,9 @@ Environment:
   EOS_CORKSCREW_SMOKE_BITS=2,4,8
   EOS_CORKSCREW_SMOKE_QUANTIZER_SEED=5581486560434873699
   EOS_CORKSCREW_SMOKE_QUANTIZED_ONLY=1
+  EOS_CORKSCREW_SMOKE_INDEX_TYPE=flat       # flat|hnsw
+  EOS_CORKSCREW_SMOKE_VECTOR_STORAGE=quantized_only # quantized_only|raw
+  EOS_CORKSCREW_SMOKE_REBUILD_INDEX=0       # defaults to 1 for hnsw, 0 for flat
   EOS_CORKSCREW_SMOKE_OVERFETCH=100       # comma-separated values sweep overfetch
   EOS_CORKSCREW_SMOKE_TOP_PARENTS=100
   EOS_CORKSCREW_SMOKE_BASELINE_DIM=3072
@@ -143,6 +156,14 @@ func envBool(name string, fallback bool) bool {
 		return fallback
 	}
 	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func envBoolWithPresence(name string, fallback bool) (bool, bool) {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	if value == "" {
+		return fallback, false
+	}
+	return value == "1" || value == "true" || value == "yes" || value == "on", true
 }
 
 func hasRepoRoot(dir string) bool {
@@ -329,11 +350,13 @@ func readMetrics(path string) (bitMetrics, error) {
 
 func writeSummaryTSV(path string, rows []summaryRow) error {
 	var b strings.Builder
-	b.WriteString("bits\toverfetch_children\tndcg_at_10\trecall_at_100\tvector_payload_storage_multiple\tdb_directory_storage_multiple\tquantized_vector_bytes\tquantized_child_bytes\tdb_bytes_after_close\tload_seconds\tsearch_seconds\tp50_ms\tp95_ms\tp99_ms\tmax_ms\n")
+	b.WriteString("bits\toverfetch_children\tindex_type\tvector_storage\tndcg_at_10\trecall_at_100\tvector_payload_storage_multiple\tdb_directory_storage_multiple\tquantized_vector_bytes\tquantized_child_bytes\tdb_bytes_after_close\tload_seconds\trebuild_seconds\tsearch_seconds\tp50_ms\tp95_ms\tp99_ms\tmax_ms\n")
 	for _, row := range rows {
-		fmt.Fprintf(&b, "%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\n",
+		fmt.Fprintf(&b, "%d\t%d\t%s\t%s\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\n",
 			row.Bits,
 			row.OverfetchChildren,
+			row.IndexType,
+			row.VectorStorage,
 			row.NDCGAt10,
 			row.RecallAt100,
 			row.VectorPayloadStorageMultiple,
@@ -342,6 +365,7 @@ func writeSummaryTSV(path string, rows []summaryRow) error {
 			row.QuantizedChildBytes,
 			row.DBBytesAfterClose,
 			row.LoadSeconds,
+			row.RebuildSeconds,
 			row.SearchSeconds,
 			row.P50MS,
 			row.P95MS,
@@ -481,6 +505,32 @@ func main() {
 	}
 
 	quantizedOnly := envBool("EOS_CORKSCREW_SMOKE_QUANTIZED_ONLY", true)
+	vectorStorage := strings.ToLower(strings.TrimSpace(os.Getenv("EOS_CORKSCREW_SMOKE_VECTOR_STORAGE")))
+	if vectorStorage == "" {
+		if quantizedOnly {
+			vectorStorage = "quantized_only"
+		} else {
+			vectorStorage = "raw"
+		}
+	}
+	if vectorStorage != "quantized_only" && vectorStorage != "raw" {
+		fmt.Fprintf(os.Stderr, "EOS_CORKSCREW_SMOKE_VECTOR_STORAGE must be quantized_only or raw, got %q\n", vectorStorage)
+		os.Exit(1)
+	}
+	quantizedOnly = vectorStorage == "quantized_only"
+	indexType := strings.ToLower(strings.TrimSpace(getenv("EOS_CORKSCREW_SMOKE_INDEX_TYPE", "flat")))
+	if indexType != "flat" && indexType != "hnsw" {
+		fmt.Fprintf(os.Stderr, "EOS_CORKSCREW_SMOKE_INDEX_TYPE must be flat or hnsw, got %q\n", indexType)
+		os.Exit(1)
+	}
+	if indexType == "hnsw" && quantizedOnly {
+		fmt.Fprintln(os.Stderr, "EOS_CORKSCREW_SMOKE_INDEX_TYPE=hnsw requires EOS_CORKSCREW_SMOKE_VECTOR_STORAGE=raw because CorkScrewDB rejects HNSW with quantized_only persistence")
+		os.Exit(1)
+	}
+	rebuildIndex, rebuildConfigured := envBoolWithPresence("EOS_CORKSCREW_SMOKE_REBUILD_INDEX", indexType == "hnsw")
+	if indexType == "hnsw" && !rebuildConfigured {
+		rebuildIndex = true
+	}
 	dataset := getenv("EOS_CORKSCREW_SMOKE_DATASET", "synthetic-timeseries-windows")
 	collection := getenv("EOS_CORKSCREW_SMOKE_COLLECTION", "eos_child_vector_smoke")
 
@@ -515,9 +565,14 @@ func main() {
 				"--dataset", dataset,
 				"--quantizer-seed", strconv.FormatInt(seed, 10),
 				"--metrics-json", metricsPath,
+				"--index-type", indexType,
+				"--vector-storage", vectorStorage,
 			}
 			if quantizedOnly {
 				args = append(args, "--quantized-only")
+			}
+			if rebuildIndex {
+				args = append(args, "--rebuild-index")
 			}
 			if overfetchIndex > 0 {
 				args = append(args, "--reuse-db")
@@ -534,6 +589,8 @@ func main() {
 			rows = append(rows, summaryRow{
 				Bits:                         metrics.Bits,
 				OverfetchChildren:            metrics.OverfetchChildren,
+				IndexType:                    metrics.IndexType,
+				VectorStorage:                metrics.VectorStorage,
 				NDCGAt10:                     metrics.Quality.NDCGAt10,
 				RecallAt100:                  metrics.Quality.RecallAt100,
 				VectorPayloadStorageMultiple: metrics.VectorPayloadStorageMultiple,
@@ -542,6 +599,7 @@ func main() {
 				QuantizedChildBytes:          metrics.QuantizedChildBytes,
 				DBBytesAfterClose:            metrics.DBBytesAfterClose,
 				LoadSeconds:                  metrics.LoadSeconds,
+				RebuildSeconds:               metrics.RebuildSeconds,
 				SearchSeconds:                metrics.SearchSeconds,
 				P50MS:                        metrics.SearchLatency.P50MS,
 				P95MS:                        metrics.SearchLatency.P95MS,
@@ -578,6 +636,9 @@ func main() {
 		Bits:              bitsValue,
 		QuantizerSeed:     seed,
 		QuantizedOnly:     quantizedOnly,
+		IndexType:         indexType,
+		VectorStorage:     vectorStorage,
+		RebuildIndex:      rebuildIndex,
 		OverfetchChildren: overfetchValue,
 		OverfetchValues:   overfetchValues,
 		TopKParents:       topParents,
@@ -596,7 +657,8 @@ func main() {
 			fmt.Sprintf("optional recall@100 floor %.6f; disabled when 0", minRecall),
 		},
 		Caveats: []string{
-			"Local flat CorkScrewDB API smoke only: PutVector/SearchVector, not remote mode, federation, or HNSW.",
+			"Local CorkScrewDB API smoke only: PutVector/SearchVector, not remote mode or federation.",
+			"HNSW runs use raw vector storage; quantized_only persistence is supported only for local flat search.",
 			"Default generated inputs are tiny synthetic text-rendered time-series windows, not a model-quality benchmark.",
 			"Storage gates use quantized vector payload accounting by default; DB directory multiples are recorded but not gated because tiny DB overhead dominates.",
 			"The run fails if a local CorkScrewDB checkout is missing instead of pulling an unknown network dependency.",
@@ -615,13 +677,16 @@ func main() {
 	fmt.Printf("\nsummary_tsv: %s\n", summaryTSV)
 	fmt.Printf("manifest: %s\n", manifestJSON)
 	for _, row := range rows {
-		fmt.Printf("q%d overfetch%d: ndcg@10=%.6f recall@100=%.6f vector_payload_multiple=%.6fx db_dir_multiple=%.6fx p95=%.6fms\n",
+		fmt.Printf("q%d overfetch%d %s/%s: ndcg@10=%.6f recall@100=%.6f vector_payload_multiple=%.6fx db_dir_multiple=%.6fx rebuild=%.6fs p95=%.6fms\n",
 			row.Bits,
 			row.OverfetchChildren,
+			row.IndexType,
+			row.VectorStorage,
 			row.NDCGAt10,
 			row.RecallAt100,
 			row.VectorPayloadStorageMultiple,
 			row.DBDirectoryStorageMultiple,
+			row.RebuildSeconds,
 			row.P95MS)
 	}
 }
@@ -714,6 +779,10 @@ type smokeMetrics struct {
 	Quality                      qualityMetrics ` + "`json:\"quality\"`" + `
 	QuantizerSeed                int64          ` + "`json:\"quantizer_seed\"`" + `
 	QuantizedOnly                bool           ` + "`json:\"quantized_only\"`" + `
+	IndexType                    string         ` + "`json:\"index_type\"`" + `
+	VectorStorage                string         ` + "`json:\"vector_storage\"`" + `
+	RebuildIndex                 bool           ` + "`json:\"rebuild_index\"`" + `
+	RebuildSeconds               float64        ` + "`json:\"rebuild_seconds\"`" + `
 }
 
 type childVector struct {
@@ -743,6 +812,9 @@ func main() {
 		seed        = flag.Int64("quantizer-seed", 0, "CorkScrewDB quantizer seed")
 		quantOnly   = flag.Bool("quantized-only", false, "store only quantized vector payloads")
 		reuseDB     = flag.Bool("reuse-db", false, "reuse an existing DB and skip deletion/inserts")
+		indexType   = flag.String("index-type", "flat", "CorkScrewDB index type: flat or hnsw")
+		vectorStore = flag.String("vector-storage", "", "CorkScrewDB vector storage: quantized_only or raw")
+		rebuildIdx  = flag.Bool("rebuild-index", false, "rebuild the collection index after inserts")
 	)
 	flag.Parse()
 
@@ -751,6 +823,27 @@ func main() {
 	}
 	if *overfetch < *topParents {
 		fatalf("--overfetch must be >= --top-parents")
+	}
+	*indexType = strings.ToLower(strings.TrimSpace(*indexType))
+	if *indexType != "flat" && *indexType != "hnsw" {
+		fatalf("--index-type must be flat or hnsw, got %q", *indexType)
+	}
+	*vectorStore = strings.ToLower(strings.TrimSpace(*vectorStore))
+	if *vectorStore == "" {
+		if *quantOnly {
+			*vectorStore = "quantized_only"
+		} else {
+			*vectorStore = "raw"
+		}
+	}
+	if *vectorStore != "quantized_only" && *vectorStore != "raw" {
+		fatalf("--vector-storage must be quantized_only or raw, got %q", *vectorStore)
+	}
+	if *vectorStore == "quantized_only" {
+		*quantOnly = true
+	}
+	if *indexType == "hnsw" && *quantOnly {
+		fatalf("--index-type=hnsw requires --vector-storage=raw because CorkScrewDB rejects HNSW with quantized_only persistence")
 	}
 	if !*reuseDB {
 		if err := os.RemoveAll(*dbPath); err != nil {
@@ -782,8 +875,13 @@ func main() {
 	if *seed != 0 {
 		options = append(options, corkscrewdb.WithQuantizerSeed(*seed))
 	}
+	if *indexType == "hnsw" && *reuseDB {
+		options = append(options, corkscrewdb.WithIndexType(corkscrewdb.IndexHNSW))
+	}
 	if *quantOnly {
 		options = append(options, corkscrewdb.WithQuantizedOnlyPersistence())
+	} else if *vectorStore == "raw" {
+		options = append(options, corkscrewdb.WithVectorStorage(corkscrewdb.VectorStorageRaw))
 	}
 	coll := db.Collection(*collection, options...)
 	loadStart := time.Now()
@@ -803,6 +901,23 @@ func main() {
 	loadSeconds := time.Since(loadStart).Seconds()
 	if *reuseDB {
 		loadSeconds = 0
+	}
+	rebuildSeconds := 0.0
+	if *rebuildIdx && !*reuseDB {
+		rebuildStart := time.Now()
+		switch *indexType {
+		case "hnsw":
+			if err := coll.RebuildIndex(corkscrewdb.IndexHNSW); err != nil {
+				_ = db.Close()
+				fatalf("rebuild hnsw index: %v", err)
+			}
+		case "flat":
+			if err := coll.RebuildIndex(corkscrewdb.IndexFlat); err != nil {
+				_ = db.Close()
+				fatalf("rebuild flat index: %v", err)
+			}
+		}
+		rebuildSeconds = time.Since(rebuildStart).Seconds()
 	}
 
 	var totals qualityMetrics
@@ -868,6 +983,10 @@ func main() {
 		Quality:                      totals,
 		QuantizerSeed:                *seed,
 		QuantizedOnly:                *quantOnly,
+		IndexType:                    *indexType,
+		VectorStorage:                *vectorStore,
+		RebuildIndex:                 *rebuildIdx,
+		RebuildSeconds:               rebuildSeconds,
 	}
 	data, err := json.MarshalIndent(metrics, "", "  ")
 	if err != nil {
