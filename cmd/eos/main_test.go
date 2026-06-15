@@ -320,8 +320,9 @@ func TestRunPlanMultiVectorStorageWritesTSVAndJSON(t *testing.T) {
 	})
 	for _, want := range []string{
 		"dim\tbaseline_dim\tbits\tobjects\tvectors_per_object\tdense_parent_bytes",
-		"128\t3072\t2\t1000\t1\t12288\t12288000\t12288\t12288000\t36\tnone\t0\t36\t36000\t341.333333\t341.333333\t341\ttrue",
-		"128\t3072\t4\t1000\t16\t12288\t12288000\t12288\t12288000\t68\tnone\t0\t68\t1088000\t180.705882\t11.294118\t180\ttrue",
+		"quantized_vector_bytes\tvector_overhead_bytes\tdense_vector_storage_bytes\tquantized_vector_storage_bytes\ttotal_quantized_bytes",
+		"128\t3072\t2\t1000\t1\t12288\t12288000\t12288\t12288000\t36\tnone\t0\t36\t0\t12288\t36\t36000\t341.333333\t341.333333\t341\ttrue",
+		"128\t3072\t4\t1000\t16\t12288\t12288000\t12288\t12288000\t68\tnone\t0\t68\t0\t12288\t68\t1088000\t180.705882\t11.294118\t180\ttrue",
 		"json: " + jsonPath,
 		"summary: rows=4 dim=128 baseline_dim=3072 objects=1000 sidecar_storage=none",
 	} {
@@ -343,8 +344,63 @@ func TestRunPlanMultiVectorStorageWritesTSVAndJSON(t *testing.T) {
 	if plan.Config.BaselineDim != 3072 || plan.Rows[0].BaselineDim != 3072 {
 		t.Fatalf("baseline dim = config:%d row:%d", plan.Config.BaselineDim, plan.Rows[0].BaselineDim)
 	}
+	if plan.Config.VectorOverheadBytes != 0 || plan.Rows[0].VectorOverheadBytes != 0 {
+		t.Fatalf("vector overhead = config:%d row:%d", plan.Config.VectorOverheadBytes, plan.Rows[0].VectorOverheadBytes)
+	}
 	if plan.Rows[0].VectorsThatFitInOneDenseVector != 341 {
 		t.Fatalf("vectors_that_fit = %d", plan.Rows[0].VectorsThatFitInOneDenseVector)
+	}
+}
+
+func TestRunPlanMultiVectorStorageAccountsForVectorOverhead(t *testing.T) {
+	jsonPath := filepath.Join(t.TempDir(), "multivector-storage-overhead.json")
+	output := captureRunOutput(t, []string{
+		"plan-multivector-storage",
+		"--dim", "128",
+		"--baseline-dim", "3072",
+		"--bits", "2",
+		"--vectors-per-object", "64,128,256",
+		"--objects", "1000",
+		"--vector-overhead-bytes", "32",
+		"--json", jsonPath,
+	})
+	for _, want := range []string{
+		"128\t3072\t2\t1000\t64\t12288\t12320000\t12288\t12320000\t36\tnone\t0\t36\t32\t12320\t68\t4352000\t181.176471\t2.830882\t181\ttrue\t0.353247",
+		"128\t3072\t2\t1000\t128\t12288\t12320000\t12288\t12320000\t36\tnone\t0\t36\t32\t12320\t68\t8704000\t181.176471\t1.415441\t181\ttrue\t0.706494",
+		"128\t3072\t2\t1000\t256\t12288\t12320000\t12288\t12320000\t36\tnone\t0\t36\t32\t12320\t68\t17408000\t181.176471\t0.707721\t181\tfalse\t1.412987",
+		"json: " + jsonPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("plan-multivector-storage output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatalf("read json: %v", err)
+	}
+	var plan eosruntime.MultiVectorStoragePlan
+	if err := json.Unmarshal(data, &plan); err != nil {
+		t.Fatalf("decode json: %v\n%s", err, data)
+	}
+	row := plan.Rows[0]
+	if plan.Config.VectorOverheadBytes != 32 || row.VectorOverheadBytes != 32 {
+		t.Fatalf("vector overhead = config:%d row:%d", plan.Config.VectorOverheadBytes, row.VectorOverheadBytes)
+	}
+	if row.DenseVectorStorageBytes != 12320 || row.QuantizedVectorStorageBytes != 68 {
+		t.Fatalf("storage bytes = dense:%d quantized:%d", row.DenseVectorStorageBytes, row.QuantizedVectorStorageBytes)
+	}
+}
+
+func TestRunPlanMultiVectorStorageRejectsNegativeVectorOverhead(t *testing.T) {
+	_, err := captureRunOutputAndError(t, []string{
+		"plan-multivector-storage",
+		"--vector-overhead-bytes", "-1",
+	})
+	if err == nil {
+		t.Fatal("plan-multivector-storage succeeded with negative overhead")
+	}
+	if !strings.Contains(err.Error(), "vector-overhead-bytes must be non-negative") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

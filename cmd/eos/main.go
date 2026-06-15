@@ -2124,12 +2124,16 @@ func runPlanMultiVectorStorage(args []string) error {
 	objects := fs.Int("objects", 1, "parent object count")
 	vectorsPerObjectRaw := fs.String("vectors-per-object", "1,16,64,128", "comma-separated quantized child vectors per parent object")
 	sidecarStorage := fs.String("sidecar-storage", eosruntime.MultiVectorSidecarNone, "optional per-child sidecar storage: none, fp16, or dense")
+	vectorOverheadBytes := fs.Int64("vector-overhead-bytes", 0, "per stored vector/index-entry overhead bytes")
 	jsonPath := fs.String("json", "", "write machine-readable plan JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("usage: eos plan-multivector-storage [flags]")
+	}
+	if *vectorOverheadBytes < 0 {
+		return fmt.Errorf("vector-overhead-bytes must be non-negative")
 	}
 	bits, err := parsePositiveIntCSV(*bitsRaw, "bits")
 	if err != nil {
@@ -2140,12 +2144,13 @@ func runPlanMultiVectorStorage(args []string) error {
 		return err
 	}
 	plan, err := eosruntime.PlanMultiVectorStorage(eosruntime.MultiVectorStoragePlanInput{
-		Dim:              *dim,
-		BaselineDim:      *baselineDim,
-		Bits:             bits,
-		Objects:          *objects,
-		VectorsPerObject: vectorsPerObject,
-		SidecarStorage:   *sidecarStorage,
+		Dim:                 *dim,
+		BaselineDim:         *baselineDim,
+		Bits:                bits,
+		Objects:             *objects,
+		VectorsPerObject:    vectorsPerObject,
+		SidecarStorage:      *sidecarStorage,
+		VectorOverheadBytes: *vectorOverheadBytes,
 	})
 	if err != nil {
 		return err
@@ -2168,9 +2173,9 @@ func runPlanMultiVectorStorage(args []string) error {
 }
 
 func printMultiVectorStoragePlanTSV(plan eosruntime.MultiVectorStoragePlan) {
-	fmt.Println("dim\tbaseline_dim\tbits\tobjects\tvectors_per_object\tdense_parent_bytes\tdense_parent_total_bytes\tdense_baseline_bytes\tdense_baseline_total_bytes\tquantized_payload_bytes\tsidecar_storage\tsidecar_bytes_per_vector\tquantized_vector_bytes\ttotal_quantized_bytes\tdense_to_quantized_vector_ratio\ttotal_compression_ratio\tvectors_that_fit_in_one_dense_vector\tfits_in_one_dense_vector_storage\tstorage_multiple_of_dense_parent_cost")
+	fmt.Println("dim\tbaseline_dim\tbits\tobjects\tvectors_per_object\tdense_parent_bytes\tdense_parent_total_bytes\tdense_baseline_bytes\tdense_baseline_total_bytes\tquantized_payload_bytes\tsidecar_storage\tsidecar_bytes_per_vector\tquantized_vector_bytes\tvector_overhead_bytes\tdense_vector_storage_bytes\tquantized_vector_storage_bytes\ttotal_quantized_bytes\tdense_to_quantized_vector_ratio\ttotal_compression_ratio\tvectors_that_fit_in_one_dense_vector\tfits_in_one_dense_vector_storage\tstorage_multiple_of_dense_parent_cost")
 	for _, row := range plan.Rows {
-		fmt.Printf("%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%.6f\t%.6f\t%d\t%t\t%.6f\n",
+		fmt.Printf("%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%.6f\t%.6f\t%d\t%t\t%.6f\n",
 			row.Dim,
 			row.BaselineDim,
 			row.Bits,
@@ -2184,6 +2189,9 @@ func printMultiVectorStoragePlanTSV(plan eosruntime.MultiVectorStoragePlan) {
 			row.SidecarStorage,
 			row.SidecarBytesPerVector,
 			row.QuantizedVectorBytes,
+			row.VectorOverheadBytes,
+			row.DenseVectorStorageBytes,
+			row.QuantizedVectorStorageBytes,
 			row.TotalQuantizedBytes,
 			row.DenseToQuantizedVectorRatio,
 			row.TotalCompressionRatio,

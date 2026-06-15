@@ -15,12 +15,13 @@ const (
 )
 
 type MultiVectorStoragePlanInput struct {
-	Dim              int
-	BaselineDim      int
-	Bits             []int
-	Objects          int
-	VectorsPerObject []int
-	SidecarStorage   string
+	Dim                 int
+	BaselineDim         int
+	Bits                []int
+	Objects             int
+	VectorsPerObject    []int
+	SidecarStorage      string
+	VectorOverheadBytes int64
 }
 
 type MultiVectorStoragePlan struct {
@@ -30,12 +31,13 @@ type MultiVectorStoragePlan struct {
 }
 
 type MultiVectorStoragePlanConfig struct {
-	Dim              int    `json:"dim"`
-	BaselineDim      int    `json:"baseline_dim"`
-	Bits             []int  `json:"bits"`
-	Objects          int    `json:"objects"`
-	VectorsPerObject []int  `json:"vectors_per_object"`
-	SidecarStorage   string `json:"sidecar_storage"`
+	Dim                 int    `json:"dim"`
+	BaselineDim         int    `json:"baseline_dim"`
+	Bits                []int  `json:"bits"`
+	Objects             int    `json:"objects"`
+	VectorsPerObject    []int  `json:"vectors_per_object"`
+	SidecarStorage      string `json:"sidecar_storage"`
+	VectorOverheadBytes int64  `json:"vector_overhead_bytes"`
 }
 
 type MultiVectorStoragePlanRow struct {
@@ -52,6 +54,9 @@ type MultiVectorStoragePlanRow struct {
 	SidecarStorage                   string  `json:"sidecar_storage"`
 	SidecarBytesPerVector            int64   `json:"sidecar_bytes_per_vector"`
 	QuantizedVectorBytes             int64   `json:"quantized_vector_bytes"`
+	VectorOverheadBytes              int64   `json:"vector_overhead_bytes"`
+	DenseVectorStorageBytes          int64   `json:"dense_vector_storage_bytes"`
+	QuantizedVectorStorageBytes      int64   `json:"quantized_vector_storage_bytes"`
 	TotalQuantizedBytes              int64   `json:"total_quantized_bytes"`
 	DenseToQuantizedVectorRatio      float64 `json:"dense_to_quantized_vector_ratio"`
 	TotalCompressionRatio            float64 `json:"total_compression_ratio"`
@@ -74,6 +79,9 @@ func PlanMultiVectorStorage(in MultiVectorStoragePlanInput) (MultiVectorStorageP
 	if in.Objects <= 0 {
 		return MultiVectorStoragePlan{}, fmt.Errorf("objects must be positive")
 	}
+	if in.VectorOverheadBytes < 0 {
+		return MultiVectorStoragePlan{}, fmt.Errorf("vector overhead bytes must be non-negative")
+	}
 	bits := normalizeTurboQuantRetrievalBits(in.Bits)
 	if err := validateTurboQuantRetrievalBits(bits); err != nil {
 		return MultiVectorStoragePlan{}, err
@@ -93,23 +101,26 @@ func PlanMultiVectorStorage(in MultiVectorStoragePlanInput) (MultiVectorStorageP
 	plan := MultiVectorStoragePlan{
 		Schema: MultiVectorStoragePlanSchema,
 		Config: MultiVectorStoragePlanConfig{
-			Dim:              in.Dim,
-			BaselineDim:      baselineDim,
-			Bits:             append([]int(nil), bits...),
-			Objects:          in.Objects,
-			VectorsPerObject: append([]int(nil), vectorsPerObject...),
-			SidecarStorage:   sidecarStorage,
+			Dim:                 in.Dim,
+			BaselineDim:         baselineDim,
+			Bits:                append([]int(nil), bits...),
+			Objects:             in.Objects,
+			VectorsPerObject:    append([]int(nil), vectorsPerObject...),
+			SidecarStorage:      sidecarStorage,
+			VectorOverheadBytes: in.VectorOverheadBytes,
 		},
 	}
 	denseBaselineBytes := int64(baselineDim) * 4
-	denseBaselineTotalBytes := denseBaselineBytes * int64(in.Objects)
+	denseVectorStorageBytes := denseBaselineBytes + in.VectorOverheadBytes
+	denseBaselineTotalBytes := denseVectorStorageBytes * int64(in.Objects)
 	sidecarBytesPerVector := multiVectorSidecarBytes(in.Dim, sidecarStorage)
 	for _, bitWidth := range bits {
 		mseBytes, signBytes := turboquant.IPQuantizedSizes(in.Dim, bitWidth)
 		quantizedPayloadBytes := int64(mseBytes + signBytes + 4)
 		quantizedVectorBytes := quantizedPayloadBytes + sidecarBytesPerVector
+		quantizedVectorStorageBytes := quantizedVectorBytes + in.VectorOverheadBytes
 		for _, count := range vectorsPerObject {
-			totalQuantizedBytes := int64(in.Objects) * int64(count) * quantizedVectorBytes
+			totalQuantizedBytes := int64(in.Objects) * int64(count) * quantizedVectorStorageBytes
 			row := MultiVectorStoragePlanRow{
 				Dim:                              in.Dim,
 				BaselineDim:                      baselineDim,
@@ -124,12 +135,15 @@ func PlanMultiVectorStorage(in MultiVectorStoragePlanInput) (MultiVectorStorageP
 				SidecarStorage:                   sidecarStorage,
 				SidecarBytesPerVector:            sidecarBytesPerVector,
 				QuantizedVectorBytes:             quantizedVectorBytes,
+				VectorOverheadBytes:              in.VectorOverheadBytes,
+				DenseVectorStorageBytes:          denseVectorStorageBytes,
+				QuantizedVectorStorageBytes:      quantizedVectorStorageBytes,
 				TotalQuantizedBytes:              totalQuantizedBytes,
-				DenseToQuantizedVectorRatio:      ratioFloat64(float64(denseBaselineBytes), float64(quantizedVectorBytes)),
+				DenseToQuantizedVectorRatio:      ratioFloat64(float64(denseVectorStorageBytes), float64(quantizedVectorStorageBytes)),
 				TotalCompressionRatio:            ratioFloat64(float64(denseBaselineTotalBytes), float64(totalQuantizedBytes)),
-				VectorsThatFitInOneDenseVector:   denseBaselineBytes / quantizedVectorBytes,
-				FitsInOneDenseVectorStorage:      int64(count)*quantizedVectorBytes <= denseBaselineBytes,
-				StorageMultipleOfDenseParentCost: ratioFloat64(float64(int64(count)*quantizedVectorBytes), float64(denseBaselineBytes)),
+				VectorsThatFitInOneDenseVector:   denseVectorStorageBytes / quantizedVectorStorageBytes,
+				FitsInOneDenseVectorStorage:      int64(count)*quantizedVectorStorageBytes <= denseVectorStorageBytes,
+				StorageMultipleOfDenseParentCost: ratioFloat64(float64(int64(count)*quantizedVectorStorageBytes), float64(denseVectorStorageBytes)),
 			}
 			plan.Rows = append(plan.Rows, row)
 		}

@@ -31,6 +31,9 @@ func TestPlanMultiVectorStorageUsesTurboQuantIPPayloadBytes(t *testing.T) {
 	if row.QuantizedPayloadBytes != 36 || row.QuantizedVectorBytes != 36 {
 		t.Fatalf("q2 bytes = payload:%d vector:%d", row.QuantizedPayloadBytes, row.QuantizedVectorBytes)
 	}
+	if row.VectorOverheadBytes != 0 || row.DenseVectorStorageBytes != 512 || row.QuantizedVectorStorageBytes != 36 {
+		t.Fatalf("storage bytes = overhead:%d dense:%d quantized:%d", row.VectorOverheadBytes, row.DenseVectorStorageBytes, row.QuantizedVectorStorageBytes)
+	}
 	if row.TotalQuantizedBytes != 36000 {
 		t.Fatalf("total quantized bytes = %d", row.TotalQuantizedBytes)
 	}
@@ -94,5 +97,53 @@ func TestPlanMultiVectorStorageUsesLargerBaselineDimForDenseBudget(t *testing.T)
 	}
 	if row.StorageMultipleOfDenseParentCost < 0.3749 || row.StorageMultipleOfDenseParentCost > 0.3751 {
 		t.Fatalf("storage multiple = %.6f", row.StorageMultipleOfDenseParentCost)
+	}
+}
+
+func TestPlanMultiVectorStorageAccountsForPerVectorOverhead(t *testing.T) {
+	plan, err := PlanMultiVectorStorage(MultiVectorStoragePlanInput{
+		Dim:                 128,
+		BaselineDim:         3072,
+		Bits:                []int{2},
+		Objects:             1000,
+		VectorsPerObject:    []int{64, 128, 256},
+		VectorOverheadBytes: 32,
+	})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if plan.Config.VectorOverheadBytes != 32 {
+		t.Fatalf("config overhead = %d", plan.Config.VectorOverheadBytes)
+	}
+	row := plan.Rows[0]
+	if row.QuantizedPayloadBytes != 36 || row.QuantizedVectorBytes != 36 {
+		t.Fatalf("raw q2 bytes = payload:%d vector:%d", row.QuantizedPayloadBytes, row.QuantizedVectorBytes)
+	}
+	if row.VectorOverheadBytes != 32 || row.DenseVectorStorageBytes != 12320 || row.QuantizedVectorStorageBytes != 68 {
+		t.Fatalf("storage bytes = overhead:%d dense:%d quantized:%d", row.VectorOverheadBytes, row.DenseVectorStorageBytes, row.QuantizedVectorStorageBytes)
+	}
+	if row.DenseBaselineTotalBytes != 12320000 || row.TotalQuantizedBytes != 4352000 {
+		t.Fatalf("totals = dense:%d quantized:%d", row.DenseBaselineTotalBytes, row.TotalQuantizedBytes)
+	}
+	if row.VectorsThatFitInOneDenseVector != 181 || !row.FitsInOneDenseVectorStorage {
+		t.Fatalf("fit = %d fits=%t", row.VectorsThatFitInOneDenseVector, row.FitsInOneDenseVectorStorage)
+	}
+	if !plan.Rows[1].FitsInOneDenseVectorStorage {
+		t.Fatalf("128 q2 child vectors with 32-byte overhead should fit in one dense baseline storage budget")
+	}
+	if plan.Rows[2].StorageMultipleOfDenseParentCost < 1.4129 || plan.Rows[2].StorageMultipleOfDenseParentCost > 1.4130 {
+		t.Fatalf("storage multiple = %.6f", plan.Rows[2].StorageMultipleOfDenseParentCost)
+	}
+}
+
+func TestPlanMultiVectorStorageRejectsNegativePerVectorOverhead(t *testing.T) {
+	_, err := PlanMultiVectorStorage(MultiVectorStoragePlanInput{
+		Dim:                 128,
+		Bits:                []int{2},
+		Objects:             1,
+		VectorOverheadBytes: -1,
+	})
+	if err == nil {
+		t.Fatal("plan succeeded with negative vector overhead")
 	}
 }
