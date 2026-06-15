@@ -159,6 +159,8 @@ func run(args []string) error {
 		return runSampleCorpusNegatives(args[1:])
 	case "plan-sparse-attention":
 		return runPlanSparseAttention(args[1:])
+	case "plan-multivector-storage":
+		return runPlanMultiVectorStorage(args[1:])
 	case "train-embed":
 		return runTrainEmbed(args[1:])
 	case "train-corpus":
@@ -1833,6 +1835,80 @@ func runPlanSparseAttention(args []string) error {
 		return fmt.Errorf("sparse attention plan gate failed: %s", strings.Join(report.Gate.FailureReasons, "; "))
 	}
 	return nil
+}
+
+func runPlanMultiVectorStorage(args []string) error {
+	fs := flag.NewFlagSet("plan-multivector-storage", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	dim := fs.Int("dim", 128, "embedding dimension")
+	bitsRaw := fs.String("bits", "2,4,8", "comma-separated TurboQuant IP bit widths; supported: 2..8")
+	objects := fs.Int("objects", 1, "parent object count")
+	vectorsPerObjectRaw := fs.String("vectors-per-object", "1,16,64,128", "comma-separated quantized child vectors per parent object")
+	sidecarStorage := fs.String("sidecar-storage", eosruntime.MultiVectorSidecarNone, "optional per-child sidecar storage: none, fp16, or dense")
+	jsonPath := fs.String("json", "", "write machine-readable plan JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: eos plan-multivector-storage [flags]")
+	}
+	bits, err := parsePositiveIntCSV(*bitsRaw, "bits")
+	if err != nil {
+		return fmt.Errorf("bits: %w", err)
+	}
+	vectorsPerObject, err := parsePositiveIntCSV(*vectorsPerObjectRaw, "vectors-per-object")
+	if err != nil {
+		return err
+	}
+	plan, err := eosruntime.PlanMultiVectorStorage(eosruntime.MultiVectorStoragePlanInput{
+		Dim:              *dim,
+		Bits:             bits,
+		Objects:          *objects,
+		VectorsPerObject: vectorsPerObject,
+		SidecarStorage:   *sidecarStorage,
+	})
+	if err != nil {
+		return err
+	}
+	printMultiVectorStoragePlanTSV(plan)
+	if *jsonPath != "" {
+		data, err := json.MarshalIndent(plan, "", "  ")
+		if err != nil {
+			return err
+		}
+		data = append(data, '\n')
+		if err := os.WriteFile(*jsonPath, data, 0o644); err != nil {
+			return err
+		}
+		fmt.Printf("json: %s\n", *jsonPath)
+	}
+	fmt.Printf("summary: rows=%d dim=%d objects=%d sidecar_storage=%s\n",
+		len(plan.Rows), plan.Config.Dim, plan.Config.Objects, plan.Config.SidecarStorage)
+	return nil
+}
+
+func printMultiVectorStoragePlanTSV(plan eosruntime.MultiVectorStoragePlan) {
+	fmt.Println("dim\tbits\tobjects\tvectors_per_object\tdense_parent_bytes\tdense_parent_total_bytes\tquantized_payload_bytes\tsidecar_storage\tsidecar_bytes_per_vector\tquantized_vector_bytes\ttotal_quantized_bytes\tdense_to_quantized_vector_ratio\ttotal_compression_ratio\tvectors_that_fit_in_one_dense_vector\tfits_in_one_dense_vector_storage\tstorage_multiple_of_dense_parent_cost")
+	for _, row := range plan.Rows {
+		fmt.Printf("%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%.6f\t%.6f\t%d\t%t\t%.6f\n",
+			row.Dim,
+			row.Bits,
+			row.Objects,
+			row.VectorsPerObject,
+			row.DenseParentBytes,
+			row.DenseParentTotalBytes,
+			row.QuantizedPayloadBytes,
+			row.SidecarStorage,
+			row.SidecarBytesPerVector,
+			row.QuantizedVectorBytes,
+			row.TotalQuantizedBytes,
+			row.DenseToQuantizedVectorRatio,
+			row.TotalCompressionRatio,
+			row.VectorsThatFitInOneDenseVector,
+			row.FitsInOneDenseVectorStorage,
+			row.StorageMultipleOfDenseParentCost,
+		)
+	}
 }
 
 func parsePositiveIntCSV(raw, label string) ([]int, error) {
@@ -5077,6 +5153,7 @@ func printUsage() {
 	fmt.Println("  eos relabel-teacher-negatives [flags] <scored-hard-negatives.jsonl> <output.jsonl>")
 	fmt.Println("  eos sample-corpus-negatives [flags] <beir-dataset-dir> <output.jsonl>")
 	fmt.Println("  eos plan-sparse-attention [flags]")
+	fmt.Println("  eos plan-multivector-storage [flags]")
 	fmt.Println("  eos init-model [flags] <artifact.mll>")
 	fmt.Println("  eos init-mirage [flags] <artifact.mll>")
 	fmt.Println("  eos init-train [flags] <artifact.mll>")
@@ -5117,6 +5194,7 @@ func printUsage() {
 	fmt.Println("relabel-teacher-negatives promotes teacher-confirmed-relevant mined negatives to positive rows, keeps teacher-confirmed-irrelevant candidates as negatives, and drops the ambiguous band.")
 	fmt.Println("sample-corpus-negatives emits random non-qrel corpus documents per query for teacher scoring into a true-negative pool.")
 	fmt.Println("plan-sparse-attention preflights routed sparse attention plus logical TurboQuant K/V memory budgets before GPU runs.")
+	fmt.Println("plan-multivector-storage estimates how many TurboQuant child vectors per parent fit in one dense fp32 parent-vector budget.")
 	fmt.Println("init-model creates the Eos-owned default quantized embedding training package.")
 	fmt.Println("init-mirage creates the Eos-owned Mirage Image v1 host-reference artifact.")
 	fmt.Println("init-train creates a native training package next to an artifact.")

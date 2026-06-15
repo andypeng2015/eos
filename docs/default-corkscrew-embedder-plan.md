@@ -164,6 +164,22 @@ Current local Eos TurboQuant result: q4/fp16 sidecar rerank at overfetch250 is t
 
 Keep q8/fp16 sidecar rerank at overfetch125 as the lower-risk, lower-rerank-cost fallback: `turboquant_ip_b8_overfetch125_fp16_rerank`, total compression `1.326425x`, evidence in `runs/eos-fp16-overfetch125-gate-20260614T000000Z/`.
 
+## Multi-Vector Storage Planning
+
+The direct multi-vector lane is a storage/accounting thesis, not a retrieval-quality claim: one parent CorkScrewDB object can keep many quantized child vectors for windows, events, spans, or time-series observations while staying near the byte budget of one dense fp32 parent vector. Measure that budget with:
+
+```bash
+go run ./cmd/eos plan-multivector-storage \
+  --dim 128 \
+  --bits 2,4,8 \
+  --vectors-per-object 1,16,64,128 \
+  --objects 1000
+```
+
+The TSV/JSON rows report `dense_parent_bytes`, `quantized_vector_bytes`, `total_quantized_bytes`, compression ratios, and `vectors_that_fit_in_one_dense_vector`. For 128-dimensional direct TurboQuant IP rows, the planner shows the order-of-magnitude lane: q2 stores a child vector in 36 bytes, so 14 q2 child vectors fit inside one 512-byte dense fp32 parent-vector budget before object/index metadata. That makes hundred-vector-per-object designs plausible only when the product can spend several dense-vector equivalents per parent or when the parent replaces coarser chunk storage with many finer windows.
+
+Keep this separate from q4/fp16 rerank. `--sidecar-storage fp16` intentionally adds a per-child fp16 sidecar and shows why sidecars destroy the high-child-count storage argument: the sidecar is useful for quality-preserving two-stage rerank, but it is not the direct hundred-child storage mode.
+
 ## Data And Teacher Growth
 
 Grow the training/evaluation signal before increasing model size:

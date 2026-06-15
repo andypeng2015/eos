@@ -205,6 +205,18 @@ Gate:
 - quality regression is measured against dense/f16 candidate
 - package size and encode throughput improve enough to justify regression
 
+Storage-accounting harness:
+
+```bash
+go run ./cmd/eos plan-multivector-storage \
+  --dim 128 \
+  --bits 2,4,8 \
+  --vectors-per-object 1,16,64,128 \
+  --objects 1000
+```
+
+Use this for the CorkScrewDB direct multi-vector lane: many quantized child vectors under one parent object for windows, spans, or time-series slices. It measures byte budgets only; retrieval quality still needs `eval-retrieval-turboquant` or a CorkScrewDB search harness. Keep direct child-vector storage separate from q4/fp16 rerank sidecars, because a per-child fp16 sidecar is a quality-preserving rerank option rather than the hundred-vector storage lane.
+
 ## Code Lanes To Unlock
 
 These are likely necessary for true best-in-class local performance.

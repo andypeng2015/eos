@@ -307,6 +307,43 @@ func TestWriteTurboQuantRetrievalMetricsTSVIncludesLatencyColumns(t *testing.T) 
 	}
 }
 
+func TestRunPlanMultiVectorStorageWritesTSVAndJSON(t *testing.T) {
+	jsonPath := filepath.Join(t.TempDir(), "multivector-storage.json")
+	output := captureRunOutput(t, []string{
+		"plan-multivector-storage",
+		"--dim", "128",
+		"--bits", "2,4",
+		"--vectors-per-object", "1,16",
+		"--objects", "1000",
+		"--json", jsonPath,
+	})
+	for _, want := range []string{
+		"dim\tbits\tobjects\tvectors_per_object\tdense_parent_bytes",
+		"128\t2\t1000\t1\t512\t512000\t36\tnone\t0\t36\t36000\t14.222222\t14.222222\t14\ttrue",
+		"128\t4\t1000\t16\t512\t512000\t68\tnone\t0\t68\t1088000\t7.529412\t0.470588\t7\tfalse",
+		"json: " + jsonPath,
+		"summary: rows=4 dim=128 objects=1000 sidecar_storage=none",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("plan-multivector-storage output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatalf("read json: %v", err)
+	}
+	var plan eosruntime.MultiVectorStoragePlan
+	if err := json.Unmarshal(data, &plan); err != nil {
+		t.Fatalf("decode json: %v\n%s", err, data)
+	}
+	if plan.Schema != eosruntime.MultiVectorStoragePlanSchema || len(plan.Rows) != 4 {
+		t.Fatalf("plan identity = schema:%q rows:%d", plan.Schema, len(plan.Rows))
+	}
+	if plan.Rows[0].VectorsThatFitInOneDenseVector != 14 {
+		t.Fatalf("vectors_that_fit = %d", plan.Rows[0].VectorsThatFitInOneDenseVector)
+	}
+}
+
 func TestRunInitTrainCreatesTrainingPackage(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {

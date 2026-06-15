@@ -164,6 +164,18 @@ The JSON/TSV rows include the dense float32 reference, TurboQuant bit width, nDC
 
 Interpret the metric groups separately for promotion. Quality metrics decide whether the candidate ranks relevant documents well enough: nDCG and MAP capture ordering, precision/hit@k capture first-screen success, and recall@100 captures candidate-pool coverage. Compression metrics decide whether q4/q8 are worth the footprint reduction. Throughput metrics are path-specific: sealed Eos evals can include local encoder time, while cached external-vector rows only measure cache load/scoring and do not represent live provider or external model encoding throughput.
 
+For CorkScrewDB multi-vector and time-series designs, use the storage planner before running quality experiments:
+
+```bash
+go run ./cmd/eos plan-multivector-storage \
+  --dim 128 \
+  --bits 2,4,8 \
+  --vectors-per-object 1,16,64,128 \
+  --objects 1000
+```
+
+This planner answers a different question from `eval-retrieval-turboquant`: how many direct quantized child vectors per parent object fit in the storage cost of one dense fp32 parent vector. The output is TSV by default and optional JSON with fields including `dim`, `bits`, `objects`, `vectors_per_object`, `dense_parent_bytes`, `quantized_vector_bytes`, `total_quantized_bytes`, compression ratios, and `vectors_that_fit_in_one_dense_vector`. The intended lane is direct child vectors for windows, spans, event histories, or per-object time-series slices. Do not enable `--sidecar-storage fp16` for that lane unless the product explicitly accepts the extra storage; fp16 sidecars are for quality-preserving rerank profiles and erase most of the hundred-child storage advantage when attached to every child vector.
+
 For hosted or open external embedders, export BEIR-aligned `doc-vectors.jsonl` and `query-vectors.jsonl` caches and run both `eos eval-retrieval-vectors` and `eos eval-retrieval-vectors-turboquant`. `scripts/export_qwen3_retrieval_vectors.py` is the first provider-boundary exporter for the leading Qwen3 family baseline:
 
 ```bash
