@@ -268,7 +268,8 @@ func TestWriteTurboQuantRetrievalMetricsTSVIncludesLatencyColumns(t *testing.T) 
 				Count: 2,
 				P50MS: 0.1,
 				P95MS: 0.2,
-				MaxMS: 0.3,
+				P99MS: 0.3,
+				MaxMS: 0.4,
 			},
 		},
 		Rows: []eosruntime.TurboQuantRetrievalBitMetrics{{
@@ -283,7 +284,7 @@ func TestWriteTurboQuantRetrievalMetricsTSVIncludesLatencyColumns(t *testing.T) 
 			TotalVectorBytes: 40,
 			TotalCompression: 1.6,
 			ScoresPerSecond:  900,
-			QueryLatency:     eosruntime.RetrievalEvalLatencyMetrics{Count: 2, P50MS: 0.4, P95MS: 0.5, MaxMS: 0.6},
+			QueryLatency:     eosruntime.RetrievalEvalLatencyMetrics{Count: 2, P50MS: 0.5, P95MS: 0.6, P99MS: 0.7, MaxMS: 0.8},
 			RerankScores:     500,
 		}},
 	}
@@ -296,9 +297,9 @@ func TestWriteTurboQuantRetrievalMetricsTSVIncludesLatencyColumns(t *testing.T) 
 	}
 	text := string(data)
 	for _, want := range []string{
-		"query_latency_p50_ms\tquery_latency_p95_ms\tquery_latency_max_ms",
-		"\t0.100000\t0.200000\t0.300000\t",
-		"\t0.400000\t0.500000\t0.600000\t",
+		"query_latency_p50_ms\tquery_latency_p95_ms\tquery_latency_p99_ms\tquery_latency_max_ms",
+		"\t0.100000\t0.200000\t0.300000\t0.400000\t",
+		"\t0.500000\t0.600000\t0.700000\t0.800000\t",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("tsv missing %q\n%s", want, text)

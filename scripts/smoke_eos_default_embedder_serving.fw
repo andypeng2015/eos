@@ -18,6 +18,7 @@ type latencyMetrics struct {
 	Count int     `json:"count"`
 	P50MS float64 `json:"p50_ms"`
 	P95MS float64 `json:"p95_ms"`
+	P99MS float64 `json:"p99_ms"`
 	MaxMS float64 `json:"max_ms"`
 }
 
@@ -211,9 +212,9 @@ func findRow(rows []summaryRow, method string) *summaryRow {
 
 func writeSummaryTSV(path string, rows []summaryRow) error {
 	var b strings.Builder
-	b.WriteString("method\tbits\trerank_overfetch\ttotal_compression_ratio\tndcg_at_10\trecall_at_100\tscores_per_second\trerank_scores\tquery_latency_p50_ms\tquery_latency_p95_ms\tquery_latency_max_ms\n")
+	b.WriteString("method\tbits\trerank_overfetch\ttotal_compression_ratio\tndcg_at_10\trecall_at_100\tscores_per_second\trerank_scores\tquery_latency_p50_ms\tquery_latency_p95_ms\tquery_latency_p99_ms\tquery_latency_max_ms\n")
 	for _, row := range rows {
-		fmt.Fprintf(&b, "%s\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.2f\t%d\t%.6f\t%.6f\t%.6f\n",
+		fmt.Fprintf(&b, "%s\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.2f\t%d\t%.6f\t%.6f\t%.6f\t%.6f\n",
 			row.Method,
 			row.Bits,
 			row.RerankOverfetch,
@@ -224,6 +225,7 @@ func writeSummaryTSV(path string, rows []summaryRow) error {
 			row.RerankScores,
 			row.QueryLatency.P50MS,
 			row.QueryLatency.P95MS,
+			row.QueryLatency.P99MS,
 			row.QueryLatency.MaxMS)
 	}
 	return os.WriteFile(path, []byte(b.String()), 0o644)
@@ -368,8 +370,8 @@ func main() {
 
 	fmt.Printf("summary_tsv: %s\n", summaryTSV)
 	fmt.Printf("manifest: %s\n", manifestJSON)
-	fmt.Printf("selected q4/fp16/250: ndcg@10=%.6f recall@100=%.6f compression=%.6fx p95_ms=%.6f scores/s=%.2f\n",
-		selected.NDCGAt10, selected.RecallAt100, selected.TotalCompressionRatio, selected.QueryLatency.P95MS, selected.ScoresPerSecond)
-	fmt.Printf("fallback q8/fp16/125: ndcg@10=%.6f recall@100=%.6f compression=%.6fx p95_ms=%.6f scores/s=%.2f\n",
-		fallback.NDCGAt10, fallback.RecallAt100, fallback.TotalCompressionRatio, fallback.QueryLatency.P95MS, fallback.ScoresPerSecond)
+	fmt.Printf("selected q4/fp16/250: ndcg@10=%.6f recall@100=%.6f compression=%.6fx p95_ms=%.6f p99_ms=%.6f scores/s=%.2f\n",
+		selected.NDCGAt10, selected.RecallAt100, selected.TotalCompressionRatio, selected.QueryLatency.P95MS, selected.QueryLatency.P99MS, selected.ScoresPerSecond)
+	fmt.Printf("fallback q8/fp16/125: ndcg@10=%.6f recall@100=%.6f compression=%.6fx p95_ms=%.6f p99_ms=%.6f scores/s=%.2f\n",
+		fallback.NDCGAt10, fallback.RecallAt100, fallback.TotalCompressionRatio, fallback.QueryLatency.P95MS, fallback.QueryLatency.P99MS, fallback.ScoresPerSecond)
 }

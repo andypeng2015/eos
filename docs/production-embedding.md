@@ -137,7 +137,7 @@ Use `eos diagnose-train-metrics /path/to/train.metrics.json` to explain backend 
 
 ## TurboQuant Retrieval Gate
 
-Default CorkScrewDB embedder promotion requires a vector-index cost check in addition to dense retrieval quality. The repo-local serving proxy is `scripts/smoke_eos_default_embedder_serving.fw`; it compares the promoted q4/fp16/overfetch250 profile against the q8/fp16/overfetch125 fallback and records p50/p95/max per-query scoring latency:
+Default CorkScrewDB embedder promotion requires a vector-index cost check in addition to dense retrieval quality. The repo-local serving proxy is `scripts/smoke_eos_default_embedder_serving.fw`; it compares the promoted q4/fp16/overfetch250 profile against the q8/fp16/overfetch125 fallback and records p50/p95/p99/max per-query scoring latency:
 
 ```bash
 EOS_REPO_ROOT=$PWD \

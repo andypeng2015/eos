@@ -170,7 +170,7 @@ go run ./cmd/eos eval-retrieval-turboquant \
   /data/manta/datasets/eos-embed-v1/raw/scifact
 ```
 
-The TurboQuant gate embeds the corpus once, records the dense float32 reference nDCG@10/recall@100, then quantizes document vectors with `m31labs.dev/turboquant` IP-preserving quantizers and reports per-bit quality deltas, vector bytes, rerank storage, rerank sidecar bytes, total vector bytes, compression ratio, total compression ratio, docs/s, scores/s, per-query p50/p95/max scoring latency, and optional rerank overfetch/score counts. Use the capped command for smoke/release checks and remove the caps for a full CorkScrewDB-relevant vector-index promotion run.
+The TurboQuant gate embeds the corpus once, records the dense float32 reference nDCG@10/recall@100, then quantizes document vectors with `m31labs.dev/turboquant` IP-preserving quantizers and reports per-bit quality deltas, vector bytes, rerank storage, rerank sidecar bytes, total vector bytes, compression ratio, total compression ratio, docs/s, scores/s, per-query p50/p95/p99/max scoring latency, and optional rerank overfetch/score counts. Use the capped command for smoke/release checks and remove the caps for a full CorkScrewDB-relevant vector-index promotion run.
 
 For the promoted compact default profile, prefer the repo-local serving proxy:
 

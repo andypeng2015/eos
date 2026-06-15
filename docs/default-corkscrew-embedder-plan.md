@@ -145,7 +145,7 @@ Record, per dataset and candidate:
 - q2/q4/q8 quality deltas, especially nDCG@10 and recall@100 deltas against the dense row.
 - Vector bytes, rerank storage, rerank sidecar bytes, total vector bytes, compression ratio, and total compression ratio.
 - Quantization docs/s.
-- Direct IP scores/s, per-query p50/p95/max scoring latency, and rerank overfetch/rerank score counts when rerank rows are enabled.
+- Direct IP scores/s, per-query p50/p95/p99/max scoring latency, and rerank overfetch/rerank score counts when rerank rows are enabled.
 
 Use the quality columns for different failure modes: nDCG and MAP judge ranked relevance, precision/hit@k judge first-screen success, and recall@100 judges candidate-pool coverage for reranking or multi-stage retrieval. Use vector bytes and compression ratio for index-footprint decisions, and throughput columns for the path they actually measure. External vector-cache dense rows measure cache load plus scoring, not live encoder throughput for Qwen, BGE, hosted APIs, or other providers.
 
@@ -180,7 +180,7 @@ Do not promote a default CorkScrewDB embedder until all of these are true:
 - The sealed `.mll` package verifies by SHA256 and package metadata.
 - The baseline matrix has explicit dense, direct TurboQuant, and TurboQuant rerank rows, with missing external rows still visible as `not_scored`.
 - A CorkScrewDB load/index/search smoke has passed with the candidate vectors.
-- q4 and q8 default choices are measured on the same datasets, with quality deltas, vector bytes, compression, docs/s, scores/s, rerank overfetch where applicable, and serving p95 attached.
+- q4 and q8 default choices are measured on the same datasets, with quality deltas, vector bytes, compression, docs/s, scores/s, rerank overfetch where applicable, and serving p50/p95/p99/max attached.
 - The docs name the measured default and avoid unsupported standing claims.
 
 ## Next Actions

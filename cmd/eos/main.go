@@ -920,8 +920,8 @@ func runEvalRetrievalVectorsTurboQuant(args []string) error {
 
 func writeTurboQuantRetrievalMetricsTSV(path string, metrics eosruntime.TurboQuantRetrievalEvalMetrics) error {
 	var b strings.Builder
-	b.WriteString("dataset\trow\tbits\tmethod\trerank_overfetch\trerank_storage\tndcg_at_10\tndcg_at_100\tmrr_at_10\tprecision_at_1\tprecision_at_5\tprecision_at_10\thit_at_1\thit_at_5\thit_at_10\tmap_at_10\tmap_at_100\trecall_at_10\trecall_at_100\tndcg_at_10_delta\trecall_at_100_delta\tvector_bytes\tdense_vector_bytes\trerank_sidecar_bytes\ttotal_vector_bytes\tcompression_ratio\ttotal_compression_ratio\tscores_per_second\tquery_latency_p50_ms\tquery_latency_p95_ms\tquery_latency_max_ms\tdocs_per_second\trerank_scores\n")
-	fmt.Fprintf(&b, "%s\tdense\t\tfloat32\t\t\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t\t\t%d\t%d\t0\t%d\t%.6f\t%.6f\t%.2f\t%.6f\t%.6f\t%.6f\t\t\n",
+	b.WriteString("dataset\trow\tbits\tmethod\trerank_overfetch\trerank_storage\tndcg_at_10\tndcg_at_100\tmrr_at_10\tprecision_at_1\tprecision_at_5\tprecision_at_10\thit_at_1\thit_at_5\thit_at_10\tmap_at_10\tmap_at_100\trecall_at_10\trecall_at_100\tndcg_at_10_delta\trecall_at_100_delta\tvector_bytes\tdense_vector_bytes\trerank_sidecar_bytes\ttotal_vector_bytes\tcompression_ratio\ttotal_compression_ratio\tscores_per_second\tquery_latency_p50_ms\tquery_latency_p95_ms\tquery_latency_p99_ms\tquery_latency_max_ms\tdocs_per_second\trerank_scores\n")
+	fmt.Fprintf(&b, "%s\tdense\t\tfloat32\t\t\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t\t\t%d\t%d\t0\t%d\t%.6f\t%.6f\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t\t\n",
 		metrics.Dataset,
 		metrics.Dense.Quality.NDCGAt10,
 		metrics.Dense.Quality.NDCGAt100,
@@ -944,6 +944,7 @@ func writeTurboQuantRetrievalMetricsTSV(path string, metrics eosruntime.TurboQua
 		metrics.Dense.ScoresPerSecond,
 		metrics.Dense.QueryLatency.P50MS,
 		metrics.Dense.QueryLatency.P95MS,
+		metrics.Dense.QueryLatency.P99MS,
 		metrics.Dense.QueryLatency.MaxMS,
 	)
 	for _, row := range metrics.Rows {
@@ -951,7 +952,7 @@ func writeTurboQuantRetrievalMetricsTSV(path string, metrics eosruntime.TurboQua
 		if row.RerankOverfetch > 0 {
 			rowKind = "quantized_rerank"
 		}
-		fmt.Fprintf(&b, "%s\t%s\t%d\t%s\t%d\t%s\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%+.6f\t%+.6f\t%d\t%d\t%d\t%d\t%.6f\t%.6f\t%.2f\t%.6f\t%.6f\t%.6f\t%.2f\t%d\n",
+		fmt.Fprintf(&b, "%s\t%s\t%d\t%s\t%d\t%s\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%+.6f\t%+.6f\t%d\t%d\t%d\t%d\t%.6f\t%.6f\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%.2f\t%d\n",
 			metrics.Dataset,
 			rowKind,
 			row.Bits,
@@ -982,6 +983,7 @@ func writeTurboQuantRetrievalMetricsTSV(path string, metrics eosruntime.TurboQua
 			row.ScoresPerSecond,
 			row.QueryLatency.P50MS,
 			row.QueryLatency.P95MS,
+			row.QueryLatency.P99MS,
 			row.QueryLatency.MaxMS,
 			row.DocsPerSecond,
 			row.RerankScores,
