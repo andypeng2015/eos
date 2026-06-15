@@ -25,7 +25,7 @@ go run ./cmd/eos gate-scoreboard \
   runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-sealed-scoreboard/scoreboard.json
 ```
 
-Use `--tolerance` only for an explicitly accepted numeric rounding margin. For TurboQuant rows, add the matching `--baseline`, `--method`, and `--bits` filters so the command compares one unambiguous row per dataset in both scoreboards. The current compact quality-repair candidate is `--baseline eos-turboquant-rerank --method turboquant_ip_b8_overfetch200_fp16_rerank --bits 8` with `--metrics ndcg_at_10,recall_at_100,total_compression_ratio`.
+Use `--tolerance` only for an explicitly accepted numeric rounding margin. For TurboQuant rows, add the matching `--baseline`, `--method`, and `--bits` filters so the command compares one unambiguous row per dataset in both scoreboards. The current promoted compact retrieval profile is `--baseline eos-turboquant-rerank --method turboquant_ip_b4_overfetch250_fp16_rerank --bits 4` with `--metrics ndcg_at_10,recall_at_100,total_compression_ratio`, backed by `runs/eos-q4-fp16-overfetch250-gate-20260615T000000Z/`.
 `--baseline eos` falls back to legacy `manta` rows when exact `eos` rows are absent, so the gate can compare new scoreboards with the current legacy-named anchor without rewriting provenance.
 
 Hybrid retrieval rows are eligible only as calibrated retrieval-surface evidence. Run `scripts/calibrate_eos_embed_hybrid_retrieval.fw` first, select method/alpha/RRF settings on the configured dev split, and apply the selected setting unchanged to test. The calibration summary must include dense and BM25 sanity rows plus the protection gate deltas against dense `ndcg_at_10` and `recall_at_100`; use that selected setting in any later `eos-hybrid` scoreboard row. Per-query protection beyond optional sentinel query IDs is still a follow-up policy layer, so do not treat a passing hybrid calibration as a dense model promotion.
@@ -81,6 +81,8 @@ python3 scripts/export_retrieval_vectors.py \
 This script is a provider-boundary exporter. Its optional Python dependencies stay outside Eos, and its default output is `runs/external-vector-caches/<provider>/<dataset>/doc-vectors.jsonl` plus `query-vectors.jsonl`. The older `scripts/export_qwen3_retrieval_vectors.py` entry point remains available for compatibility and accepts `--model-name` for non-Qwen SentenceTransformers models.
 The mxbai preset applies Mixedbread's retrieval query prompt and leaves document text unprefixed.
 
+Current external comparison state: Qwen3 is locally consolidated only for SciFact and NFCorpus. Its useful compact external row is direct q8 at about `3.98x` vector compression, with SciFact q8 nDCG@10 `0.704128` and NFCorpus q8 nDCG@10 `0.368763`. mxbai remains stronger than Qwen3 in the existing local SciFact/NFCorpus evidence. Qwen3 FiQA is still subset-only and must not be used for full short-set standing claims until the full FiQA cache is repaired.
+
 ## TurboQuant Gate
 
 Every promotion candidate needs a dense reference and TurboQuant IP document-vector rows over the same vectors:
@@ -127,15 +129,15 @@ EOS_SCOREBOARD_ARTIFACT=runs/<candidate>/eos-embed-v1.sealed.mll \
 EOS_SCOREBOARD_RETRIEVAL_ROOT=datasets/eos-embed-v1 \
 EOS_SCOREBOARD_RETRIEVAL_DATASETS=scifact,nfcorpus,fiqa \
 EOS_SCOREBOARD_TURBOQUANT=1 \
-EOS_SCOREBOARD_TURBOQUANT_BITS=8 \
-EOS_SCOREBOARD_TURBOQUANT_RERANK_OVERFETCH=200 \
+EOS_SCOREBOARD_TURBOQUANT_BITS=4 \
+EOS_SCOREBOARD_TURBOQUANT_RERANK_OVERFETCH=250 \
 EOS_SCOREBOARD_TURBOQUANT_RERANK_STORAGE=fp16 \
 EOS_SCOREBOARD_TURBOQUANT_BASELINE=eos-turboquant \
 EOS_SCOREBOARD_TURBOQUANT_RERANK_BASELINE=eos-turboquant-rerank \
 ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
 ```
 
-This produces direct `eos-turboquant` rows and fp16 sidecar rerank `eos-turboquant-rerank` rows from one `eval-retrieval-turboquant` metrics file. Use `--baseline eos-turboquant --method turboquant_ip_b8 --bits 8` to gate direct q8, and `--baseline eos-turboquant-rerank --method turboquant_ip_b8_overfetch200_fp16_rerank --bits 8 --metrics ndcg_at_10,recall_at_100,total_compression_ratio` to gate the current compact reranked candidate.
+This produces direct `eos-turboquant` rows and fp16 sidecar rerank `eos-turboquant-rerank` rows from one `eval-retrieval-turboquant` metrics file. Use `--baseline eos-turboquant --method turboquant_ip_b4 --bits 4` to inspect direct q4, but do not treat direct q4 or direct q8 as default-promotion candidates. Gate the promoted compact profile with `--baseline eos-turboquant-rerank --method turboquant_ip_b4_overfetch250_fp16_rerank --bits 4 --metrics ndcg_at_10,recall_at_100,total_compression_ratio`.
 
 Record, per dataset and candidate:
 
@@ -150,7 +152,9 @@ Use the quality columns for different failure modes: nDCG and MAP judge ranked r
 
 The default bit width should be selected from measured q4/q8 rows. q2 is useful pressure testing but should not become default unless quality loss is explicitly acceptable for the target workload.
 
-Current local Eos TurboQuant result: direct q8 is rejected because it misses the strict June 10 anchor on NFCorpus recall@100. q8 overfetch200 exact dense rerank is quality evidence, but it is not a compact default candidate because its f32 sidecar brings total compression below 1. q8 overfetch200 fp16 sidecar rerank is the compact quality-repair candidate: it matched dense/exact rerank quality on SciFact, NFCorpus, and FiQA while preserving total compression above 1 in `runs/eos-embed-v1-fp16-rerank-sidecar-20260614T000000Z/`.
+Current local Eos TurboQuant result: q4/fp16 sidecar rerank at overfetch250 is the promoted compact retrieval profile. It passed the selected-vs-anchor scoreboard gate on SciFact, NFCorpus, and FiQA for `ndcg_at_10,recall_at_100,total_compression_ratio` as `eos-turboquant-rerank` / `turboquant_ip_b4_overfetch250_fp16_rerank` / bits `4`, with total compression `1.590062x`, in `runs/eos-q4-fp16-overfetch250-gate-20260615T000000Z/`. This is a two-stage compact retrieval profile, not q4-only retrieval: direct q4 loses quality on SciFact and FiQA and is not a default-promotion candidate. Direct q8 also remains outside the promoted default path because the useful lower-risk compact fallback is the two-stage q8/fp16 sidecar profile.
+
+Keep q8/fp16 sidecar rerank at overfetch125 as the lower-risk, lower-rerank-cost fallback: `turboquant_ip_b8_overfetch125_fp16_rerank`, total compression `1.326425x`, evidence in `runs/eos-fp16-overfetch125-gate-20260614T000000Z/`.
 
 ## Data And Teacher Growth
 
@@ -173,8 +177,8 @@ Do not promote a default CorkScrewDB embedder until all of these are true:
 
 ## Next Actions
 
-1. Generate or collect one real external vector cache for SciFact.
-2. Run dense and TurboQuant cache evals for that row.
-3. Add the row to the scoreboard with missing provider rows still marked `not_scored`.
-4. Run the same q2/q4/q8 gate for the sealed Eos anchor.
-5. Use the first complete matrix to decide whether the current anchor is a local-only baseline, a candidate, or a default-promotion blocker.
+1. Run a CorkScrewDB load/index/search smoke for the q4/fp16/overfetch250 compact retrieval profile.
+2. Measure p95 serving latency for q4/fp16/overfetch250 and decide whether the q8/fp16/overfetch125 fallback is needed for lower rerank cost.
+3. Repair the full Qwen3 FiQA cache; do not use the current subset-only cache for full short-set claims.
+4. Re-run the full short-set external matrix once Qwen3 FiQA is complete, keeping mxbai and Qwen3 rows separated by backend/artifact/cache provenance.
+5. Only after the serving smoke and full matrix, run a protected teacher/data experiment targeted at the remaining quality gap.
