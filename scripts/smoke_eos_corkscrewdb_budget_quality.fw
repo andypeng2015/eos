@@ -1,0 +1,868 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const defaultCacheRun = "runs/eos-128d-child-cache-quality-20260615T000000Z"
+const defaultCorkScrewDBRepo = "/home/draco/work/corkscrewdb"
+
+type latencyMetrics struct {
+	P50MS float64 `json:"p50_ms"`
+	P95MS float64 `json:"p95_ms"`
+	P99MS float64 `json:"p99_ms"`
+	MaxMS float64 `json:"max_ms"`
+}
+
+type qualityMetrics struct {
+	NDCGAt10    float64 `json:"ndcg_at_10"`
+	RecallAt100 float64 `json:"recall_at_100"`
+}
+
+type corkMetric struct {
+	Bits                         int            `json:"bits"`
+	Dimension                    int            `json:"dimension"`
+	InsertCount                  int            `json:"insert_count"`
+	ParentCount                  int            `json:"parent_count"`
+	QueryCount                   int            `json:"query_count"`
+	RelevantPairs                int            `json:"relevant_pairs"`
+	OverfetchChildren            int            `json:"overfetch_children"`
+	TopKParents                  int            `json:"top_k_parents"`
+	Collection                   string         `json:"collection"`
+	Dataset                      string         `json:"dataset"`
+	LoadSeconds                  float64        `json:"load_seconds"`
+	SearchSeconds                float64        `json:"search_seconds"`
+	DBBytesAfterClose            int64          `json:"db_bytes_after_close"`
+	QuantizedVectorBytes         int64          `json:"quantized_vector_bytes"`
+	QuantizedChildBytes          int64          `json:"quantized_child_bytes"`
+	DenseParentBaselineBytes     int64          `json:"dense_parent_baseline_bytes"`
+	VectorPayloadStorageMultiple float64        `json:"vector_payload_storage_multiple"`
+	DBDirectoryStorageMultiple   float64        `json:"db_directory_storage_multiple"`
+	SearchLatency                latencyMetrics `json:"search_latency"`
+	Quality                      qualityMetrics `json:"quality"`
+	QuantizerSeed                int64          `json:"quantizer_seed"`
+	QuantizedOnly                bool           `json:"quantized_only"`
+}
+
+type corkManifest struct {
+	Schema      string       `json:"schema"`
+	RunDir      string       `json:"run_dir"`
+	SummaryTSV  string       `json:"summary_tsv"`
+	MetricFiles []string     `json:"metric_files"`
+	Rows        []corkMetric `json:"rows"`
+	Caveats     []string     `json:"caveats"`
+}
+
+type planRow struct {
+	Dim                              int     `json:"dim"`
+	BaselineDim                      int     `json:"baseline_dim"`
+	Bits                             int     `json:"bits"`
+	Objects                          int     `json:"objects"`
+	VectorsPerObject                 int     `json:"vectors_per_object"`
+	QuantizedPayloadBytes            int64   `json:"quantized_payload_bytes"`
+	SidecarStorage                   string  `json:"sidecar_storage"`
+	SidecarBytesPerVector            int64   `json:"sidecar_bytes_per_vector"`
+	QuantizedVectorBytes             int64   `json:"quantized_vector_bytes"`
+	VectorOverheadBytes              int64   `json:"vector_overhead_bytes"`
+	DenseVectorStorageBytes          int64   `json:"dense_vector_storage_bytes"`
+	QuantizedVectorStorageBytes      int64   `json:"quantized_vector_storage_bytes"`
+	TotalQuantizedBytes              int64   `json:"total_quantized_bytes"`
+	TotalCompressionRatio            float64 `json:"total_compression_ratio"`
+	VectorsThatFitInOneDenseVector   int64   `json:"vectors_that_fit_in_one_dense_vector"`
+	FitsInOneDenseVectorStorage      bool    `json:"fits_in_one_dense_vector_storage"`
+	StorageMultipleOfDenseParentCost float64 `json:"storage_multiple_of_dense_parent_cost"`
+}
+
+type storagePlan struct {
+	Schema string    `json:"schema"`
+	Rows   []planRow `json:"rows"`
+}
+
+type summaryRow struct {
+	Bits                               int     `json:"bits"`
+	OverfetchChildren                  int     `json:"overfetch_children"`
+	NDCGAt10                           float64 `json:"ndcg_at_10"`
+	RecallAt100                        float64 `json:"recall_at_100"`
+	VectorPayloadStorageMultiple       float64 `json:"vector_payload_storage_multiple"`
+	DBDirectoryStorageMultiple         float64 `json:"db_directory_storage_multiple"`
+	DBBytesAfterClose                  int64   `json:"db_bytes_after_close"`
+	QuantizedVectorBytes               int64   `json:"quantized_vector_bytes"`
+	QuantizedChildBytes                int64   `json:"quantized_child_bytes"`
+	LoadSeconds                        float64 `json:"load_seconds"`
+	SearchSeconds                      float64 `json:"search_seconds"`
+	P95MS                              float64 `json:"p95_ms"`
+	PlannerQuantizedVectorStorageBytes int64   `json:"planner_quantized_vector_storage_bytes"`
+	PlannerVectorsFitOneDenseVector    int64   `json:"planner_vectors_fit_one_dense_vector"`
+	TargetChildrenFit                  bool    `json:"target_children_fit"`
+	StorageMultipleAtTargetChildren    float64 `json:"storage_multiple_at_target_children"`
+	HundredVectorCapable               bool    `json:"hundred_vector_capable"`
+}
+
+type commandRecord struct {
+	Label string   `json:"label"`
+	Args  []string `json:"args"`
+	Log   string   `json:"log"`
+}
+
+type config struct {
+	RunRoot             string  `json:"run_root"`
+	RunDir              string  `json:"run_dir"`
+	CorkScrewDBRepo     string  `json:"corkscrewdb_repo"`
+	DatasetDir          string  `json:"dataset_dir"`
+	Qrels               string  `json:"qrels"`
+	ChildVectors        string  `json:"child_vectors"`
+	QueryVectors        string  `json:"query_vectors"`
+	Bits                string  `json:"bits"`
+	OverfetchChildren   string  `json:"overfetch_children"`
+	BaselineDim         int     `json:"baseline_dim"`
+	TopParents          int     `json:"top_parents"`
+	QuantizedOnly       bool    `json:"quantized_only"`
+	TargetChildren      int     `json:"target_children"`
+	VectorOverheadBytes int64   `json:"vector_overhead_bytes"`
+	SidecarStorage      string  `json:"sidecar_storage"`
+	CollectionLabel      string  `json:"collection_label"`
+	DatasetLabel         string  `json:"dataset_label"`
+	MinOverfetchNDCG     float64 `json:"min_overfetch_ndcg_at_10"`
+	MinOverfetchRecall   float64 `json:"min_overfetch_recall_at_100"`
+	MinFullRecall        float64 `json:"min_full_recall_at_100"`
+	MinPlannerFit        int64   `json:"min_planner_fit"`
+	MaxDBDirMultiple     float64 `json:"max_db_directory_storage_multiple"`
+}
+
+type manifest struct {
+	Schema              string            `json:"schema"`
+	GeneratedAt         string            `json:"generated_at"`
+	RepoRoot            string            `json:"repo_root"`
+	RunDir              string            `json:"run_dir"`
+	Config              config            `json:"config"`
+	Inputs              map[string]string `json:"inputs"`
+	Commands            []commandRecord   `json:"commands"`
+	CorkScrewDBRunDir    string            `json:"corkscrewdb_run_dir"`
+	CorkScrewDBManifest  string            `json:"corkscrewdb_manifest"`
+	CorkScrewDBSummary   string            `json:"corkscrewdb_summary"`
+	CorkScrewDBMetricFiles []string        `json:"corkscrewdb_metric_files"`
+	PlannerJSON         string            `json:"planner_json"`
+	SummaryTSV          string            `json:"summary_tsv"`
+	ChildDim            int               `json:"child_dim"`
+	ParentCount         int               `json:"parent_count"`
+	ChildCount          int               `json:"child_count"`
+	Rows                []summaryRow      `json:"rows"`
+	Gates               []string          `json:"gates"`
+	Caveats             []string          `json:"caveats"`
+}
+
+func usage() {
+	fmt.Println(`Eos CorkScrewDB budget-quality smoke.
+
+Run:
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_corkscrewdb_budget_quality.fw
+
+This wrapper feeds the existing Eos 128d SciFact child cache into the local flat
+CorkScrewDB child-vector API smoke, then joins q4 API quality/storage/latency
+metrics to the overhead-aware multivector storage planner.
+
+Environment:
+  EOS_CORKSCREW_BUDGET_QUALITY_RUN_ROOT=runs
+  EOS_CORKSCREW_BUDGET_QUALITY_RUN_DIR=runs/eos-corkscrewdb-budget-quality-smoke-<timestamp>
+  EOS_CORKSCREW_BUDGET_QUALITY_CORKSCREWDB_REPO=/home/draco/work/corkscrewdb
+  EOS_CORKSCREW_BUDGET_QUALITY_DATASET_DIR=datasets/manta-embed-v1/raw/scifact/scifact
+  EOS_CORKSCREW_BUDGET_QUALITY_QRELS=datasets/manta-embed-v1/raw/scifact/scifact/qrels/test.tsv
+  EOS_CORKSCREW_BUDGET_QUALITY_CHILD_VECTORS=runs/eos-128d-child-cache-quality-20260615T000000Z/scifact/child-doc-vectors.jsonl
+  EOS_CORKSCREW_BUDGET_QUALITY_QUERY_VECTORS=runs/eos-128d-child-cache-quality-20260615T000000Z/scifact/query-vectors.jsonl
+  EOS_CORKSCREW_BUDGET_QUALITY_BITS=4
+  EOS_CORKSCREW_BUDGET_QUALITY_OVERFETCH=100,12468
+  EOS_CORKSCREW_BUDGET_QUALITY_BASELINE_DIM=3072
+  EOS_CORKSCREW_BUDGET_QUALITY_TOP_PARENTS=100
+  EOS_CORKSCREW_BUDGET_QUALITY_QUANTIZED_ONLY=1
+  EOS_CORKSCREW_BUDGET_QUALITY_TARGET_CHILDREN=100
+  EOS_CORKSCREW_BUDGET_QUALITY_VECTOR_OVERHEAD_BYTES=32
+  EOS_CORKSCREW_BUDGET_QUALITY_SIDECAR_STORAGE=none
+  EOS_CORKSCREW_BUDGET_QUALITY_MIN_NDCG_AT_10=0.40
+  EOS_CORKSCREW_BUDGET_QUALITY_MIN_RECALL_AT_100=0.72
+  EOS_CORKSCREW_BUDGET_QUALITY_MIN_FULL_RECALL_AT_100=0.741
+  EOS_CORKSCREW_BUDGET_QUALITY_MIN_PLANNER_FIT=100
+  EOS_CORKSCREW_BUDGET_QUALITY_MAX_DB_DIR_MULTIPLE=0.06`)
+}
+
+func getenv(name string, fallback string) string {
+	value := os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envBool(name string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	if value == "" {
+		return fallback
+	}
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	if pwd := os.Getenv("PWD"); hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func parseIntEnv(name string, fallback int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parseInt64Env(name string, fallback int64) (int64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parseFloatEnv(name string, fallback float64) (float64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a float: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parsePositiveIntList(name string, value string) ([]int, error) {
+	parts := strings.Split(value, ",")
+	values := []int{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		parsed, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, fmt.Errorf("%s contains invalid integer %q: %w", name, part, err)
+		}
+		if parsed <= 0 {
+			return nil, fmt.Errorf("%s values must be positive: %d", name, parsed)
+		}
+		values = append(values, parsed)
+	}
+	if len(values) == 0 {
+		return nil, fmt.Errorf("%s must include at least one positive integer", name)
+	}
+	return values, nil
+}
+
+func ensureInt(values []int, value int) []int {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func intListCSV(values []int) string {
+	parts := []string{}
+	for _, value := range values {
+		parts = append(parts, strconv.Itoa(value))
+	}
+	return strings.Join(parts, ",")
+}
+
+func resolvePath(root string, path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return filepath.Abs(path)
+	}
+	return filepath.Abs(filepath.Join(root, path))
+}
+
+func requireFile(path string, label string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("%s is missing: %s", label, path)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s is a directory, expected file: %s", label, path)
+	}
+	return nil
+}
+
+func requireDir(path string, label string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("%s is missing: %s", label, path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory: %s", label, path)
+	}
+	return nil
+}
+
+func requireRepo(path string, label string) error {
+	if !hasRepoRoot(path) {
+		return fmt.Errorf("%s is required at %s", label, path)
+	}
+	return nil
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func renderCommand(args []string) string {
+	parts := []string{}
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func runCommand(root string, logDir string, label string, args []string, env []string) (commandRecord, error) {
+	fmt.Println("\n== " + label + " ==")
+	fmt.Println("+ " + renderCommand(args))
+	logPath := filepath.Join(logDir, label+".log")
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = root
+	cmd.Env = env
+	output, err := cmd.CombinedOutput()
+	if writeErr := os.WriteFile(logPath, append([]byte(renderCommand(args)+"\n\n"), output...), 0o644); writeErr != nil {
+		return commandRecord{}, writeErr
+	}
+	fmt.Print(string(output))
+	record := commandRecord{Label: label, Args: args, Log: logPath}
+	if err != nil {
+		return record, fmt.Errorf("%s failed: %w", label, err)
+	}
+	return record, nil
+}
+
+func readJSON(path string, target any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, target)
+}
+
+func findMetric(metrics []corkMetric, bits int, overfetch int) *corkMetric {
+	for i := range metrics {
+		if metrics[i].Bits == bits && metrics[i].OverfetchChildren == overfetch {
+			return &metrics[i]
+		}
+	}
+	return nil
+}
+
+func findPlanRow(rows []planRow, bits int, vectorsPerObject int) *planRow {
+	for i := range rows {
+		if rows[i].Bits == bits && rows[i].VectorsPerObject == vectorsPerObject {
+			return &rows[i]
+		}
+	}
+	return nil
+}
+
+func maxFitPlanRow(rows []planRow, bits int) *planRow {
+	var best *planRow
+	for i := range rows {
+		if rows[i].Bits != bits {
+			continue
+		}
+		if best == nil || rows[i].VectorsThatFitInOneDenseVector > best.VectorsThatFitInOneDenseVector {
+			best = &rows[i]
+		}
+	}
+	return best
+}
+
+func makeSummaryRows(metrics []corkMetric, plan storagePlan, targetChildren int) []summaryRow {
+	rows := []summaryRow{}
+	for _, metric := range metrics {
+		fitPlan := maxFitPlanRow(plan.Rows, metric.Bits)
+		targetPlan := findPlanRow(plan.Rows, metric.Bits, targetChildren)
+		row := summaryRow{
+			Bits:                         metric.Bits,
+			OverfetchChildren:            metric.OverfetchChildren,
+			NDCGAt10:                     metric.Quality.NDCGAt10,
+			RecallAt100:                  metric.Quality.RecallAt100,
+			VectorPayloadStorageMultiple: metric.VectorPayloadStorageMultiple,
+			DBDirectoryStorageMultiple:   metric.DBDirectoryStorageMultiple,
+			DBBytesAfterClose:            metric.DBBytesAfterClose,
+			QuantizedVectorBytes:         metric.QuantizedVectorBytes,
+			QuantizedChildBytes:          metric.QuantizedChildBytes,
+			LoadSeconds:                  metric.LoadSeconds,
+			SearchSeconds:                metric.SearchSeconds,
+			P95MS:                        metric.SearchLatency.P95MS,
+		}
+		if fitPlan != nil {
+			row.PlannerQuantizedVectorStorageBytes = fitPlan.QuantizedVectorStorageBytes
+			row.PlannerVectorsFitOneDenseVector = fitPlan.VectorsThatFitInOneDenseVector
+			row.TargetChildrenFit = fitPlan.VectorsThatFitInOneDenseVector >= int64(targetChildren)
+			row.HundredVectorCapable = fitPlan.VectorsThatFitInOneDenseVector >= 100
+		}
+		if targetPlan != nil {
+			row.TargetChildrenFit = targetPlan.FitsInOneDenseVectorStorage
+			row.StorageMultipleAtTargetChildren = targetPlan.StorageMultipleOfDenseParentCost
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+func writeSummaryTSV(path string, rows []summaryRow) error {
+	var b strings.Builder
+	b.WriteString("bits\toverfetch_children\tndcg_at_10\trecall_at_100\tvector_payload_storage_multiple\tdb_directory_storage_multiple\tdb_bytes_after_close\tquantized_vector_bytes\tquantized_child_bytes\tload_seconds\tsearch_seconds\tp95_ms\tplanner_quantized_vector_storage_bytes\tplanner_vectors_fit_one_dense_vector\ttarget_children_fit\tstorage_multiple_at_target_children\thundred_vector_capable\n")
+	for _, row := range rows {
+		fmt.Fprintf(&b, "%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%d\t%d\t%t\t%.6f\t%t\n",
+			row.Bits,
+			row.OverfetchChildren,
+			row.NDCGAt10,
+			row.RecallAt100,
+			row.VectorPayloadStorageMultiple,
+			row.DBDirectoryStorageMultiple,
+			row.DBBytesAfterClose,
+			row.QuantizedVectorBytes,
+			row.QuantizedChildBytes,
+			row.LoadSeconds,
+			row.SearchSeconds,
+			row.P95MS,
+			row.PlannerQuantizedVectorStorageBytes,
+			row.PlannerVectorsFitOneDenseVector,
+			row.TargetChildrenFit,
+			row.StorageMultipleAtTargetChildren,
+			row.HundredVectorCapable)
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func checkGates(rows []summaryRow, overfetchValues []int, cfg config) error {
+	q4Bounded := findSummaryRow(rows, 4, 100)
+	if q4Bounded == nil && len(overfetchValues) > 0 {
+		q4Bounded = findSummaryRow(rows, 4, overfetchValues[0])
+	}
+	if q4Bounded == nil {
+		return fmt.Errorf("q4 bounded overfetch row is missing; include bits=4 and at least one overfetch value")
+	}
+	if q4Bounded.NDCGAt10 < cfg.MinOverfetchNDCG {
+		return fmt.Errorf("q4 overfetch%d ndcg@10 %.6f is below %.6f", q4Bounded.OverfetchChildren, q4Bounded.NDCGAt10, cfg.MinOverfetchNDCG)
+	}
+	if q4Bounded.RecallAt100 < cfg.MinOverfetchRecall {
+		return fmt.Errorf("q4 overfetch%d recall@100 %.6f is below %.6f", q4Bounded.OverfetchChildren, q4Bounded.RecallAt100, cfg.MinOverfetchRecall)
+	}
+	if cfg.MaxDBDirMultiple > 0 && q4Bounded.DBDirectoryStorageMultiple > cfg.MaxDBDirMultiple {
+		return fmt.Errorf("q4 overfetch%d DB directory multiple %.6f exceeds %.6f", q4Bounded.OverfetchChildren, q4Bounded.DBDirectoryStorageMultiple, cfg.MaxDBDirMultiple)
+	}
+	q4Full := findSummaryRow(rows, 4, maxInt(overfetchValues))
+	if q4Full != nil && q4Full.OverfetchChildren != q4Bounded.OverfetchChildren && q4Full.RecallAt100 < cfg.MinFullRecall {
+		return fmt.Errorf("q4 overfetch%d recall@100 %.6f is below full-overfetch floor %.6f", q4Full.OverfetchChildren, q4Full.RecallAt100, cfg.MinFullRecall)
+	}
+	if q4Bounded.PlannerVectorsFitOneDenseVector < cfg.MinPlannerFit {
+		return fmt.Errorf("q4 planner fits %d child vectors in one dense-vector budget, below required %d", q4Bounded.PlannerVectorsFitOneDenseVector, cfg.MinPlannerFit)
+	}
+	if !q4Bounded.TargetChildrenFit {
+		return fmt.Errorf("q4 planner target children %d does not fit in one dense-vector budget", cfg.TargetChildren)
+	}
+	return nil
+}
+
+func findSummaryRow(rows []summaryRow, bits int, overfetch int) *summaryRow {
+	for i := range rows {
+		if rows[i].Bits == bits && rows[i].OverfetchChildren == overfetch {
+			return &rows[i]
+		}
+	}
+	return nil
+}
+
+func maxInt(values []int) int {
+	maxValue := 0
+	for _, value := range values {
+		if value > maxValue {
+			maxValue = value
+		}
+	}
+	return maxValue
+}
+
+func hasInt(values []int, needle int) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	runRoot := getenv("EOS_CORKSCREW_BUDGET_QUALITY_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir := getenv("EOS_CORKSCREW_BUDGET_QUALITY_RUN_DIR", filepath.Join(runRoot, "eos-corkscrewdb-budget-quality-smoke-"+time.Now().UTC().Format("20060102T150405Z")))
+	runDir, err = resolvePath(root, runDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	logDir := filepath.Join(runDir, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	datasetDir, err := resolvePath(root, getenv("EOS_CORKSCREW_BUDGET_QUALITY_DATASET_DIR", "datasets/manta-embed-v1/raw/scifact/scifact"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	qrels, err := resolvePath(root, getenv("EOS_CORKSCREW_BUDGET_QUALITY_QRELS", filepath.Join("datasets/manta-embed-v1/raw/scifact/scifact/qrels/test.tsv")))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	childVectors, err := resolvePath(root, getenv("EOS_CORKSCREW_BUDGET_QUALITY_CHILD_VECTORS", filepath.Join(defaultCacheRun, "scifact", "child-doc-vectors.jsonl")))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	queryVectors, err := resolvePath(root, getenv("EOS_CORKSCREW_BUDGET_QUALITY_QUERY_VECTORS", filepath.Join(defaultCacheRun, "scifact", "query-vectors.jsonl")))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	corkscrewRepo, err := resolvePath(root, getenv("EOS_CORKSCREW_BUDGET_QUALITY_CORKSCREWDB_REPO", defaultCorkScrewDBRepo))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := requireDir(datasetDir, "dataset dir"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := requireFile(qrels, "qrels"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := requireFile(childVectors, "child vectors"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := requireFile(queryVectors, "query vectors"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := requireRepo(corkscrewRepo, "local CorkScrewDB repo"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	bitsValue := getenv("EOS_CORKSCREW_BUDGET_QUALITY_BITS", "4")
+	bits, err := parsePositiveIntList("EOS_CORKSCREW_BUDGET_QUALITY_BITS", bitsValue)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if !hasInt(bits, 4) {
+		fmt.Fprintln(os.Stderr, "EOS_CORKSCREW_BUDGET_QUALITY_BITS must include 4")
+		os.Exit(1)
+	}
+	overfetchValue := getenv("EOS_CORKSCREW_BUDGET_QUALITY_OVERFETCH", "100,12468")
+	overfetchValues, err := parsePositiveIntList("EOS_CORKSCREW_BUDGET_QUALITY_OVERFETCH", overfetchValue)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	baselineDim, err := parseIntEnv("EOS_CORKSCREW_BUDGET_QUALITY_BASELINE_DIM", 3072)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	topParents, err := parseIntEnv("EOS_CORKSCREW_BUDGET_QUALITY_TOP_PARENTS", 100)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	targetChildren, err := parseIntEnv("EOS_CORKSCREW_BUDGET_QUALITY_TARGET_CHILDREN", 100)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	vectorOverheadBytes, err := parseInt64Env("EOS_CORKSCREW_BUDGET_QUALITY_VECTOR_OVERHEAD_BYTES", 32)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	minNDCG, err := parseFloatEnv("EOS_CORKSCREW_BUDGET_QUALITY_MIN_NDCG_AT_10", 0.40)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	minRecall, err := parseFloatEnv("EOS_CORKSCREW_BUDGET_QUALITY_MIN_RECALL_AT_100", 0.72)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	minFullRecall, err := parseFloatEnv("EOS_CORKSCREW_BUDGET_QUALITY_MIN_FULL_RECALL_AT_100", 0.741)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	minPlannerFit, err := parseInt64Env("EOS_CORKSCREW_BUDGET_QUALITY_MIN_PLANNER_FIT", 100)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	maxDBDirMultiple, err := parseFloatEnv("EOS_CORKSCREW_BUDGET_QUALITY_MAX_DB_DIR_MULTIPLE", 0.06)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	quantizedOnly := envBool("EOS_CORKSCREW_BUDGET_QUALITY_QUANTIZED_ONLY", true)
+	sidecarStorage := getenv("EOS_CORKSCREW_BUDGET_QUALITY_SIDECAR_STORAGE", "none")
+	collectionLabel := getenv("EOS_CORKSCREW_BUDGET_QUALITY_COLLECTION", "eos_scifact_128d_child_budget_quality")
+	datasetLabel := getenv("EOS_CORKSCREW_BUDGET_QUALITY_DATASET", "scifact-eos-128d-child-cache")
+
+	cfg := config{
+		RunRoot:             runRoot,
+		RunDir:              runDir,
+		CorkScrewDBRepo:     corkscrewRepo,
+		DatasetDir:          datasetDir,
+		Qrels:               qrels,
+		ChildVectors:        childVectors,
+		QueryVectors:        queryVectors,
+		Bits:                bitsValue,
+		OverfetchChildren:   overfetchValue,
+		BaselineDim:         baselineDim,
+		TopParents:          topParents,
+		QuantizedOnly:       quantizedOnly,
+		TargetChildren:      targetChildren,
+		VectorOverheadBytes: vectorOverheadBytes,
+		SidecarStorage:      sidecarStorage,
+		CollectionLabel:      collectionLabel,
+		DatasetLabel:         datasetLabel,
+		MinOverfetchNDCG:     minNDCG,
+		MinOverfetchRecall:   minRecall,
+		MinFullRecall:        minFullRecall,
+		MinPlannerFit:        minPlannerFit,
+		MaxDBDirMultiple:     maxDBDirMultiple,
+	}
+
+	corkscrewRunDir := filepath.Join(runDir, "corkscrewdb")
+	commands := []commandRecord{}
+	corkEnv := append(os.Environ(),
+		"EOS_REPO_ROOT="+root,
+		"EOS_CORKSCREW_SMOKE_RUN_DIR="+corkscrewRunDir,
+		"EOS_CORKSCREW_SMOKE_CORKSCREWDB_REPO="+corkscrewRepo,
+		"EOS_CORKSCREW_SMOKE_CHILD_VECTORS="+childVectors,
+		"EOS_CORKSCREW_SMOKE_QUERY_VECTORS="+queryVectors,
+		"EOS_CORKSCREW_SMOKE_QRELS="+qrels,
+		"EOS_CORKSCREW_SMOKE_BITS="+bitsValue,
+		"EOS_CORKSCREW_SMOKE_OVERFETCH="+overfetchValue,
+		"EOS_CORKSCREW_SMOKE_BASELINE_DIM="+strconv.Itoa(baselineDim),
+		"EOS_CORKSCREW_SMOKE_TOP_PARENTS="+strconv.Itoa(topParents),
+		"EOS_CORKSCREW_SMOKE_COLLECTION="+collectionLabel,
+		"EOS_CORKSCREW_SMOKE_DATASET="+datasetLabel,
+		"EOS_CORKSCREW_SMOKE_MIN_NDCG_AT_10=0",
+		"EOS_CORKSCREW_SMOKE_MIN_RECALL_AT_100=0",
+	)
+	if quantizedOnly {
+		corkEnv = append(corkEnv, "EOS_CORKSCREW_SMOKE_QUANTIZED_ONLY=1")
+	} else {
+		corkEnv = append(corkEnv, "EOS_CORKSCREW_SMOKE_QUANTIZED_ONLY=0")
+	}
+	corkArgs := []string{"ferrous-wheel", "run", "scripts/smoke_corkscrewdb_child_vectors.fw"}
+	record, err := runCommand(root, logDir, "corkscrewdb-child-vector-smoke", corkArgs, corkEnv)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	commands = append(commands, record)
+
+	corkManifestPath := filepath.Join(corkscrewRunDir, "manifest.json")
+	var corkOut corkManifest
+	if err := readJSON(corkManifestPath, &corkOut); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	metrics := []corkMetric{}
+	for _, metricPath := range corkOut.MetricFiles {
+		var metric corkMetric
+		if err := readJSON(metricPath, &metric); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		metrics = append(metrics, metric)
+	}
+	if len(metrics) == 0 {
+		fmt.Fprintln(os.Stderr, "CorkScrewDB smoke wrote no metric files")
+		os.Exit(1)
+	}
+
+	childDim := metrics[0].Dimension
+	parentCount := metrics[0].ParentCount
+	childCount := metrics[0].InsertCount
+	if parentCount <= 0 {
+		parentCount = 5183
+	}
+	if childDim <= 0 {
+		fmt.Fprintln(os.Stderr, "could not infer child dimension from CorkScrewDB metrics")
+		os.Exit(1)
+	}
+	vectorsPerObject := []int{1, 64, 100, 128, 181, 256, 341}
+	vectorsPerObject = ensureInt(vectorsPerObject, targetChildren)
+	plannerJSON := filepath.Join(runDir, "planner.json")
+	plannerArgs := []string{
+		"go", "run", "./cmd/eos", "plan-multivector-storage",
+		"--dim", strconv.Itoa(childDim),
+		"--baseline-dim", strconv.Itoa(baselineDim),
+		"--bits", bitsValue,
+		"--vectors-per-object", intListCSV(vectorsPerObject),
+		"--objects", strconv.Itoa(parentCount),
+		"--vector-overhead-bytes", strconv.FormatInt(vectorOverheadBytes, 10),
+		"--sidecar-storage", sidecarStorage,
+		"--json", plannerJSON,
+	}
+	record, err = runCommand(root, logDir, "planner", plannerArgs, os.Environ())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	commands = append(commands, record)
+
+	var plan storagePlan
+	if err := readJSON(plannerJSON, &plan); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	rows := makeSummaryRows(metrics, plan, targetChildren)
+	if err := checkGates(rows, overfetchValues, cfg); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	summaryTSV := filepath.Join(runDir, "summary.tsv")
+	if err := writeSummaryTSV(summaryTSV, rows); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	manifestJSON := filepath.Join(runDir, "manifest.json")
+	out := manifest{
+		Schema:             "eos.corkscrewdb_budget_quality_smoke.v1",
+		GeneratedAt:        time.Now().UTC().Format(time.RFC3339),
+		RepoRoot:           root,
+		RunDir:             runDir,
+		Config:             cfg,
+		Inputs: map[string]string{
+			"dataset_dir": datasetDir,
+			"qrels": qrels,
+			"child_vectors": childVectors,
+			"query_vectors": queryVectors,
+			"corkscrewdb_repo": corkscrewRepo,
+		},
+		Commands:            commands,
+		CorkScrewDBRunDir:    corkscrewRunDir,
+		CorkScrewDBManifest:  corkManifestPath,
+		CorkScrewDBSummary:   corkOut.SummaryTSV,
+		CorkScrewDBMetricFiles: corkOut.MetricFiles,
+		PlannerJSON:         plannerJSON,
+		SummaryTSV:          summaryTSV,
+		ChildDim:            childDim,
+		ParentCount:         parentCount,
+		ChildCount:          childCount,
+		Rows:                rows,
+		Gates: []string{
+			fmt.Sprintf("q4 bounded overfetch ndcg@10 >= %.6f", minNDCG),
+			fmt.Sprintf("q4 bounded overfetch recall@100 >= %.6f", minRecall),
+			fmt.Sprintf("q4 full/exhaustive overfetch recall@100 >= %.6f when a distinct full row is present", minFullRecall),
+			fmt.Sprintf("q4 planner vectors_that_fit_in_one_dense_vector >= %d", minPlannerFit),
+			fmt.Sprintf("q4 target children %d fits in one dense-vector budget", targetChildren),
+			fmt.Sprintf("q4 bounded overfetch DB directory storage multiple <= %.6f when positive", maxDBDirMultiple),
+		},
+		Caveats: []string{
+			"Local flat CorkScrewDB API smoke only: PutVector/SearchVector, not remote mode, federation, or HNSW.",
+			"The Eos 128d SciFact child cache is a compact prefix bridge, not a native Matryoshka artifact.",
+			"The joined planner overhead is explicit byte accounting; DB directory size is measured separately from the local smoke run.",
+			"Default exhaustive overfetch is the full current child count for this cache; override overfetch when using another cache size.",
+		},
+	}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(manifestJSON, append(data, '\n'), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("\nsummary_tsv: %s\n", summaryTSV)
+	fmt.Printf("manifest: %s\n", manifestJSON)
+	for _, row := range rows {
+		fmt.Printf("q%d overfetch%d: ndcg@10=%.6f recall@100=%.6f db_dir_multiple=%.6fx planner_fit=%d target_fit=%t p95=%.6fms\n",
+			row.Bits,
+			row.OverfetchChildren,
+			row.NDCGAt10,
+			row.RecallAt100,
+			row.DBDirectoryStorageMultiple,
+			row.PlannerVectorsFitOneDenseVector,
+			row.TargetChildrenFit,
+			row.P95MS)
+	}
+}

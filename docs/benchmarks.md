@@ -208,6 +208,15 @@ ferrous-wheel run scripts/smoke_eos_multivector_budget_quality.fw
 
 The default smoke reuses the existing Eos 128d SciFact child cache under `runs/eos-128d-child-cache-quality-20260615T000000Z/`, calls `eval-retrieval-multivector-turboquant`, infers the 128d child shape from the dense child-vector bytes, then calls `plan-multivector-storage` with `--baseline-dim 3072 --vector-overhead-bytes 32` and a `100` child-vector fit gate. Current default interpretation: direct q4 is near dense on this cache (`ndcg@10` drop about `0.002630`, `recall@100` drop about `0.001667`) while the overhead-aware planner fits `123` q4 child vectors in one 3072d dense-vector budget, so 100 child vectors fit with overhead. It remains cache-only evidence, not CorkScrewDB API latency or DB-directory measurement.
 
+For the actual local flat CorkScrewDB API budget-quality smoke on the compact Eos child cache, run:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+ferrous-wheel run scripts/smoke_eos_corkscrewdb_budget_quality.fw
+```
+
+This wrapper feeds `runs/eos-128d-child-cache-quality-20260615T000000Z/scifact/child-doc-vectors.jsonl`, matching query vectors, and SciFact test qrels into `scripts/smoke_corkscrewdb_child_vectors.fw` with q4 overfetch `100,12468`, then joins the API metrics to the overhead-aware planner row for `--dim 128 --baseline-dim 3072 --vector-overhead-bytes 32 --sidecar-storage none`. The default run writes `summary.tsv`, `manifest.json`, command logs, nested CorkScrewDB artifacts under `corkscrewdb/`, and `planner.json` under `runs/eos-corkscrewdb-budget-quality-smoke-<timestamp>/`. Current default API result: q4 overfetch100 records `ndcg@10=0.407586`, `recall@100=0.724111`, DB directory multiple `0.048935x`, and p95 search latency about `11.8ms`; q4 full overfetch records `recall@100=0.741889`; the planner fits `123` q4 children in one 3072d dense-vector budget and the 100-child target fits. This is actual local flat `PutVector`/`SearchVector` evidence for the compact Eos child cache, beside the cache-only quality smoke and pure planner smoke; it is not remote mode, federation, HNSW, or a native Matryoshka embedding result.
+
 Current measured local result: q4/fp16 sidecar rerank at overfetch250 is the promoted compact retrieval profile. It passed the selected-vs-anchor scoreboard gate on SciFact, NFCorpus, and FiQA for `ndcg_at_10,recall_at_100,total_compression_ratio` as `eos-turboquant-rerank` / `turboquant_ip_b4_overfetch250_fp16_rerank` / bits `4`, with total compression `1.590062x`, in `runs/eos-q4-fp16-overfetch250-gate-20260615T000000Z/`. This is not q4-only retrieval: direct q4 misses dense quality on SciFact and FiQA, and direct q8 is not the promoted default path. Keep q8/fp16 sidecar rerank at overfetch125 as the lower-risk, lower-rerank-cost fallback: `turboquant_ip_b8_overfetch125_fp16_rerank`, total compression `1.326425x`, evidence in `runs/eos-fp16-overfetch125-gate-20260614T000000Z/`.
 
 Current sealed-verified local anchor:

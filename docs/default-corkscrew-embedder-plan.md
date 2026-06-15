@@ -262,6 +262,14 @@ EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_multivector_budget_qualit
 
 The default run uses `runs/eos-128d-child-cache-quality-20260615T000000Z/scifact/child-doc-vectors.jsonl`, matching query vectors, and `datasets/manta-embed-v1/raw/scifact/scifact`. It evaluates dense/q2/q4/q8 parent-child retrieval, infers the `128d` child dimension from dense child-vector bytes, then plans q2/q4/q8 for the actual parent count with child counts including `1,64,100,128,181,256,341`, `--baseline-dim 3072`, `--vector-overhead-bytes 32`, and `--sidecar-storage none`. Current default interpretation: q4 is near dense on the 128d SciFact child cache (`ndcg@10` drop about `0.002630`, `recall@100` drop about `0.001667`) while the overhead-aware planner fits `123` q4 children in one 3072d dense-vector budget, so the `100` child-vector target fits. Treat this as Eos cache evidence only: the 128d cache is a prefix-truncated bridge, not a native Matryoshka artifact, and the planner overhead is an explicit input rather than a measured CorkScrewDB directory or API result.
 
+For the actual local flat CorkScrewDB API budget-quality check on the same compact cache, run:
+
+```bash
+EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_corkscrewdb_budget_quality.fw
+```
+
+The wrapper runs `scripts/smoke_corkscrewdb_child_vectors.fw` against the Eos 128d SciFact child/query cache and test qrels with q4 overfetch `100,12468`, then joins the resulting local `PutVector`/`SearchVector` metrics to the overhead-aware planner row for `--dim 128 --baseline-dim 3072 --vector-overhead-bytes 32 --sidecar-storage none`. It writes `summary.tsv`, `manifest.json`, command logs, nested `corkscrewdb/` artifacts, and `planner.json` under `runs/eos-corkscrewdb-budget-quality-smoke-<timestamp>/`. Current default result: q4 overfetch100 records `ndcg@10=0.407586`, `recall@100=0.724111`, DB directory multiple `0.048935x`, and p95 search latency about `11.8ms`; q4 full overfetch records `recall@100=0.741889`; planner fit remains `123` q4 children, so the `100` child target fits. Read this beside the cache-only smoke and pure planner smoke as actual local flat CorkScrewDB API evidence for the compact Eos child cache, not remote serving, federation, HNSW, or native Matryoshka proof.
+
 For a first time-series/window quality seam, export text-rendered numeric windows and run the existing parent-child evaluator against parent-series qrels:
 
 ```bash
