@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"m31labs.dev/eos/compiler"
 	"m31labs.dev/eos/runtime/backends/cuda"
@@ -125,6 +126,9 @@ func TestEvaluateTurboQuantVectorRetrievalReportsQualityAndCost(t *testing.T) {
 	if metrics.Dense.VectorBytes != int64(len(docs)*len(docs[0].Vector)*4) {
 		t.Fatalf("dense vector bytes = %d", metrics.Dense.VectorBytes)
 	}
+	if metrics.Dense.QueryLatency.Count != len(queries) || metrics.Dense.QueryLatency.P95MS < 0 {
+		t.Fatalf("dense query latency = %+v, want populated latency metrics", metrics.Dense.QueryLatency)
+	}
 	if len(metrics.Rows) != 1 {
 		t.Fatalf("rows = %d, want 1", len(metrics.Rows))
 	}
@@ -137,6 +141,9 @@ func TestEvaluateTurboQuantVectorRetrievalReportsQualityAndCost(t *testing.T) {
 	}
 	if row.CompressionRatio <= 1 {
 		t.Fatalf("compression ratio = %v, want > 1", row.CompressionRatio)
+	}
+	if row.QueryLatency.Count != len(queries) || row.QueryLatency.P95MS < 0 {
+		t.Fatalf("quantized query latency = %+v, want populated latency metrics", row.QueryLatency)
 	}
 	if row.Quality.NDCGAt10 < 0.99 || row.Quality.RecallAt100 != 1 {
 		t.Fatalf("quantized quality = %+v, want near-perfect", row.Quality)
@@ -295,8 +302,39 @@ func TestEvaluateTurboQuantVectorRetrievalReportsFP16RerankRows(t *testing.T) {
 	if rerank.RerankScores != int64(len(queries)*110) || rerank.RerankScoreSeconds <= 0 {
 		t.Fatalf("fp16 rerank accounting = scores:%d seconds:%f", rerank.RerankScores, rerank.RerankScoreSeconds)
 	}
+	if rerank.QueryLatency.Count != len(queries) || rerank.QueryLatency.P95MS < 0 {
+		t.Fatalf("fp16 rerank query latency = %+v, want populated latency metrics", rerank.QueryLatency)
+	}
 	if rerank.Quality.NDCGAt10 < 0.99 || rerank.Quality.RecallAt100 != 1 {
 		t.Fatalf("fp16 rerank quality = %+v, want near-perfect", rerank.Quality)
+	}
+}
+
+func TestPercentileDurationUsesConservativeNearestRankForSmallSamples(t *testing.T) {
+	durations := []time.Duration{
+		1 * time.Millisecond,
+		2 * time.Millisecond,
+		3 * time.Millisecond,
+		4 * time.Millisecond,
+		5 * time.Millisecond,
+	}
+	tests := []struct {
+		name string
+		p    float64
+		want time.Duration
+	}{
+		{name: "min", p: 0, want: 1 * time.Millisecond},
+		{name: "median", p: 0.50, want: 3 * time.Millisecond},
+		{name: "p95", p: 0.95, want: 5 * time.Millisecond},
+		{name: "p99", p: 0.99, want: 5 * time.Millisecond},
+		{name: "max", p: 1, want: 5 * time.Millisecond},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := percentileDuration(durations, tt.p); got != tt.want {
+				t.Fatalf("percentileDuration(p=%v) = %v, want %v", tt.p, got, tt.want)
+			}
+		})
 	}
 }
 

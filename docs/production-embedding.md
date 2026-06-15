@@ -137,7 +137,14 @@ Use `eos diagnose-train-metrics /path/to/train.metrics.json` to explain backend 
 
 ## TurboQuant Retrieval Gate
 
-Default CorkScrewDB embedder promotion requires a vector-index cost check in addition to dense retrieval quality. Run `eos eval-retrieval-turboquant` on at least one capped BEIR-style dataset for release smoke, and on the full selected retrieval set before updating the `corkscrewdb-default-embedder` alias:
+Default CorkScrewDB embedder promotion requires a vector-index cost check in addition to dense retrieval quality. The repo-local serving proxy is `scripts/smoke_eos_default_embedder_serving.fw`; it compares the promoted q4/fp16/overfetch250 profile against the q8/fp16/overfetch125 fallback and records p50/p95/max per-query scoring latency:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+ferrous-wheel run scripts/smoke_eos_default_embedder_serving.fw
+```
+
+This smoke uses the in-repo TurboQuant evaluator as CorkScrewDB-relevant vector-index and serving evidence. It is not an actual CorkScrewDB API load/index/search smoke; that integration remains external until CorkScrewDB is wired into this repository. For lower-level release checks, run `eos eval-retrieval-turboquant` on at least one capped BEIR-style dataset, and on the full selected retrieval set before updating the `corkscrewdb-default-embedder` alias:
 
 ```bash
 go run ./cmd/eos eval-retrieval-turboquant \
@@ -153,7 +160,7 @@ go run ./cmd/eos eval-retrieval-turboquant \
   /data/manta/datasets/eos-embed-v1/raw/scifact
 ```
 
-The JSON/TSV rows include the dense float32 reference, TurboQuant bit width, nDCG@10/nDCG@100, MRR@10, precision@1/5/10, hit@1/5/10, MAP@10/MAP@100, recall@10/100, quality deltas, vector bytes, rerank storage, rerank sidecar bytes, total vector bytes, compression ratio, total compression ratio, quantization docs/s, direct IP scoring throughput, and optional rerank overfetch/score counts. CorkScrewDB integration is optional for this gate; these are the CorkScrewDB-relevant storage and scoring metrics that must stay attached to a promoted default embedder.
+The JSON/TSV rows include the dense float32 reference, TurboQuant bit width, nDCG@10/nDCG@100, MRR@10, precision@1/5/10, hit@1/5/10, MAP@10/MAP@100, recall@10/100, quality deltas, vector bytes, rerank storage, rerank sidecar bytes, total vector bytes, compression ratio, total compression ratio, quantization docs/s, direct IP scoring throughput, per-query scoring latency summaries, and optional rerank overfetch/score counts. CorkScrewDB integration is optional for this gate; these are the CorkScrewDB-relevant storage and scoring metrics that must stay attached to a promoted default embedder.
 
 Interpret the metric groups separately for promotion. Quality metrics decide whether the candidate ranks relevant documents well enough: nDCG and MAP capture ordering, precision/hit@k capture first-screen success, and recall@100 captures candidate-pool coverage. Compression metrics decide whether q4/q8 are worth the footprint reduction. Throughput metrics are path-specific: sealed Eos evals can include local encoder time, while cached external-vector rows only measure cache load/scoring and do not represent live provider or external model encoding throughput.
 

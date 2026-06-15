@@ -250,6 +250,62 @@ func TestFormatTrainThroughputIncludesExamplePairAndStepRates(t *testing.T) {
 	}
 }
 
+func TestWriteTurboQuantRetrievalMetricsTSVIncludesLatencyColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "turboquant.tsv")
+	metrics := eosruntime.TurboQuantRetrievalEvalMetrics{
+		Dataset: "tiny",
+		Dense: eosruntime.TurboQuantDenseRetrievalMetrics{
+			Quality: eosruntime.RetrievalEvalQualityMetrics{
+				NDCGAt10:    1,
+				NDCGAt100:   1,
+				MRRAt10:     1,
+				RecallAt10:  1,
+				RecallAt100: 1,
+			},
+			VectorBytes:     64,
+			ScoresPerSecond: 1000,
+			QueryLatency: eosruntime.RetrievalEvalLatencyMetrics{
+				Count: 2,
+				P50MS: 0.1,
+				P95MS: 0.2,
+				MaxMS: 0.3,
+			},
+		},
+		Rows: []eosruntime.TurboQuantRetrievalBitMetrics{{
+			Bits:             4,
+			Method:           "turboquant_ip_b4_overfetch250_fp16_rerank",
+			RerankOverfetch:  250,
+			RerankStorage:    eosruntime.TurboQuantRerankStorageFP16,
+			Quality:          eosruntime.RetrievalEvalQualityMetrics{NDCGAt10: 1, NDCGAt100: 1, MRRAt10: 1, RecallAt10: 1, RecallAt100: 1},
+			VectorBytes:      8,
+			DenseVectorBytes: 64,
+			CompressionRatio: 8,
+			TotalVectorBytes: 40,
+			TotalCompression: 1.6,
+			ScoresPerSecond:  900,
+			QueryLatency:     eosruntime.RetrievalEvalLatencyMetrics{Count: 2, P50MS: 0.4, P95MS: 0.5, MaxMS: 0.6},
+			RerankScores:     500,
+		}},
+	}
+	if err := writeTurboQuantRetrievalMetricsTSV(path, metrics); err != nil {
+		t.Fatalf("write tsv: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read tsv: %v", err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		"query_latency_p50_ms\tquery_latency_p95_ms\tquery_latency_max_ms",
+		"\t0.100000\t0.200000\t0.300000\t",
+		"\t0.400000\t0.500000\t0.600000\t",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("tsv missing %q\n%s", want, text)
+		}
+	}
+}
+
 func TestRunInitTrainCreatesTrainingPackage(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {

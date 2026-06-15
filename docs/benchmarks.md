@@ -170,7 +170,16 @@ go run ./cmd/eos eval-retrieval-turboquant \
   /data/manta/datasets/eos-embed-v1/raw/scifact
 ```
 
-The TurboQuant gate embeds the corpus once, records the dense float32 reference nDCG@10/recall@100, then quantizes document vectors with `m31labs.dev/turboquant` IP-preserving quantizers and reports per-bit quality deltas, vector bytes, rerank storage, rerank sidecar bytes, total vector bytes, compression ratio, total compression ratio, docs/s, scores/s, and optional rerank overfetch/score counts. Use the capped command for smoke/release checks and remove the caps for a full CorkScrewDB-relevant vector-index promotion run.
+The TurboQuant gate embeds the corpus once, records the dense float32 reference nDCG@10/recall@100, then quantizes document vectors with `m31labs.dev/turboquant` IP-preserving quantizers and reports per-bit quality deltas, vector bytes, rerank storage, rerank sidecar bytes, total vector bytes, compression ratio, total compression ratio, docs/s, scores/s, per-query p50/p95/max scoring latency, and optional rerank overfetch/score counts. Use the capped command for smoke/release checks and remove the caps for a full CorkScrewDB-relevant vector-index promotion run.
+
+For the promoted compact default profile, prefer the repo-local serving proxy:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+ferrous-wheel run scripts/smoke_eos_default_embedder_serving.fw
+```
+
+It compares q4/fp16/overfetch250 with q8/fp16/overfetch125 and writes `summary.tsv` plus `manifest.json` under `runs/eos-default-embedder-serving-smoke-<timestamp>/`. This is not an actual CorkScrewDB API smoke; it is the in-repo TurboQuant proxy until a CorkScrewDB dependency or harness exists.
 
 Current measured local result: q4/fp16 sidecar rerank at overfetch250 is the promoted compact retrieval profile. It passed the selected-vs-anchor scoreboard gate on SciFact, NFCorpus, and FiQA for `ndcg_at_10,recall_at_100,total_compression_ratio` as `eos-turboquant-rerank` / `turboquant_ip_b4_overfetch250_fp16_rerank` / bits `4`, with total compression `1.590062x`, in `runs/eos-q4-fp16-overfetch250-gate-20260615T000000Z/`. This is not q4-only retrieval: direct q4 misses dense quality on SciFact and FiQA, and direct q8 is not the promoted default path. Keep q8/fp16 sidecar rerank at overfetch125 as the lower-risk, lower-rerank-cost fallback: `turboquant_ip_b8_overfetch125_fp16_rerank`, total compression `1.326425x`, evidence in `runs/eos-fp16-overfetch125-gate-20260614T000000Z/`.
 

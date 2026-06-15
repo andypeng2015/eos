@@ -4,6 +4,8 @@ import (
 	"container/heap"
 	"context"
 	"fmt"
+	"math"
+	"sort"
 	"time"
 
 	"m31labs.dev/turboquant"
@@ -46,6 +48,7 @@ type TurboQuantDenseRetrievalMetrics struct {
 	VectorBytes     int64                       `json:"vector_bytes"`
 	ScoreSeconds    float64                     `json:"score_seconds"`
 	ScoresPerSecond float64                     `json:"scores_per_second"`
+	QueryLatency    RetrievalEvalLatencyMetrics `json:"query_latency"`
 }
 
 type TurboQuantRetrievalBitMetrics struct {
@@ -67,9 +70,20 @@ type TurboQuantRetrievalBitMetrics struct {
 	RerankScoreSeconds  float64                     `json:"rerank_score_seconds,omitempty"`
 	DocsPerSecond       float64                     `json:"docs_per_second"`
 	ScoresPerSecond     float64                     `json:"scores_per_second"`
+	QueryLatency        RetrievalEvalLatencyMetrics `json:"query_latency"`
 	RerankScores        int64                       `json:"rerank_scores,omitempty"`
 	SkippedRelevantDocs int                         `json:"skipped_relevant_docs,omitempty"`
 	SkippedQueries      int                         `json:"skipped_queries_without_relevant_docs,omitempty"`
+}
+
+type RetrievalEvalLatencyMetrics struct {
+	Count  int     `json:"count"`
+	MinMS  float64 `json:"min_ms"`
+	MeanMS float64 `json:"mean_ms"`
+	P50MS  float64 `json:"p50_ms"`
+	P95MS  float64 `json:"p95_ms"`
+	P99MS  float64 `json:"p99_ms"`
+	MaxMS  float64 `json:"max_ms"`
 }
 
 // EvaluateTurboQuantRetrieval embeds a BEIR-style split once, then evaluates
@@ -282,7 +296,7 @@ func evaluateTurboQuantVectorRetrievalWithRerankStorage(ctx context.Context, cfg
 	}
 
 	scoreStart := time.Now()
-	denseQuality, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant := computeRetrievalQuality(queries, docs, qrels, cfg.TopK)
+	denseQuality, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, denseLatency := computeDenseRetrievalQualityWithLatency(queries, docs, qrels, cfg.TopK)
 	denseScoreDuration := time.Since(scoreStart)
 	if evaluatedQueries == 0 {
 		return TurboQuantRetrievalEvalMetrics{}, fmt.Errorf("no queries had relevant documents in the evaluated corpus")
@@ -313,6 +327,7 @@ func evaluateTurboQuantVectorRetrievalWithRerankStorage(ctx context.Context, cfg
 			VectorBytes:     denseVectorBytes,
 			ScoreSeconds:    denseScoreDuration.Seconds(),
 			ScoresPerSecond: ratePerSecond(float64(scoredPairs), denseScoreDuration),
+			QueryLatency:    denseLatency,
 		},
 		Rows: make([]TurboQuantRetrievalBitMetrics, 0, len(bits)),
 	}
@@ -350,7 +365,7 @@ func evaluateTurboQuantRetrievalBits(ctx context.Context, dim, bitWidth, topK in
 	quantizeDuration := time.Since(quantizeStart)
 
 	scoreStart := time.Now()
-	quality, evaluatedQueries, _, skippedRelevantDocs, skippedNoRelevant := computeTurboQuantRetrievalQuality(ctx, q, queries, qdocs, qrels, topK)
+	quality, evaluatedQueries, _, skippedRelevantDocs, skippedNoRelevant, queryLatency := computeTurboQuantRetrievalQuality(ctx, q, queries, qdocs, qrels, topK)
 	if evaluatedQueries == 0 {
 		return nil, fmt.Errorf("no queries had relevant documents in the evaluated corpus")
 	}
@@ -370,6 +385,7 @@ func evaluateTurboQuantRetrievalBits(ctx context.Context, dim, bitWidth, topK in
 		ScoreSeconds:        scoreDuration.Seconds(),
 		DocsPerSecond:       ratePerSecond(float64(len(docs)), quantizeDuration),
 		ScoresPerSecond:     ratePerSecond(float64(scoredPairs), scoreDuration),
+		QueryLatency:        queryLatency,
 		SkippedRelevantDocs: skippedRelevantDocs,
 		SkippedQueries:      skippedNoRelevant,
 	}}
@@ -385,18 +401,19 @@ func evaluateTurboQuantRetrievalBits(ctx context.Context, dim, bitWidth, topK in
 		var rerankQuality RetrievalEvalQualityMetrics
 		var evaluatedQueries, skippedRelevantDocs, skippedNoRelevant int
 		var rerankScores int64
+		var rerankLatency RetrievalEvalLatencyMetrics
 		var method string
 		var rerankSidecarBytes int64
 		switch rerankStorage {
 		case TurboQuantRerankStorageDense:
-			rerankQuality, evaluatedQueries, _, skippedRelevantDocs, skippedNoRelevant, rerankScores = computeTurboQuantDenseRerankRetrievalQuality(ctx, q, queries, docs, qdocs, qrels, topK, overfetch)
+			rerankQuality, evaluatedQueries, _, skippedRelevantDocs, skippedNoRelevant, rerankScores, rerankLatency = computeTurboQuantDenseRerankRetrievalQuality(ctx, q, queries, docs, qdocs, qrels, topK, overfetch)
 			method = fmt.Sprintf("turboquant_ip_b%d_overfetch%d_dense_rerank", bitWidth, overfetch)
 			rerankSidecarBytes = denseVectorBytes
 		case TurboQuantRerankStorageCompactReconstruct:
-			rerankQuality, evaluatedQueries, _, skippedRelevantDocs, skippedNoRelevant, rerankScores = computeTurboQuantReconstructRerankRetrievalQuality(ctx, q, queries, qdocs, qrels, topK, overfetch)
+			rerankQuality, evaluatedQueries, _, skippedRelevantDocs, skippedNoRelevant, rerankScores, rerankLatency = computeTurboQuantReconstructRerankRetrievalQuality(ctx, q, queries, qdocs, qrels, topK, overfetch)
 			method = fmt.Sprintf("turboquant_ip_b%d_overfetch%d_reconstruct_rerank", bitWidth, overfetch)
 		case TurboQuantRerankStorageFP16:
-			rerankQuality, evaluatedQueries, _, skippedRelevantDocs, skippedNoRelevant, rerankScores = computeTurboQuantFP16RerankRetrievalQuality(ctx, q, queries, docs, qdocs, qrels, topK, overfetch)
+			rerankQuality, evaluatedQueries, _, skippedRelevantDocs, skippedNoRelevant, rerankScores, rerankLatency = computeTurboQuantFP16RerankRetrievalQuality(ctx, q, queries, docs, qdocs, qrels, topK, overfetch)
 			method = fmt.Sprintf("turboquant_ip_b%d_overfetch%d_fp16_rerank", bitWidth, overfetch)
 			rerankSidecarBytes = int64(len(docs) * dim * 2)
 		default:
@@ -426,6 +443,7 @@ func evaluateTurboQuantRetrievalBits(ctx context.Context, dim, bitWidth, topK in
 			RerankScoreSeconds:  rerankDuration.Seconds(),
 			DocsPerSecond:       ratePerSecond(float64(len(docs)), quantizeDuration),
 			ScoresPerSecond:     ratePerSecond(float64(scoredPairs+rerankScores), scoreDuration+rerankDuration),
+			QueryLatency:        rerankLatency,
 			RerankScores:        rerankScores,
 			SkippedRelevantDocs: skippedRelevantDocs,
 			SkippedQueries:      skippedNoRelevant,
@@ -439,7 +457,7 @@ type turboQuantRetrievalDoc struct {
 	Vector turboquant.IPQuantized
 }
 
-func computeTurboQuantRetrievalQuality(ctx context.Context, q *turboquant.IPQuantizer, queries []retrievalVectorRecord, docs []turboQuantRetrievalDoc, qrels retrievalQrels, topK int) (RetrievalEvalQualityMetrics, int, int, int, int) {
+func computeDenseRetrievalQualityWithLatency(queries, docs []retrievalVectorRecord, qrels retrievalQrels, topK int) (RetrievalEvalQualityMetrics, int, int, int, int, RetrievalEvalLatencyMetrics) {
 	docIDSet := make(map[string]bool, len(docs))
 	for _, doc := range docs {
 		docIDSet[doc.ID] = true
@@ -452,6 +470,46 @@ func computeTurboQuantRetrievalQuality(ctx context.Context, q *turboquant.IPQuan
 	relevantPairs := 0
 	skippedRelevantDocs := 0
 	skippedNoRelevant := 0
+	latencies := make([]time.Duration, 0, len(queries))
+	for _, query := range queries {
+		rels := qrels[query.ID]
+		filteredRels := make(map[string]float64, len(rels))
+		for docID, rel := range rels {
+			if docIDSet[docID] {
+				filteredRels[docID] = rel
+			} else {
+				skippedRelevantDocs++
+			}
+		}
+		if len(filteredRels) == 0 {
+			skippedNoRelevant++
+			continue
+		}
+		queryStart := time.Now()
+		scores := topRetrievalScores(query.Vector, docs, topK)
+		latencies = append(latencies, time.Since(queryStart))
+		evaluatedQueries++
+		relevantPairs += len(filteredRels)
+		addRetrievalQuality(&totals, scores, filteredRels)
+	}
+	averageRetrievalQuality(&totals, evaluatedQueries)
+	return totals, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, summarizeRetrievalEvalLatencies(latencies)
+}
+
+func computeTurboQuantRetrievalQuality(ctx context.Context, q *turboquant.IPQuantizer, queries []retrievalVectorRecord, docs []turboQuantRetrievalDoc, qrels retrievalQrels, topK int) (RetrievalEvalQualityMetrics, int, int, int, int, RetrievalEvalLatencyMetrics) {
+	docIDSet := make(map[string]bool, len(docs))
+	for _, doc := range docs {
+		docIDSet[doc.ID] = true
+	}
+	if topK < 100 {
+		topK = 100
+	}
+	var totals RetrievalEvalQualityMetrics
+	evaluatedQueries := 0
+	relevantPairs := 0
+	skippedRelevantDocs := 0
+	skippedNoRelevant := 0
+	latencies := make([]time.Duration, 0, len(queries))
 	for _, query := range queries {
 		if err := ctx.Err(); err != nil {
 			break
@@ -469,17 +527,19 @@ func computeTurboQuantRetrievalQuality(ctx context.Context, q *turboquant.IPQuan
 			skippedNoRelevant++
 			continue
 		}
+		queryStart := time.Now()
 		prepared := q.PrepareQuery(query.Vector)
 		scores := topTurboQuantRetrievalScores(q, prepared, docs, topK)
+		latencies = append(latencies, time.Since(queryStart))
 		evaluatedQueries++
 		relevantPairs += len(filteredRels)
 		addRetrievalQuality(&totals, scores, filteredRels)
 	}
 	averageRetrievalQuality(&totals, evaluatedQueries)
-	return totals, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant
+	return totals, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, summarizeRetrievalEvalLatencies(latencies)
 }
 
-func computeTurboQuantDenseRerankRetrievalQuality(ctx context.Context, q *turboquant.IPQuantizer, queries []retrievalVectorRecord, denseDocs []retrievalVectorRecord, qdocs []turboQuantRetrievalDoc, qrels retrievalQrels, topK, overfetchK int) (RetrievalEvalQualityMetrics, int, int, int, int, int64) {
+func computeTurboQuantDenseRerankRetrievalQuality(ctx context.Context, q *turboquant.IPQuantizer, queries []retrievalVectorRecord, denseDocs []retrievalVectorRecord, qdocs []turboQuantRetrievalDoc, qrels retrievalQrels, topK, overfetchK int) (RetrievalEvalQualityMetrics, int, int, int, int, int64, RetrievalEvalLatencyMetrics) {
 	docIDSet := make(map[string]bool, len(denseDocs))
 	denseByID := make(map[string][]float32, len(denseDocs))
 	for _, doc := range denseDocs {
@@ -498,6 +558,7 @@ func computeTurboQuantDenseRerankRetrievalQuality(ctx context.Context, q *turboq
 	skippedRelevantDocs := 0
 	skippedNoRelevant := 0
 	var rerankScores int64
+	latencies := make([]time.Duration, 0, len(queries))
 	for _, query := range queries {
 		if err := ctx.Err(); err != nil {
 			break
@@ -515,19 +576,21 @@ func computeTurboQuantDenseRerankRetrievalQuality(ctx context.Context, q *turboq
 			skippedNoRelevant++
 			continue
 		}
+		queryStart := time.Now()
 		prepared := q.PrepareQuery(query.Vector)
 		candidates := topTurboQuantRetrievalScores(q, prepared, qdocs, overfetchK)
 		reranked := topDenseRerankScores(query.Vector, candidates, denseByID, topK)
+		latencies = append(latencies, time.Since(queryStart))
 		rerankScores += int64(len(candidates))
 		evaluatedQueries++
 		relevantPairs += len(filteredRels)
 		addRetrievalQuality(&totals, reranked, filteredRels)
 	}
 	averageRetrievalQuality(&totals, evaluatedQueries)
-	return totals, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, rerankScores
+	return totals, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, rerankScores, summarizeRetrievalEvalLatencies(latencies)
 }
 
-func computeTurboQuantReconstructRerankRetrievalQuality(ctx context.Context, q *turboquant.IPQuantizer, queries []retrievalVectorRecord, qdocs []turboQuantRetrievalDoc, qrels retrievalQrels, topK, overfetchK int) (RetrievalEvalQualityMetrics, int, int, int, int, int64) {
+func computeTurboQuantReconstructRerankRetrievalQuality(ctx context.Context, q *turboquant.IPQuantizer, queries []retrievalVectorRecord, qdocs []turboQuantRetrievalDoc, qrels retrievalQrels, topK, overfetchK int) (RetrievalEvalQualityMetrics, int, int, int, int, int64, RetrievalEvalLatencyMetrics) {
 	docIDSet := make(map[string]bool, len(qdocs))
 	quantizedByID := make(map[string]turboquant.IPQuantized, len(qdocs))
 	for _, doc := range qdocs {
@@ -546,6 +609,7 @@ func computeTurboQuantReconstructRerankRetrievalQuality(ctx context.Context, q *
 	skippedRelevantDocs := 0
 	skippedNoRelevant := 0
 	var rerankScores int64
+	latencies := make([]time.Duration, 0, len(queries))
 	for _, query := range queries {
 		if err := ctx.Err(); err != nil {
 			break
@@ -563,19 +627,21 @@ func computeTurboQuantReconstructRerankRetrievalQuality(ctx context.Context, q *
 			skippedNoRelevant++
 			continue
 		}
+		queryStart := time.Now()
 		prepared := q.PrepareQuery(query.Vector)
 		candidates := topTurboQuantRetrievalScores(q, prepared, qdocs, overfetchK)
 		reranked := topTurboQuantReconstructRerankScores(q, query.Vector, candidates, quantizedByID, topK)
+		latencies = append(latencies, time.Since(queryStart))
 		rerankScores += int64(len(candidates))
 		evaluatedQueries++
 		relevantPairs += len(filteredRels)
 		addRetrievalQuality(&totals, reranked, filteredRels)
 	}
 	averageRetrievalQuality(&totals, evaluatedQueries)
-	return totals, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, rerankScores
+	return totals, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, rerankScores, summarizeRetrievalEvalLatencies(latencies)
 }
 
-func computeTurboQuantFP16RerankRetrievalQuality(ctx context.Context, q *turboquant.IPQuantizer, queries []retrievalVectorRecord, denseDocs []retrievalVectorRecord, qdocs []turboQuantRetrievalDoc, qrels retrievalQrels, topK, overfetchK int) (RetrievalEvalQualityMetrics, int, int, int, int, int64) {
+func computeTurboQuantFP16RerankRetrievalQuality(ctx context.Context, q *turboquant.IPQuantizer, queries []retrievalVectorRecord, denseDocs []retrievalVectorRecord, qdocs []turboQuantRetrievalDoc, qrels retrievalQrels, topK, overfetchK int) (RetrievalEvalQualityMetrics, int, int, int, int, int64, RetrievalEvalLatencyMetrics) {
 	docIDSet := make(map[string]bool, len(denseDocs))
 	halfByID := make(map[string][]uint16, len(denseDocs))
 	for _, doc := range denseDocs {
@@ -598,6 +664,7 @@ func computeTurboQuantFP16RerankRetrievalQuality(ctx context.Context, q *turboqu
 	skippedRelevantDocs := 0
 	skippedNoRelevant := 0
 	var rerankScores int64
+	latencies := make([]time.Duration, 0, len(queries))
 	for _, query := range queries {
 		if err := ctx.Err(); err != nil {
 			break
@@ -615,16 +682,65 @@ func computeTurboQuantFP16RerankRetrievalQuality(ctx context.Context, q *turboqu
 			skippedNoRelevant++
 			continue
 		}
+		queryStart := time.Now()
 		prepared := q.PrepareQuery(query.Vector)
 		candidates := topTurboQuantRetrievalScores(q, prepared, qdocs, overfetchK)
 		reranked := topFP16RerankScores(query.Vector, candidates, halfByID, topK)
+		latencies = append(latencies, time.Since(queryStart))
 		rerankScores += int64(len(candidates))
 		evaluatedQueries++
 		relevantPairs += len(filteredRels)
 		addRetrievalQuality(&totals, reranked, filteredRels)
 	}
 	averageRetrievalQuality(&totals, evaluatedQueries)
-	return totals, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, rerankScores
+	return totals, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, rerankScores, summarizeRetrievalEvalLatencies(latencies)
+}
+
+func summarizeRetrievalEvalLatencies(latencies []time.Duration) RetrievalEvalLatencyMetrics {
+	if len(latencies) == 0 {
+		return RetrievalEvalLatencyMetrics{}
+	}
+	values := append([]time.Duration(nil), latencies...)
+	sort.Slice(values, func(i, j int) bool {
+		return values[i] < values[j]
+	})
+	var total time.Duration
+	for _, value := range values {
+		total += value
+	}
+	return RetrievalEvalLatencyMetrics{
+		Count:  len(values),
+		MinMS:  durationMilliseconds(values[0]),
+		MeanMS: durationMilliseconds(total) / float64(len(values)),
+		P50MS:  durationMilliseconds(percentileDuration(values, 0.50)),
+		P95MS:  durationMilliseconds(percentileDuration(values, 0.95)),
+		P99MS:  durationMilliseconds(percentileDuration(values, 0.99)),
+		MaxMS:  durationMilliseconds(values[len(values)-1]),
+	}
+}
+
+func percentileDuration(sorted []time.Duration, p float64) time.Duration {
+	if len(sorted) == 0 {
+		return 0
+	}
+	if p <= 0 {
+		return sorted[0]
+	}
+	if p >= 1 {
+		return sorted[len(sorted)-1]
+	}
+	index := int(math.Ceil(p*float64(len(sorted)))) - 1
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(sorted) {
+		index = len(sorted) - 1
+	}
+	return sorted[index]
+}
+
+func durationMilliseconds(duration time.Duration) float64 {
+	return float64(duration) / float64(time.Millisecond)
 }
 
 func topDenseRerankScores(query []float32, candidates []retrievalScoredDoc, docs map[string][]float32, topK int) []retrievalScoredDoc {

@@ -1,0 +1,375 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const selectedMethod = "turboquant_ip_b4_overfetch250_fp16_rerank"
+const fallbackMethod = "turboquant_ip_b8_overfetch125_fp16_rerank"
+
+type latencyMetrics struct {
+	Count int     `json:"count"`
+	P50MS float64 `json:"p50_ms"`
+	P95MS float64 `json:"p95_ms"`
+	MaxMS float64 `json:"max_ms"`
+}
+
+type turboQuantMetrics struct {
+	Dataset string `json:"dataset"`
+	Rows []struct {
+		Bits int `json:"bits"`
+		Method string `json:"method"`
+		RerankOverfetch int `json:"rerank_overfetch"`
+		Quality struct {
+			NDCGAt10 float64 `json:"ndcg_at_10"`
+			RecallAt100 float64 `json:"recall_at_100"`
+		} `json:"quality"`
+		TotalCompressionRatio float64 `json:"total_compression_ratio"`
+		ScoresPerSecond float64 `json:"scores_per_second"`
+		RerankScores int64 `json:"rerank_scores"`
+		QueryLatency latencyMetrics `json:"query_latency"`
+	} `json:"rows"`
+}
+
+type summaryRow struct {
+	Method string `json:"method"`
+	Bits int `json:"bits"`
+	RerankOverfetch int `json:"rerank_overfetch"`
+	TotalCompressionRatio float64 `json:"total_compression_ratio"`
+	NDCGAt10 float64 `json:"ndcg_at_10"`
+	RecallAt100 float64 `json:"recall_at_100"`
+	ScoresPerSecond float64 `json:"scores_per_second"`
+	RerankScores int64 `json:"rerank_scores"`
+	QueryLatency latencyMetrics `json:"query_latency"`
+}
+
+type manifest struct {
+	Schema string `json:"schema"`
+	GeneratedAt string `json:"generated_at"`
+	RunDir string `json:"run_dir"`
+	Artifact string `json:"artifact"`
+	Dataset string `json:"dataset"`
+	DatasetDir string `json:"dataset_dir"`
+	MaxDocs string `json:"max_docs"`
+	MaxQueries string `json:"max_queries"`
+	MetricsJSON string `json:"metrics_json"`
+	MetricsTSV string `json:"metrics_tsv"`
+	SummaryTSV string `json:"summary_tsv"`
+	Command []string `json:"command"`
+	Rows []summaryRow `json:"rows"`
+	Selected *summaryRow `json:"selected_q4_overfetch250_fp16"`
+	Fallback *summaryRow `json:"fallback_q8_overfetch125_fp16"`
+}
+
+func usage() {
+	fmt.Println(`Repo-local serving smoke for the promoted compact Eos default embedder.
+
+This is CorkScrewDB-relevant vector-index/serving evidence using the in-repo
+TurboQuant evaluator. It does not load, index, or query CorkScrewDB itself; the
+actual CorkScrewDB API smoke remains external until CorkScrewDB is wired into
+this repository.
+
+Run:
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_default_embedder_serving.fw
+
+Environment:
+  EOS_SERVE_SMOKE_ARTIFACT=/path/to/manta-embed-v1.sealed.mll
+  EOS_SERVE_SMOKE_DATASET_ROOT=datasets/eos-embed-v1
+  EOS_SERVE_SMOKE_DATASET=scifact
+  EOS_SERVE_SMOKE_SPLIT=test
+  EOS_SERVE_SMOKE_RUN_ROOT=runs/eos-default-embedder-serving-smoke-<timestamp>
+  EOS_SERVE_SMOKE_MAX_DOCS=300      # set 0 for full corpus
+  EOS_SERVE_SMOKE_MAX_QUERIES=20    # set 0 for full query set
+  EOS_SERVE_SMOKE_MIN_TOTAL_COMPRESSION=1.0
+  EOS_SERVE_SMOKE_MAX_P95_MS=0      # set nonzero to gate selected/fallback p95`)
+}
+
+func getenv(name string, fallback string) string {
+	value := os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	if pwd := os.Getenv("PWD"); hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func firstExistingDir(paths []string, fallback string) string {
+	for _, path := range paths {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return path
+		}
+	}
+	return fallback
+}
+
+func retrievalDatasetDir(root string, dataset string) string {
+	candidate := filepath.Join(root, "raw", dataset, dataset)
+	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+		return candidate
+	}
+	return filepath.Join(root, dataset)
+}
+
+func parseFloatEnv(name string, fallback float64) (float64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a float: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func runCommand(root string, args []string) error {
+	fmt.Println("+ " + strings.Join(args, " "))
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = root
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func readMetrics(path string) (turboQuantMetrics, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return turboQuantMetrics{}, err
+	}
+	var metrics turboQuantMetrics
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		return turboQuantMetrics{}, err
+	}
+	return metrics, nil
+}
+
+func rowsFromMetrics(metrics turboQuantMetrics) []summaryRow {
+	rows := []summaryRow{}
+	for _, row := range metrics.Rows {
+		if row.RerankOverfetch == 0 {
+			continue
+		}
+		rows = append(rows, summaryRow{
+			Method: row.Method,
+			Bits: row.Bits,
+			RerankOverfetch: row.RerankOverfetch,
+			TotalCompressionRatio: row.TotalCompressionRatio,
+			NDCGAt10: row.Quality.NDCGAt10,
+			RecallAt100: row.Quality.RecallAt100,
+			ScoresPerSecond: row.ScoresPerSecond,
+			RerankScores: row.RerankScores,
+			QueryLatency: row.QueryLatency,
+		})
+	}
+	return rows
+}
+
+func findRow(rows []summaryRow, method string) *summaryRow {
+	for i := range rows {
+		if rows[i].Method == method {
+			return &rows[i]
+		}
+	}
+	return nil
+}
+
+func writeSummaryTSV(path string, rows []summaryRow) error {
+	var b strings.Builder
+	b.WriteString("method\tbits\trerank_overfetch\ttotal_compression_ratio\tndcg_at_10\trecall_at_100\tscores_per_second\trerank_scores\tquery_latency_p50_ms\tquery_latency_p95_ms\tquery_latency_max_ms\n")
+	for _, row := range rows {
+		fmt.Fprintf(&b, "%s\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.2f\t%d\t%.6f\t%.6f\t%.6f\n",
+			row.Method,
+			row.Bits,
+			row.RerankOverfetch,
+			row.TotalCompressionRatio,
+			row.NDCGAt10,
+			row.RecallAt100,
+			row.ScoresPerSecond,
+			row.RerankScores,
+			row.QueryLatency.P50MS,
+			row.QueryLatency.P95MS,
+			row.QueryLatency.MaxMS)
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func checkGate(row *summaryRow, label string, minCompression float64, maxP95MS float64) error {
+	if row == nil {
+		return fmt.Errorf("%s profile is missing from metrics", label)
+	}
+	if row.TotalCompressionRatio <= minCompression {
+		return fmt.Errorf("%s total compression %.6f must be > %.6f", label, row.TotalCompressionRatio, minCompression)
+	}
+	if maxP95MS > 0 && row.QueryLatency.P95MS > maxP95MS {
+		return fmt.Errorf("%s p95 %.6f ms exceeds %.6f ms", label, row.QueryLatency.P95MS, maxP95MS)
+	}
+	return nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defaultArtifact := filepath.Join(root, "runs", "eos-embed-v1-splitclean-modelhard-followup-20260614T000000Z", "candidate-june10-modelhard-lr000002-1epoch", "manta-embed-v1.sealed.mll")
+	artifact := getenv("EOS_SERVE_SMOKE_ARTIFACT", defaultArtifact)
+	if info, err := os.Stat(artifact); err != nil || info.IsDir() {
+		fmt.Fprintf(os.Stderr, "artifact does not exist or is not a file: %s\n", artifact)
+		os.Exit(1)
+	}
+
+	defaultDatasetRoot := firstExistingDir([]string{
+		filepath.Join(root, "datasets", "eos-embed-v1"),
+		filepath.Join(root, "datasets", "manta-embed-v1"),
+	}, filepath.Join(root, "datasets", "eos-embed-v1"))
+	datasetRoot := getenv("EOS_SERVE_SMOKE_DATASET_ROOT", defaultDatasetRoot)
+	dataset := getenv("EOS_SERVE_SMOKE_DATASET", "scifact")
+	datasetDir := retrievalDatasetDir(datasetRoot, dataset)
+	if info, err := os.Stat(datasetDir); err != nil || !info.IsDir() {
+		fmt.Fprintf(os.Stderr, "dataset directory does not exist: %s\n", datasetDir)
+		os.Exit(1)
+	}
+
+	runRoot := getenv("EOS_SERVE_SMOKE_RUN_ROOT", filepath.Join(root, "runs", "eos-default-embedder-serving-smoke-"+time.Now().UTC().Format("20060102T150405Z")))
+	if err := os.MkdirAll(runRoot, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	metricsJSON := filepath.Join(runRoot, dataset+".turboquant-serving.metrics.json")
+	metricsTSV := filepath.Join(runRoot, dataset+".turboquant-serving.metrics.tsv")
+	summaryTSV := filepath.Join(runRoot, "summary.tsv")
+	manifestJSON := filepath.Join(runRoot, "manifest.json")
+
+	maxDocs := getenv("EOS_SERVE_SMOKE_MAX_DOCS", "300")
+	maxQueries := getenv("EOS_SERVE_SMOKE_MAX_QUERIES", "20")
+	minCompression, err := parseFloatEnv("EOS_SERVE_SMOKE_MIN_TOTAL_COMPRESSION", 1.0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	maxP95MS, err := parseFloatEnv("EOS_SERVE_SMOKE_MAX_P95_MS", 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	args := []string{
+		"go", "run", "./cmd/eos", "eval-retrieval-turboquant",
+		"--dataset", dataset,
+		"--split", getenv("EOS_SERVE_SMOKE_SPLIT", "test"),
+		"--top-k", getenv("EOS_SERVE_SMOKE_TOP_K", "100"),
+		"--batch-size", getenv("EOS_SERVE_SMOKE_BATCH_SIZE", "512"),
+		"--bits", "4,8",
+		"--rerank-overfetch", "125,250",
+		"--rerank-storage", "fp16",
+		"--metrics-json", metricsJSON,
+		"--metrics-tsv", metricsTSV,
+	}
+	if maxDocs != "0" {
+		args = append(args, "--max-docs", maxDocs)
+	}
+	if maxQueries != "0" {
+		args = append(args, "--max-queries", maxQueries)
+	}
+	args = append(args, artifact, datasetDir)
+
+	if err := runCommand(root, args); err != nil {
+		fmt.Fprintf(os.Stderr, "serving smoke eval failed: %v\n", err)
+		os.Exit(1)
+	}
+	metrics, err := readMetrics(metricsJSON)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	rows := rowsFromMetrics(metrics)
+	selected := findRow(rows, selectedMethod)
+	fallback := findRow(rows, fallbackMethod)
+	if err := checkGate(selected, "selected q4/fp16/250", minCompression, maxP95MS); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := checkGate(fallback, "fallback q8/fp16/125", minCompression, maxP95MS); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := writeSummaryTSV(summaryTSV, rows); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	out := manifest{
+		Schema: "eos.default_embedder_serving_smoke.v1",
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		RunDir: runRoot,
+		Artifact: artifact,
+		Dataset: dataset,
+		DatasetDir: datasetDir,
+		MaxDocs: maxDocs,
+		MaxQueries: maxQueries,
+		MetricsJSON: metricsJSON,
+		MetricsTSV: metricsTSV,
+		SummaryTSV: summaryTSV,
+		Command: args,
+		Rows: rows,
+		Selected: selected,
+		Fallback: fallback,
+	}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(manifestJSON, data, 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("summary_tsv: %s\n", summaryTSV)
+	fmt.Printf("manifest: %s\n", manifestJSON)
+	fmt.Printf("selected q4/fp16/250: ndcg@10=%.6f recall@100=%.6f compression=%.6fx p95_ms=%.6f scores/s=%.2f\n",
+		selected.NDCGAt10, selected.RecallAt100, selected.TotalCompressionRatio, selected.QueryLatency.P95MS, selected.ScoresPerSecond)
+	fmt.Printf("fallback q8/fp16/125: ndcg@10=%.6f recall@100=%.6f compression=%.6fx p95_ms=%.6f scores/s=%.2f\n",
+		fallback.NDCGAt10, fallback.RecallAt100, fallback.TotalCompressionRatio, fallback.QueryLatency.P95MS, fallback.ScoresPerSecond)
+}
