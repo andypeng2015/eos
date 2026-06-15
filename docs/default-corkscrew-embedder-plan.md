@@ -239,6 +239,37 @@ The planner uses one vector per covering window, including a tail window when ne
 
 The TSV/JSON rows report `baseline_dim`, `dense_parent_bytes`, `dense_baseline_bytes`, raw `quantized_vector_bytes`, `vector_overhead_bytes`, `dense_vector_storage_bytes`, `quantized_vector_storage_bytes`, `total_quantized_bytes`, compression ratios, `vectors_that_fit_in_one_dense_vector`, and optional time-series fields `series_length`, `window_size`, `window_stride`, and `derived_window_count`. When `--baseline-dim` is omitted or `0`, the dense budget is the same dimension as the child vector, preserving the same-dim interpretation: 128-dimensional q2 stores a child vector payload in 36 bytes, so 14 payload-only children fit inside one 512-byte fp32 vector budget. When modeling compact children against a larger baseline, pass `--dim 128 --baseline-dim 3072`; one dense baseline vector is 12,288 payload bytes, so 341 q2 payload-only children fit in that one-vector budget and 128 children cost about `0.375x` of it before object/index metadata. Ideal payload math can fit q2/q4/q8 as measured, but CorkScrewDB product claims require overhead-aware planning with `--vector-overhead-bytes` because every stored vector/index entry has metadata and layout cost.
 
+For a first time-series/window quality seam, export text-rendered numeric windows and run the existing parent-child evaluator against parent-series qrels:
+
+```bash
+go run ./cmd/eos export-timeseries-vectors \
+  --dataset sensor-window-retrieval \
+  --batch-size 64 \
+  --output-dim 128 \
+  --window-size 64 \
+  --window-stride 16 \
+  --manifest-json runs/timeseries-window-cache-128d/manifest.json \
+  runs/default-embedder/eos-embed-v1.sealed.mll \
+  data/timeseries/sensor-series.jsonl \
+  data/timeseries/queries.jsonl \
+  runs/timeseries-window-cache-128d
+```
+
+```bash
+go run ./cmd/eos eval-retrieval-multivector-turboquant \
+  --dataset sensor-window-retrieval \
+  --backend text-rendered-timeseries-windows \
+  --artifact eos-embed-v1-prefix128 \
+  --doc-vectors runs/timeseries-window-cache-128d/child-doc-vectors.jsonl \
+  --query-vectors runs/timeseries-window-cache-128d/query-vectors.jsonl \
+  --qrels data/timeseries/qrels/test.tsv \
+  --bits 2,4,8 \
+  --baseline-dim 3072 \
+  runs/timeseries-window-cache-128d
+```
+
+`export-timeseries-vectors` expects one JSONL object per parent series with `id` or `_id` and numeric `values`. It writes deterministic child IDs like `series-id#window-0000`, renders each numeric window as stable text with values and simple stats, embeds those windows with the same Eos text embedder path as retrieval export, and also writes BEIR helper files `corpus.jsonl` and `queries.jsonl` into the output directory. Use that output directory as the evaluator dataset directory and pass parent-series qrels with `--qrels`; the qrels corpus IDs must be parent series IDs. This is a quality harness for text-rendered numeric windows, not a final trained numeric time-series encoder.
+
 The first quality harness for that lane is cache-only and still outside the CorkScrewDB API:
 
 ```bash

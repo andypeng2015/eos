@@ -109,6 +109,8 @@ func run(args []string) error {
 		return runEmbedText(args[1:])
 	case "export-retrieval-vectors":
 		return runExportRetrievalVectors(args[1:])
+	case "export-timeseries-vectors":
+		return runExportTimeSeriesVectors(args[1:])
 	case "eval-retrieval":
 		return runEvalRetrieval(args[1:])
 	case "eval-retrieval-hybrid":
@@ -472,6 +474,76 @@ func runExportRetrievalVectors(args []string) error {
 	if summary.ChildDocVectorPath != "" {
 		fmt.Printf("child_doc_vectors: %s\n", summary.ChildDocVectorPath)
 	}
+	fmt.Printf("query_vectors: %s\n", summary.QueryVectorPath)
+	if *manifestPath != "" {
+		fmt.Printf("manifest: %s\n", *manifestPath)
+	}
+	return nil
+}
+
+func runExportTimeSeriesVectors(args []string) error {
+	fs := flag.NewFlagSet("export-timeseries-vectors", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	datasetName := fs.String("dataset", "", "dataset name for manifest/status output")
+	batchSize := fs.Int("batch-size", 64, "embedding batch size")
+	maxSeries := fs.Int("max-series", 0, "limit series rows for smoke exports")
+	maxQueries := fs.Int("max-queries", 0, "limit query rows for smoke exports")
+	outputDim := fs.Int("output-dim", 0, "when positive, prefix-truncate embeddings to this dimension and L2-renormalize before writing")
+	windowSize := fs.Int("window-size", 0, "time-series window size in points")
+	windowStride := fs.Int("window-stride", 0, "time-series window stride in points; 0 uses --window-size")
+	seriesPrefix := fs.String("series-prefix", "", "prefix prepended to rendered series-window text before embedding")
+	queryPrefix := fs.String("query-prefix", "", "prefix prepended to query text before embedding")
+	manifestPath := fs.String("manifest-json", "", "write export summary JSON manifest")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 4 || fs.Arg(0) == "" || fs.Arg(1) == "" || fs.Arg(2) == "" || fs.Arg(3) == "" {
+		return fmt.Errorf("usage: eos export-timeseries-vectors [flags] <artifact.mll> <series.jsonl> <queries.jsonl> <output-dir>")
+	}
+	artifactPath := fs.Arg(0)
+	seriesPath := fs.Arg(1)
+	queriesPath := fs.Arg(2)
+	outputDir := fs.Arg(3)
+	if *datasetName == "" {
+		*datasetName = strings.TrimSuffix(filepath.Base(seriesPath), filepath.Ext(seriesPath))
+		if *datasetName == "" {
+			*datasetName = "timeseries"
+		}
+	}
+
+	rt := eosruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+	model, err := rt.LoadEmbeddingPackage(context.Background(), artifactPath)
+	if err != nil {
+		return err
+	}
+	summary, err := eosruntime.ExportTimeSeriesWindowVectors(context.Background(), model, eosruntime.TimeSeriesVectorExportConfig{
+		DatasetName:      *datasetName,
+		ArtifactPath:     artifactPath,
+		SeriesPath:       seriesPath,
+		QueriesPath:      queriesPath,
+		OutputDir:        outputDir,
+		BatchSize:        *batchSize,
+		MaxSeries:        *maxSeries,
+		MaxQueries:       *maxQueries,
+		OutputDim:        *outputDim,
+		WindowSize:       *windowSize,
+		WindowStride:     *windowStride,
+		SeriesPrefix:     *seriesPrefix,
+		QueryPrefix:      *queryPrefix,
+		ManifestJSONPath: *manifestPath,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("exported time-series vectors: dataset=%s backend=%s series=%d queries=%d child_window_vectors=%d dim=%d\n", summary.Dataset, summary.Backend, summary.Series, summary.Queries, summary.ChildVectors, summary.Dimension)
+	if summary.ModelDimension != 0 && summary.ModelDimension != summary.Dimension {
+		fmt.Printf("model_dim: %d\n", summary.ModelDimension)
+	}
+	fmt.Printf("windows: size=%d stride=%d\n", summary.WindowSize, summary.WindowStride)
+	fmt.Printf("dataset_dir: %s\n", summary.OutputDir)
+	fmt.Printf("corpus: %s\n", summary.CorpusPath)
+	fmt.Printf("queries: %s\n", summary.BEIRQueriesPath)
+	fmt.Printf("child_doc_vectors: %s\n", summary.ChildDocVectorPath)
 	fmt.Printf("query_vectors: %s\n", summary.QueryVectorPath)
 	if *manifestPath != "" {
 		fmt.Printf("manifest: %s\n", *manifestPath)
@@ -5456,6 +5528,7 @@ func printUsage() {
 	fmt.Println("  eos export-mll <artifact.mll> [output.mll]")
 	fmt.Println("  eos embed-text <artifact.mll> <text...>")
 	fmt.Println("  eos export-retrieval-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
+	fmt.Println("  eos export-timeseries-vectors [flags] <artifact.mll> <series.jsonl> <queries.jsonl> <output-dir>")
 	fmt.Println("  eos eval-retrieval [flags] <artifact.mll> <beir-dataset-dir>")
 	fmt.Println("  eos eval-retrieval-hybrid [flags] <artifact.mll> <beir-dataset-dir>")
 	fmt.Println("  eos eval-retrieval-turboquant [flags] <artifact.mll> <beir-dataset-dir>")
@@ -5499,6 +5572,7 @@ func printUsage() {
 	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Eos metadata in XMTA.")
 	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
 	fmt.Println("export-retrieval-vectors writes BEIR document/query vector caches from a packaged or sealed Eos embedding .mll, optionally as parent-child document chunks.")
+	fmt.Println("export-timeseries-vectors writes text-rendered time-series window child-vector caches plus query vectors for the multivector TurboQuant quality harness.")
 	fmt.Println("eval-retrieval scores a sealed embedding .mll on BEIR-style corpus/query/qrels files with nDCG/MRR/Recall metrics.")
 	fmt.Println("eval-retrieval-hybrid fuses sealed embedding dense top-k with BM25 top-k using minmax, zscore, or RRF scoring.")
 	fmt.Println("eval-retrieval-turboquant compares dense retrieval quality/cost against TurboQuant IP-preserving quantized document vectors.")

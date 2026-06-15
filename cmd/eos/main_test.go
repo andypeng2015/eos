@@ -1004,6 +1004,152 @@ func TestRunExportRetrievalVectorsWritesChildCaches(t *testing.T) {
 	}
 }
 
+func TestRunExportTimeSeriesVectorsWritesWindowCaches(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "eos-embed-v1.mll")
+	if err := run([]string{
+		"init-model",
+		"--vocab-size", "24",
+		"--max-seq", "16",
+		"--embedding-dim", "4",
+		"--hidden-dim", "8",
+		path,
+	}); err != nil {
+		t.Fatalf("run init-model: %v", err)
+	}
+	tokenizer := eosruntime.TokenizerFile{
+		Version:      eosruntime.TokenizerFileVersion,
+		Tokens:       []string{"[PAD]", "[UNK]", "series", "window", "sensor", "rising", "load", "values", "stats", "query", "temperature", "short", "s1", "s2", "q1"},
+		UnknownToken: "[UNK]",
+	}
+	if err := tokenizer.WriteFile(eosruntime.DefaultTokenizerPath(path)); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	if _, _, err := eosruntime.RebuildSiblingPackageManifest(path); err != nil {
+		t.Fatalf("rebuild package manifest: %v", err)
+	}
+	sealedPath := filepath.Join(dir, "eos-embed-v1.sealed.mll")
+	if err := run([]string{"export-mll", path, sealedPath}); err != nil {
+		t.Fatalf("run export-mll: %v", err)
+	}
+
+	seriesPath := filepath.Join(dir, "series.jsonl")
+	queriesPath := filepath.Join(dir, "queries.jsonl")
+	if err := os.WriteFile(seriesPath, []byte(
+		`{"id":"s1","label":"load","values":[1,2,3,4,5]}`+"\n"+
+			`{"_id":"s2","text":"short sensor","values":[8,9]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write series: %v", err)
+	}
+	if err := os.WriteFile(queriesPath, []byte(`{"id":"q1","text":"rising load query"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	outputDir := filepath.Join(dir, "timeseries-cache")
+	manifestPath := filepath.Join(dir, "timeseries-cache.manifest.json")
+
+	output := captureRunOutput(t, []string{
+		"export-timeseries-vectors",
+		"--dataset", "tiny-series",
+		"--batch-size", "1",
+		"--output-dim", "2",
+		"--window-size", "3",
+		"--window-stride", "2",
+		"--series-prefix", "series window: ",
+		"--query-prefix", "query: ",
+		"--manifest-json", manifestPath,
+		sealedPath,
+		seriesPath,
+		queriesPath,
+		outputDir,
+	})
+	childPath := filepath.Join(outputDir, "child-doc-vectors.jsonl")
+	queryPath := filepath.Join(outputDir, "query-vectors.jsonl")
+	corpusPath := filepath.Join(outputDir, "corpus.jsonl")
+	beirQueriesPath := filepath.Join(outputDir, "queries.jsonl")
+	for _, want := range []string{
+		"exported time-series vectors: dataset=tiny-series",
+		"series=2 queries=1 child_window_vectors=3 dim=2",
+		"model_dim: 4",
+		"windows: size=3 stride=2",
+		"dataset_dir: " + outputDir,
+		"corpus: " + corpusPath,
+		"queries: " + beirQueriesPath,
+		"child_doc_vectors: " + childPath,
+		"query_vectors: " + queryPath,
+		"manifest: " + manifestPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("timeseries export output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	corpusData, err := os.ReadFile(corpusPath)
+	if err != nil {
+		t.Fatalf("read corpus helper: %v", err)
+	}
+	if !strings.Contains(string(corpusData), `"_id":"s1"`) || !strings.Contains(string(corpusData), `"text":"label: load\nseries_id: s1`) || !strings.Contains(string(corpusData), `points: count=5`) {
+		t.Fatalf("unexpected corpus helper rows:\n%s", string(corpusData))
+	}
+	beirQueryData, err := os.ReadFile(beirQueriesPath)
+	if err != nil {
+		t.Fatalf("read BEIR query helper: %v", err)
+	}
+	if !strings.Contains(string(beirQueryData), `"_id":"q1"`) || !strings.Contains(string(beirQueryData), `"text":"rising load query"`) {
+		t.Fatalf("unexpected BEIR query helper rows:\n%s", string(beirQueryData))
+	}
+	childData, err := os.ReadFile(childPath)
+	if err != nil {
+		t.Fatalf("read child vectors: %v", err)
+	}
+	if !strings.Contains(string(childData), `"parent_id":"s1"`) || !strings.Contains(string(childData), `"child_id":"s1#window-0001"`) || !strings.Contains(string(childData), `"embedding"`) {
+		t.Fatalf("unexpected child vector rows:\n%s", string(childData))
+	}
+	queryData, err := os.ReadFile(queryPath)
+	if err != nil {
+		t.Fatalf("read query vectors: %v", err)
+	}
+	if !strings.Contains(string(queryData), `"id":"q1"`) || !strings.Contains(string(queryData), `"embedding"`) {
+		t.Fatalf("unexpected query vector rows:\n%s", string(queryData))
+	}
+	var manifest eosruntime.TimeSeriesVectorExportSummary
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if manifest.Schema != eosruntime.TimeSeriesVectorExportManifestSchema || manifest.Dataset != "tiny-series" || manifest.ChildVectors != 3 || manifest.CorpusPath != corpusPath || manifest.BEIRQueriesPath != beirQueriesPath || manifest.QueryVectorPath != queryPath || manifest.Dimension != 2 || manifest.ModelDimension != 4 || manifest.OutputDimension != 2 || manifest.WindowSize != 3 || manifest.WindowStride != 2 {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+
+	qrelsPath := filepath.Join(dir, "qrels.tsv")
+	metricsPath := filepath.Join(dir, "timeseries-multivector.metrics.json")
+	if err := os.WriteFile(qrelsPath, []byte("query-id\tcorpus-id\tscore\nq1\ts1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	evalOutput := captureRunOutput(t, []string{
+		"eval-retrieval-multivector-turboquant",
+		"--dataset", "tiny-series",
+		"--backend", "text-rendered-timeseries-windows",
+		"--artifact", "tiny-sealed",
+		"--bits", "8",
+		"--doc-vectors", childPath,
+		"--query-vectors", queryPath,
+		"--qrels", qrelsPath,
+		"--metrics-json", metricsPath,
+		outputDir,
+	})
+	for _, want := range []string{
+		"retrieval multivector turboquant: dataset=tiny-series backend=text-rendered-timeseries-windows parents=2 child_vectors=3",
+		"dense-child: ndcg@10=",
+		"q8: ndcg@10=",
+		"metrics: " + metricsPath,
+	} {
+		if !strings.Contains(evalOutput, want) {
+			t.Fatalf("timeseries eval output missing %q\noutput:\n%s", want, evalOutput)
+		}
+	}
+}
+
 func TestRunEvalRetrievalBM25WritesMetricsJSON(t *testing.T) {
 	dir := t.TempDir()
 	datasetDir := filepath.Join(dir, "dataset")

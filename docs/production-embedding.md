@@ -194,6 +194,37 @@ This uses one vector per covering window: a series no longer than the window get
 
 This planner answers a different question from `eval-retrieval-turboquant`: how many direct quantized child vectors per parent object fit in the storage cost of one dense fp32 baseline vector. It is a storage gate, not a numeric time-series quality benchmark. The output is TSV by default and optional JSON with fields including `dim`, `baseline_dim`, `bits`, `objects`, `vectors_per_object`, optional `series_length`/`window_size`/`window_stride`/`derived_window_count`, `dense_parent_bytes`, `dense_baseline_bytes`, raw `quantized_vector_bytes`, `vector_overhead_bytes`, `dense_vector_storage_bytes`, `quantized_vector_storage_bytes`, `total_quantized_bytes`, compression ratios, and `vectors_that_fit_in_one_dense_vector`. Omitting `--baseline-dim` preserves same-dim accounting (`baseline_dim=dim`); omitting `--vector-overhead-bytes` preserves ideal payload-only accounting. Use `--dim 128 --baseline-dim 3072` to test the large-baseline interpretation where one 3072d fp32 vector has a 12,288-byte payload, q2 128d children have a 36-byte raw payload, and 128 payload-only children use about `0.375x` of the baseline budget. That ideal math can fit q2/q4/q8 as measured, but CorkScrewDB product claims require overhead-aware planning with per-vector/index-entry bytes before claiming hundreds of vectors for the cost of one. The intended lane is direct child vectors for windows, spans, event histories, or per-object time-series slices. Do not enable `--sidecar-storage fp16` for that lane unless the product explicitly accepts the extra storage; fp16 sidecars are for quality-preserving rerank profiles and erase most of the hundred-child storage advantage when attached to every child vector.
 
+To move from storage math to a cache-only quality harness for time-series windows, export text-rendered numeric windows and reuse the existing multivector TurboQuant evaluator. The series JSONL has one parent series per row with `id` or `_id` and numeric `values`; qrels must use the parent series IDs as corpus IDs:
+
+```bash
+go run ./cmd/eos export-timeseries-vectors \
+  --dataset sensor-window-retrieval \
+  --batch-size 64 \
+  --output-dim 128 \
+  --window-size 64 \
+  --window-stride 16 \
+  --manifest-json /data/manta/runs/<run-id>/sensor-window-export-128d.json \
+  /data/manta/runs/<run-id>/eos-embed-v1.sealed.mll \
+  /data/manta/timeseries/sensor-series.jsonl \
+  /data/manta/timeseries/queries.jsonl \
+  /data/manta/runs/<run-id>/sensor-window-cache-128d
+```
+
+```bash
+go run ./cmd/eos eval-retrieval-multivector-turboquant \
+  --dataset sensor-window-retrieval \
+  --backend text-rendered-timeseries-windows \
+  --artifact eos-embed-v1-prefix128 \
+  --doc-vectors /data/manta/runs/<run-id>/sensor-window-cache-128d/child-doc-vectors.jsonl \
+  --query-vectors /data/manta/runs/<run-id>/sensor-window-cache-128d/query-vectors.jsonl \
+  --qrels /data/manta/timeseries/qrels/test.tsv \
+  --bits 2,4,8 \
+  --baseline-dim 3072 \
+  /data/manta/runs/<run-id>/sensor-window-cache-128d
+```
+
+`export-timeseries-vectors` renders each window as stable text containing the series ID, window bounds, values, and simple stats before embedding with the normal Eos text embedder path. It also writes BEIR helper `corpus.jsonl` and `queries.jsonl` files into the output directory, so use the export directory as the evaluator dataset directory and pass the parent-series qrels with `--qrels`. This is a bridge quality harness for numeric windows represented as text, not a final trained numeric time-series encoder or a CorkScrewDB load/index/search benchmark.
+
 After storage planning, run the cache-only parent-child quality harness before making product claims:
 
 For Eos-owned/default embedders, create the cache with the Go-native exporter so the sealed `.mll` runtime path, tokenizer, batching, and normalization match `eval-retrieval` without Python or SentenceTransformers:
