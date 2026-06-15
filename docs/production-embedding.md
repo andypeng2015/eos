@@ -176,7 +176,23 @@ go run ./cmd/eos plan-multivector-storage \
   --objects 1000
 ```
 
-This planner answers a different question from `eval-retrieval-turboquant`: how many direct quantized child vectors per parent object fit in the storage cost of one dense fp32 baseline vector. The output is TSV by default and optional JSON with fields including `dim`, `baseline_dim`, `bits`, `objects`, `vectors_per_object`, `dense_parent_bytes`, `dense_baseline_bytes`, raw `quantized_vector_bytes`, `vector_overhead_bytes`, `dense_vector_storage_bytes`, `quantized_vector_storage_bytes`, `total_quantized_bytes`, compression ratios, and `vectors_that_fit_in_one_dense_vector`. Omitting `--baseline-dim` preserves same-dim accounting (`baseline_dim=dim`); omitting `--vector-overhead-bytes` preserves ideal payload-only accounting. Use `--dim 128 --baseline-dim 3072` to test the large-baseline interpretation where one 3072d fp32 vector has a 12,288-byte payload, q2 128d children have a 36-byte raw payload, and 128 payload-only children use about `0.375x` of the baseline budget. That ideal math can fit q2/q4/q8 as measured, but CorkScrewDB product claims require overhead-aware planning with per-vector/index-entry bytes before claiming hundreds of vectors for the cost of one. The intended lane is direct child vectors for windows, spans, event histories, or per-object time-series slices. Do not enable `--sidecar-storage fp16` for that lane unless the product explicitly accepts the extra storage; fp16 sidecars are for quality-preserving rerank profiles and erase most of the hundred-child storage advantage when attached to every child vector.
+For time-series/window-vector planning, derive the child-vector count from point counts, window size, and stride instead of hand-entering `--vectors-per-object`:
+
+```bash
+go run ./cmd/eos plan-multivector-storage \
+  --dim 128 \
+  --baseline-dim 3072 \
+  --bits 2,4,8 \
+  --series-lengths 256,1024 \
+  --window-size 64 \
+  --window-stride 16 \
+  --vector-overhead-bytes 32 \
+  --objects 1000
+```
+
+This uses one vector per covering window: a series no longer than the window gets one vector, and longer series include a tail window when the stride does not land exactly on the end. Do not pass `--vectors-per-object` with `--series-lengths`; the CLI fails explicit conflicts so manual and derived modes stay distinct.
+
+This planner answers a different question from `eval-retrieval-turboquant`: how many direct quantized child vectors per parent object fit in the storage cost of one dense fp32 baseline vector. It is a storage gate, not a numeric time-series quality benchmark. The output is TSV by default and optional JSON with fields including `dim`, `baseline_dim`, `bits`, `objects`, `vectors_per_object`, optional `series_length`/`window_size`/`window_stride`/`derived_window_count`, `dense_parent_bytes`, `dense_baseline_bytes`, raw `quantized_vector_bytes`, `vector_overhead_bytes`, `dense_vector_storage_bytes`, `quantized_vector_storage_bytes`, `total_quantized_bytes`, compression ratios, and `vectors_that_fit_in_one_dense_vector`. Omitting `--baseline-dim` preserves same-dim accounting (`baseline_dim=dim`); omitting `--vector-overhead-bytes` preserves ideal payload-only accounting. Use `--dim 128 --baseline-dim 3072` to test the large-baseline interpretation where one 3072d fp32 vector has a 12,288-byte payload, q2 128d children have a 36-byte raw payload, and 128 payload-only children use about `0.375x` of the baseline budget. That ideal math can fit q2/q4/q8 as measured, but CorkScrewDB product claims require overhead-aware planning with per-vector/index-entry bytes before claiming hundreds of vectors for the cost of one. The intended lane is direct child vectors for windows, spans, event histories, or per-object time-series slices. Do not enable `--sidecar-storage fp16` for that lane unless the product explicitly accepts the extra storage; fp16 sidecars are for quality-preserving rerank profiles and erase most of the hundred-child storage advantage when attached to every child vector.
 
 After storage planning, run the cache-only parent-child quality harness before making product claims:
 

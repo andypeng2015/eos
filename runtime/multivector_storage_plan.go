@@ -20,6 +20,9 @@ type MultiVectorStoragePlanInput struct {
 	Bits                []int
 	Objects             int
 	VectorsPerObject    []int
+	SeriesLengths       []int
+	WindowSize          int
+	WindowStride        int
 	SidecarStorage      string
 	VectorOverheadBytes int64
 }
@@ -36,6 +39,9 @@ type MultiVectorStoragePlanConfig struct {
 	Bits                []int  `json:"bits"`
 	Objects             int    `json:"objects"`
 	VectorsPerObject    []int  `json:"vectors_per_object"`
+	SeriesLengths       []int  `json:"series_lengths,omitempty"`
+	WindowSize          int    `json:"window_size,omitempty"`
+	WindowStride        int    `json:"window_stride,omitempty"`
 	SidecarStorage      string `json:"sidecar_storage"`
 	VectorOverheadBytes int64  `json:"vector_overhead_bytes"`
 }
@@ -46,6 +52,10 @@ type MultiVectorStoragePlanRow struct {
 	Bits                             int     `json:"bits"`
 	Objects                          int     `json:"objects"`
 	VectorsPerObject                 int     `json:"vectors_per_object"`
+	SeriesLength                     int     `json:"series_length,omitempty"`
+	WindowSize                       int     `json:"window_size,omitempty"`
+	WindowStride                     int     `json:"window_stride,omitempty"`
+	DerivedWindowCount               int     `json:"derived_window_count,omitempty"`
 	DenseParentBytes                 int64   `json:"dense_parent_bytes"`
 	DenseParentTotalBytes            int64   `json:"dense_parent_total_bytes"`
 	DenseBaselineBytes               int64   `json:"dense_baseline_bytes"`
@@ -86,12 +96,9 @@ func PlanMultiVectorStorage(in MultiVectorStoragePlanInput) (MultiVectorStorageP
 	if err := validateTurboQuantRetrievalBits(bits); err != nil {
 		return MultiVectorStoragePlan{}, err
 	}
-	vectorsPerObject := normalizeMultiVectorStorageCounts(in.VectorsPerObject)
-	if len(vectorsPerObject) == 0 {
-		if len(in.VectorsPerObject) > 0 {
-			return MultiVectorStoragePlan{}, fmt.Errorf("vectors-per-object must contain at least one positive integer")
-		}
-		vectorsPerObject = []int{1}
+	scenarios, vectorsPerObject, seriesLengths, windowSize, windowStride, err := multiVectorStorageScenarios(in)
+	if err != nil {
+		return MultiVectorStoragePlan{}, err
 	}
 	sidecarStorage, err := normalizeMultiVectorSidecarStorage(in.SidecarStorage)
 	if err != nil {
@@ -106,6 +113,9 @@ func PlanMultiVectorStorage(in MultiVectorStoragePlanInput) (MultiVectorStorageP
 			Bits:                append([]int(nil), bits...),
 			Objects:             in.Objects,
 			VectorsPerObject:    append([]int(nil), vectorsPerObject...),
+			SeriesLengths:       append([]int(nil), seriesLengths...),
+			WindowSize:          windowSize,
+			WindowStride:        windowStride,
 			SidecarStorage:      sidecarStorage,
 			VectorOverheadBytes: in.VectorOverheadBytes,
 		},
@@ -119,7 +129,8 @@ func PlanMultiVectorStorage(in MultiVectorStoragePlanInput) (MultiVectorStorageP
 		quantizedPayloadBytes := int64(mseBytes + signBytes + 4)
 		quantizedVectorBytes := quantizedPayloadBytes + sidecarBytesPerVector
 		quantizedVectorStorageBytes := quantizedVectorBytes + in.VectorOverheadBytes
-		for _, count := range vectorsPerObject {
+		for _, scenario := range scenarios {
+			count := scenario.VectorsPerObject
 			totalQuantizedBytes := int64(in.Objects) * int64(count) * quantizedVectorStorageBytes
 			row := MultiVectorStoragePlanRow{
 				Dim:                              in.Dim,
@@ -127,6 +138,10 @@ func PlanMultiVectorStorage(in MultiVectorStoragePlanInput) (MultiVectorStorageP
 				Bits:                             bitWidth,
 				Objects:                          in.Objects,
 				VectorsPerObject:                 count,
+				SeriesLength:                     scenario.SeriesLength,
+				WindowSize:                       scenario.WindowSize,
+				WindowStride:                     scenario.WindowStride,
+				DerivedWindowCount:               scenario.DerivedWindowCount,
 				DenseParentBytes:                 denseBaselineBytes,
 				DenseParentTotalBytes:            denseBaselineTotalBytes,
 				DenseBaselineBytes:               denseBaselineBytes,
@@ -149,6 +164,80 @@ func PlanMultiVectorStorage(in MultiVectorStoragePlanInput) (MultiVectorStorageP
 		}
 	}
 	return plan, nil
+}
+
+type multiVectorStorageScenario struct {
+	VectorsPerObject   int
+	SeriesLength       int
+	WindowSize         int
+	WindowStride       int
+	DerivedWindowCount int
+}
+
+func multiVectorStorageScenarios(in MultiVectorStoragePlanInput) ([]multiVectorStorageScenario, []int, []int, int, int, error) {
+	if len(in.SeriesLengths) > 0 {
+		if len(in.VectorsPerObject) > 0 {
+			return nil, nil, nil, 0, 0, fmt.Errorf("use either series lengths with window settings or vectors per object, not both")
+		}
+		if in.WindowSize <= 0 {
+			return nil, nil, nil, 0, 0, fmt.Errorf("window-size must be positive when series-lengths is set")
+		}
+		windowStride := in.WindowStride
+		if windowStride == 0 {
+			windowStride = in.WindowSize
+		}
+		if windowStride < 0 {
+			return nil, nil, nil, 0, 0, fmt.Errorf("window-stride must be positive or zero to use window-size")
+		}
+		scenarios := make([]multiVectorStorageScenario, 0, len(in.SeriesLengths))
+		vectorsPerObject := make([]int, 0, len(in.SeriesLengths))
+		seriesLengths := make([]int, 0, len(in.SeriesLengths))
+		for _, points := range in.SeriesLengths {
+			windowCount, err := TimeSeriesWindowVectorCount(points, in.WindowSize, windowStride)
+			if err != nil {
+				return nil, nil, nil, 0, 0, err
+			}
+			scenarios = append(scenarios, multiVectorStorageScenario{
+				VectorsPerObject:   windowCount,
+				SeriesLength:       points,
+				WindowSize:         in.WindowSize,
+				WindowStride:       windowStride,
+				DerivedWindowCount: windowCount,
+			})
+			vectorsPerObject = append(vectorsPerObject, windowCount)
+			seriesLengths = append(seriesLengths, points)
+		}
+		return scenarios, vectorsPerObject, seriesLengths, in.WindowSize, windowStride, nil
+	}
+
+	vectorsPerObject := normalizeMultiVectorStorageCounts(in.VectorsPerObject)
+	if len(vectorsPerObject) == 0 {
+		if len(in.VectorsPerObject) > 0 {
+			return nil, nil, nil, 0, 0, fmt.Errorf("vectors-per-object must contain at least one positive integer")
+		}
+		vectorsPerObject = []int{1}
+	}
+	scenarios := make([]multiVectorStorageScenario, 0, len(vectorsPerObject))
+	for _, count := range vectorsPerObject {
+		scenarios = append(scenarios, multiVectorStorageScenario{VectorsPerObject: count})
+	}
+	return scenarios, vectorsPerObject, nil, 0, 0, nil
+}
+
+func TimeSeriesWindowVectorCount(points, windowSize, stride int) (int, error) {
+	if points <= 0 {
+		return 0, fmt.Errorf("series length must be positive")
+	}
+	if windowSize <= 0 {
+		return 0, fmt.Errorf("window size must be positive")
+	}
+	if stride <= 0 {
+		return 0, fmt.Errorf("window stride must be positive")
+	}
+	if points <= windowSize {
+		return 1, nil
+	}
+	return 1 + (points-windowSize+stride-1)/stride, nil
 }
 
 func normalizeMultiVectorStorageCounts(values []int) []int {

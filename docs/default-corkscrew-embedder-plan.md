@@ -221,7 +221,23 @@ go run ./cmd/eos plan-multivector-storage \
   --objects 1000
 ```
 
-The TSV/JSON rows report `baseline_dim`, `dense_parent_bytes`, `dense_baseline_bytes`, raw `quantized_vector_bytes`, `vector_overhead_bytes`, `dense_vector_storage_bytes`, `quantized_vector_storage_bytes`, `total_quantized_bytes`, compression ratios, and `vectors_that_fit_in_one_dense_vector`. When `--baseline-dim` is omitted or `0`, the dense budget is the same dimension as the child vector, preserving the same-dim interpretation: 128-dimensional q2 stores a child vector payload in 36 bytes, so 14 payload-only children fit inside one 512-byte fp32 vector budget. When modeling compact children against a larger baseline, pass `--dim 128 --baseline-dim 3072`; one dense baseline vector is 12,288 payload bytes, so 341 q2 payload-only children fit in that one-vector budget and 128 children cost about `0.375x` of it before object/index metadata. Ideal payload math can fit q2/q4/q8 as measured, but CorkScrewDB product claims require overhead-aware planning with `--vector-overhead-bytes` because every stored vector/index entry has metadata and layout cost.
+For time-series/window-vector planning, derive the child-vector count from series lengths:
+
+```bash
+go run ./cmd/eos plan-multivector-storage \
+  --dim 128 \
+  --baseline-dim 3072 \
+  --bits 2,4,8 \
+  --series-lengths 256,1024 \
+  --window-size 64 \
+  --window-stride 16 \
+  --vector-overhead-bytes 32 \
+  --objects 1000
+```
+
+The planner uses one vector per covering window, including a tail window when needed. This is a storage gate for the TurboQuant time-series vector hypothesis, not a numeric time-series quality benchmark; run a retrieval or forecasting quality harness separately before making quality claims. Do not pass `--vectors-per-object` with `--series-lengths`; explicit conflicts fail so manual and derived modes remain separate.
+
+The TSV/JSON rows report `baseline_dim`, `dense_parent_bytes`, `dense_baseline_bytes`, raw `quantized_vector_bytes`, `vector_overhead_bytes`, `dense_vector_storage_bytes`, `quantized_vector_storage_bytes`, `total_quantized_bytes`, compression ratios, `vectors_that_fit_in_one_dense_vector`, and optional time-series fields `series_length`, `window_size`, `window_stride`, and `derived_window_count`. When `--baseline-dim` is omitted or `0`, the dense budget is the same dimension as the child vector, preserving the same-dim interpretation: 128-dimensional q2 stores a child vector payload in 36 bytes, so 14 payload-only children fit inside one 512-byte fp32 vector budget. When modeling compact children against a larger baseline, pass `--dim 128 --baseline-dim 3072`; one dense baseline vector is 12,288 payload bytes, so 341 q2 payload-only children fit in that one-vector budget and 128 children cost about `0.375x` of it before object/index metadata. Ideal payload math can fit q2/q4/q8 as measured, but CorkScrewDB product claims require overhead-aware planning with `--vector-overhead-bytes` because every stored vector/index entry has metadata and layout cost.
 
 The first quality harness for that lane is cache-only and still outside the CorkScrewDB API:
 

@@ -391,6 +391,64 @@ func TestRunPlanMultiVectorStorageAccountsForVectorOverhead(t *testing.T) {
 	}
 }
 
+func TestRunPlanMultiVectorStorageDerivesTimeSeriesWindows(t *testing.T) {
+	jsonPath := filepath.Join(t.TempDir(), "multivector-storage-series.json")
+	output := captureRunOutput(t, []string{
+		"plan-multivector-storage",
+		"--dim", "128",
+		"--baseline-dim", "3072",
+		"--bits", "2",
+		"--series-lengths", "256,1024",
+		"--window-size", "64",
+		"--window-stride", "16",
+		"--objects", "1000",
+		"--vector-overhead-bytes", "32",
+		"--json", jsonPath,
+	})
+	for _, want := range []string{
+		"storage_multiple_of_dense_parent_cost\tseries_length\twindow_size\twindow_stride\tderived_window_count",
+		"128\t3072\t2\t1000\t13\t12288\t12320000\t12288\t12320000\t36\tnone\t0\t36\t32\t12320\t68\t884000\t181.176471\t13.936652\t181\ttrue\t0.071753\t256\t64\t16\t13",
+		"128\t3072\t2\t1000\t61\t12288\t12320000\t12288\t12320000\t36\tnone\t0\t36\t32\t12320\t68\t4148000\t181.176471\t2.970106\t181\ttrue\t0.336688\t1024\t64\t16\t61",
+		"json: " + jsonPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("plan-multivector-storage output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatalf("read json: %v", err)
+	}
+	var plan eosruntime.MultiVectorStoragePlan
+	if err := json.Unmarshal(data, &plan); err != nil {
+		t.Fatalf("decode json: %v\n%s", err, data)
+	}
+	if got, want := plan.Config.VectorsPerObject, []int{13, 61}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("vectors_per_object = %v, want %v", got, want)
+	}
+	if plan.Config.WindowSize != 64 || plan.Config.WindowStride != 16 || len(plan.Config.SeriesLengths) != 2 {
+		t.Fatalf("config time series = lengths:%v window:%d stride:%d", plan.Config.SeriesLengths, plan.Config.WindowSize, plan.Config.WindowStride)
+	}
+	if plan.Rows[1].SeriesLength != 1024 || plan.Rows[1].DerivedWindowCount != 61 {
+		t.Fatalf("series row = %+v", plan.Rows[1])
+	}
+}
+
+func TestRunPlanMultiVectorStorageRejectsExplicitVectorsWithSeriesLengths(t *testing.T) {
+	_, err := captureRunOutputAndError(t, []string{
+		"plan-multivector-storage",
+		"--series-lengths", "256",
+		"--window-size", "64",
+		"--vectors-per-object", "13",
+	})
+	if err == nil {
+		t.Fatal("plan-multivector-storage succeeded with explicit vectors-per-object and series-lengths")
+	}
+	if !strings.Contains(err.Error(), "use either --series-lengths") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestRunPlanMultiVectorStorageRejectsNegativeVectorOverhead(t *testing.T) {
 	_, err := captureRunOutputAndError(t, []string{
 		"plan-multivector-storage",

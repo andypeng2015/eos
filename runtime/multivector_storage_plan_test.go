@@ -1,6 +1,9 @@
 package eosruntime
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestPlanMultiVectorStorageUsesTurboQuantIPPayloadBytes(t *testing.T) {
 	plan, err := PlanMultiVectorStorage(MultiVectorStoragePlanInput{
@@ -133,6 +136,113 @@ func TestPlanMultiVectorStorageAccountsForPerVectorOverhead(t *testing.T) {
 	}
 	if plan.Rows[2].StorageMultipleOfDenseParentCost < 1.4129 || plan.Rows[2].StorageMultipleOfDenseParentCost > 1.4130 {
 		t.Fatalf("storage multiple = %.6f", plan.Rows[2].StorageMultipleOfDenseParentCost)
+	}
+}
+
+func TestTimeSeriesWindowVectorCountCoversTailWindow(t *testing.T) {
+	tests := []struct {
+		name       string
+		points     int
+		windowSize int
+		stride     int
+		want       int
+	}{
+		{name: "short series", points: 32, windowSize: 64, stride: 16, want: 1},
+		{name: "exact window", points: 64, windowSize: 64, stride: 16, want: 1},
+		{name: "aligned windows", points: 256, windowSize: 64, stride: 16, want: 13},
+		{name: "tail window", points: 257, windowSize: 64, stride: 16, want: 14},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := TimeSeriesWindowVectorCount(tt.points, tt.windowSize, tt.stride)
+			if err != nil {
+				t.Fatalf("count: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("count = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPlanMultiVectorStorageDerivesVectorsFromTimeSeriesWindows(t *testing.T) {
+	plan, err := PlanMultiVectorStorage(MultiVectorStoragePlanInput{
+		Dim:                 128,
+		BaselineDim:         3072,
+		Bits:                []int{2},
+		Objects:             1000,
+		SeriesLengths:       []int{256, 1024},
+		WindowSize:          64,
+		WindowStride:        16,
+		VectorOverheadBytes: 32,
+	})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if len(plan.Rows) != 2 {
+		t.Fatalf("rows = %d", len(plan.Rows))
+	}
+	if got, want := plan.Config.VectorsPerObject, []int{13, 61}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("config vectors_per_object = %v, want %v", got, want)
+	}
+	if plan.Config.WindowSize != 64 || plan.Config.WindowStride != 16 || len(plan.Config.SeriesLengths) != 2 {
+		t.Fatalf("config time series = lengths:%v window:%d stride:%d", plan.Config.SeriesLengths, plan.Config.WindowSize, plan.Config.WindowStride)
+	}
+	row := plan.Rows[0]
+	if row.SeriesLength != 256 || row.WindowSize != 64 || row.WindowStride != 16 || row.DerivedWindowCount != 13 {
+		t.Fatalf("row time series fields = %+v", row)
+	}
+	if row.VectorsPerObject != 13 || row.TotalQuantizedBytes != 884000 {
+		t.Fatalf("row count/storage = vectors:%d total:%d", row.VectorsPerObject, row.TotalQuantizedBytes)
+	}
+	if !row.FitsInOneDenseVectorStorage || row.StorageMultipleOfDenseParentCost < 0.0717 || row.StorageMultipleOfDenseParentCost > 0.0718 {
+		t.Fatalf("row fit/multiple = fits:%t multiple:%.6f", row.FitsInOneDenseVectorStorage, row.StorageMultipleOfDenseParentCost)
+	}
+}
+
+func TestPlanMultiVectorStorageRejectsVectorsPerObjectWithSeriesLengths(t *testing.T) {
+	_, err := PlanMultiVectorStorage(MultiVectorStoragePlanInput{
+		Dim:              128,
+		Bits:             []int{2},
+		Objects:          1,
+		VectorsPerObject: []int{13},
+		SeriesLengths:    []int{256},
+		WindowSize:       64,
+	})
+	if err == nil {
+		t.Fatal("plan succeeded with vectors per object and series lengths")
+	}
+	if !strings.Contains(err.Error(), "not both") {
+		t.Fatalf("error = %q, want conflict message", err)
+	}
+}
+
+func TestPlanMultiVectorStorageDefaultsWindowStrideToWindowSize(t *testing.T) {
+	plan, err := PlanMultiVectorStorage(MultiVectorStoragePlanInput{
+		Dim:           128,
+		Bits:          []int{2},
+		Objects:       1,
+		SeriesLengths: []int{256},
+		WindowSize:    64,
+	})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	row := plan.Rows[0]
+	if row.WindowStride != 64 || row.DerivedWindowCount != 4 || row.VectorsPerObject != 4 {
+		t.Fatalf("default stride row = %+v", row)
+	}
+}
+
+func TestPlanMultiVectorStorageRejectsInvalidTimeSeriesWindow(t *testing.T) {
+	for _, in := range []MultiVectorStoragePlanInput{
+		{Dim: 128, Bits: []int{2}, Objects: 1, SeriesLengths: []int{256}},
+		{Dim: 128, Bits: []int{2}, Objects: 1, SeriesLengths: []int{0}, WindowSize: 64},
+		{Dim: 128, Bits: []int{2}, Objects: 1, SeriesLengths: []int{256}, WindowSize: 64, WindowStride: -1},
+	} {
+		if _, err := PlanMultiVectorStorage(in); err == nil {
+			t.Fatalf("plan succeeded with invalid time series input: %+v", in)
+		}
 	}
 }
 
