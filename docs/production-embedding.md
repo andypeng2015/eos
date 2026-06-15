@@ -203,6 +203,14 @@ This uses one vector per covering window: a series no longer than the window get
 
 This planner answers a different question from `eval-retrieval-turboquant`: how many direct quantized child vectors per parent object fit in the storage cost of one dense fp32 baseline vector. It is a storage gate, not a numeric time-series quality benchmark. The output is TSV by default and optional JSON with fields including `dim`, `baseline_dim`, `bits`, `objects`, `vectors_per_object`, optional `series_length`/`window_size`/`window_stride`/`derived_window_count`, `dense_parent_bytes`, `dense_baseline_bytes`, raw `quantized_vector_bytes`, `vector_overhead_bytes`, `dense_vector_storage_bytes`, `quantized_vector_storage_bytes`, `total_quantized_bytes`, compression ratios, and `vectors_that_fit_in_one_dense_vector`. Omitting `--baseline-dim` preserves same-dim accounting (`baseline_dim=dim`); omitting `--vector-overhead-bytes` preserves ideal payload-only accounting. Use `--dim 128 --baseline-dim 3072` to test the large-baseline interpretation where one 3072d fp32 vector has a 12,288-byte payload, q2 128d children have a 36-byte raw payload, and 128 payload-only children use about `0.375x` of the baseline budget. That ideal math can fit q2/q4/q8 as measured, but CorkScrewDB product claims require overhead-aware planning with per-vector/index-entry bytes before claiming hundreds of vectors for the cost of one. The intended lane is direct child vectors for windows, spans, event histories, or per-object time-series slices. Do not enable `--sidecar-storage fp16` for that lane unless the product explicitly accepts the extra storage; fp16 sidecars are for quality-preserving rerank profiles and erase most of the hundred-child storage advantage when attached to every child vector.
 
+Use the executable budget-frontier smoke when the claim needs a repeatable artifact instead of an inline planner command:
+
+```bash
+EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_multivector_budget_frontier.fw
+```
+
+The default smoke runs the planner for `128d` compact children against a `3072d` dense baseline with q2/q4/q8, child counts `1,16,64,100,128,181,256,341`, `32` bytes of per-vector overhead, no sidecar, and `1000` objects. It writes `summary.tsv`, `manifest.json`, planner JSON, and command logs under `runs/eos-multivector-budget-frontier-smoke-<timestamp>/`; the default gates assert q2 fits at least `181`, q4 at least `100`, and q8 at least `64` child vectors in one dense-vector budget. This is storage/accounting only, not retrieval quality and not CorkScrewDB API latency.
+
 To move from storage math to a cache-only quality harness for time-series windows, export text-rendered numeric windows and reuse the existing multivector TurboQuant evaluator. The series JSONL has one parent series per row with `id` or `_id` and numeric `values`; qrels must use the parent series IDs as corpus IDs:
 
 ```bash
