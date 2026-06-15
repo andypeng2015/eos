@@ -6,6 +6,12 @@ This keeps external embedding providers at the vector-cache boundary expected by
 
   <output_root>/<dataset_name>/doc-vectors.jsonl
   <output_root>/<dataset_name>/query-vectors.jsonl
+
+With document chunking enabled, it writes the parent-child cache expected by
+`eos eval-retrieval-multivector-turboquant`:
+
+  <output_root>/<dataset_name>/child-doc-vectors.jsonl
+  <output_root>/<dataset_name>/query-vectors.jsonl
 """
 
 from __future__ import annotations

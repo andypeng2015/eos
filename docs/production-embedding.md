@@ -203,6 +203,20 @@ python3 scripts/export_qwen3_retrieval_vectors.py \
   --model-name Qwen/Qwen3-Embedding-0.6B
 ```
 
+For parent-child multi-vector runs, keep the same provider boundary and add chunking flags. The exporter writes `child-doc-vectors.jsonl` with `parent_id`, deterministic `child_id`, and `embedding`, while still writing the normal `query-vectors.jsonl`:
+
+```bash
+python3 scripts/export_retrieval_vectors.py \
+  --preset qwen3-0.6b \
+  --dataset-dir datasets/manta-embed-v1/raw/scifact/scifact \
+  --output-root runs/external-vector-caches/qwen3-0.6b-scifact-child-w128-o32 \
+  --dataset-name scifact \
+  --batch-size 16 \
+  --document-chunk-words 128 \
+  --document-chunk-overlap 32 \
+  --document-chunk-min-words 16
+```
+
 Use `--backend` and `--artifact` labels to keep BGE, Qwen, Jina, Voyage, Cohere, OpenAI, and sealed Eos rows comparable. In the scoreboard harness, set `EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT=1` and `EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT_BITS=2,4,8` to append q2/q4/q8 rows for the same cache; add `EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT_RERANK_OVERFETCH=200` and `EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT_RERANK_STORAGE=fp16` when fp16 sidecar rerank rows should be emitted for an external cache. External baseline rows remain `not_scored` until the dense and TurboQuant cache metrics are present.
 
 Current external comparison state: Qwen3 is locally consolidated for SciFact, NFCorpus, and full exportable-text FiQA. Its useful compact external row is direct q8 at about `3.98x` vector compression, with SciFact q8 nDCG@10 `0.704128`, NFCorpus q8 nDCG@10 `0.368763`, and FiQA q8 nDCG@10 `0.449614`. mxbai remains stronger than Qwen3 in the existing local short-set evidence. Qwen3 FiQA is not raw-row-complete or judged-coverage complete because one judged test document had empty unexportable text and was skipped.

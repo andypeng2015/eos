@@ -81,6 +81,20 @@ python3 scripts/export_retrieval_vectors.py \
 This script is a provider-boundary exporter. Its optional Python dependencies stay outside Eos, and its default output is `runs/external-vector-caches/<provider>/<dataset>/doc-vectors.jsonl` plus `query-vectors.jsonl`. The older `scripts/export_qwen3_retrieval_vectors.py` entry point remains available for compatibility and accepts `--model-name` for non-Qwen SentenceTransformers models.
 The mxbai preset applies Mixedbread's retrieval query prompt and leaves document text unprefixed.
 
+For parent-child multi-vector evidence, add document chunking flags. This keeps the query cache unchanged but writes `child-doc-vectors.jsonl` rows with `parent_id`, deterministic `child_id`, and `embedding`:
+
+```bash
+python3 scripts/export_retrieval_vectors.py \
+  --preset qwen3-0.6b \
+  --dataset-dir datasets/manta-embed-v1/raw/scifact/scifact \
+  --output-root runs/external-vector-caches/qwen3-0.6b-scifact-child-w128-o32 \
+  --dataset-name scifact \
+  --batch-size 16 \
+  --document-chunk-words 128 \
+  --document-chunk-overlap 32 \
+  --document-chunk-min-words 16
+```
+
 Current external comparison state: Qwen3 is locally consolidated for SciFact, NFCorpus, and full exportable-text FiQA. Its useful compact external row is direct q8 at about `3.98x` vector compression, with SciFact q8 nDCG@10 `0.704128`, NFCorpus q8 nDCG@10 `0.368763`, and FiQA q8 nDCG@10 `0.449614`. mxbai remains stronger than Qwen3 in the existing local short-set evidence. Qwen3 FiQA is not raw-row-complete or judged-coverage complete because one judged test document had empty unexportable text and was skipped.
 
 ## TurboQuant Gate
@@ -185,15 +199,28 @@ go run ./cmd/eos eval-retrieval-multivector-turboquant \
   --dataset scifact \
   --backend qwen3-child-cache \
   --artifact Qwen/Qwen3-Embedding-0.6B \
-  --doc-vectors runs/<cache>/scifact/child-doc-vectors.jsonl \
-  --query-vectors runs/<cache>/scifact/query-vectors.jsonl \
+  --doc-vectors runs/external-vector-caches/qwen3-0.6b-scifact-child-w128-o32/scifact/child-doc-vectors.jsonl \
+  --query-vectors runs/external-vector-caches/qwen3-0.6b-scifact-child-w128-o32/scifact/query-vectors.jsonl \
   --bits 2,4,8 \
   --metrics-json runs/scifact.multivector-turboquant.metrics.json \
   --metrics-tsv runs/scifact.multivector-turboquant.metrics.tsv \
-  datasets/eos-embed-v1/raw/scifact/scifact
+  datasets/manta-embed-v1/raw/scifact/scifact
 ```
 
 Document child-vector JSONL accepts `parent_id`, `child_id`, and one vector field among `vector`, `embedding`, or `values`. When `parent_id` is absent, `id` or `_id` is used as both parent and child, so one-vector caches remain a valid degenerate multi-vector input. The evaluator scores every child vector, aggregates by max child score per parent, and evaluates parent IDs against BEIR qrels. Strict coverage is the default: if any qrels-relevant parent is missing from the child-vector cache, the run fails instead of filtering that parent out and inflating metrics. Use `--allow-missing-relevant` only for diagnostic smoke runs where incomplete qrel coverage is intentional. Its dense row uses the same max-child aggregation over fp32 child vectors; q2/q4/q8 rows quantize children with a deterministic TurboQuant IP seed, configurable with `--quantizer-seed`, and use direct TurboQuant IP scoring without fp16 rerank sidecars. JSON/TSV metrics include `allow_missing_relevant`, `quantizer_seed`, parent count, child-vector count, average children per parent, dense parent bytes, dense child bytes, quantized child bytes, dense-child compression, storage multiple versus one dense parent vector per parent, scored child pairs, quality deltas, scores/s, and query latency summaries.
+
+First measured SciFact parent-child evidence: Qwen3 0.6B child cache, `128` word chunks, `32` word overlap, and `16` word minimum trailing chunk produced `5,183` parents and `12,468` children, averaging `2.41` children per parent. The run evaluated `300` qrels queries with strict qrels coverage and recorded the deterministic quantizer seed in metrics.
+
+| row | child nDCG@10 | child recall@100 | compression | parent-budget multiple |
+| --- | ---: | ---: | ---: | ---: |
+| dense-child | 0.717467 | 0.953333 | n/a | n/a |
+| q2 | 0.701697 | 0.950000 | 15.75x | 0.15x |
+| q4 | 0.714895 | 0.956667 | 7.94x | 0.30x |
+| q8 | 0.716310 | 0.953333 | 3.98x | 0.60x |
+
+Compared with the existing one-vector Qwen3 SciFact evidence, dense child-max improves over dense `0.702026` nDCG@10 / `0.946667` recall@100, and direct q8 child-max improves over q8 `0.702657` nDCG@10 / `0.946667` recall@100 while storing q8 children below one dense-parent-vector budget.
+
+TurboQuant's strategic win for CorkScrewDB is not only q4/q8 compression of one vector. Direct compact child vectors let a parent object carry many cheap vectors for windows, spans, time-series slices, events, and other multi-vector schemas. Be precise in product planning: same-dimension child vectors do not fit hundreds of children inside the budget of one same-dimension fp32 parent vector. Tens to hundreds become plausible when compact child dimensions are planned against a 1024 to 3072 dimensional fp32 baseline or when the product explicitly budgets multiple dense-parent equivalents. That needs a measured planner and eval lane, not hand-wavy storage copy.
 
 Keep this separate from q4/fp16 rerank. `--sidecar-storage fp16` intentionally adds a per-child fp16 sidecar and shows why sidecars destroy the high-child-count storage argument: the sidecar is useful for quality-preserving two-stage rerank, but it is not the direct hundred-child storage mode.
 

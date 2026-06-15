@@ -6,6 +6,12 @@ The output layout matches `eos eval-retrieval-vectors`:
   <output_root>/<dataset_name>/doc-vectors.jsonl
   <output_root>/<dataset_name>/query-vectors.jsonl
 
+When document chunking is enabled, documents are exported as child vectors for
+`eos eval-retrieval-multivector-turboquant`:
+
+  <output_root>/<dataset_name>/child-doc-vectors.jsonl
+  <output_root>/<dataset_name>/query-vectors.jsonl
+
 Rows are JSON objects with `id` and `embedding` fields. Embeddings are
 L2-normalized by default because SentenceTransformers embedding models are
 commonly used with cosine similarity; the Eos evaluator normalizes vectors
@@ -19,7 +25,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Callable, Iterable, Iterator, NamedTuple
 
 
 DEFAULT_MODEL = "Qwen/Qwen3-Embedding-0.6B"
@@ -27,6 +33,12 @@ DEFAULT_QUERY_PREFIX = (
     "Instruct: Given a scientific claim, retrieve documents that support or "
     "refute the claim\nQuery: "
 )
+
+
+class DocumentChunk(NamedTuple):
+    parent_id: str
+    child_id: str
+    text: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,6 +94,27 @@ def parse_args() -> argparse.Namespace:
         "--document-prefix",
         default="",
         help="Instruction prefix prepended to document title/text. Use '' to disable.",
+    )
+    parser.add_argument(
+        "--document-chunk-words",
+        type=int,
+        default=0,
+        help=(
+            "When positive, export documents as overlapping word chunks to "
+            "child-doc-vectors.jsonl instead of doc-vectors.jsonl."
+        ),
+    )
+    parser.add_argument(
+        "--document-chunk-overlap",
+        type=int,
+        default=0,
+        help="Word overlap between adjacent document chunks; requires --document-chunk-words.",
+    )
+    parser.add_argument(
+        "--document-chunk-min-words",
+        type=int,
+        default=1,
+        help="Minimum words for a trailing document chunk when chunking is enabled.",
     )
     parser.add_argument(
         "--no-normalize",
@@ -148,7 +181,7 @@ def batches(items: list[tuple[str, str]], batch_size: int) -> Iterable[list[tupl
         yield items[start : start + batch_size]
 
 
-def load_items(path: Path, limit: int, text_fn) -> list[tuple[str, str]]:
+def load_items(path: Path, limit: int, text_fn: Callable[[dict], str]) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for row in iter_jsonl(path, limit):
         item_id = row_id(row, path)
@@ -157,6 +190,59 @@ def load_items(path: Path, limit: int, text_fn) -> list[tuple[str, str]]:
             raise ValueError(f"{path}: row {item_id!r} has empty text")
         out.append((item_id, text))
     return out
+
+
+def chunk_document_text(
+    parent_id: str,
+    text: str,
+    chunk_words: int,
+    overlap: int,
+    min_words: int,
+) -> list[DocumentChunk]:
+    words = text.split()
+    if not words:
+        return []
+    if chunk_words <= 0 or len(words) <= chunk_words:
+        return [DocumentChunk(parent_id, f"{parent_id}#chunk-0000", " ".join(words))]
+
+    chunks: list[DocumentChunk] = []
+    step = chunk_words - overlap
+    start = 0
+    while start < len(words):
+        end = min(start + chunk_words, len(words))
+        chunk = words[start:end]
+        if chunks and len(chunk) < min_words:
+            break
+        chunks.append(
+            DocumentChunk(
+                parent_id,
+                f"{parent_id}#chunk-{len(chunks):04d}",
+                " ".join(chunk),
+            )
+        )
+        if end >= len(words):
+            break
+        start += step
+    if not chunks:
+        chunks.append(DocumentChunk(parent_id, f"{parent_id}#chunk-0000", " ".join(words)))
+    return chunks
+
+
+def chunk_documents(
+    docs: list[tuple[str, str]],
+    chunk_words: int,
+    overlap: int,
+    min_words: int,
+) -> list[DocumentChunk]:
+    chunks: list[DocumentChunk] = []
+    for parent_id, text in docs:
+        chunks.extend(chunk_document_text(parent_id, text, chunk_words, overlap, min_words))
+    return chunks
+
+
+def embedding_to_list(embedding) -> list[float]:
+    values = embedding.tolist() if hasattr(embedding, "tolist") else embedding
+    return [float(value) for value in values]
 
 
 def write_vectors(
@@ -181,8 +267,44 @@ def write_vectors(
                 show_progress_bar=True,
             )
             for item_id, embedding in zip(ids, embeddings):
-                vector = [float(value) for value in embedding.tolist()]
+                vector = embedding_to_list(embedding)
                 handle.write(json.dumps({"id": item_id, "embedding": vector}) + "\n")
+                written += 1
+        print(f"wrote {written} rows to {output_path}", flush=True)
+
+
+def write_child_vectors(
+    model,
+    chunks: list[DocumentChunk],
+    output_path: Path,
+    prefix: str,
+    batch_size: int,
+    normalize: bool,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as handle:
+        written = 0
+        for batch in batches(chunks, batch_size):
+            texts = [prefix + chunk.text for chunk in batch]
+            embeddings = model.encode(
+                texts,
+                batch_size=batch_size,
+                convert_to_numpy=True,
+                normalize_embeddings=normalize,
+                show_progress_bar=True,
+            )
+            for chunk, embedding in zip(batch, embeddings):
+                vector = embedding_to_list(embedding)
+                handle.write(
+                    json.dumps(
+                        {
+                            "parent_id": chunk.parent_id,
+                            "child_id": chunk.child_id,
+                            "embedding": vector,
+                        }
+                    )
+                    + "\n"
+                )
                 written += 1
         print(f"wrote {written} rows to {output_path}", flush=True)
 
@@ -193,6 +315,16 @@ def main() -> int:
         raise SystemExit("--batch-size must be positive")
     if args.max_docs < 0 or args.max_queries < 0:
         raise SystemExit("--max-docs and --max-queries must be non-negative")
+    if args.document_chunk_words < 0:
+        raise SystemExit("--document-chunk-words must be non-negative")
+    if args.document_chunk_overlap < 0:
+        raise SystemExit("--document-chunk-overlap must be non-negative")
+    if args.document_chunk_min_words <= 0:
+        raise SystemExit("--document-chunk-min-words must be positive")
+    if args.document_chunk_words == 0 and args.document_chunk_overlap != 0:
+        raise SystemExit("--document-chunk-overlap requires --document-chunk-words")
+    if args.document_chunk_words > 0 and args.document_chunk_overlap >= args.document_chunk_words:
+        raise SystemExit("--document-chunk-overlap must be smaller than --document-chunk-words")
 
     corpus_path = args.dataset_dir / "corpus.jsonl"
     queries_path = args.dataset_dir / "queries.jsonl"
@@ -214,19 +346,39 @@ def main() -> int:
 
     out_dir = args.output_root / args.dataset_name
     normalize = not args.no_normalize
+    chunks: list[DocumentChunk] = []
+    if args.document_chunk_words > 0:
+        chunks = chunk_documents(
+            docs,
+            args.document_chunk_words,
+            args.document_chunk_overlap,
+            args.document_chunk_min_words,
+        )
+        if not chunks:
+            raise SystemExit("document chunking selected no chunks")
     print(
         f"exporting dataset={args.dataset_name} docs={len(docs)} "
-        f"queries={len(queries)} normalize={normalize}",
+        f"queries={len(queries)} child_chunks={len(chunks)} normalize={normalize}",
         flush=True,
     )
-    write_vectors(
-        model,
-        docs,
-        out_dir / "doc-vectors.jsonl",
-        args.document_prefix,
-        args.batch_size,
-        normalize,
-    )
+    if args.document_chunk_words > 0:
+        write_child_vectors(
+            model,
+            chunks,
+            out_dir / "child-doc-vectors.jsonl",
+            args.document_prefix,
+            args.batch_size,
+            normalize,
+        )
+    else:
+        write_vectors(
+            model,
+            docs,
+            out_dir / "doc-vectors.jsonl",
+            args.document_prefix,
+            args.batch_size,
+            normalize,
+        )
     write_vectors(
         model,
         queries,
