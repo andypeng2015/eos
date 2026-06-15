@@ -270,6 +270,14 @@ go run ./cmd/eos eval-retrieval-multivector-turboquant \
 
 `export-timeseries-vectors` expects one JSONL object per parent series with `id` or `_id` and numeric `values`. It writes deterministic child IDs like `series-id#window-0000`, renders each numeric window as stable text with values and simple stats, embeds those windows with the same Eos text embedder path as retrieval export, and also writes BEIR helper files `corpus.jsonl` and `queries.jsonl` into the output directory. Use that output directory as the evaluator dataset directory and pass parent-series qrels with `--qrels`; the qrels corpus IDs must be parent series IDs. This is a quality harness for text-rendered numeric windows, not a final trained numeric time-series encoder.
 
+Reusable smoke:
+
+```bash
+EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_timeseries_window_vectors.fw
+```
+
+This script creates a tiny synthetic five-series dataset, regenerates the time-series child-vector cache with the sealed Eos artifact, runs dense/q2/q4/q8 multivector TurboQuant evaluation, and then runs the storage planner with overhead-aware baseline accounting. Its `summary.tsv` and `manifest.json` demonstrate the narrow economics claim: many 128d quantized window vectors can fit under one 3072d dense-vector budget while q8 stays at dense quality on this controlled smoke. Override `EOS_TS_WINDOW_SMOKE_ARTIFACT`, `EOS_TS_WINDOW_SMOKE_OUTPUT_DIM`, `EOS_TS_WINDOW_SMOKE_WINDOW_SIZE`, `EOS_TS_WINDOW_SMOKE_WINDOW_STRIDE`, `EOS_TS_WINDOW_SMOKE_BITS`, `EOS_TS_WINDOW_SMOKE_BASELINE_DIM`, and `EOS_TS_WINDOW_SMOKE_VECTOR_OVERHEAD_BYTES` to reuse the harness on another artifact or shape.
+
 The first quality harness for that lane is cache-only and still outside the CorkScrewDB API:
 
 ```bash

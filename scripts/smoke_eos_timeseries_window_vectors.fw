@@ -1,0 +1,675 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const defaultArtifactRel = "runs/eos-embed-v1-splitclean-modelhard-followup-20260614T000000Z/candidate-june10-modelhard-lr000002-1epoch/manta-embed-v1.sealed.mll"
+
+type exportManifest struct {
+	Schema             string `json:"schema"`
+	Dataset            string `json:"dataset"`
+	Artifact           string `json:"artifact"`
+	Series             int    `json:"series_count"`
+	Queries            int    `json:"query_count"`
+	ChildVectors       int    `json:"child_window_vectors"`
+	Dimension          int    `json:"dimension"`
+	ModelDimension     int    `json:"model_dimension"`
+	OutputDimension    int    `json:"output_dimension"`
+	WindowSize         int    `json:"window_size"`
+	WindowStride       int    `json:"window_stride"`
+	CorpusPath         string `json:"corpus_path"`
+	BEIRQueriesPath    string `json:"beir_queries_path"`
+	ChildDocVectorPath string `json:"child_doc_vector_path"`
+	QueryVectorPath    string `json:"query_vector_path"`
+}
+
+type qualityMetrics struct {
+	NDCGAt10    float64 `json:"ndcg_at_10"`
+	NDCGAt100   float64 `json:"ndcg_at_100"`
+	RecallAt100 float64 `json:"recall_at_100"`
+}
+
+type latencyMetrics struct {
+	P50MS float64 `json:"p50_ms"`
+	P95MS float64 `json:"p95_ms"`
+	P99MS float64 `json:"p99_ms"`
+	MaxMS float64 `json:"max_ms"`
+}
+
+type denseMetrics struct {
+	Quality                          qualityMetrics `json:"quality"`
+	BaselineDim                      int            `json:"baseline_dim"`
+	ParentCount                      int            `json:"parent_count"`
+	ChildCount                       int            `json:"child_count"`
+	AvgChildrenPerParent             float64        `json:"avg_children_per_parent"`
+	MaxChildrenPerParent             int            `json:"max_children_per_parent"`
+	DenseBaselineBytes               int64          `json:"dense_baseline_bytes"`
+	DenseBaselineTotalBytes          int64          `json:"dense_baseline_total_bytes"`
+	DenseChildBytes                  int64          `json:"dense_child_bytes"`
+	VectorsThatFitInOneDenseBaseline int64          `json:"vectors_that_fit_in_one_dense_baseline"`
+	StorageMultipleOfDenseBaseline   float64        `json:"storage_multiple_of_dense_baseline"`
+	ParentBudgetStorageMultiple      float64        `json:"parent_budget_storage_multiple"`
+	ScoresPerSecond                  float64        `json:"scores_per_second"`
+	QueryLatency                     latencyMetrics `json:"query_latency"`
+}
+
+type bitMetrics struct {
+	Bits                             int            `json:"bits"`
+	Method                           string         `json:"method"`
+	QuantizerSeed                    int64          `json:"quantizer_seed"`
+	Quality                          qualityMetrics `json:"quality"`
+	NDCGAt10Delta                    float64        `json:"ndcg_at_10_delta"`
+	RecallAt100Delta                 float64        `json:"recall_at_100_delta"`
+	BaselineDim                      int            `json:"baseline_dim"`
+	ParentCount                      int            `json:"parent_count"`
+	ChildCount                       int            `json:"child_count"`
+	AvgChildrenPerParent             float64        `json:"avg_children_per_parent"`
+	MaxChildrenPerParent             int            `json:"max_children_per_parent"`
+	QuantizedVectorBytes             int64          `json:"quantized_vector_bytes"`
+	QuantizedChildBytes              int64          `json:"quantized_child_bytes"`
+	DenseBaselineBytes               int64          `json:"dense_baseline_bytes"`
+	DenseBaselineTotalBytes          int64          `json:"dense_baseline_total_bytes"`
+	DenseChildBytes                  int64          `json:"dense_child_bytes"`
+	DenseChildCompression            float64        `json:"dense_child_compression_ratio"`
+	VectorsThatFitInOneDenseBaseline int64          `json:"vectors_that_fit_in_one_dense_baseline"`
+	StorageMultipleOfDenseBaseline   float64        `json:"storage_multiple_of_dense_baseline"`
+	ParentBudgetStorageMultiple      float64        `json:"parent_budget_storage_multiple"`
+	ScoresPerSecond                  float64        `json:"scores_per_second"`
+	QueryLatency                     latencyMetrics `json:"query_latency"`
+}
+
+type evalMetrics struct {
+	Schema  string       `json:"schema"`
+	Dataset string       `json:"dataset"`
+	Backend string       `json:"backend"`
+	Dense   denseMetrics `json:"dense"`
+	Rows    []bitMetrics `json:"rows"`
+}
+
+type planRow struct {
+	Dim                              int     `json:"dim"`
+	BaselineDim                      int     `json:"baseline_dim"`
+	Bits                             int     `json:"bits"`
+	Objects                          int     `json:"objects"`
+	VectorsPerObject                 int     `json:"vectors_per_object"`
+	SeriesLength                     int     `json:"series_length"`
+	WindowSize                       int     `json:"window_size"`
+	WindowStride                     int     `json:"window_stride"`
+	DerivedWindowCount               int     `json:"derived_window_count"`
+	QuantizedPayloadBytes            int64   `json:"quantized_payload_bytes"`
+	QuantizedVectorBytes             int64   `json:"quantized_vector_bytes"`
+	VectorOverheadBytes              int64   `json:"vector_overhead_bytes"`
+	DenseVectorStorageBytes          int64   `json:"dense_vector_storage_bytes"`
+	QuantizedVectorStorageBytes      int64   `json:"quantized_vector_storage_bytes"`
+	TotalQuantizedBytes              int64   `json:"total_quantized_bytes"`
+	TotalCompressionRatio            float64 `json:"total_compression_ratio"`
+	VectorsThatFitInOneDenseVector   int64   `json:"vectors_that_fit_in_one_dense_vector"`
+	FitsInOneDenseVectorStorage      bool    `json:"fits_in_one_dense_vector_storage"`
+	StorageMultipleOfDenseParentCost float64 `json:"storage_multiple_of_dense_parent_cost"`
+}
+
+type storagePlan struct {
+	Schema string    `json:"schema"`
+	Rows   []planRow `json:"rows"`
+}
+
+type summaryRow struct {
+	Row                              string  `json:"row"`
+	Bits                             int     `json:"bits,omitempty"`
+	Method                           string  `json:"method,omitempty"`
+	NDCGAt10                         float64 `json:"ndcg_at_10"`
+	RecallAt100                      float64 `json:"recall_at_100"`
+	NDCGAt10Delta                    float64 `json:"ndcg_at_10_delta,omitempty"`
+	RecallAt100Delta                 float64 `json:"recall_at_100_delta,omitempty"`
+	EvalStorageMultiple              float64 `json:"eval_storage_multiple_of_dense_baseline"`
+	PlannerStorageMultiple           float64 `json:"planner_storage_multiple_of_dense_parent_cost,omitempty"`
+	VectorsThatFitInOneDenseBaseline int64   `json:"vectors_that_fit_in_one_dense_baseline"`
+	QuantizedVectorBytes             int64   `json:"quantized_vector_bytes,omitempty"`
+	VectorOverheadBytes              int64   `json:"vector_overhead_bytes,omitempty"`
+	ScoresPerSecond                  float64 `json:"scores_per_second"`
+	QueryP95MS                       float64 `json:"query_p95_ms"`
+}
+
+type manifest struct {
+	Schema           string       `json:"schema"`
+	GeneratedAt      string       `json:"generated_at"`
+	RunDir           string       `json:"run_dir"`
+	Artifact         string       `json:"artifact"`
+	Dataset          string       `json:"dataset"`
+	OutputDim        int          `json:"output_dim"`
+	WindowSize       int          `json:"window_size"`
+	WindowStride     int          `json:"window_stride"`
+	SeriesCount      int          `json:"series_count"`
+	SeriesLength     int          `json:"series_length"`
+	Bits             string       `json:"bits"`
+	BaselineDim      int          `json:"baseline_dim"`
+	VectorOverhead   int64        `json:"vector_overhead_bytes"`
+	SeriesPath       string       `json:"series_path"`
+	QueriesPath      string       `json:"queries_path"`
+	QrelsPath        string       `json:"qrels_path"`
+	ExportDir        string       `json:"export_dir"`
+	ExportManifest   string       `json:"export_manifest"`
+	MetricsJSON      string       `json:"metrics_json"`
+	MetricsTSV       string       `json:"metrics_tsv"`
+	StoragePlanJSON  string       `json:"storage_plan_json"`
+	SummaryTSV       string       `json:"summary_tsv"`
+	ExportCommand    []string     `json:"export_command"`
+	EvalCommand      []string     `json:"eval_command"`
+	PlannerCommand   []string     `json:"planner_command"`
+	Rows             []summaryRow `json:"rows"`
+	Caveats          []string     `json:"caveats"`
+	QualityGate      string       `json:"quality_gate"`
+	StorageGate      string       `json:"storage_gate"`
+}
+
+func usage() {
+	fmt.Println(`Synthetic Eos time-series window vector smoke for TurboQuant multi-vector economics.
+
+Run:
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_timeseries_window_vectors.fw
+
+Environment:
+  EOS_TS_WINDOW_SMOKE_ARTIFACT=/path/to/manta-embed-v1.sealed.mll
+  EOS_TS_WINDOW_SMOKE_RUN_ROOT=runs
+  EOS_TS_WINDOW_SMOKE_RUN_DIR=runs/eos-timeseries-window-vector-smoke-<timestamp>
+  EOS_TS_WINDOW_SMOKE_OUTPUT_DIM=128
+  EOS_TS_WINDOW_SMOKE_WINDOW_SIZE=4
+  EOS_TS_WINDOW_SMOKE_WINDOW_STRIDE=2
+  EOS_TS_WINDOW_SMOKE_BITS=2,4,8
+  EOS_TS_WINDOW_SMOKE_BASELINE_DIM=3072
+  EOS_TS_WINDOW_SMOKE_VECTOR_OVERHEAD_BYTES=32
+  EOS_TS_WINDOW_SMOKE_DISABLE_QUALITY_GATE=0
+  EOS_TS_WINDOW_SMOKE_Q8_MAX_NDCG_DROP=0.000001
+  EOS_TS_WINDOW_SMOKE_Q8_MAX_RECALL_DROP=0.000001
+  EOS_TS_WINDOW_SMOKE_Q8_MAX_STORAGE_MULTIPLE=0.10`)
+}
+
+func getenv(name string, fallback string) string {
+	value := os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envEnabled(name string) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	if pwd := os.Getenv("PWD"); hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func parseIntEnv(name string, fallback int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parseInt64Env(name string, fallback int64) (int64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parseFloatEnv(name string, fallback float64) (float64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a float: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func renderCommand(args []string) string {
+	parts := []string{}
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func runCommand(root string, logDir string, label string, args []string) error {
+	fmt.Println("\n== " + label + " ==")
+	fmt.Println("+ " + renderCommand(args))
+	if err := os.WriteFile(filepath.Join(logDir, label+".cmd"), []byte(renderCommand(args)+"\n"), 0o644); err != nil {
+		return err
+	}
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = root
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s failed: %w", label, err)
+	}
+	return nil
+}
+
+func writeSyntheticInputs(seriesPath string, queriesPath string, qrelsPath string) error {
+	series := []string{
+		`{"id":"series-rising","label":"rising load","text":"steady upward sensor ramp with increasing load","values":[1,2,3,4,5,6,7,8,9,10,11,12]}`,
+		`{"id":"series-falling","label":"falling load","text":"steady downward sensor ramp with decreasing load","values":[12,11,10,9,8,7,6,5,4,3,2,1]}`,
+		`{"id":"series-spike","label":"sharp spike","text":"mostly calm signal with a sharp central spike event","values":[2,2,2,2,2,12,13,2,2,2,2,2]}`,
+		`{"id":"series-valley","label":"deep valley","text":"high signal with a deep central valley event","values":[12,12,12,12,12,3,2,12,12,12,12,12]}`,
+		`{"id":"series-wave","label":"oscillating wave","text":"repeating oscillating wave pattern across the series","values":[1,4,1,4,1,4,1,4,1,4,1,4]}`,
+	}
+	queries := []string{
+		`{"id":"q-rising","text":"find the series with a steady upward increasing ramp"}`,
+		`{"id":"q-falling","text":"find the series with a steady downward decreasing ramp"}`,
+		`{"id":"q-spike","text":"find the series with a sharp central spike event"}`,
+		`{"id":"q-valley","text":"find the series with a deep central valley event"}`,
+		`{"id":"q-wave","text":"find the series with a repeating oscillating wave pattern"}`,
+	}
+	qrels := []string{
+		"query-id\tcorpus-id\tscore",
+		"q-rising\tseries-rising\t1",
+		"q-falling\tseries-falling\t1",
+		"q-spike\tseries-spike\t1",
+		"q-valley\tseries-valley\t1",
+		"q-wave\tseries-wave\t1",
+	}
+	if err := os.WriteFile(seriesPath, []byte(strings.Join(series, "\n")+"\n"), 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(queriesPath, []byte(strings.Join(queries, "\n")+"\n"), 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(qrelsPath, []byte(strings.Join(qrels, "\n")+"\n"), 0o644); err != nil {
+		return err
+	}
+	return nil
+}
+
+func readJSON(path string, target any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, target)
+}
+
+func findBitRow(rows []bitMetrics, bits int) *bitMetrics {
+	for i := range rows {
+		if rows[i].Bits == bits {
+			return &rows[i]
+		}
+	}
+	return nil
+}
+
+func findPlanRow(rows []planRow, bits int) *planRow {
+	for i := range rows {
+		if rows[i].Bits == bits {
+			return &rows[i]
+		}
+	}
+	return nil
+}
+
+func makeSummaryRows(metrics evalMetrics, plan storagePlan) []summaryRow {
+	rows := []summaryRow{{
+		Row:                              "dense",
+		Method:                           "dense-child",
+		NDCGAt10:                         metrics.Dense.Quality.NDCGAt10,
+		RecallAt100:                      metrics.Dense.Quality.RecallAt100,
+		EvalStorageMultiple:              metrics.Dense.StorageMultipleOfDenseBaseline,
+		VectorsThatFitInOneDenseBaseline: metrics.Dense.VectorsThatFitInOneDenseBaseline,
+		ScoresPerSecond:                  metrics.Dense.ScoresPerSecond,
+		QueryP95MS:                       metrics.Dense.QueryLatency.P95MS,
+	}}
+	for _, bit := range metrics.Rows {
+		planRow := findPlanRow(plan.Rows, bit.Bits)
+		out := summaryRow{
+			Row:                              fmt.Sprintf("q%d", bit.Bits),
+			Bits:                             bit.Bits,
+			Method:                           bit.Method,
+			NDCGAt10:                         bit.Quality.NDCGAt10,
+			RecallAt100:                      bit.Quality.RecallAt100,
+			NDCGAt10Delta:                    bit.NDCGAt10Delta,
+			RecallAt100Delta:                 bit.RecallAt100Delta,
+			EvalStorageMultiple:              bit.StorageMultipleOfDenseBaseline,
+			VectorsThatFitInOneDenseBaseline: bit.VectorsThatFitInOneDenseBaseline,
+			QuantizedVectorBytes:             bit.QuantizedVectorBytes,
+			ScoresPerSecond:                  bit.ScoresPerSecond,
+			QueryP95MS:                       bit.QueryLatency.P95MS,
+		}
+		if planRow != nil {
+			out.PlannerStorageMultiple = planRow.StorageMultipleOfDenseParentCost
+			out.VectorOverheadBytes = planRow.VectorOverheadBytes
+		}
+		rows = append(rows, out)
+	}
+	return rows
+}
+
+func writeSummaryTSV(path string, rows []summaryRow) error {
+	var b strings.Builder
+	b.WriteString("row\tbits\tmethod\tndcg_at_10\trecall_at_100\tndcg_at_10_delta\trecall_at_100_delta\teval_storage_multiple_of_dense_baseline\tplanner_storage_multiple_of_dense_parent_cost\tvectors_that_fit_in_one_dense_baseline\tquantized_vector_bytes\tvector_overhead_bytes\tscores_per_second\tquery_p95_ms\n")
+	for _, row := range rows {
+		fmt.Fprintf(&b, "%s\t%d\t%s\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%.2f\t%.6f\n",
+			row.Row,
+			row.Bits,
+			row.Method,
+			row.NDCGAt10,
+			row.RecallAt100,
+			row.NDCGAt10Delta,
+			row.RecallAt100Delta,
+			row.EvalStorageMultiple,
+			row.PlannerStorageMultiple,
+			row.VectorsThatFitInOneDenseBaseline,
+			row.QuantizedVectorBytes,
+			row.VectorOverheadBytes,
+			row.ScoresPerSecond,
+			row.QueryP95MS)
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func checkGates(metrics evalMetrics, maxNDCGDrop float64, maxRecallDrop float64, maxQ8Storage float64, disableQuality bool) error {
+	q8 := findBitRow(metrics.Rows, 8)
+	if q8 == nil {
+		return fmt.Errorf("q8 metrics row is missing; include 8 in EOS_TS_WINDOW_SMOKE_BITS")
+	}
+	if !disableQuality {
+		if q8.Quality.NDCGAt10+maxNDCGDrop < metrics.Dense.Quality.NDCGAt10 {
+			return fmt.Errorf("q8 ndcg@10 %.6f is worse than dense %.6f by more than %.6f", q8.Quality.NDCGAt10, metrics.Dense.Quality.NDCGAt10, maxNDCGDrop)
+		}
+		if q8.Quality.RecallAt100+maxRecallDrop < metrics.Dense.Quality.RecallAt100 {
+			return fmt.Errorf("q8 recall@100 %.6f is worse than dense %.6f by more than %.6f", q8.Quality.RecallAt100, metrics.Dense.Quality.RecallAt100, maxRecallDrop)
+		}
+	}
+	if maxQ8Storage > 0 && q8.StorageMultipleOfDenseBaseline > maxQ8Storage {
+		return fmt.Errorf("q8 storage multiple %.6f exceeds %.6f", q8.StorageMultipleOfDenseBaseline, maxQ8Storage)
+	}
+	return nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	defaultArtifact := filepath.Join(root, defaultArtifactRel)
+	artifact := getenv("EOS_TS_WINDOW_SMOKE_ARTIFACT", defaultArtifact)
+	if info, err := os.Stat(artifact); err != nil || info.IsDir() {
+		fmt.Fprintf(os.Stderr, "artifact does not exist: %s\nset EOS_TS_WINDOW_SMOKE_ARTIFACT=/path/to/manta-embed-v1.sealed.mll or restore the default real artifact at %s\n", artifact, defaultArtifact)
+		os.Exit(1)
+	}
+
+	runRoot := getenv("EOS_TS_WINDOW_SMOKE_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir := getenv("EOS_TS_WINDOW_SMOKE_RUN_DIR", filepath.Join(runRoot, "eos-timeseries-window-vector-smoke-"+time.Now().UTC().Format("20060102T150405Z")))
+	runDir, err = filepath.Abs(runDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(filepath.Join(runDir, "logs"), 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	outputDim, err := parseIntEnv("EOS_TS_WINDOW_SMOKE_OUTPUT_DIM", 128)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	windowSize, err := parseIntEnv("EOS_TS_WINDOW_SMOKE_WINDOW_SIZE", 4)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	windowStride, err := parseIntEnv("EOS_TS_WINDOW_SMOKE_WINDOW_STRIDE", 2)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	baselineDim, err := parseIntEnv("EOS_TS_WINDOW_SMOKE_BASELINE_DIM", 3072)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	vectorOverhead, err := parseInt64Env("EOS_TS_WINDOW_SMOKE_VECTOR_OVERHEAD_BYTES", 32)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	maxNDCGDrop, err := parseFloatEnv("EOS_TS_WINDOW_SMOKE_Q8_MAX_NDCG_DROP", 0.000001)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	maxRecallDrop, err := parseFloatEnv("EOS_TS_WINDOW_SMOKE_Q8_MAX_RECALL_DROP", 0.000001)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	maxQ8Storage, err := parseFloatEnv("EOS_TS_WINDOW_SMOKE_Q8_MAX_STORAGE_MULTIPLE", 0.10)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	dataset := getenv("EOS_TS_WINDOW_SMOKE_DATASET", "synthetic-timeseries-windows")
+	bits := getenv("EOS_TS_WINDOW_SMOKE_BITS", "2,4,8")
+	seriesPath := filepath.Join(runDir, "series.jsonl")
+	queriesPath := filepath.Join(runDir, "queries.jsonl")
+	qrelsPath := filepath.Join(runDir, "qrels.tsv")
+	exportDir := filepath.Join(runDir, "window-cache")
+	exportManifestPath := filepath.Join(runDir, "window-cache.manifest.json")
+	metricsJSON := filepath.Join(runDir, "multivector-metrics.json")
+	metricsTSV := filepath.Join(runDir, "multivector-metrics.tsv")
+	storagePlanJSON := filepath.Join(runDir, "storage-plan.json")
+	summaryTSV := filepath.Join(runDir, "summary.tsv")
+	manifestJSON := filepath.Join(runDir, "manifest.json")
+
+	if err := writeSyntheticInputs(seriesPath, queriesPath, qrelsPath); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	exportArgs := []string{
+		"go", "run", "./cmd/eos", "export-timeseries-vectors",
+		"--dataset", dataset,
+		"--batch-size", getenv("EOS_TS_WINDOW_SMOKE_BATCH_SIZE", "64"),
+		"--output-dim", strconv.Itoa(outputDim),
+		"--window-size", strconv.Itoa(windowSize),
+		"--window-stride", strconv.Itoa(windowStride),
+		"--manifest-json", exportManifestPath,
+		artifact,
+		seriesPath,
+		queriesPath,
+		exportDir,
+	}
+	if err := runCommand(root, filepath.Join(runDir, "logs"), "export-timeseries-vectors", exportArgs); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	evalArgs := []string{
+		"go", "run", "./cmd/eos", "eval-retrieval-multivector-turboquant",
+		"--dataset", dataset,
+		"--backend", "text-rendered-timeseries-windows",
+		"--artifact", filepath.Base(artifact),
+		"--doc-vectors", filepath.Join(exportDir, "child-doc-vectors.jsonl"),
+		"--query-vectors", filepath.Join(exportDir, "query-vectors.jsonl"),
+		"--qrels", qrelsPath,
+		"--bits", bits,
+		"--baseline-dim", strconv.Itoa(baselineDim),
+		"--metrics-json", metricsJSON,
+		"--metrics-tsv", metricsTSV,
+		exportDir,
+	}
+	if err := runCommand(root, filepath.Join(runDir, "logs"), "eval-retrieval-multivector-turboquant", evalArgs); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	plannerArgs := []string{
+		"go", "run", "./cmd/eos", "plan-multivector-storage",
+		"--dim", strconv.Itoa(outputDim),
+		"--baseline-dim", strconv.Itoa(baselineDim),
+		"--bits", bits,
+		"--objects", "5",
+		"--series-lengths", "12",
+		"--window-size", strconv.Itoa(windowSize),
+		"--window-stride", strconv.Itoa(windowStride),
+		"--vector-overhead-bytes", strconv.FormatInt(vectorOverhead, 10),
+		"--json", storagePlanJSON,
+	}
+	if err := runCommand(root, filepath.Join(runDir, "logs"), "plan-multivector-storage", plannerArgs); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	var exported exportManifest
+	if err := readJSON(exportManifestPath, &exported); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	var metrics evalMetrics
+	if err := readJSON(metricsJSON, &metrics); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	var plan storagePlan
+	if err := readJSON(storagePlanJSON, &plan); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := checkGates(metrics, maxNDCGDrop, maxRecallDrop, maxQ8Storage, envEnabled("EOS_TS_WINDOW_SMOKE_DISABLE_QUALITY_GATE")); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	rows := makeSummaryRows(metrics, plan)
+	if err := writeSummaryTSV(summaryTSV, rows); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	out := manifest{
+		Schema:          "eos.timeseries_window_vector_smoke.v1",
+		GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+		RunDir:          runDir,
+		Artifact:        artifact,
+		Dataset:         dataset,
+		OutputDim:       outputDim,
+		WindowSize:      windowSize,
+		WindowStride:    windowStride,
+		SeriesCount:     exported.Series,
+		SeriesLength:    12,
+		Bits:            bits,
+		BaselineDim:     baselineDim,
+		VectorOverhead:  vectorOverhead,
+		SeriesPath:      seriesPath,
+		QueriesPath:     queriesPath,
+		QrelsPath:       qrelsPath,
+		ExportDir:       exportDir,
+		ExportManifest:  exportManifestPath,
+		MetricsJSON:     metricsJSON,
+		MetricsTSV:      metricsTSV,
+		StoragePlanJSON: storagePlanJSON,
+		SummaryTSV:      summaryTSV,
+		ExportCommand:   exportArgs,
+		EvalCommand:     evalArgs,
+		PlannerCommand:  plannerArgs,
+		Rows:            rows,
+		Caveats: []string{
+			"Synthetic smoke only: text-rendered numeric windows, not a trained numeric time-series encoder.",
+			"Cache-only evaluator: this does not load/index/query CorkScrewDB.",
+			"Planner overhead is configurable and defaults to 32 bytes per stored vector/index entry.",
+		},
+		QualityGate: fmt.Sprintf("q8 must be within ndcg@10 %.6f and recall@100 %.6f of dense unless EOS_TS_WINDOW_SMOKE_DISABLE_QUALITY_GATE=1", maxNDCGDrop, maxRecallDrop),
+		StorageGate: fmt.Sprintf("q8 eval storage multiple must be <= %.6f when positive", maxQ8Storage),
+	}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(manifestJSON, data, 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	q8 := findBitRow(metrics.Rows, 8)
+	fmt.Printf("\nsummary_tsv: %s\n", summaryTSV)
+	fmt.Printf("manifest: %s\n", manifestJSON)
+	fmt.Printf("dense: ndcg@10=%.6f recall@100=%.6f\n", metrics.Dense.Quality.NDCGAt10, metrics.Dense.Quality.RecallAt100)
+	if q8 != nil {
+		fmt.Printf("q8: ndcg@10=%.6f delta=%+.6f recall@100=%.6f delta=%+.6f eval_storage_multiple=%.6fx vectors_per_baseline=%d\n",
+			q8.Quality.NDCGAt10,
+			q8.NDCGAt10Delta,
+			q8.Quality.RecallAt100,
+			q8.RecallAt100Delta,
+			q8.StorageMultipleOfDenseBaseline,
+			q8.VectorsThatFitInOneDenseBaseline)
+	}
+	fmt.Printf("windows: series=%d child_window_vectors=%d dim=%d window_size=%d stride=%d\n", exported.Series, exported.ChildVectors, exported.Dimension, exported.WindowSize, exported.WindowStride)
+}

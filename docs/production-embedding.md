@@ -225,6 +225,14 @@ go run ./cmd/eos eval-retrieval-multivector-turboquant \
 
 `export-timeseries-vectors` renders each window as stable text containing the series ID, window bounds, values, and simple stats before embedding with the normal Eos text embedder path. It also writes BEIR helper `corpus.jsonl` and `queries.jsonl` files into the output directory, so use the export directory as the evaluator dataset directory and pass the parent-series qrels with `--qrels`. This is a bridge quality harness for numeric windows represented as text, not a final trained numeric time-series encoder or a CorkScrewDB load/index/search benchmark.
 
+For a reproducible local smoke of that bridge, run:
+
+```bash
+EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_timeseries_window_vectors.fw
+```
+
+The smoke generates five synthetic 12-point parent series, exports 128d text-rendered windows with `--window-size 4 --window-stride 2`, evaluates dense/q2/q4/q8 parent-child retrieval, and runs the storage planner with `--baseline-dim 3072 --vector-overhead-bytes 32`. It writes `summary.tsv` and `manifest.json` under `runs/eos-timeseries-window-vector-smoke-<timestamp>` so the claim is concrete: on this synthetic cache, q8 should match dense quality within the configured tolerance while using a small fraction of a large dense baseline-vector budget. Set `EOS_TS_WINDOW_SMOKE_ARTIFACT` if the default sealed artifact is not present.
+
 After storage planning, run the cache-only parent-child quality harness before making product claims:
 
 For Eos-owned/default embedders, create the cache with the Go-native exporter so the sealed `.mll` runtime path, tokenizer, batching, and normalization match `eval-retrieval` without Python or SentenceTransformers:
