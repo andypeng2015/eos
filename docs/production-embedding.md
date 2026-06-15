@@ -169,12 +169,13 @@ For CorkScrewDB multi-vector and time-series designs, use the storage planner be
 ```bash
 go run ./cmd/eos plan-multivector-storage \
   --dim 128 \
+  --baseline-dim 3072 \
   --bits 2,4,8 \
-  --vectors-per-object 1,16,64,128 \
+  --vectors-per-object 64,128,256,384 \
   --objects 1000
 ```
 
-This planner answers a different question from `eval-retrieval-turboquant`: how many direct quantized child vectors per parent object fit in the storage cost of one dense fp32 parent vector. The output is TSV by default and optional JSON with fields including `dim`, `bits`, `objects`, `vectors_per_object`, `dense_parent_bytes`, `quantized_vector_bytes`, `total_quantized_bytes`, compression ratios, and `vectors_that_fit_in_one_dense_vector`. The intended lane is direct child vectors for windows, spans, event histories, or per-object time-series slices. Do not enable `--sidecar-storage fp16` for that lane unless the product explicitly accepts the extra storage; fp16 sidecars are for quality-preserving rerank profiles and erase most of the hundred-child storage advantage when attached to every child vector.
+This planner answers a different question from `eval-retrieval-turboquant`: how many direct quantized child vectors per parent object fit in the storage cost of one dense fp32 baseline vector. The output is TSV by default and optional JSON with fields including `dim`, `baseline_dim`, `bits`, `objects`, `vectors_per_object`, `dense_parent_bytes`, `dense_baseline_bytes`, `quantized_vector_bytes`, `total_quantized_bytes`, compression ratios, and `vectors_that_fit_in_one_dense_vector`. Omitting `--baseline-dim` preserves same-dim accounting (`baseline_dim=dim`); use `--dim 128 --baseline-dim 3072` to test the large-baseline interpretation where one 3072d fp32 vector costs 12,288 bytes, q2 128d children cost 36 bytes each, and 128 children use about `0.375x` of the baseline budget. The intended lane is direct child vectors for windows, spans, event histories, or per-object time-series slices. Do not enable `--sidecar-storage fp16` for that lane unless the product explicitly accepts the extra storage; fp16 sidecars are for quality-preserving rerank profiles and erase most of the hundred-child storage advantage when attached to every child vector.
 
 After storage planning, run the cache-only parent-child quality harness before making product claims:
 

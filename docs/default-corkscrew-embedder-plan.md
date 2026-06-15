@@ -185,12 +185,13 @@ The direct multi-vector lane is a storage/accounting thesis, not a retrieval-qua
 ```bash
 go run ./cmd/eos plan-multivector-storage \
   --dim 128 \
+  --baseline-dim 3072 \
   --bits 2,4,8 \
-  --vectors-per-object 1,16,64,128 \
+  --vectors-per-object 64,128,256,384 \
   --objects 1000
 ```
 
-The TSV/JSON rows report `dense_parent_bytes`, `quantized_vector_bytes`, `total_quantized_bytes`, compression ratios, and `vectors_that_fit_in_one_dense_vector`. For 128-dimensional direct TurboQuant IP rows, the planner shows the order-of-magnitude lane: q2 stores a child vector in 36 bytes, so 14 q2 child vectors fit inside one 512-byte dense fp32 parent-vector budget before object/index metadata. That makes hundred-vector-per-object designs plausible only when the product can spend several dense-vector equivalents per parent or when the parent replaces coarser chunk storage with many finer windows.
+The TSV/JSON rows report `baseline_dim`, `dense_parent_bytes`, `dense_baseline_bytes`, `quantized_vector_bytes`, `total_quantized_bytes`, compression ratios, and `vectors_that_fit_in_one_dense_vector`. When `--baseline-dim` is omitted or `0`, the dense budget is the same dimension as the child vector, preserving the same-dim interpretation: 128-dimensional q2 stores a child vector in 36 bytes, so 14 children fit inside one 512-byte fp32 vector budget. When modeling compact children against a larger baseline, pass `--dim 128 --baseline-dim 3072`; one dense baseline vector is 12,288 bytes, so 341 q2 children fit in that one-vector budget and 128 children cost about `0.375x` of it before object/index metadata.
 
 The first quality harness for that lane is cache-only and still outside the CorkScrewDB API:
 
@@ -220,7 +221,7 @@ First measured SciFact parent-child evidence: Qwen3 0.6B child cache, `128` word
 
 Compared with the existing one-vector Qwen3 SciFact evidence, dense child-max improves over dense `0.702026` nDCG@10 / `0.946667` recall@100, and direct q8 child-max improves over q8 `0.702657` nDCG@10 / `0.946667` recall@100 while storing q8 children below one dense-parent-vector budget.
 
-TurboQuant's strategic win for CorkScrewDB is not only q4/q8 compression of one vector. Direct compact child vectors let a parent object carry many cheap vectors for windows, spans, time-series slices, events, and other multi-vector schemas. Be precise in product planning: same-dimension child vectors do not fit hundreds of children inside the budget of one same-dimension fp32 parent vector. Tens to hundreds become plausible when compact child dimensions are planned against a 1024 to 3072 dimensional fp32 baseline or when the product explicitly budgets multiple dense-parent equivalents. That needs a measured planner and eval lane, not hand-wavy storage copy.
+TurboQuant's strategic win for CorkScrewDB is not only q4/q8 compression of one vector. Direct compact child vectors let a parent object carry many cheap vectors for windows, spans, time-series slices, events, and other multi-vector schemas. Be precise in product planning: same-dimension child vectors do not fit hundreds of children inside the budget of one same-dimension fp32 parent vector. Tens to hundreds become plausible when compact child dimensions are planned against a 1024 to 3072 dimensional fp32 baseline with `--baseline-dim` or when the product explicitly budgets multiple dense-parent equivalents. That needs a measured planner and eval lane, not hand-wavy storage copy.
 
 Keep this separate from q4/fp16 rerank. `--sidecar-storage fp16` intentionally adds a per-child fp16 sidecar and shows why sidecars destroy the high-child-count storage argument: the sidecar is useful for quality-preserving two-stage rerank, but it is not the direct hundred-child storage mode.
 

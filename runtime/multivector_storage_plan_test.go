@@ -19,8 +19,14 @@ func TestPlanMultiVectorStorageUsesTurboQuantIPPayloadBytes(t *testing.T) {
 	if row.Bits != 2 || row.VectorsPerObject != 1 {
 		t.Fatalf("unexpected first row: %+v", row)
 	}
+	if plan.Config.BaselineDim != 128 || row.BaselineDim != 128 {
+		t.Fatalf("baseline dim = config:%d row:%d", plan.Config.BaselineDim, row.BaselineDim)
+	}
 	if row.DenseParentBytes != 512 || row.DenseParentTotalBytes != 512000 {
 		t.Fatalf("dense bytes = parent:%d total:%d", row.DenseParentBytes, row.DenseParentTotalBytes)
+	}
+	if row.DenseBaselineBytes != row.DenseParentBytes || row.DenseBaselineTotalBytes != row.DenseParentTotalBytes {
+		t.Fatalf("dense baseline aliases = bytes:%d total:%d", row.DenseBaselineBytes, row.DenseBaselineTotalBytes)
 	}
 	if row.QuantizedPayloadBytes != 36 || row.QuantizedVectorBytes != 36 {
 		t.Fatalf("q2 bytes = payload:%d vector:%d", row.QuantizedPayloadBytes, row.QuantizedVectorBytes)
@@ -59,5 +65,34 @@ func TestPlanMultiVectorStorageAccountsForFP16Sidecar(t *testing.T) {
 	}
 	if plan.Rows[1].FitsInOneDenseVectorStorage {
 		t.Fatalf("two q4 fp16 sidecar vectors should exceed one dense parent budget")
+	}
+}
+
+func TestPlanMultiVectorStorageUsesLargerBaselineDimForDenseBudget(t *testing.T) {
+	plan, err := PlanMultiVectorStorage(MultiVectorStoragePlanInput{
+		Dim:              128,
+		BaselineDim:      3072,
+		Bits:             []int{2},
+		Objects:          1,
+		VectorsPerObject: []int{128},
+	})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	row := plan.Rows[0]
+	if plan.Config.BaselineDim != 3072 || row.BaselineDim != 3072 {
+		t.Fatalf("baseline dim = config:%d row:%d", plan.Config.BaselineDim, row.BaselineDim)
+	}
+	if row.DenseParentBytes != 12288 || row.DenseBaselineBytes != 12288 {
+		t.Fatalf("dense baseline bytes = parent:%d baseline:%d", row.DenseParentBytes, row.DenseBaselineBytes)
+	}
+	if row.QuantizedPayloadBytes != 36 || row.QuantizedVectorBytes != 36 {
+		t.Fatalf("q2 bytes = payload:%d vector:%d", row.QuantizedPayloadBytes, row.QuantizedVectorBytes)
+	}
+	if row.VectorsThatFitInOneDenseVector != 341 || !row.FitsInOneDenseVectorStorage {
+		t.Fatalf("fit = %d fits=%t", row.VectorsThatFitInOneDenseVector, row.FitsInOneDenseVectorStorage)
+	}
+	if row.StorageMultipleOfDenseParentCost < 0.3749 || row.StorageMultipleOfDenseParentCost > 0.3751 {
+		t.Fatalf("storage multiple = %.6f", row.StorageMultipleOfDenseParentCost)
 	}
 }

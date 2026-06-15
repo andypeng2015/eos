@@ -312,17 +312,18 @@ func TestRunPlanMultiVectorStorageWritesTSVAndJSON(t *testing.T) {
 	output := captureRunOutput(t, []string{
 		"plan-multivector-storage",
 		"--dim", "128",
+		"--baseline-dim", "3072",
 		"--bits", "2,4",
 		"--vectors-per-object", "1,16",
 		"--objects", "1000",
 		"--json", jsonPath,
 	})
 	for _, want := range []string{
-		"dim\tbits\tobjects\tvectors_per_object\tdense_parent_bytes",
-		"128\t2\t1000\t1\t512\t512000\t36\tnone\t0\t36\t36000\t14.222222\t14.222222\t14\ttrue",
-		"128\t4\t1000\t16\t512\t512000\t68\tnone\t0\t68\t1088000\t7.529412\t0.470588\t7\tfalse",
+		"dim\tbaseline_dim\tbits\tobjects\tvectors_per_object\tdense_parent_bytes",
+		"128\t3072\t2\t1000\t1\t12288\t12288000\t12288\t12288000\t36\tnone\t0\t36\t36000\t341.333333\t341.333333\t341\ttrue",
+		"128\t3072\t4\t1000\t16\t12288\t12288000\t12288\t12288000\t68\tnone\t0\t68\t1088000\t180.705882\t11.294118\t180\ttrue",
 		"json: " + jsonPath,
-		"summary: rows=4 dim=128 objects=1000 sidecar_storage=none",
+		"summary: rows=4 dim=128 baseline_dim=3072 objects=1000 sidecar_storage=none",
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("plan-multivector-storage output missing %q\noutput:\n%s", want, output)
@@ -339,7 +340,10 @@ func TestRunPlanMultiVectorStorageWritesTSVAndJSON(t *testing.T) {
 	if plan.Schema != eosruntime.MultiVectorStoragePlanSchema || len(plan.Rows) != 4 {
 		t.Fatalf("plan identity = schema:%q rows:%d", plan.Schema, len(plan.Rows))
 	}
-	if plan.Rows[0].VectorsThatFitInOneDenseVector != 14 {
+	if plan.Config.BaselineDim != 3072 || plan.Rows[0].BaselineDim != 3072 {
+		t.Fatalf("baseline dim = config:%d row:%d", plan.Config.BaselineDim, plan.Rows[0].BaselineDim)
+	}
+	if plan.Rows[0].VectorsThatFitInOneDenseVector != 341 {
 		t.Fatalf("vectors_that_fit = %d", plan.Rows[0].VectorsThatFitInOneDenseVector)
 	}
 }

@@ -2017,6 +2017,7 @@ func runPlanMultiVectorStorage(args []string) error {
 	fs := flag.NewFlagSet("plan-multivector-storage", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	dim := fs.Int("dim", 128, "embedding dimension")
+	baselineDim := fs.Int("baseline-dim", 0, "dense fp32 baseline dimension for one-vector budget; 0 uses --dim")
 	bitsRaw := fs.String("bits", "2,4,8", "comma-separated TurboQuant IP bit widths; supported: 2..8")
 	objects := fs.Int("objects", 1, "parent object count")
 	vectorsPerObjectRaw := fs.String("vectors-per-object", "1,16,64,128", "comma-separated quantized child vectors per parent object")
@@ -2038,6 +2039,7 @@ func runPlanMultiVectorStorage(args []string) error {
 	}
 	plan, err := eosruntime.PlanMultiVectorStorage(eosruntime.MultiVectorStoragePlanInput{
 		Dim:              *dim,
+		BaselineDim:      *baselineDim,
 		Bits:             bits,
 		Objects:          *objects,
 		VectorsPerObject: vectorsPerObject,
@@ -2058,21 +2060,24 @@ func runPlanMultiVectorStorage(args []string) error {
 		}
 		fmt.Printf("json: %s\n", *jsonPath)
 	}
-	fmt.Printf("summary: rows=%d dim=%d objects=%d sidecar_storage=%s\n",
-		len(plan.Rows), plan.Config.Dim, plan.Config.Objects, plan.Config.SidecarStorage)
+	fmt.Printf("summary: rows=%d dim=%d baseline_dim=%d objects=%d sidecar_storage=%s\n",
+		len(plan.Rows), plan.Config.Dim, plan.Config.BaselineDim, plan.Config.Objects, plan.Config.SidecarStorage)
 	return nil
 }
 
 func printMultiVectorStoragePlanTSV(plan eosruntime.MultiVectorStoragePlan) {
-	fmt.Println("dim\tbits\tobjects\tvectors_per_object\tdense_parent_bytes\tdense_parent_total_bytes\tquantized_payload_bytes\tsidecar_storage\tsidecar_bytes_per_vector\tquantized_vector_bytes\ttotal_quantized_bytes\tdense_to_quantized_vector_ratio\ttotal_compression_ratio\tvectors_that_fit_in_one_dense_vector\tfits_in_one_dense_vector_storage\tstorage_multiple_of_dense_parent_cost")
+	fmt.Println("dim\tbaseline_dim\tbits\tobjects\tvectors_per_object\tdense_parent_bytes\tdense_parent_total_bytes\tdense_baseline_bytes\tdense_baseline_total_bytes\tquantized_payload_bytes\tsidecar_storage\tsidecar_bytes_per_vector\tquantized_vector_bytes\ttotal_quantized_bytes\tdense_to_quantized_vector_ratio\ttotal_compression_ratio\tvectors_that_fit_in_one_dense_vector\tfits_in_one_dense_vector_storage\tstorage_multiple_of_dense_parent_cost")
 	for _, row := range plan.Rows {
-		fmt.Printf("%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%.6f\t%.6f\t%d\t%t\t%.6f\n",
+		fmt.Printf("%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%d\t%d\t%d\t%.6f\t%.6f\t%d\t%t\t%.6f\n",
 			row.Dim,
+			row.BaselineDim,
 			row.Bits,
 			row.Objects,
 			row.VectorsPerObject,
 			row.DenseParentBytes,
 			row.DenseParentTotalBytes,
+			row.DenseBaselineBytes,
+			row.DenseBaselineTotalBytes,
 			row.QuantizedPayloadBytes,
 			row.SidecarStorage,
 			row.SidecarBytesPerVector,
@@ -5372,7 +5377,7 @@ func printUsage() {
 	fmt.Println("relabel-teacher-negatives promotes teacher-confirmed-relevant mined negatives to positive rows, keeps teacher-confirmed-irrelevant candidates as negatives, and drops the ambiguous band.")
 	fmt.Println("sample-corpus-negatives emits random non-qrel corpus documents per query for teacher scoring into a true-negative pool.")
 	fmt.Println("plan-sparse-attention preflights routed sparse attention plus logical TurboQuant K/V memory budgets before GPU runs.")
-	fmt.Println("plan-multivector-storage estimates how many TurboQuant child vectors per parent fit in one dense fp32 parent-vector budget.")
+	fmt.Println("plan-multivector-storage estimates how many TurboQuant child vectors per parent fit in one dense fp32 baseline-vector budget; use --baseline-dim to compare compact children against a larger dense baseline.")
 	fmt.Println("init-model creates the Eos-owned default quantized embedding training package.")
 	fmt.Println("init-mirage creates the Eos-owned Mirage Image v1 host-reference artifact.")
 	fmt.Println("init-train creates a native training package next to an artifact.")
