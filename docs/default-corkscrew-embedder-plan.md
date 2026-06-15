@@ -81,7 +81,7 @@ python3 scripts/export_retrieval_vectors.py \
 This script is a provider-boundary exporter. Its optional Python dependencies stay outside Eos, and its default output is `runs/external-vector-caches/<provider>/<dataset>/doc-vectors.jsonl` plus `query-vectors.jsonl`. The older `scripts/export_qwen3_retrieval_vectors.py` entry point remains available for compatibility and accepts `--model-name` for non-Qwen SentenceTransformers models.
 The mxbai preset applies Mixedbread's retrieval query prompt and leaves document text unprefixed.
 
-Current external comparison state: Qwen3 is locally consolidated only for SciFact and NFCorpus. Its useful compact external row is direct q8 at about `3.98x` vector compression, with SciFact q8 nDCG@10 `0.704128` and NFCorpus q8 nDCG@10 `0.368763`. mxbai remains stronger than Qwen3 in the existing local SciFact/NFCorpus evidence. Qwen3 FiQA is still subset-only and must not be used for full short-set standing claims until the full FiQA cache is repaired.
+Current external comparison state: Qwen3 is locally consolidated for SciFact, NFCorpus, and full exportable-text FiQA. Its useful compact external row is direct q8 at about `3.98x` vector compression, with SciFact q8 nDCG@10 `0.704128`, NFCorpus q8 nDCG@10 `0.368763`, and FiQA q8 nDCG@10 `0.449614`. mxbai remains stronger than Qwen3 in the existing local short-set evidence. Qwen3 FiQA is not raw-row-complete or judged-coverage complete because one judged test document had empty unexportable text and was skipped.
 
 ## TurboQuant Gate
 
@@ -187,6 +187,5 @@ Do not promote a default CorkScrewDB embedder until all of these are true:
 
 1. Run a CorkScrewDB load/index/search smoke for the q4/fp16/overfetch250 compact retrieval profile.
 2. Measure p95 serving latency for q4/fp16/overfetch250 and decide whether the q8/fp16/overfetch125 fallback is needed for lower rerank cost.
-3. Repair the full Qwen3 FiQA cache; do not use the current subset-only cache for full short-set claims.
-4. Re-run the full short-set external matrix once Qwen3 FiQA is complete, keeping mxbai and Qwen3 rows separated by backend/artifact/cache provenance.
-5. Only after the serving smoke and full matrix, run a protected teacher/data experiment targeted at the remaining quality gap.
+3. Keep the full short-set external matrix current, with Qwen3 FiQA labeled as full exportable-text rather than raw-row-complete or judged-coverage complete.
+4. Run a protected teacher/data experiment targeted at the remaining quality gap.
