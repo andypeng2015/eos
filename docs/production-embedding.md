@@ -176,6 +176,23 @@ go run ./cmd/eos plan-multivector-storage \
 
 This planner answers a different question from `eval-retrieval-turboquant`: how many direct quantized child vectors per parent object fit in the storage cost of one dense fp32 parent vector. The output is TSV by default and optional JSON with fields including `dim`, `bits`, `objects`, `vectors_per_object`, `dense_parent_bytes`, `quantized_vector_bytes`, `total_quantized_bytes`, compression ratios, and `vectors_that_fit_in_one_dense_vector`. The intended lane is direct child vectors for windows, spans, event histories, or per-object time-series slices. Do not enable `--sidecar-storage fp16` for that lane unless the product explicitly accepts the extra storage; fp16 sidecars are for quality-preserving rerank profiles and erase most of the hundred-child storage advantage when attached to every child vector.
 
+After storage planning, run the cache-only parent-child quality harness before making product claims:
+
+```bash
+go run ./cmd/eos eval-retrieval-multivector-turboquant \
+  --dataset scifact \
+  --backend child-cache \
+  --artifact <embedder-label> \
+  --doc-vectors /data/manta/runs/<run-id>/child-doc-vectors.jsonl \
+  --query-vectors /data/manta/runs/<run-id>/query-vectors.jsonl \
+  --bits 2,4,8 \
+  --metrics-json /data/manta/runs/<run-id>/multivector-turboquant.json \
+  --metrics-tsv /data/manta/runs/<run-id>/multivector-turboquant.tsv \
+  /data/manta/datasets/eos-embed-v1/raw/scifact
+```
+
+This evaluator treats qrels document IDs as parent IDs. Each document-vector JSONL row may include `parent_id`, `child_id`, and `vector`/`embedding`/`values`; absent `parent_id` falls back to `id` or `_id` for one-vector compatibility. The dense reference scores all child vectors and rolls them up by max score per parent, then direct TurboQuant rows quantize child vectors and perform the same max-child parent aggregation. Runs fail by default when any qrels-relevant parent is absent from the child-vector cache; `--allow-missing-relevant` preserves the old filtered behavior only for incomplete-cache diagnostics. TurboQuant rows use a deterministic IP quantizer seed, configurable with `--quantizer-seed`, and metrics record both `allow_missing_relevant` and `quantizer_seed`. The metrics also report parent and child counts, average children per parent, dense parent bytes, dense child bytes, quantized child bytes, dense-child compression, storage multiple relative to one dense parent vector per parent, scored child pairs, quality metrics/deltas, scores/s, and per-query latency. It is still not a CorkScrewDB load/index/search smoke; it is the first quality gate for the multi-vector/time-series object design.
+
 For hosted or open external embedders, export BEIR-aligned `doc-vectors.jsonl` and `query-vectors.jsonl` caches and run both `eos eval-retrieval-vectors` and `eos eval-retrieval-vectors-turboquant`. `scripts/export_qwen3_retrieval_vectors.py` is the first provider-boundary exporter for the leading Qwen3 family baseline:
 
 ```bash

@@ -178,6 +178,23 @@ go run ./cmd/eos plan-multivector-storage \
 
 The TSV/JSON rows report `dense_parent_bytes`, `quantized_vector_bytes`, `total_quantized_bytes`, compression ratios, and `vectors_that_fit_in_one_dense_vector`. For 128-dimensional direct TurboQuant IP rows, the planner shows the order-of-magnitude lane: q2 stores a child vector in 36 bytes, so 14 q2 child vectors fit inside one 512-byte dense fp32 parent-vector budget before object/index metadata. That makes hundred-vector-per-object designs plausible only when the product can spend several dense-vector equivalents per parent or when the parent replaces coarser chunk storage with many finer windows.
 
+The first quality harness for that lane is cache-only and still outside the CorkScrewDB API:
+
+```bash
+go run ./cmd/eos eval-retrieval-multivector-turboquant \
+  --dataset scifact \
+  --backend qwen3-child-cache \
+  --artifact Qwen/Qwen3-Embedding-0.6B \
+  --doc-vectors runs/<cache>/scifact/child-doc-vectors.jsonl \
+  --query-vectors runs/<cache>/scifact/query-vectors.jsonl \
+  --bits 2,4,8 \
+  --metrics-json runs/scifact.multivector-turboquant.metrics.json \
+  --metrics-tsv runs/scifact.multivector-turboquant.metrics.tsv \
+  datasets/eos-embed-v1/raw/scifact/scifact
+```
+
+Document child-vector JSONL accepts `parent_id`, `child_id`, and one vector field among `vector`, `embedding`, or `values`. When `parent_id` is absent, `id` or `_id` is used as both parent and child, so one-vector caches remain a valid degenerate multi-vector input. The evaluator scores every child vector, aggregates by max child score per parent, and evaluates parent IDs against BEIR qrels. Strict coverage is the default: if any qrels-relevant parent is missing from the child-vector cache, the run fails instead of filtering that parent out and inflating metrics. Use `--allow-missing-relevant` only for diagnostic smoke runs where incomplete qrel coverage is intentional. Its dense row uses the same max-child aggregation over fp32 child vectors; q2/q4/q8 rows quantize children with a deterministic TurboQuant IP seed, configurable with `--quantizer-seed`, and use direct TurboQuant IP scoring without fp16 rerank sidecars. JSON/TSV metrics include `allow_missing_relevant`, `quantizer_seed`, parent count, child-vector count, average children per parent, dense parent bytes, dense child bytes, quantized child bytes, dense-child compression, storage multiple versus one dense parent vector per parent, scored child pairs, quality deltas, scores/s, and query latency summaries.
+
 Keep this separate from q4/fp16 rerank. `--sidecar-storage fp16` intentionally adds a per-child fp16 sidecar and shows why sidecars destroy the high-child-count storage argument: the sidecar is useful for quality-preserving two-stage rerank, but it is not the direct hundred-child storage mode.
 
 ## Data And Teacher Growth

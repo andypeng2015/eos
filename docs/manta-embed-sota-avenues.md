@@ -215,7 +215,7 @@ go run ./cmd/eos plan-multivector-storage \
   --objects 1000
 ```
 
-Use this for the CorkScrewDB direct multi-vector lane: many quantized child vectors under one parent object for windows, spans, or time-series slices. It measures byte budgets only; retrieval quality still needs `eval-retrieval-turboquant` or a CorkScrewDB search harness. Keep direct child-vector storage separate from q4/fp16 rerank sidecars, because a per-child fp16 sidecar is a quality-preserving rerank option rather than the hundred-vector storage lane.
+Use this for the CorkScrewDB direct multi-vector lane: many quantized child vectors under one parent object for windows, spans, or time-series slices. It measures byte budgets only. The first cache-only quality follow-up is `eval-retrieval-multivector-turboquant`, which reads child-vector JSONL with `parent_id`/`child_id`, scores every child, rolls up by max child score per parent, and compares dense child aggregation against direct q2/q4/q8 TurboQuant child aggregation on BEIR qrels. The quality harness fails by default if the child-vector cache is missing any qrels-relevant parent; `--allow-missing-relevant` is diagnostic-only. TurboQuant rows are deterministic through `--quantizer-seed`, and metrics record the seed. It is the quality bridge between storage math and a future CorkScrewDB search harness, not a replacement for an API load/index/search smoke. Keep direct child-vector storage separate from q4/fp16 rerank sidecars, because a per-child fp16 sidecar is a quality-preserving rerank option rather than the hundred-vector storage lane.
 
 ## Code Lanes To Unlock
 

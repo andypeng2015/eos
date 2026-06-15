@@ -759,6 +759,156 @@ func TestEvaluateTurboQuantVectorCacheRetrievalUsesExternalCaches(t *testing.T) 
 	}
 }
 
+func TestReadRetrievalChildVectorCachePreservesMultipleChildrenPerParent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "child-vectors.jsonl")
+	if err := os.WriteFile(path, []byte(
+		`{"parent_id":"p2","child_id":"p2-c1","vector":[0,1]}`+"\n"+
+			`{"parent_id":"p1","child_id":"p1-c1","embedding":[1,0]}`+"\n"+
+			`{"parent_id":"p1","child_id":"p1-c2","values":[0.8,0.6]}`+"\n"+
+			`{"id":"p3","vector":[0,0.5]}`+"\n"+
+			`{"parent_id":"skip","child_id":"skip-c1","vector":[1,1]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write child vectors: %v", err)
+	}
+
+	children, missing, dim, err := readRetrievalChildVectorCache(path, []string{"p1", "p2", "p3", "missing"})
+	if err != nil {
+		t.Fatalf("read child vectors: %v", err)
+	}
+	if missing != 1 || dim != 2 || len(children) != 4 {
+		t.Fatalf("missing=%d dim=%d children=%d", missing, dim, len(children))
+	}
+	got := []string{}
+	for _, child := range children {
+		got = append(got, child.ParentID+"/"+child.ChildID)
+	}
+	want := []string{"p1/p1-c1", "p1/p1-c2", "p2/p2-c1", "p3/p3"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("child order = %v, want %v", got, want)
+	}
+}
+
+func TestEvaluateTurboQuantMultiVectorRetrievalAggregatesChildrenByParent(t *testing.T) {
+	children := []retrievalChildVectorRecord{
+		{ParentID: "p1", ChildID: "p1-a", Vector: normalizeRetrievalVector([]float32{0, 1, 0, 0, 0, 0, 0, 0})},
+		{ParentID: "p1", ChildID: "p1-b", Vector: normalizeRetrievalVector([]float32{1, 0, 0, 0, 0, 0, 0, 0})},
+		{ParentID: "p2", ChildID: "p2-a", Vector: normalizeRetrievalVector([]float32{0, 1, 0, 0, 0, 0, 0, 0})},
+	}
+	queries := []retrievalVectorRecord{
+		{ID: "q1", Vector: normalizeRetrievalVector([]float32{1, 0, 0, 0, 0, 0, 0, 0})},
+	}
+	qrels := retrievalQrels{"q1": {"p1": 1}}
+
+	metrics, err := evaluateTurboQuantMultiVectorRetrieval(context.Background(), RetrievalEvalConfig{
+		DatasetName: "tiny-multivector",
+		TopK:        100,
+	}, []int{8}, children, queries, qrels)
+	if err != nil {
+		t.Fatalf("evaluate multivector turboquant retrieval: %v", err)
+	}
+	if metrics.Schema != TurboQuantMultiVectorRetrievalEvalMetricsSchema || metrics.Dataset != "tiny-multivector" {
+		t.Fatalf("metrics identity = schema:%q dataset:%q", metrics.Schema, metrics.Dataset)
+	}
+	if metrics.Inputs.Parents != 2 || metrics.Inputs.ChildVectors != 3 || metrics.Inputs.AverageChildrenPerParent != 1.5 || metrics.Inputs.ScoredChildPairs != 3 {
+		t.Fatalf("input accounting = %+v", metrics.Inputs)
+	}
+	if metrics.Dense.DenseParentBytes != int64(2*8*4) || metrics.Dense.DenseChildBytes != int64(3*8*4) {
+		t.Fatalf("dense bytes = %+v", metrics.Dense)
+	}
+	if metrics.Dense.Quality.NDCGAt10 != 1 || metrics.Dense.Quality.MRRAt10 != 1 || metrics.Dense.Quality.RecallAt100 != 1 {
+		t.Fatalf("dense quality = %+v, want parent p1 top-ranked by second child", metrics.Dense.Quality)
+	}
+	if len(metrics.Rows) != 1 || metrics.Rows[0].Bits != 8 {
+		t.Fatalf("rows = %+v", metrics.Rows)
+	}
+	row := metrics.Rows[0]
+	if row.Method != "turboquant_ip_b8_child_max" || row.QuantizedChildBytes <= 0 || row.DenseChildCompression <= 1 {
+		t.Fatalf("row accounting = %+v", row)
+	}
+	if metrics.Config.QuantizerSeed != DefaultTurboQuantMultiVectorQuantizerSeed || row.QuantizerSeed != DefaultTurboQuantMultiVectorQuantizerSeed {
+		t.Fatalf("quantizer seeds = config:%d row:%d", metrics.Config.QuantizerSeed, row.QuantizerSeed)
+	}
+	if row.ParentBudgetStorageMultiple <= 0 || row.DenseParentBytes != metrics.Dense.DenseParentBytes || row.DenseChildBytes != metrics.Dense.DenseChildBytes {
+		t.Fatalf("row storage = %+v", row)
+	}
+	if row.Quality.NDCGAt10 < 0.99 || row.Quality.RecallAt100 != 1 {
+		t.Fatalf("quantized quality = %+v, want near-perfect", row.Quality)
+	}
+}
+
+func TestEvaluateTurboQuantMultiVectorRetrievalFailsMissingRelevantParentsByDefault(t *testing.T) {
+	children := []retrievalChildVectorRecord{
+		{ParentID: "p1", ChildID: "p1-a", Vector: normalizeRetrievalVector([]float32{1, 0, 0, 0, 0, 0, 0, 0})},
+		{ParentID: "p2", ChildID: "p2-a", Vector: normalizeRetrievalVector([]float32{0, 1, 0, 0, 0, 0, 0, 0})},
+	}
+	queries := []retrievalVectorRecord{
+		{ID: "q1", Vector: normalizeRetrievalVector([]float32{1, 0, 0, 0, 0, 0, 0, 0})},
+	}
+	qrels := retrievalQrels{"q1": {"p1": 1, "missing-parent": 1}}
+
+	_, err := evaluateTurboQuantMultiVectorRetrieval(context.Background(), RetrievalEvalConfig{
+		DatasetName: "missing-relevant",
+		TopK:        100,
+	}, []int{8}, children, queries, qrels)
+	if err == nil || !strings.Contains(err.Error(), "missing 1 qrels-relevant parent documents") || !strings.Contains(err.Error(), "--allow-missing-relevant") {
+		t.Fatalf("strict coverage error = %v", err)
+	}
+
+	metrics, err := evaluateTurboQuantMultiVectorRetrieval(context.Background(), RetrievalEvalConfig{
+		DatasetName:          "missing-relevant",
+		TopK:                 100,
+		AllowMissingRelevant: true,
+		QuantizerSeed:        17,
+	}, []int{8}, children, queries, qrels)
+	if err != nil {
+		t.Fatalf("allow missing relevant: %v", err)
+	}
+	if !metrics.Config.AllowMissingRelevant || metrics.Config.QuantizerSeed != 17 {
+		t.Fatalf("config = %+v", metrics.Config)
+	}
+	if metrics.Rows[0].SkippedRelevantDocs != 1 || metrics.Rows[0].SkippedQueries != 0 {
+		t.Fatalf("skipped counts = row:%+v skipped:%+v", metrics.Rows[0], metrics.SkippedCounts)
+	}
+}
+
+func TestEvaluateTurboQuantMultiVectorRetrievalSeededRowsRepeat(t *testing.T) {
+	children := []retrievalChildVectorRecord{
+		{ParentID: "p1", ChildID: "p1-a", Vector: normalizeRetrievalVector([]float32{0.9, 0.1, 0.2, 0.3, 0.05, 0.01, 0.4, 0.2})},
+		{ParentID: "p1", ChildID: "p1-b", Vector: normalizeRetrievalVector([]float32{0.1, 0.8, 0.1, 0.2, 0.3, 0.2, 0.1, 0.4})},
+		{ParentID: "p2", ChildID: "p2-a", Vector: normalizeRetrievalVector([]float32{0.2, 0.1, 0.9, 0.1, 0.4, 0.3, 0.2, 0.1})},
+		{ParentID: "p3", ChildID: "p3-a", Vector: normalizeRetrievalVector([]float32{0.1, 0.2, 0.2, 0.9, 0.1, 0.4, 0.3, 0.2})},
+	}
+	queries := []retrievalVectorRecord{
+		{ID: "q1", Vector: normalizeRetrievalVector([]float32{1, 0.1, 0.2, 0.3, 0.1, 0, 0.4, 0.2})},
+		{ID: "q2", Vector: normalizeRetrievalVector([]float32{0.1, 0.2, 1, 0.1, 0.4, 0.2, 0.1, 0})},
+	}
+	qrels := retrievalQrels{
+		"q1": {"p1": 1},
+		"q2": {"p2": 1},
+	}
+	cfg := RetrievalEvalConfig{DatasetName: "seeded", TopK: 100, QuantizerSeed: 12345}
+
+	first, err := evaluateTurboQuantMultiVectorRetrieval(context.Background(), cfg, []int{2, 4}, children, queries, qrels)
+	if err != nil {
+		t.Fatalf("first evaluation: %v", err)
+	}
+	second, err := evaluateTurboQuantMultiVectorRetrieval(context.Background(), cfg, []int{2, 4}, children, queries, qrels)
+	if err != nil {
+		t.Fatalf("second evaluation: %v", err)
+	}
+	if first.Config.QuantizerSeed != 12345 || second.Config.QuantizerSeed != 12345 {
+		t.Fatalf("config seeds = %d/%d", first.Config.QuantizerSeed, second.Config.QuantizerSeed)
+	}
+	for i := range first.Rows {
+		a, b := first.Rows[i], second.Rows[i]
+		if a.Bits != b.Bits || a.Method != b.Method || a.QuantizerSeed != b.QuantizerSeed || a.QuantizedChildBytes != b.QuantizedChildBytes {
+			t.Fatalf("row identity mismatch %d: %+v vs %+v", i, a, b)
+		}
+		if a.Quality != b.Quality || a.NDCGAt10Delta != b.NDCGAt10Delta || a.RecallAt100Delta != b.RecallAt100Delta {
+			t.Fatalf("quality mismatch %d: %+v vs %+v", i, a, b)
+		}
+	}
+}
+
 func TestEvaluateVectorCacheRetrievalRejectsDimensionMismatch(t *testing.T) {
 	dir := t.TempDir()
 	qrelsDir := filepath.Join(dir, "qrels")

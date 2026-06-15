@@ -24,20 +24,22 @@ const RetrievalEvalPerQuerySchema = "manta.embedding_retrieval_per_query.v1"
 
 // RetrievalEvalConfig describes a BEIR-style retrieval eval.
 type RetrievalEvalConfig struct {
-	DatasetName       string
-	ArtifactPath      string
-	CorpusPath        string
-	QueriesPath       string
-	QrelsPath         string
-	DocVectorPath     string
-	QueryVectorPath   string
-	BackendName       string
-	BatchSize         int
-	TopK              int
-	MaxDocs           int
-	MaxQueries        int
-	PerQueryJSONLPath string
-	Hybrid            RetrievalEvalHybridConfig
+	DatasetName          string
+	ArtifactPath         string
+	CorpusPath           string
+	QueriesPath          string
+	QrelsPath            string
+	DocVectorPath        string
+	QueryVectorPath      string
+	BackendName          string
+	BatchSize            int
+	TopK                 int
+	MaxDocs              int
+	MaxQueries           int
+	PerQueryJSONLPath    string
+	AllowMissingRelevant bool
+	QuantizerSeed        int64
+	Hybrid               RetrievalEvalHybridConfig
 }
 
 type RetrievalEvalHybridConfig struct {
@@ -155,11 +157,19 @@ type retrievalVectorRecord struct {
 	Vector []float32
 }
 
+type retrievalChildVectorRecord struct {
+	ParentID string
+	ChildID  string
+	Vector   []float32
+}
+
 type retrievalQrels map[string]map[string]float64
 
 type retrievalVectorJSONRecord struct {
 	ID        string    `json:"id"`
 	BEIRID    string    `json:"_id"`
+	ParentID  string    `json:"parent_id"`
+	ChildID   string    `json:"child_id"`
 	Vector    []float32 `json:"vector"`
 	Embedding []float32 `json:"embedding"`
 	Values    []float32 `json:"values"`
@@ -569,6 +579,91 @@ func readRetrievalVectorCache(path string, orderedIDs []string) ([]retrievalVect
 		out = append(out, retrievalVectorRecord{ID: id, Vector: vector})
 	}
 	return out, missing, dim, nil
+}
+
+func readRetrievalChildVectorCache(path string, orderedParentIDs []string) ([]retrievalChildVectorRecord, int, int, error) {
+	needed := make(map[string]int, len(orderedParentIDs))
+	for i, id := range orderedParentIDs {
+		if id != "" {
+			needed[id] = i
+		}
+	}
+	type childRecord struct {
+		childID string
+		vector  []float32
+	}
+	childrenByParent := make(map[string][]childRecord, len(needed))
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
+	dim := 0
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var record retrievalVectorJSONRecord
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			return nil, 0, 0, fmt.Errorf("%s:%d: %w", path, lineNo, err)
+		}
+		id := firstNonEmptyString(record.ID, record.BEIRID)
+		parentID := firstNonEmptyString(record.ParentID, id)
+		childID := firstNonEmptyString(record.ChildID, id, parentID)
+		if parentID == "" {
+			continue
+		}
+		if _, ok := needed[parentID]; !ok {
+			continue
+		}
+		vector := firstRetrievalVector(record)
+		if len(vector) == 0 {
+			return nil, 0, 0, fmt.Errorf("%s:%d: vector for parent %q child %q is empty", path, lineNo, parentID, childID)
+		}
+		if dim == 0 {
+			dim = len(vector)
+		} else if len(vector) != dim {
+			return nil, 0, 0, fmt.Errorf("%s:%d: vector for parent %q child %q has dimension %d, want %d", path, lineNo, parentID, childID, len(vector), dim)
+		}
+		childrenByParent[parentID] = append(childrenByParent[parentID], childRecord{
+			childID: childID,
+			vector:  normalizeRetrievalVector(vector),
+		})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, 0, 0, err
+	}
+	out := make([]retrievalChildVectorRecord, 0)
+	missing := 0
+	for _, parentID := range orderedParentIDs {
+		children := childrenByParent[parentID]
+		if len(children) == 0 {
+			missing++
+			continue
+		}
+		for _, child := range children {
+			out = append(out, retrievalChildVectorRecord{
+				ParentID: parentID,
+				ChildID:  child.childID,
+				Vector:   child.vector,
+			})
+		}
+	}
+	return out, missing, dim, nil
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func firstRetrievalVector(record retrievalVectorJSONRecord) []float32 {

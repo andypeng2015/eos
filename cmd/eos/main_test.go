@@ -344,6 +344,97 @@ func TestRunPlanMultiVectorStorageWritesTSVAndJSON(t *testing.T) {
 	}
 }
 
+func TestRunEvalRetrievalMultiVectorTurboQuantWritesMetrics(t *testing.T) {
+	dir := t.TempDir()
+	qrelsDir := filepath.Join(dir, "qrels")
+	if err := os.Mkdir(qrelsDir, 0o755); err != nil {
+		t.Fatalf("mkdir qrels: %v", err)
+	}
+	corpusPath := filepath.Join(dir, "corpus.jsonl")
+	queriesPath := filepath.Join(dir, "queries.jsonl")
+	qrelsPath := filepath.Join(qrelsDir, "test.tsv")
+	docVectorsPath := filepath.Join(dir, "child-doc-vectors.jsonl")
+	queryVectorsPath := filepath.Join(dir, "query-vectors.jsonl")
+	metricsPath := filepath.Join(dir, "metrics.json")
+	tsvPath := filepath.Join(dir, "metrics.tsv")
+	if err := os.WriteFile(corpusPath, []byte(
+		`{"_id":"p1","text":"alpha parent"}`+"\n"+
+			`{"_id":"p2","text":"beta parent"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(queriesPath, []byte(`{"_id":"q1","text":"alpha query"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(qrelsPath, []byte("query-id\tcorpus-id\tscore\nq1\tp1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	if err := os.WriteFile(docVectorsPath, []byte(
+		`{"parent_id":"p1","child_id":"p1-a","vector":[0,1,0,0,0,0,0,0]}`+"\n"+
+			`{"parent_id":"p1","child_id":"p1-b","vector":[1,0,0,0,0,0,0,0]}`+"\n"+
+			`{"parent_id":"p2","child_id":"p2-a","vector":[0,1,0,0,0,0,0,0]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write doc vectors: %v", err)
+	}
+	if err := os.WriteFile(queryVectorsPath, []byte(`{"id":"q1","vector":[1,0,0,0,0,0,0,0]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write query vectors: %v", err)
+	}
+
+	output := captureRunOutput(t, []string{
+		"eval-retrieval-multivector-turboquant",
+		"--dataset", "tiny-multivector",
+		"--backend", "unit",
+		"--artifact", "unit-cache",
+		"--bits", "8",
+		"--quantizer-seed", "99",
+		"--doc-vectors", docVectorsPath,
+		"--query-vectors", queryVectorsPath,
+		"--metrics-json", metricsPath,
+		"--metrics-tsv", tsvPath,
+		dir,
+	})
+	for _, want := range []string{
+		"retrieval multivector turboquant: dataset=tiny-multivector backend=unit parents=2 child_vectors=3 avg_children=1.50",
+		"dense-child: ndcg@10=1.000000",
+		"q8: ndcg@10=",
+		"metrics: " + metricsPath,
+		"metrics_tsv: " + tsvPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q\n%s", want, output)
+		}
+	}
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	var metrics eosruntime.TurboQuantMultiVectorRetrievalEvalMetrics
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		t.Fatalf("decode metrics: %v\n%s", err, data)
+	}
+	if metrics.Schema != eosruntime.TurboQuantMultiVectorRetrievalEvalMetricsSchema || metrics.Artifact != "unit-cache" || metrics.Backend != "unit" {
+		t.Fatalf("metrics identity = %+v", metrics)
+	}
+	if metrics.Inputs.Parents != 2 || metrics.Inputs.ChildVectors != 3 || metrics.Inputs.ScoredChildPairs != 3 || metrics.Dense.Quality.NDCGAt10 != 1 {
+		t.Fatalf("metrics accounting/quality = %+v dense=%+v", metrics.Inputs, metrics.Dense.Quality)
+	}
+	if metrics.Config.AllowMissingRelevant || metrics.Config.QuantizerSeed != 99 || len(metrics.Rows) != 1 || metrics.Rows[0].QuantizerSeed != 99 {
+		t.Fatalf("seed/strict config = config:%+v rows:%+v", metrics.Config, metrics.Rows)
+	}
+	tsv, err := os.ReadFile(tsvPath)
+	if err != nil {
+		t.Fatalf("read tsv: %v", err)
+	}
+	for _, want := range []string{
+		"quantizer_seed\tallow_missing_relevant",
+		"parent_budget_storage_multiple",
+		"tiny-multivector\tdense-child",
+		"tiny-multivector\tquantized-child\t8\tturboquant_ip_b8_child_max\t99\tfalse",
+	} {
+		if !strings.Contains(string(tsv), want) {
+			t.Fatalf("tsv missing %q\n%s", want, tsv)
+		}
+	}
+}
+
 func TestRunInitTrainCreatesTrainingPackage(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {

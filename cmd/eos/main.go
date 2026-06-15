@@ -115,6 +115,8 @@ func run(args []string) error {
 		return runEvalRetrievalTurboQuant(args[1:])
 	case "eval-retrieval-vectors-turboquant":
 		return runEvalRetrievalVectorsTurboQuant(args[1:])
+	case "eval-retrieval-multivector-turboquant":
+		return runEvalRetrievalMultiVectorTurboQuant(args[1:])
 	case "eval-retrieval-vectors":
 		return runEvalRetrievalVectors(args[1:])
 	case "eval-retrieval-vectors-hybrid":
@@ -920,6 +922,102 @@ func runEvalRetrievalVectorsTurboQuant(args []string) error {
 	return nil
 }
 
+func runEvalRetrievalMultiVectorTurboQuant(args []string) error {
+	fs := flag.NewFlagSet("eval-retrieval-multivector-turboquant", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	datasetName := fs.String("dataset", "", "dataset name for metrics output")
+	split := fs.String("split", "test", "qrels split under <dataset-dir>/qrels")
+	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path")
+	docVectorsPath := fs.String("doc-vectors", "", "parent-child document vector cache JSONL")
+	queryVectorsPath := fs.String("query-vectors", "", "query vector cache JSONL")
+	backendName := fs.String("backend", "vectors", "backend/provider label for metrics output")
+	artifactLabel := fs.String("artifact", "", "external artifact/model label for metrics output")
+	topK := fs.Int("top-k", 100, "retrieval depth for scoring")
+	maxDocs := fs.Int("max-docs", 0, "limit corpus parent documents for smoke checks")
+	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
+	bitsRaw := fs.String("bits", "2,4,8", "comma-separated TurboQuant IP bit widths; supported: 2..8")
+	quantizerSeed := fs.Int64("quantizer-seed", eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed, "TurboQuant IP quantizer seed for deterministic rows")
+	allowMissingRelevant := fs.Bool("allow-missing-relevant", false, "allow qrels-relevant parent IDs missing from the child-vector cache")
+	metricsPath := fs.String("metrics-json", "", "write parent-child TurboQuant retrieval metrics JSON")
+	metricsTSVPath := fs.String("metrics-tsv", "", "write compact parent-child dense/quantized metrics TSV")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 || fs.Arg(0) == "" || *docVectorsPath == "" || *queryVectorsPath == "" {
+		return fmt.Errorf("usage: eos eval-retrieval-multivector-turboquant [flags] --doc-vectors docs.jsonl --query-vectors queries.jsonl <beir-dataset-dir>")
+	}
+	bits, err := parsePositiveIntCSV(*bitsRaw, "bits")
+	if err != nil {
+		return fmt.Errorf("bits: %w", err)
+	}
+	datasetDir := fs.Arg(0)
+	corpusPath, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
+	if *qrelsPath == "" {
+		*qrelsPath = defaultQrelsPath
+	}
+	if *datasetName == "" {
+		*datasetName = filepath.Base(datasetDir)
+	}
+	metrics, err := eosruntime.EvaluateTurboQuantMultiVectorCacheRetrieval(context.Background(), eosruntime.RetrievalEvalConfig{
+		DatasetName:          *datasetName,
+		ArtifactPath:         *artifactLabel,
+		CorpusPath:           corpusPath,
+		QueriesPath:          queriesPath,
+		QrelsPath:            *qrelsPath,
+		DocVectorPath:        *docVectorsPath,
+		QueryVectorPath:      *queryVectorsPath,
+		BackendName:          *backendName,
+		TopK:                 *topK,
+		MaxDocs:              *maxDocs,
+		MaxQueries:           *maxQueries,
+		AllowMissingRelevant: *allowMissingRelevant,
+		QuantizerSeed:        *quantizerSeed,
+	}, bits)
+	if err != nil {
+		return err
+	}
+	if *metricsPath != "" {
+		data, err := json.MarshalIndent(metrics, "", "  ")
+		if err != nil {
+			return err
+		}
+		data = append(data, '\n')
+		if err := os.WriteFile(*metricsPath, data, 0o644); err != nil {
+			return err
+		}
+	}
+	if *metricsTSVPath != "" {
+		if err := writeTurboQuantMultiVectorRetrievalMetricsTSV(*metricsTSVPath, metrics); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("retrieval multivector turboquant: dataset=%s backend=%s parents=%d child_vectors=%d avg_children=%.2f queries=%d relevant_pairs=%d scored_child_pairs=%d\n",
+		metrics.Dataset, metrics.Backend, metrics.Inputs.Parents, metrics.Inputs.ChildVectors, metrics.Inputs.AverageChildrenPerParent, metrics.Inputs.Queries, metrics.Inputs.RelevantPairs, metrics.Inputs.ScoredChildPairs)
+	fmt.Printf("dense-child: ndcg@10=%.6f ndcg@100=%.6f map@10=%.6f recall@100=%.6f dense_parent_bytes=%d dense_child_bytes=%d scores/s=%.2f query_p95_ms=%.3f\n",
+		metrics.Dense.Quality.NDCGAt10, metrics.Dense.Quality.NDCGAt100, metrics.Dense.Quality.MAPAt10, metrics.Dense.Quality.RecallAt100, metrics.Dense.DenseParentBytes, metrics.Dense.DenseChildBytes, metrics.Dense.ScoresPerSecond, metrics.Dense.QueryLatency.P95MS)
+	for _, row := range metrics.Rows {
+		fmt.Printf("q%d: ndcg@10=%.6f delta=%+.6f recall@100=%.6f delta=%+.6f quantized_child_bytes=%d dense_child_compression=%.2fx parent_budget_multiple=%.2fx scores/s=%.2f query_p95_ms=%.3f\n",
+			row.Bits,
+			row.Quality.NDCGAt10,
+			row.NDCGAt10Delta,
+			row.Quality.RecallAt100,
+			row.RecallAt100Delta,
+			row.QuantizedChildBytes,
+			row.DenseChildCompression,
+			row.ParentBudgetStorageMultiple,
+			row.ScoresPerSecond,
+			row.QueryLatency.P95MS,
+		)
+	}
+	if *metricsPath != "" {
+		fmt.Printf("metrics: %s\n", *metricsPath)
+	}
+	if *metricsTSVPath != "" {
+		fmt.Printf("metrics_tsv: %s\n", *metricsTSVPath)
+	}
+	return nil
+}
+
 func writeTurboQuantRetrievalMetricsTSV(path string, metrics eosruntime.TurboQuantRetrievalEvalMetrics) error {
 	var b strings.Builder
 	b.WriteString("dataset\trow\tbits\tmethod\trerank_overfetch\trerank_storage\tndcg_at_10\tndcg_at_100\tmrr_at_10\tprecision_at_1\tprecision_at_5\tprecision_at_10\thit_at_1\thit_at_5\thit_at_10\tmap_at_10\tmap_at_100\trecall_at_10\trecall_at_100\tndcg_at_10_delta\trecall_at_100_delta\tvector_bytes\tdense_vector_bytes\trerank_sidecar_bytes\ttotal_vector_bytes\tcompression_ratio\ttotal_compression_ratio\tscores_per_second\tquery_latency_p50_ms\tquery_latency_p95_ms\tquery_latency_p99_ms\tquery_latency_max_ms\tdocs_per_second\trerank_scores\n")
@@ -989,6 +1087,84 @@ func writeTurboQuantRetrievalMetricsTSV(path string, metrics eosruntime.TurboQua
 			row.QueryLatency.MaxMS,
 			row.DocsPerSecond,
 			row.RerankScores,
+		)
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func writeTurboQuantMultiVectorRetrievalMetricsTSV(path string, metrics eosruntime.TurboQuantMultiVectorRetrievalEvalMetrics) error {
+	var b strings.Builder
+	b.WriteString("dataset\trow\tbits\tmethod\tquantizer_seed\tallow_missing_relevant\tparents\tchild_vectors\tavg_children_per_parent\tqueries\trelevant_pairs\tscored_child_pairs\tndcg_at_10\tndcg_at_100\tmrr_at_10\tprecision_at_1\tprecision_at_5\tprecision_at_10\thit_at_1\thit_at_5\thit_at_10\tmap_at_10\tmap_at_100\trecall_at_10\trecall_at_100\tndcg_at_10_delta\trecall_at_100_delta\tdense_parent_bytes\tdense_child_bytes\tquantized_child_bytes\tdense_child_compression_ratio\tparent_budget_storage_multiple\tscores_per_second\tquery_latency_p50_ms\tquery_latency_p95_ms\tquery_latency_p99_ms\tquery_latency_max_ms\tchildren_per_second\n")
+	fmt.Fprintf(&b, "%s\tdense-child\t\tfloat32_child_max\t%d\t%t\t%d\t%d\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t\t\t%d\t%d\t\t\t\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t\n",
+		metrics.Dataset,
+		metrics.Config.QuantizerSeed,
+		metrics.Config.AllowMissingRelevant,
+		metrics.Inputs.Parents,
+		metrics.Inputs.ChildVectors,
+		metrics.Inputs.AverageChildrenPerParent,
+		metrics.Inputs.Queries,
+		metrics.Inputs.RelevantPairs,
+		metrics.Inputs.ScoredChildPairs,
+		metrics.Dense.Quality.NDCGAt10,
+		metrics.Dense.Quality.NDCGAt100,
+		metrics.Dense.Quality.MRRAt10,
+		metrics.Dense.Quality.PrecisionAt1,
+		metrics.Dense.Quality.PrecisionAt5,
+		metrics.Dense.Quality.PrecisionAt10,
+		metrics.Dense.Quality.HitAt1,
+		metrics.Dense.Quality.HitAt5,
+		metrics.Dense.Quality.HitAt10,
+		metrics.Dense.Quality.MAPAt10,
+		metrics.Dense.Quality.MAPAt100,
+		metrics.Dense.Quality.RecallAt10,
+		metrics.Dense.Quality.RecallAt100,
+		metrics.Dense.DenseParentBytes,
+		metrics.Dense.DenseChildBytes,
+		metrics.Dense.ScoresPerSecond,
+		metrics.Dense.QueryLatency.P50MS,
+		metrics.Dense.QueryLatency.P95MS,
+		metrics.Dense.QueryLatency.P99MS,
+		metrics.Dense.QueryLatency.MaxMS,
+	)
+	for _, row := range metrics.Rows {
+		fmt.Fprintf(&b, "%s\tquantized-child\t%d\t%s\t%d\t%t\t%d\t%d\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%+.6f\t%+.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%.2f\n",
+			metrics.Dataset,
+			row.Bits,
+			row.Method,
+			row.QuantizerSeed,
+			metrics.Config.AllowMissingRelevant,
+			metrics.Inputs.Parents,
+			metrics.Inputs.ChildVectors,
+			metrics.Inputs.AverageChildrenPerParent,
+			metrics.Inputs.Queries,
+			metrics.Inputs.RelevantPairs,
+			metrics.Inputs.ScoredChildPairs,
+			row.Quality.NDCGAt10,
+			row.Quality.NDCGAt100,
+			row.Quality.MRRAt10,
+			row.Quality.PrecisionAt1,
+			row.Quality.PrecisionAt5,
+			row.Quality.PrecisionAt10,
+			row.Quality.HitAt1,
+			row.Quality.HitAt5,
+			row.Quality.HitAt10,
+			row.Quality.MAPAt10,
+			row.Quality.MAPAt100,
+			row.Quality.RecallAt10,
+			row.Quality.RecallAt100,
+			row.NDCGAt10Delta,
+			row.RecallAt100Delta,
+			row.DenseParentBytes,
+			row.DenseChildBytes,
+			row.QuantizedChildBytes,
+			row.DenseChildCompression,
+			row.ParentBudgetStorageMultiple,
+			row.ScoresPerSecond,
+			row.QueryLatency.P50MS,
+			row.QueryLatency.P95MS,
+			row.QueryLatency.P99MS,
+			row.QueryLatency.MaxMS,
+			row.ChildrenPerSecond,
 		)
 	}
 	return os.WriteFile(path, []byte(b.String()), 0o644)
@@ -5143,6 +5319,7 @@ func printUsage() {
 	fmt.Println("  eos eval-retrieval-vectors [flags] --doc-vectors docs.jsonl --query-vectors queries.jsonl <beir-dataset-dir>")
 	fmt.Println("  eos eval-retrieval-vectors-hybrid [flags] --doc-vectors docs.jsonl --query-vectors queries.jsonl <beir-dataset-dir>")
 	fmt.Println("  eos eval-retrieval-vectors-turboquant [flags] --doc-vectors docs.jsonl --query-vectors queries.jsonl <beir-dataset-dir>")
+	fmt.Println("  eos eval-retrieval-multivector-turboquant [flags] --doc-vectors child-docs.jsonl --query-vectors queries.jsonl <beir-dataset-dir>")
 	fmt.Println("  eos eval-retrieval-bm25 [flags] <beir-dataset-dir>")
 	fmt.Println("  eos mine-retrieval-hard-negatives [flags] <beir-dataset-dir> <output.jsonl>")
 	fmt.Println("  eos mine-retrieval-model-hard-negatives [flags] <artifact.mll> <beir-dataset-dir> <output.jsonl>")
@@ -5184,6 +5361,7 @@ func printUsage() {
 	fmt.Println("eval-retrieval-vectors scores precomputed document/query vector JSONL caches on the same BEIR metrics.")
 	fmt.Println("eval-retrieval-vectors-hybrid fuses external dense vector caches with BM25 top-k over the same BEIR files.")
 	fmt.Println("eval-retrieval-vectors-turboquant compares external vector caches against TurboQuant IP-preserving document-vector compression.")
+	fmt.Println("eval-retrieval-multivector-turboquant compares dense and direct TurboQuant child-vector scoring aggregated by max child score per parent.")
 	fmt.Println("eval-retrieval-bm25 scores the same BEIR files with an in-repo BM25 lexical baseline.")
 	fmt.Println("mine-retrieval-hard-negatives creates text hard-negative training JSONL from BEIR qrels using the BM25 baseline.")
 	fmt.Println("mine-retrieval-model-hard-negatives creates text hard-negative training JSONL from BEIR qrels using a Eos embedding model's own misses.")
