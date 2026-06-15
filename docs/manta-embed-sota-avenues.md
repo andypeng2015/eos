@@ -169,6 +169,18 @@ Status:
 - The cached-tokenizer `embed-m` shape (`16384` vocab, max sequence `512`, dim `192`, hidden `384`, repeats `3`) trains and seals on the desktop GPU at batch `64`, but the current-best fine-tune recipe is invalid from random initialization: validation/hard AUC `0.595854` / `0.598887`, macro nDCG@10 `0.078073`, and `1460.78` train pairs/s.
 - A scratch `infonce` LR `0.002` pass also failed as a bootstrap: validation/hard AUC `0.495137` / `0.498731` with `1259.54` train pairs/s. The next `embed-m` attempt should use staged pretraining or dimension-compatible weight expansion, then apply the teacher-distilled recipe as a fine-tune.
 
+2026-06-15 `embed-m` frontier checkpoint: protective replay is the current local `embed-m` benchmark, but it is evidence only. It is not the promoted default model, and it does not replace the compact q4 + fp16 sidecar rerank default path. Direct retrieval remains the gate; pairwise AUC is not sufficient.
+
+| Candidate | SciFact nDCG@10 | NFCorpus nDCG@10 | FiQA nDCG@10 | Macro nDCG@10 | Macro recall@100 | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| balanced Stage B `embed-m` baseline | 0.365649 | 0.152246 | 0.040103 | 0.185999 | 0.331780 | stronger staged baseline, still below anchor |
+| protective replay `embed-m` continuation | 0.365697 | 0.152673 | 0.040820 | 0.186397 | 0.331876 | current local `embed-m` benchmark |
+| current dense anchor | 0.482406 | 0.197733 | 0.117533 | 0.265891 | 0.452844 | remains far ahead |
+
+The protective replay continuation is `runs/eos-embed-m-fiqa-dev-toprank-protective-replay-probe-20260615T000000Z/`. It starts from the balanced Stage B baseline and trains one LR `0.000002`, HN3, no-teacher continuation on a 96-row blend: `48` FiQA dev top-rank rows, `24` SciFact replay rows, and `24` NFCorpus replay rows.
+
+Negative findings for this branch: FiQA source oversampling regressed; the test-selected microrepair was diagnostic only; dev-heldout top-rank selection generalized directionally but was weaker without protective replay; and the larger scale96 blend was worse than the 96-row protective blend on macro and FiQA nDCG. Future `embed-m` work should treat protective replay as the local comparison point, not as a promotion candidate.
+
 ### Lane E: TurboQuant And Weight Precision
 
 Question: where is the quality/throughput knee for local serving?
