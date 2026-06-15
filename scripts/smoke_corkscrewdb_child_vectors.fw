@@ -53,6 +53,7 @@ type bitMetrics struct {
 
 type summaryRow struct {
 	Bits                         int
+	OverfetchChildren            int
 	NDCGAt10                     float64
 	RecallAt100                  float64
 	VectorPayloadStorageMultiple float64
@@ -83,7 +84,8 @@ type manifest struct {
 	Bits                string       `json:"bits"`
 	QuantizerSeed       int64        `json:"quantizer_seed"`
 	QuantizedOnly       bool         `json:"quantized_only"`
-	OverfetchChildren   int          `json:"overfetch_children"`
+	OverfetchChildren   string       `json:"overfetch_children"`
+	OverfetchValues     []int        `json:"overfetch_values"`
 	TopKParents         int          `json:"top_k_parents"`
 	BaselineDim         int          `json:"baseline_dim"`
 	HarnessDir          string       `json:"harness_dir"`
@@ -117,7 +119,7 @@ Environment:
   EOS_CORKSCREW_SMOKE_BITS=2,4,8
   EOS_CORKSCREW_SMOKE_QUANTIZER_SEED=5581486560434873699
   EOS_CORKSCREW_SMOKE_QUANTIZED_ONLY=1
-  EOS_CORKSCREW_SMOKE_OVERFETCH=100
+  EOS_CORKSCREW_SMOKE_OVERFETCH=100       # comma-separated values sweep overfetch
   EOS_CORKSCREW_SMOKE_TOP_PARENTS=100
   EOS_CORKSCREW_SMOKE_BASELINE_DIM=3072
   EOS_CORKSCREW_SMOKE_COLLECTION=eos_child_vector_smoke
@@ -232,6 +234,29 @@ func parseBits(value string) ([]int, error) {
 	return bits, nil
 }
 
+func parsePositiveIntList(name string, value string) ([]int, error) {
+	parts := strings.Split(value, ",")
+	values := []int{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		parsed, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, fmt.Errorf("%s contains invalid integer %q: %w", name, part, err)
+		}
+		if parsed <= 0 {
+			return nil, fmt.Errorf("%s values must be positive: %d", name, parsed)
+		}
+		values = append(values, parsed)
+	}
+	if len(values) == 0 {
+		return nil, fmt.Errorf("%s must include at least one positive integer", name)
+	}
+	return values, nil
+}
+
 func shellQuote(value string) string {
 	if value == "" {
 		return "''"
@@ -304,10 +329,11 @@ func readMetrics(path string) (bitMetrics, error) {
 
 func writeSummaryTSV(path string, rows []summaryRow) error {
 	var b strings.Builder
-	b.WriteString("bits\tndcg_at_10\trecall_at_100\tvector_payload_storage_multiple\tdb_directory_storage_multiple\tquantized_vector_bytes\tquantized_child_bytes\tdb_bytes_after_close\tload_seconds\tsearch_seconds\tp50_ms\tp95_ms\tp99_ms\tmax_ms\n")
+	b.WriteString("bits\toverfetch_children\tndcg_at_10\trecall_at_100\tvector_payload_storage_multiple\tdb_directory_storage_multiple\tquantized_vector_bytes\tquantized_child_bytes\tdb_bytes_after_close\tload_seconds\tsearch_seconds\tp50_ms\tp95_ms\tp99_ms\tmax_ms\n")
 	for _, row := range rows {
-		fmt.Fprintf(&b, "%d\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\n",
+		fmt.Fprintf(&b, "%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\n",
 			row.Bits,
+			row.OverfetchChildren,
 			row.NDCGAt10,
 			row.RecallAt100,
 			row.VectorPayloadStorageMultiple,
@@ -328,13 +354,13 @@ func writeSummaryTSV(path string, rows []summaryRow) error {
 func checkGates(rows []summaryRow, maxQ8PayloadMultiple float64, minNDCG float64, minRecall float64) error {
 	for _, row := range rows {
 		if minNDCG > 0 && row.NDCGAt10 < minNDCG {
-			return fmt.Errorf("q%d ndcg@10 %.6f is below %.6f", row.Bits, row.NDCGAt10, minNDCG)
+			return fmt.Errorf("q%d overfetch%d ndcg@10 %.6f is below %.6f", row.Bits, row.OverfetchChildren, row.NDCGAt10, minNDCG)
 		}
 		if minRecall > 0 && row.RecallAt100 < minRecall {
-			return fmt.Errorf("q%d recall@100 %.6f is below %.6f", row.Bits, row.RecallAt100, minRecall)
+			return fmt.Errorf("q%d overfetch%d recall@100 %.6f is below %.6f", row.Bits, row.OverfetchChildren, row.RecallAt100, minRecall)
 		}
 		if row.Bits == 8 && maxQ8PayloadMultiple > 0 && row.VectorPayloadStorageMultiple > maxQ8PayloadMultiple {
-			return fmt.Errorf("q8 vector payload multiple %.6f exceeds %.6f", row.VectorPayloadStorageMultiple, maxQ8PayloadMultiple)
+			return fmt.Errorf("q8 overfetch%d vector payload multiple %.6f exceeds %.6f", row.OverfetchChildren, row.VectorPayloadStorageMultiple, maxQ8PayloadMultiple)
 		}
 	}
 	return nil
@@ -416,7 +442,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	overfetch, err := parseIntEnv("EOS_CORKSCREW_SMOKE_OVERFETCH", 100)
+	overfetchValue := getenv("EOS_CORKSCREW_SMOKE_OVERFETCH", "100")
+	overfetchValues, err := parsePositiveIntList("EOS_CORKSCREW_SMOKE_OVERFETCH", overfetchValue)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -425,6 +452,12 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+	for _, overfetch := range overfetchValues {
+		if overfetch < topParents {
+			fmt.Fprintf(os.Stderr, "EOS_CORKSCREW_SMOKE_OVERFETCH value %d must be >= EOS_CORKSCREW_SMOKE_TOP_PARENTS %d\n", overfetch, topParents)
+			os.Exit(1)
+		}
 	}
 	baselineDim, err := parseIntEnv("EOS_CORKSCREW_SMOKE_BASELINE_DIM", 3072)
 	if err != nil {
@@ -465,53 +498,59 @@ func main() {
 	metricFiles := []string{}
 	harnessCommands := [][]string{}
 	for _, bit := range bits {
-		metricsPath := filepath.Join(metricsDir, fmt.Sprintf("q%d.metrics.json", bit))
 		dbPath := filepath.Join(dbRoot, fmt.Sprintf("q%d", bit))
-		args := []string{
-			"go", "run", ".",
-			"--child-vectors", childVectors,
-			"--query-vectors", queryVectors,
-			"--qrels", qrels,
-			"--db", dbPath,
-			"--bits", strconv.Itoa(bit),
-			"--overfetch", strconv.Itoa(overfetch),
-			"--top-parents", strconv.Itoa(topParents),
-			"--baseline-dim", strconv.Itoa(baselineDim),
-			"--collection", collection,
-			"--dataset", dataset,
-			"--quantizer-seed", strconv.FormatInt(seed, 10),
-			"--metrics-json", metricsPath,
+		for overfetchIndex, overfetch := range overfetchValues {
+			metricsPath := filepath.Join(metricsDir, fmt.Sprintf("q%d-overfetch%d.metrics.json", bit, overfetch))
+			args := []string{
+				"go", "run", ".",
+				"--child-vectors", childVectors,
+				"--query-vectors", queryVectors,
+				"--qrels", qrels,
+				"--db", dbPath,
+				"--bits", strconv.Itoa(bit),
+				"--overfetch", strconv.Itoa(overfetch),
+				"--top-parents", strconv.Itoa(topParents),
+				"--baseline-dim", strconv.Itoa(baselineDim),
+				"--collection", collection,
+				"--dataset", dataset,
+				"--quantizer-seed", strconv.FormatInt(seed, 10),
+				"--metrics-json", metricsPath,
+			}
+			if quantizedOnly {
+				args = append(args, "--quantized-only")
+			}
+			if overfetchIndex > 0 {
+				args = append(args, "--reuse-db")
+			}
+			if err := runCommand(harnessDir, logDir, fmt.Sprintf("harness-q%d-overfetch%d", bit, overfetch), args, os.Environ()); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			metrics, err := readMetrics(metricsPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			rows = append(rows, summaryRow{
+				Bits:                         metrics.Bits,
+				OverfetchChildren:            metrics.OverfetchChildren,
+				NDCGAt10:                     metrics.Quality.NDCGAt10,
+				RecallAt100:                  metrics.Quality.RecallAt100,
+				VectorPayloadStorageMultiple: metrics.VectorPayloadStorageMultiple,
+				DBDirectoryStorageMultiple:   metrics.DBDirectoryStorageMultiple,
+				QuantizedVectorBytes:         metrics.QuantizedVectorBytes,
+				QuantizedChildBytes:          metrics.QuantizedChildBytes,
+				DBBytesAfterClose:            metrics.DBBytesAfterClose,
+				LoadSeconds:                  metrics.LoadSeconds,
+				SearchSeconds:                metrics.SearchSeconds,
+				P50MS:                        metrics.SearchLatency.P50MS,
+				P95MS:                        metrics.SearchLatency.P95MS,
+				P99MS:                        metrics.SearchLatency.P99MS,
+				MaxMS:                        metrics.SearchLatency.MaxMS,
+			})
+			metricFiles = append(metricFiles, metricsPath)
+			harnessCommands = append(harnessCommands, args)
 		}
-		if quantizedOnly {
-			args = append(args, "--quantized-only")
-		}
-		if err := runCommand(harnessDir, logDir, fmt.Sprintf("harness-q%d", bit), args, os.Environ()); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		metrics, err := readMetrics(metricsPath)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		rows = append(rows, summaryRow{
-			Bits:                         metrics.Bits,
-			NDCGAt10:                     metrics.Quality.NDCGAt10,
-			RecallAt100:                  metrics.Quality.RecallAt100,
-			VectorPayloadStorageMultiple: metrics.VectorPayloadStorageMultiple,
-			DBDirectoryStorageMultiple:   metrics.DBDirectoryStorageMultiple,
-			QuantizedVectorBytes:         metrics.QuantizedVectorBytes,
-			QuantizedChildBytes:          metrics.QuantizedChildBytes,
-			DBBytesAfterClose:            metrics.DBBytesAfterClose,
-			LoadSeconds:                  metrics.LoadSeconds,
-			SearchSeconds:                metrics.SearchSeconds,
-			P50MS:                        metrics.SearchLatency.P50MS,
-			P95MS:                        metrics.SearchLatency.P95MS,
-			P99MS:                        metrics.SearchLatency.P99MS,
-			MaxMS:                        metrics.SearchLatency.MaxMS,
-		})
-		metricFiles = append(metricFiles, metricsPath)
-		harnessCommands = append(harnessCommands, args)
 	}
 
 	if err := checkGates(rows, maxQ8PayloadMultiple, minNDCG, minRecall); err != nil {
@@ -539,7 +578,8 @@ func main() {
 		Bits:              bitsValue,
 		QuantizerSeed:     seed,
 		QuantizedOnly:     quantizedOnly,
-		OverfetchChildren: overfetch,
+		OverfetchChildren: overfetchValue,
+		OverfetchValues:   overfetchValues,
 		TopKParents:       topParents,
 		BaselineDim:       baselineDim,
 		HarnessDir:        harnessDir,
@@ -575,8 +615,9 @@ func main() {
 	fmt.Printf("\nsummary_tsv: %s\n", summaryTSV)
 	fmt.Printf("manifest: %s\n", manifestJSON)
 	for _, row := range rows {
-		fmt.Printf("q%d: ndcg@10=%.6f recall@100=%.6f vector_payload_multiple=%.6fx db_dir_multiple=%.6fx p95=%.6fms\n",
+		fmt.Printf("q%d overfetch%d: ndcg@10=%.6f recall@100=%.6f vector_payload_multiple=%.6fx db_dir_multiple=%.6fx p95=%.6fms\n",
 			row.Bits,
+			row.OverfetchChildren,
 			row.NDCGAt10,
 			row.RecallAt100,
 			row.VectorPayloadStorageMultiple,
@@ -701,6 +742,7 @@ func main() {
 		outPath     = flag.String("metrics-json", "", "output metrics JSON path")
 		seed        = flag.Int64("quantizer-seed", 0, "CorkScrewDB quantizer seed")
 		quantOnly   = flag.Bool("quantized-only", false, "store only quantized vector payloads")
+		reuseDB     = flag.Bool("reuse-db", false, "reuse an existing DB and skip deletion/inserts")
 	)
 	flag.Parse()
 
@@ -710,8 +752,10 @@ func main() {
 	if *overfetch < *topParents {
 		fatalf("--overfetch must be >= --top-parents")
 	}
-	if err := os.RemoveAll(*dbPath); err != nil {
-		fatalf("remove db dir: %v", err)
+	if !*reuseDB {
+		if err := os.RemoveAll(*dbPath); err != nil {
+			fatalf("remove db dir: %v", err)
+		}
 	}
 
 	children, dim, parentCount, err := readChildVectors(*childPath)
@@ -743,18 +787,23 @@ func main() {
 	}
 	coll := db.Collection(*collection, options...)
 	loadStart := time.Now()
-	for _, child := range children {
-		meta := map[string]string{
-			"parent_id": child.ParentID,
-			"child_id":  child.ChildID,
-			"dataset":   *dataset,
-		}
-		if err := coll.PutVector(child.ChildID, child.Vector, corkscrewdb.WithMetadata(meta)); err != nil {
-			_ = db.Close()
-			fatalf("put vector %q: %v", child.ChildID, err)
+	if !*reuseDB {
+		for _, child := range children {
+			meta := map[string]string{
+				"parent_id": child.ParentID,
+				"child_id":  child.ChildID,
+				"dataset":   *dataset,
+			}
+			if err := coll.PutVector(child.ChildID, child.Vector, corkscrewdb.WithMetadata(meta)); err != nil {
+				_ = db.Close()
+				fatalf("put vector %q: %v", child.ChildID, err)
+			}
 		}
 	}
 	loadSeconds := time.Since(loadStart).Seconds()
+	if *reuseDB {
+		loadSeconds = 0
+	}
 
 	var totals qualityMetrics
 	latencies := make([]time.Duration, 0, len(queries))
