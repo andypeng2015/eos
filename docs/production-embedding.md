@@ -211,6 +211,14 @@ EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_multivector_budget_fronti
 
 The default smoke runs the planner for `128d` compact children against a `3072d` dense baseline with q2/q4/q8, child counts `1,16,64,100,128,181,256,341`, `32` bytes of per-vector overhead, no sidecar, and `1000` objects. It writes `summary.tsv`, `manifest.json`, planner JSON, and command logs under `runs/eos-multivector-budget-frontier-smoke-<timestamp>/`; the default gates assert q2 fits at least `181`, q4 at least `100`, and q8 at least `64` child vectors in one dense-vector budget. This is storage/accounting only, not retrieval quality and not CorkScrewDB API latency.
 
+Use the budget-quality smoke when the claim must include both cache-only retrieval quality and overhead-aware planner capacity:
+
+```bash
+EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_multivector_budget_quality.fw
+```
+
+The default run uses the local Eos 128d SciFact child cache in `runs/eos-128d-child-cache-quality-20260615T000000Z/`, evaluates dense/q2/q4/q8 max-child parent retrieval, then plans the inferred 128d child vectors against one 3072d dense baseline vector with `32` overhead bytes and no sidecar. Current default interpretation: q4 stays near dense on this cache (`ndcg@10` drop about `0.002630`, `recall@100` drop about `0.001667`) and the planner fits `123` overhead-aware q4 children per dense-vector budget, so the `100` child-vector target fits. This remains cache-only evidence; it does not measure CorkScrewDB API latency, HNSW/index behavior, remote mode, or DB-directory size.
+
 To move from storage math to a cache-only quality harness for time-series windows, export text-rendered numeric windows and reuse the existing multivector TurboQuant evaluator. The series JSONL has one parent series per row with `id` or `_id` and numeric `values`; qrels must use the parent series IDs as corpus IDs:
 
 ```bash

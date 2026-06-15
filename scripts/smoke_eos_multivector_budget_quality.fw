@@ -1,0 +1,746 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const defaultCacheRun = "runs/eos-128d-child-cache-quality-20260615T000000Z"
+
+type qualityMetrics struct {
+	NDCGAt10    float64 `json:"ndcg_at_10"`
+	RecallAt100 float64 `json:"recall_at_100"`
+}
+
+type latencyMetrics struct {
+	P95MS float64 `json:"p95_ms"`
+}
+
+type denseMetrics struct {
+	Quality                        qualityMetrics `json:"quality"`
+	BaselineDim                    int            `json:"baseline_dim"`
+	ParentCount                    int            `json:"parent_count"`
+	ChildCount                     int            `json:"child_count"`
+	AvgChildrenPerParent           float64        `json:"avg_children_per_parent"`
+	MaxChildrenPerParent           int            `json:"max_children_per_parent"`
+	ChildVectorBytes               int64          `json:"child_vector_bytes"`
+	DenseChildBytes                int64          `json:"dense_child_bytes"`
+	DenseBaselineBytes             int64          `json:"dense_baseline_bytes"`
+	DenseBaselineTotalBytes        int64          `json:"dense_baseline_total_bytes"`
+	StorageMultipleOfDenseBaseline float64        `json:"storage_multiple_of_dense_baseline"`
+	ScoresPerSecond                float64        `json:"scores_per_second"`
+	QueryLatency                   latencyMetrics `json:"query_latency"`
+}
+
+type bitMetrics struct {
+	Bits                             int            `json:"bits"`
+	Method                           string         `json:"method"`
+	Quality                          qualityMetrics `json:"quality"`
+	NDCGAt10Delta                    float64        `json:"ndcg_at_10_delta"`
+	RecallAt100Delta                 float64        `json:"recall_at_100_delta"`
+	ParentCount                      int            `json:"parent_count"`
+	ChildCount                       int            `json:"child_count"`
+	QuantizedVectorBytes             int64          `json:"quantized_vector_bytes"`
+	QuantizedChildBytes              int64          `json:"quantized_child_bytes"`
+	StorageMultipleOfDenseBaseline   float64        `json:"storage_multiple_of_dense_baseline"`
+	VectorsThatFitInOneDenseBaseline int64          `json:"vectors_that_fit_in_one_dense_baseline"`
+	ScoresPerSecond                  float64        `json:"scores_per_second"`
+	QueryLatency                     latencyMetrics `json:"query_latency"`
+}
+
+type evalMetrics struct {
+	Schema  string       `json:"schema"`
+	Dataset string       `json:"dataset"`
+	Backend string       `json:"backend"`
+	Dense   denseMetrics `json:"dense"`
+	Rows    []bitMetrics `json:"rows"`
+}
+
+type planRow struct {
+	Dim                              int     `json:"dim"`
+	BaselineDim                      int     `json:"baseline_dim"`
+	Bits                             int     `json:"bits"`
+	Objects                          int     `json:"objects"`
+	VectorsPerObject                 int     `json:"vectors_per_object"`
+	QuantizedPayloadBytes            int64   `json:"quantized_payload_bytes"`
+	QuantizedVectorBytes             int64   `json:"quantized_vector_bytes"`
+	VectorOverheadBytes              int64   `json:"vector_overhead_bytes"`
+	DenseVectorStorageBytes          int64   `json:"dense_vector_storage_bytes"`
+	QuantizedVectorStorageBytes      int64   `json:"quantized_vector_storage_bytes"`
+	TotalQuantizedBytes              int64   `json:"total_quantized_bytes"`
+	TotalCompressionRatio            float64 `json:"total_compression_ratio"`
+	VectorsThatFitInOneDenseVector   int64   `json:"vectors_that_fit_in_one_dense_vector"`
+	FitsInOneDenseVectorStorage      bool    `json:"fits_in_one_dense_vector_storage"`
+	StorageMultipleOfDenseParentCost float64 `json:"storage_multiple_of_dense_parent_cost"`
+}
+
+type storagePlan struct {
+	Schema string    `json:"schema"`
+	Rows   []planRow `json:"rows"`
+}
+
+type summaryRow struct {
+	Row                                string  `json:"row"`
+	Bits                               int     `json:"bits,omitempty"`
+	Method                             string  `json:"method"`
+	NDCGAt10                           float64 `json:"ndcg_at_10"`
+	RecallAt100                        float64 `json:"recall_at_100"`
+	NDCGAt10Delta                      float64 `json:"ndcg_at_10_delta"`
+	RecallAt100Delta                   float64 `json:"recall_at_100_delta"`
+	EvalPayloadStorageMultiple         float64 `json:"eval_payload_storage_multiple"`
+	QuantizedVectorBytes               int64   `json:"quantized_vector_bytes,omitempty"`
+	PlannerQuantizedVectorStorageBytes int64   `json:"planner_quantized_vector_storage_bytes,omitempty"`
+	PlannerVectorsFitOneDenseVector    int64   `json:"planner_vectors_that_fit_in_one_dense_vector,omitempty"`
+	TargetChildrenFit                  bool    `json:"target_children_fit"`
+	StorageMultipleAtTargetChildren    float64 `json:"storage_multiple_at_target_children,omitempty"`
+	HundredVectorCapable               bool    `json:"hundred_vector_capable"`
+	ScoresPerSecond                    float64 `json:"scores_per_second"`
+	QueryP95MS                         float64 `json:"query_p95_ms"`
+}
+
+type commandRecord struct {
+	Label string   `json:"label"`
+	Args  []string `json:"args"`
+	Log   string   `json:"log"`
+}
+
+type config struct {
+	RunRoot             string  `json:"run_root"`
+	RunDir              string  `json:"run_dir"`
+	DatasetDir          string  `json:"dataset_dir"`
+	DatasetLabel        string  `json:"dataset_label"`
+	DocVectors          string  `json:"doc_vectors"`
+	QueryVectors        string  `json:"query_vectors"`
+	Backend             string  `json:"backend"`
+	Artifact            string  `json:"artifact"`
+	Bits                string  `json:"bits"`
+	BaselineDim         int     `json:"baseline_dim"`
+	VectorOverheadBytes int64   `json:"vector_overhead_bytes"`
+	TargetChildren      int     `json:"target_children"`
+	SidecarStorage      string  `json:"sidecar_storage"`
+	Q4MaxNDCGDrop       float64 `json:"q4_max_ndcg_drop"`
+	Q4MaxRecallDrop     float64 `json:"q4_max_recall_drop"`
+	Q4MinFit            int64   `json:"q4_min_fit"`
+	VectorsPerObject    []int   `json:"vectors_per_object"`
+}
+
+type manifest struct {
+	Schema      string            `json:"schema"`
+	GeneratedAt string            `json:"generated_at"`
+	RepoRoot    string            `json:"repo_root"`
+	RunDir      string            `json:"run_dir"`
+	Config      config            `json:"config"`
+	Inputs      map[string]string `json:"inputs"`
+	Commands    []commandRecord   `json:"commands"`
+	MetricsJSON string            `json:"metrics_json"`
+	MetricsTSV  string            `json:"metrics_tsv"`
+	PlannerJSON string            `json:"planner_json"`
+	SummaryTSV  string            `json:"summary_tsv"`
+	ChildDim    int               `json:"child_dim"`
+	ParentCount int               `json:"parent_count"`
+	ChildCount  int               `json:"child_count"`
+	Rows        []summaryRow      `json:"rows"`
+	Gates       []string          `json:"gates"`
+	Caveats     []string          `json:"caveats"`
+}
+
+func usage() {
+	fmt.Println(`Eos multi-vector budget-quality smoke.
+
+Run:
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_multivector_budget_quality.fw
+
+This is cache-only. It calls:
+  go run ./cmd/eos eval-retrieval-multivector-turboquant
+  go run ./cmd/eos plan-multivector-storage
+
+Environment:
+  EOS_MV_BUDGET_QUALITY_RUN_ROOT=runs
+  EOS_MV_BUDGET_QUALITY_RUN_DIR=runs/eos-multivector-budget-quality-smoke-<timestamp>
+  EOS_MV_BUDGET_QUALITY_DATASET_DIR=datasets/manta-embed-v1/raw/scifact/scifact
+  EOS_MV_BUDGET_QUALITY_DATASET_LABEL=scifact
+  EOS_MV_BUDGET_QUALITY_DOC_VECTORS=runs/eos-128d-child-cache-quality-20260615T000000Z/scifact/child-doc-vectors.jsonl
+  EOS_MV_BUDGET_QUALITY_QUERY_VECTORS=runs/eos-128d-child-cache-quality-20260615T000000Z/scifact/query-vectors.jsonl
+  EOS_MV_BUDGET_QUALITY_BACKEND=eos-child-cache-128d
+  EOS_MV_BUDGET_QUALITY_ARTIFACT=eos-embed-v1-prefix128
+  EOS_MV_BUDGET_QUALITY_BITS=2,4,8
+  EOS_MV_BUDGET_QUALITY_BASELINE_DIM=3072
+  EOS_MV_BUDGET_QUALITY_VECTOR_OVERHEAD_BYTES=32
+  EOS_MV_BUDGET_QUALITY_TARGET_CHILDREN=100
+  EOS_MV_BUDGET_QUALITY_SIDECAR_STORAGE=none
+  EOS_MV_BUDGET_QUALITY_Q4_MAX_NDCG_DROP=0.005
+  EOS_MV_BUDGET_QUALITY_Q4_MAX_RECALL_DROP=0.005
+  EOS_MV_BUDGET_QUALITY_Q4_MIN_FIT=100`)
+}
+
+func getenv(name string, fallback string) string {
+	value := os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	if pwd := os.Getenv("PWD"); hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func parseIntEnv(name string, fallback int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parseInt64Env(name string, fallback int64) (int64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parseFloatEnv(name string, fallback float64) (float64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a float: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parsePositiveIntList(name string, value string) ([]int, error) {
+	parts := strings.Split(value, ",")
+	values := []int{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		parsed, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, fmt.Errorf("%s contains invalid integer %q: %w", name, part, err)
+		}
+		if parsed <= 0 {
+			return nil, fmt.Errorf("%s values must be positive: %d", name, parsed)
+		}
+		values = append(values, parsed)
+	}
+	if len(values) == 0 {
+		return nil, fmt.Errorf("%s must include at least one positive integer", name)
+	}
+	return values, nil
+}
+
+func ensureInt(values []int, value int) []int {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func intListCSV(values []int) string {
+	parts := []string{}
+	for _, value := range values {
+		parts = append(parts, strconv.Itoa(value))
+	}
+	return strings.Join(parts, ",")
+}
+
+func resolvePath(root string, path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return filepath.Abs(path)
+	}
+	return filepath.Abs(filepath.Join(root, path))
+}
+
+func requireFile(path string, label string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("%s is missing: %s", label, path)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s is a directory, expected file: %s", label, path)
+	}
+	return nil
+}
+
+func requireDir(path string, label string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("%s is missing: %s", label, path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory: %s", label, path)
+	}
+	return nil
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func renderCommand(args []string) string {
+	parts := []string{}
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func runCommand(root string, logDir string, label string, args []string) (commandRecord, error) {
+	fmt.Println("\n== " + label + " ==")
+	fmt.Println("+ " + renderCommand(args))
+	logPath := filepath.Join(logDir, label+".log")
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if writeErr := os.WriteFile(logPath, append([]byte(renderCommand(args)+"\n\n"), output...), 0o644); writeErr != nil {
+		return commandRecord{}, writeErr
+	}
+	fmt.Print(string(output))
+	record := commandRecord{Label: label, Args: args, Log: logPath}
+	if err != nil {
+		return record, fmt.Errorf("%s failed: %w", label, err)
+	}
+	return record, nil
+}
+
+func readJSON(path string, target any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, target)
+}
+
+func findBitRow(rows []bitMetrics, bits int) *bitMetrics {
+	for i := range rows {
+		if rows[i].Bits == bits {
+			return &rows[i]
+		}
+	}
+	return nil
+}
+
+func findPlanRow(rows []planRow, bits int, vectorsPerObject int) *planRow {
+	for i := range rows {
+		if rows[i].Bits == bits && rows[i].VectorsPerObject == vectorsPerObject {
+			return &rows[i]
+		}
+	}
+	return nil
+}
+
+func maxFitPlanRow(rows []planRow, bits int) *planRow {
+	var best *planRow
+	for i := range rows {
+		if rows[i].Bits != bits {
+			continue
+		}
+		if best == nil || rows[i].VectorsThatFitInOneDenseVector > best.VectorsThatFitInOneDenseVector {
+			best = &rows[i]
+		}
+	}
+	return best
+}
+
+func inferChildDim(metrics evalMetrics) (int, error) {
+	if metrics.Dense.ChildVectorBytes > 0 && metrics.Dense.ChildVectorBytes%4 == 0 {
+		return int(metrics.Dense.ChildVectorBytes / 4), nil
+	}
+	if metrics.Dense.DenseChildBytes > 0 && metrics.Dense.ChildCount > 0 {
+		bytesPerChild := metrics.Dense.DenseChildBytes / int64(metrics.Dense.ChildCount)
+		if bytesPerChild > 0 && bytesPerChild%4 == 0 {
+			return int(bytesPerChild / 4), nil
+		}
+	}
+	return 0, fmt.Errorf("could not infer child dimension from dense child vector bytes")
+}
+
+func makeSummaryRows(metrics evalMetrics, plan storagePlan, targetChildren int) []summaryRow {
+	rows := []summaryRow{{
+		Row:                        "dense",
+		Method:                     "dense-child-max",
+		NDCGAt10:                   metrics.Dense.Quality.NDCGAt10,
+		RecallAt100:                metrics.Dense.Quality.RecallAt100,
+		EvalPayloadStorageMultiple: metrics.Dense.StorageMultipleOfDenseBaseline,
+		ScoresPerSecond:            metrics.Dense.ScoresPerSecond,
+		QueryP95MS:                 metrics.Dense.QueryLatency.P95MS,
+	}}
+	for _, bit := range metrics.Rows {
+		targetPlan := findPlanRow(plan.Rows, bit.Bits, targetChildren)
+		fitPlan := maxFitPlanRow(plan.Rows, bit.Bits)
+		out := summaryRow{
+			Row:                        fmt.Sprintf("q%d", bit.Bits),
+			Bits:                       bit.Bits,
+			Method:                     bit.Method,
+			NDCGAt10:                   bit.Quality.NDCGAt10,
+			RecallAt100:                bit.Quality.RecallAt100,
+			NDCGAt10Delta:              bit.NDCGAt10Delta,
+			RecallAt100Delta:           bit.RecallAt100Delta,
+			EvalPayloadStorageMultiple: bit.StorageMultipleOfDenseBaseline,
+			QuantizedVectorBytes:       bit.QuantizedVectorBytes,
+			ScoresPerSecond:            bit.ScoresPerSecond,
+			QueryP95MS:                 bit.QueryLatency.P95MS,
+		}
+		if fitPlan != nil {
+			out.PlannerQuantizedVectorStorageBytes = fitPlan.QuantizedVectorStorageBytes
+			out.PlannerVectorsFitOneDenseVector = fitPlan.VectorsThatFitInOneDenseVector
+			out.TargetChildrenFit = fitPlan.VectorsThatFitInOneDenseVector >= int64(targetChildren)
+			out.HundredVectorCapable = fitPlan.VectorsThatFitInOneDenseVector >= 100
+		}
+		if targetPlan != nil {
+			out.StorageMultipleAtTargetChildren = targetPlan.StorageMultipleOfDenseParentCost
+			out.TargetChildrenFit = targetPlan.FitsInOneDenseVectorStorage
+		}
+		rows = append(rows, out)
+	}
+	return rows
+}
+
+func writeSummaryTSV(path string, rows []summaryRow) error {
+	var b strings.Builder
+	b.WriteString("row\tbits\tmethod\tndcg_at_10\trecall_at_100\tndcg_at_10_delta\trecall_at_100_delta\teval_payload_storage_multiple\tquantized_vector_bytes\tplanner_quantized_vector_storage_bytes\tplanner_vectors_that_fit_in_one_dense_vector\ttarget_children_fit\tstorage_multiple_at_target_children\thundred_vector_capable\tscores_per_second\tquery_p95_ms\n")
+	for _, row := range rows {
+		fmt.Fprintf(&b, "%s\t%d\t%s\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%t\t%.6f\t%t\t%.2f\t%.6f\n",
+			row.Row,
+			row.Bits,
+			row.Method,
+			row.NDCGAt10,
+			row.RecallAt100,
+			row.NDCGAt10Delta,
+			row.RecallAt100Delta,
+			row.EvalPayloadStorageMultiple,
+			row.QuantizedVectorBytes,
+			row.PlannerQuantizedVectorStorageBytes,
+			row.PlannerVectorsFitOneDenseVector,
+			row.TargetChildrenFit,
+			row.StorageMultipleAtTargetChildren,
+			row.HundredVectorCapable,
+			row.ScoresPerSecond,
+			row.QueryP95MS)
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func checkGates(metrics evalMetrics, plan storagePlan, maxNDCGDrop float64, maxRecallDrop float64, minFit int64) error {
+	q4 := findBitRow(metrics.Rows, 4)
+	if q4 == nil {
+		return fmt.Errorf("q4 metrics row is missing; include 4 in EOS_MV_BUDGET_QUALITY_BITS")
+	}
+	if q4.Quality.NDCGAt10+maxNDCGDrop < metrics.Dense.Quality.NDCGAt10 {
+		return fmt.Errorf("q4 ndcg@10 %.6f is worse than dense %.6f by more than %.6f", q4.Quality.NDCGAt10, metrics.Dense.Quality.NDCGAt10, maxNDCGDrop)
+	}
+	if q4.Quality.RecallAt100+maxRecallDrop < metrics.Dense.Quality.RecallAt100 {
+		return fmt.Errorf("q4 recall@100 %.6f is worse than dense %.6f by more than %.6f", q4.Quality.RecallAt100, metrics.Dense.Quality.RecallAt100, maxRecallDrop)
+	}
+	q4Plan := maxFitPlanRow(plan.Rows, 4)
+	if q4Plan == nil {
+		return fmt.Errorf("q4 planner row is missing; include 4 in EOS_MV_BUDGET_QUALITY_BITS")
+	}
+	if q4Plan.VectorsThatFitInOneDenseVector < minFit {
+		return fmt.Errorf("q4 planner fits %d child vectors in one dense-vector budget, below required %d", q4Plan.VectorsThatFitInOneDenseVector, minFit)
+	}
+	return nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	runRoot := getenv("EOS_MV_BUDGET_QUALITY_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir := getenv("EOS_MV_BUDGET_QUALITY_RUN_DIR", filepath.Join(runRoot, "eos-multivector-budget-quality-smoke-"+time.Now().UTC().Format("20060102T150405Z")))
+	runDir, err = resolvePath(root, runDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	logDir := filepath.Join(runDir, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	datasetDir, err := resolvePath(root, getenv("EOS_MV_BUDGET_QUALITY_DATASET_DIR", "datasets/manta-embed-v1/raw/scifact/scifact"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	docVectors, err := resolvePath(root, getenv("EOS_MV_BUDGET_QUALITY_DOC_VECTORS", filepath.Join(defaultCacheRun, "scifact", "child-doc-vectors.jsonl")))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	queryVectors, err := resolvePath(root, getenv("EOS_MV_BUDGET_QUALITY_QUERY_VECTORS", filepath.Join(defaultCacheRun, "scifact", "query-vectors.jsonl")))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := requireDir(datasetDir, "dataset dir"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := requireFile(docVectors, "doc vectors"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := requireFile(queryVectors, "query vectors"); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	datasetLabel := getenv("EOS_MV_BUDGET_QUALITY_DATASET_LABEL", "scifact")
+	backend := getenv("EOS_MV_BUDGET_QUALITY_BACKEND", "eos-child-cache-128d")
+	artifact := getenv("EOS_MV_BUDGET_QUALITY_ARTIFACT", "eos-embed-v1-prefix128")
+	bitsRaw := getenv("EOS_MV_BUDGET_QUALITY_BITS", "2,4,8")
+	bits, err := parsePositiveIntList("EOS_MV_BUDGET_QUALITY_BITS", bitsRaw)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	baselineDim, err := parseIntEnv("EOS_MV_BUDGET_QUALITY_BASELINE_DIM", 3072)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	vectorOverheadBytes, err := parseInt64Env("EOS_MV_BUDGET_QUALITY_VECTOR_OVERHEAD_BYTES", 32)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	targetChildren, err := parseIntEnv("EOS_MV_BUDGET_QUALITY_TARGET_CHILDREN", 100)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if targetChildren <= 0 {
+		fmt.Fprintln(os.Stderr, "EOS_MV_BUDGET_QUALITY_TARGET_CHILDREN must be positive")
+		os.Exit(1)
+	}
+	sidecarStorage := getenv("EOS_MV_BUDGET_QUALITY_SIDECAR_STORAGE", "none")
+	maxNDCGDrop, err := parseFloatEnv("EOS_MV_BUDGET_QUALITY_Q4_MAX_NDCG_DROP", 0.005)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	maxRecallDrop, err := parseFloatEnv("EOS_MV_BUDGET_QUALITY_Q4_MAX_RECALL_DROP", 0.005)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	minQ4Fit, err := parseInt64Env("EOS_MV_BUDGET_QUALITY_Q4_MIN_FIT", 100)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	vectorsPerObject := []int{1, 64, 100, 128, 181, 256, 341}
+	vectorsPerObject = ensureInt(vectorsPerObject, targetChildren)
+
+	metricsJSON := filepath.Join(runDir, "multivector-turboquant.json")
+	metricsTSV := filepath.Join(runDir, "multivector-turboquant.tsv")
+	plannerJSON := filepath.Join(runDir, "planner.json")
+	summaryTSV := filepath.Join(runDir, "summary.tsv")
+
+	commands := []commandRecord{}
+	evalArgs := []string{
+		"go", "run", "./cmd/eos", "eval-retrieval-multivector-turboquant",
+		"--dataset", datasetLabel,
+		"--backend", backend,
+		"--artifact", artifact,
+		"--doc-vectors", docVectors,
+		"--query-vectors", queryVectors,
+		"--bits", intListCSV(bits),
+		"--baseline-dim", strconv.Itoa(baselineDim),
+		"--metrics-json", metricsJSON,
+		"--metrics-tsv", metricsTSV,
+		datasetDir,
+	}
+	record, err := runCommand(root, logDir, "eval-retrieval-multivector-turboquant", evalArgs)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	commands = append(commands, record)
+
+	var metrics evalMetrics
+	if err := readJSON(metricsJSON, &metrics); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	childDim, err := inferChildDim(metrics)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	plannerArgs := []string{
+		"go", "run", "./cmd/eos", "plan-multivector-storage",
+		"--dim", strconv.Itoa(childDim),
+		"--baseline-dim", strconv.Itoa(baselineDim),
+		"--bits", intListCSV(bits),
+		"--vectors-per-object", intListCSV(vectorsPerObject),
+		"--objects", strconv.Itoa(metrics.Dense.ParentCount),
+		"--vector-overhead-bytes", strconv.FormatInt(vectorOverheadBytes, 10),
+		"--sidecar-storage", sidecarStorage,
+		"--json", plannerJSON,
+	}
+	record, err = runCommand(root, logDir, "plan-multivector-storage", plannerArgs)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	commands = append(commands, record)
+
+	var plan storagePlan
+	if err := readJSON(plannerJSON, &plan); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := checkGates(metrics, plan, maxNDCGDrop, maxRecallDrop, minQ4Fit); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	rows := makeSummaryRows(metrics, plan, targetChildren)
+	if err := writeSummaryTSV(summaryTSV, rows); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	out := manifest{
+		Schema:      "eos.multivector_budget_quality_smoke.v1",
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		RepoRoot:    root,
+		RunDir:      runDir,
+		Config: config{
+			RunRoot:             runRoot,
+			RunDir:              runDir,
+			DatasetDir:          datasetDir,
+			DatasetLabel:        datasetLabel,
+			DocVectors:          docVectors,
+			QueryVectors:        queryVectors,
+			Backend:             backend,
+			Artifact:            artifact,
+			Bits:                intListCSV(bits),
+			BaselineDim:         baselineDim,
+			VectorOverheadBytes: vectorOverheadBytes,
+			TargetChildren:      targetChildren,
+			SidecarStorage:      sidecarStorage,
+			Q4MaxNDCGDrop:       maxNDCGDrop,
+			Q4MaxRecallDrop:     maxRecallDrop,
+			Q4MinFit:            minQ4Fit,
+			VectorsPerObject:    vectorsPerObject,
+		},
+		Inputs: map[string]string{
+			"dataset_dir":   datasetDir,
+			"doc_vectors":   docVectors,
+			"query_vectors": queryVectors,
+		},
+		Commands:    commands,
+		MetricsJSON: metricsJSON,
+		MetricsTSV:  metricsTSV,
+		PlannerJSON: plannerJSON,
+		SummaryTSV:  summaryTSV,
+		ChildDim:    childDim,
+		ParentCount: metrics.Dense.ParentCount,
+		ChildCount:  metrics.Dense.ChildCount,
+		Rows:        rows,
+		Gates: []string{
+			fmt.Sprintf("q4 ndcg@10 drop <= %.6f", maxNDCGDrop),
+			fmt.Sprintf("q4 recall@100 drop <= %.6f", maxRecallDrop),
+			fmt.Sprintf("q4 overhead-aware planner vectors_that_fit_in_one_dense_vector >= %d", minQ4Fit),
+			"evaluator and planner commands must succeed and emit parseable JSON",
+		},
+		Caveats: []string{
+			"SciFact cache-only: this smoke reuses existing local doc/query vector caches and does not train models or call external APIs.",
+			"Prefix-truncated 128d bridge: the cache uses an Eos prefix-truncated 128d representation, not a native Matryoshka artifact.",
+			"Planner overhead is an explicit input, not a measured CorkScrewDB directory-size overhead.",
+			"This does not measure CorkScrewDB API latency, remote mode, WAL, compaction, HNSW/index behavior, or database-directory size.",
+		},
+	}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	manifestJSON := filepath.Join(runDir, "manifest.json")
+	if err := os.WriteFile(manifestJSON, append(data, '\n'), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	q4 := findBitRow(metrics.Rows, 4)
+	q4Plan := maxFitPlanRow(plan.Rows, 4)
+	fmt.Printf("\nsummary_tsv: %s\n", summaryTSV)
+	fmt.Printf("manifest: %s\n", manifestJSON)
+	if q4 != nil && q4Plan != nil {
+		fmt.Printf("q4: ndcg@10=%.6f delta=%.6f recall@100=%.6f delta=%.6f fit=%d target%d=%t\n",
+			q4.Quality.NDCGAt10,
+			q4.NDCGAt10Delta,
+			q4.Quality.RecallAt100,
+			q4.RecallAt100Delta,
+			q4Plan.VectorsThatFitInOneDenseVector,
+			targetChildren,
+			q4Plan.VectorsThatFitInOneDenseVector >= int64(targetChildren))
+	}
+}

@@ -199,6 +199,15 @@ ferrous-wheel run scripts/smoke_eos_multivector_budget_frontier.fw
 
 This smoke calls `go run ./cmd/eos plan-multivector-storage` for the default `128d` compact-child versus `3072d` dense-baseline shape, records planner JSON, command logs, `summary.tsv`, and `manifest.json` under `runs/eos-multivector-budget-frontier-smoke-<timestamp>/`, and gates the default overhead-aware fit counts at q2 >= 181, q4 >= 100, and q8 >= 64 children per dense-vector budget. Interpret it beside the time-series and CorkScrewDB API smokes as byte accounting only: it does not measure retrieval quality or CorkScrewDB API latency.
 
+For the combined cache-only quality plus overhead-aware budget gate, run:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+ferrous-wheel run scripts/smoke_eos_multivector_budget_quality.fw
+```
+
+The default smoke reuses the existing Eos 128d SciFact child cache under `runs/eos-128d-child-cache-quality-20260615T000000Z/`, calls `eval-retrieval-multivector-turboquant`, infers the 128d child shape from the dense child-vector bytes, then calls `plan-multivector-storage` with `--baseline-dim 3072 --vector-overhead-bytes 32` and a `100` child-vector fit gate. Current default interpretation: direct q4 is near dense on this cache (`ndcg@10` drop about `0.002630`, `recall@100` drop about `0.001667`) while the overhead-aware planner fits `123` q4 child vectors in one 3072d dense-vector budget, so 100 child vectors fit with overhead. It remains cache-only evidence, not CorkScrewDB API latency or DB-directory measurement.
+
 Current measured local result: q4/fp16 sidecar rerank at overfetch250 is the promoted compact retrieval profile. It passed the selected-vs-anchor scoreboard gate on SciFact, NFCorpus, and FiQA for `ndcg_at_10,recall_at_100,total_compression_ratio` as `eos-turboquant-rerank` / `turboquant_ip_b4_overfetch250_fp16_rerank` / bits `4`, with total compression `1.590062x`, in `runs/eos-q4-fp16-overfetch250-gate-20260615T000000Z/`. This is not q4-only retrieval: direct q4 misses dense quality on SciFact and FiQA, and direct q8 is not the promoted default path. Keep q8/fp16 sidecar rerank at overfetch125 as the lower-risk, lower-rerank-cost fallback: `turboquant_ip_b8_overfetch125_fp16_rerank`, total compression `1.326425x`, evidence in `runs/eos-fp16-overfetch125-gate-20260614T000000Z/`.
 
 Current sealed-verified local anchor:

@@ -254,6 +254,14 @@ EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_multivector_budget_fronti
 
 The smoke uses the planner as the source of truth and writes `summary.tsv`, `manifest.json`, planner JSON, and command logs under `runs/eos-multivector-budget-frontier-smoke-<timestamp>/`. Defaults model `128d` compact children against a `3072d` dense baseline, q2/q4/q8, child counts `1,16,64,100,128,181,256,341`, `32` bytes per stored vector, no sidecar, and `1000` objects. The default gates are q2 >= `181`, q4 >= `100`, and q8 >= `64` children fitting in one dense-vector budget. Read this beside the time-series smoke and local CorkScrewDB API smoke: it proves byte accounting only, not retrieval quality, remote serving, HNSW, federation, or API latency.
 
+For the executable bridge from byte accounting to cache-only quality, run:
+
+```bash
+EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_multivector_budget_quality.fw
+```
+
+The default run uses `runs/eos-128d-child-cache-quality-20260615T000000Z/scifact/child-doc-vectors.jsonl`, matching query vectors, and `datasets/manta-embed-v1/raw/scifact/scifact`. It evaluates dense/q2/q4/q8 parent-child retrieval, infers the `128d` child dimension from dense child-vector bytes, then plans q2/q4/q8 for the actual parent count with child counts including `1,64,100,128,181,256,341`, `--baseline-dim 3072`, `--vector-overhead-bytes 32`, and `--sidecar-storage none`. Current default interpretation: q4 is near dense on the 128d SciFact child cache (`ndcg@10` drop about `0.002630`, `recall@100` drop about `0.001667`) while the overhead-aware planner fits `123` q4 children in one 3072d dense-vector budget, so the `100` child-vector target fits. Treat this as Eos cache evidence only: the 128d cache is a prefix-truncated bridge, not a native Matryoshka artifact, and the planner overhead is an explicit input rather than a measured CorkScrewDB directory or API result.
+
 For a first time-series/window quality seam, export text-rendered numeric windows and run the existing parent-child evaluator against parent-series qrels:
 
 ```bash
