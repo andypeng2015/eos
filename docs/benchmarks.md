@@ -277,24 +277,23 @@ Corrected q2-341 packed-parent frontier evidence is now a unified API run rather
 
 These scaled time-series rows are synthetic text-rendered smoke evidence: they improve DB overhead measurement by scaling parent objects and show a local flat packed-parent storage win, but they are not production quality, remote/federation/HNSW evidence, or a trained numeric time-series encoder claim. Keep the DB directory max disabled unless a fresh run establishes a stable machine-local threshold.
 
-Current measured local result: q4/fp16 sidecar rerank at overfetch250 is the promoted compact retrieval profile. It passed the selected-vs-anchor scoreboard gate on SciFact, NFCorpus, and FiQA for `ndcg_at_10,recall_at_100,total_compression_ratio` as `eos-turboquant-rerank` / `turboquant_ip_b4_overfetch250_fp16_rerank` / bits `4`, with total compression `1.590062x`, in `runs/eos-q4-fp16-overfetch250-gate-20260615T000000Z/`. This is not q4-only retrieval: direct q4 misses dense quality on SciFact and FiQA, and direct q8 is not the promoted default path. Keep q8/fp16 sidecar rerank at overfetch125 as the lower-risk, lower-rerank-cost fallback: `turboquant_ip_b8_overfetch125_fp16_rerank`, total compression `1.326425x`, evidence in `runs/eos-fp16-overfetch125-gate-20260614T000000Z/`.
+Current measured local compact-profile result: q4/fp16 sidecar rerank at overfetch250 passed the selected-vs-anchor scoreboard gate on SciFact, NFCorpus, and FiQA for `ndcg_at_10,recall_at_100,total_compression_ratio` as `eos-turboquant-rerank` / `turboquant_ip_b4_overfetch250_fp16_rerank` / bits `4`, with total compression `1.590062x`, in `runs/eos-q4-fp16-overfetch250-gate-20260615T000000Z/`. This remains compact-profile evidence against the previously selected candidate/path, not proof that targeted-v3 is quantized-deployment ready. Direct targeted-v3 q2/q4 drops are too large for default quantized promotion, and direct q8 is closer but still loses nDCG on SciFact, NFCorpus, and FiQA. Keep q8/fp16 sidecar rerank at overfetch125 as the lower-risk, lower-rerank-cost fallback and refresh both sidecar profiles against targeted-v3 before final alias promotion.
 
-Current sealed-verified local anchor:
+Current dense local candidate:
 
 ```text
-runs/manta-embed-v1-deephard-full-ft-20260610T0000Z/manta-embed-v1.sealed.mll
+runs/eos-embed-v1-targeted-neargate-v3-low-lr-restorebest-20260614T000000Z/targeted-v3-lr000002-restorebest-manta/manta-embed-v1.sealed.mll
 ```
 
-The June 10 deephard-full candidate is a legacy-named `manta-embed-v1` artifact for the `eos-embed-v1` lineage. It is sealed, inspected, and verified through the full scoreboard path. The sealed artifact SHA256 is `a7461b47784ea7434cf6048f33f6c281ef19887cfa9d0c699b6f2fba079f2b67`. The sealed scoreboard is under `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-sealed-scoreboard/`, and its sealed-vs-train-package comparison recorded zero nonzero quality or count deltas against `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-scoreboard/`.
+The targeted-v3 candidate is a measured dense promotion candidate for the `eos-embed-v1` lineage. It was trained from `43` targeted no-teacher rows and sealed as SHA256 `ea776e2fca7fdade7ee05396b2ee8980e220899e2515853c83a4bca34cf87242`. The June 10 deephard-full candidate remains the previous strict sealed anchor for comparison: `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z/manta-embed-v1.sealed.mll`, SHA256 `a7461b47784ea7434cf6048f33f6c281ef19887cfa9d0c699b6f2fba079f2b67`, with sealed scoreboard under `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-sealed-scoreboard/`.
 
-| Dataset | Previous sealed anchor nDCG@10 | Current sealed anchor nDCG@10 | Delta | Previous sealed anchor recall@100 | Current sealed anchor recall@100 | Delta |
+| Dataset | June 10 strict anchor nDCG@10 | targeted-v3 nDCG@10 | Delta | June 10 strict anchor recall@100 | targeted-v3 recall@100 | Delta |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| SciFact | 0.331139 | 0.482406 | +0.151267 | 0.724111 | 0.775778 | +0.051667 |
-| NFCorpus | 0.084325 | 0.197733 | +0.113408 | 0.129067 | 0.235557 | +0.106490 |
-| FiQA | 0.028967 | 0.117533 | +0.088566 | 0.164881 | 0.347197 | +0.182316 |
-| Macro | 0.148144 | 0.265891 | +0.117747 | 0.339353 | 0.452844 | +0.113491 |
+| SciFact | 0.482406 | 0.562322 | +0.079915 | 0.775778 | 0.796444 | +0.020667 |
+| NFCorpus | 0.197733 | 0.204117 | +0.006384 | 0.235557 | 0.242032 | +0.006475 |
+| FiQA | 0.117533 | 0.120294 | +0.002761 | 0.347197 | 0.350444 | +0.003247 |
 
-Pairwise eval-only rows completed with `optimizer_updates=0`, CUDA forward backend, eval AUC `0.825890`, and hard AUC `0.812725`.
+For the June 10 strict anchor, pairwise eval-only rows completed with `optimizer_updates=0`, CUDA forward backend, eval AUC `0.825890`, and hard AUC `0.812725`.
 
 Run a full retrieval-alignment round from an existing candidate when retrieval is behind the BM25 or open-model baselines:
 

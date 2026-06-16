@@ -420,7 +420,7 @@ EOS_SCOREBOARD_HYBRID_RRF_LAMBDA=1.0
 
 This appends `eos-hybrid` rows by default and, when external vector datasets are configured, `<external>-hybrid` rows. Scoreboard `method` is explicit, such as `hybrid_minmax_alpha0.75` or `hybrid_rrf_k60_lambda1.0`, so gates can select the hybrid mode independently from dense Eos, BM25, and TurboQuant rows. Set `EOS_SCOREBOARD_HYBRID_BASELINE_LABEL=manta-hybrid` only when intentionally producing a legacy-labeled scoreboard. The FiQA dev-selected `minmax_alpha0.75` result is evidence for guarded hybrid retrieval because it improved held-out FiQA test nDCG@10 over dense v2, strict anchor, and BM25-only; it is not evidence that the dense model itself should be promoted.
 
-Before updating the default-shipping anchor, run the scoreboard-level promotion gate against the current sealed anchor scoreboard:
+Before updating the default-shipping anchor, run the scoreboard-level promotion gate against the accepted dense candidate scoreboard. Targeted-v3 was accepted by passing zero-tolerance dense gates against both the June 10 strict sealed anchor and the v2 candidate; future dense candidates should use targeted-v3 as the comparison point once its scoreboard is the accepted anchor.
 
 ```bash
 go run ./cmd/eos gate-scoreboard \
@@ -429,7 +429,7 @@ go run ./cmd/eos gate-scoreboard \
   --datasets scifact,nfcorpus,fiqa \
   --metrics ndcg_at_10,recall_at_100 \
   /data/manta/runs/<candidate-scoreboard>/scoreboard.json \
-  /data/manta/runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-sealed-scoreboard/scoreboard.json
+  /data/manta/runs/<accepted-dense-scoreboard>/scoreboard.json
 ```
 
 The command fails on any missing selected row or any dataset metric below the anchor minus `--tolerance`. Macro deltas are printed only as summary evidence; they are not a substitute for every selected dataset metric passing.
@@ -438,7 +438,9 @@ Compatibility note: older scoreboards and run directories use the legacy `manta`
 
 Canonical active row labels are `eos` for dense `eos-embed-v1`, `eos-hybrid` for lexical+dense hybrid retrieval, `eos-turboquant` for local direct TurboQuant rows, and `eos-turboquant-rerank` for local TurboQuant candidate overfetch plus rerank rows. Enable the promoted local compact lane in the scoreboard with `EOS_SCOREBOARD_TURBOQUANT=1`, `EOS_SCOREBOARD_TURBOQUANT_BITS=4`, `EOS_SCOREBOARD_TURBOQUANT_RERANK_OVERFETCH=250`, `EOS_SCOREBOARD_TURBOQUANT_RERANK_STORAGE=fp16`, `EOS_SCOREBOARD_TURBOQUANT_BASELINE=eos-turboquant`, and `EOS_SCOREBOARD_TURBOQUANT_RERANK_BASELINE=eos-turboquant-rerank`. Gate the compact profile with `--baseline eos-turboquant-rerank --method turboquant_ip_b4_overfetch250_fp16_rerank --bits 4 --metrics ndcg_at_10,recall_at_100,total_compression_ratio`. The CorkScrewDB shipping alias should point at the promoted `corkscrewdb-default-embedder` artifact only after the dense, hybrid where relevant, and TurboQuant gates have passed.
 
-Current measured TurboQuant promotion surface: q4/fp16 sidecar rerank at overfetch250 is the promoted compact retrieval profile. It passed the selected-vs-anchor scoreboard gate on SciFact, NFCorpus, and FiQA for `ndcg_at_10,recall_at_100,total_compression_ratio` as `eos-turboquant-rerank` / `turboquant_ip_b4_overfetch250_fp16_rerank` / bits `4`, with total compression `1.590062x`, in `runs/eos-q4-fp16-overfetch250-gate-20260615T000000Z/`. This is a two-stage compact retrieval profile, not q4-only retrieval: direct q4 and direct q8 are not default-promotion candidates. Keep q8/fp16 sidecar rerank at overfetch125 as the lower-risk, lower-rerank-cost fallback: `turboquant_ip_b8_overfetch125_fp16_rerank`, total compression `1.326425x`, evidence in `runs/eos-fp16-overfetch125-gate-20260614T000000Z/`.
+Current measured TurboQuant promotion surface: q4/fp16 sidecar rerank at overfetch250 is the previously selected compact retrieval profile. It passed the selected-vs-anchor scoreboard gate on SciFact, NFCorpus, and FiQA for `ndcg_at_10,recall_at_100,total_compression_ratio` as `eos-turboquant-rerank` / `turboquant_ip_b4_overfetch250_fp16_rerank` / bits `4`, with total compression `1.590062x`, in `runs/eos-q4-fp16-overfetch250-gate-20260615T000000Z/`. This is a two-stage compact retrieval profile, not q4-only retrieval: direct q4 and direct q8 are not default-promotion candidates. Keep q8/fp16 sidecar rerank at overfetch125 as the lower-risk, lower-rerank-cost fallback: `turboquant_ip_b8_overfetch125_fp16_rerank`, total compression `1.326425x`, evidence in `runs/eos-fp16-overfetch125-gate-20260614T000000Z/`.
+
+For the current targeted-v3 dense candidate, keep dense promotion separate from quantized deployment readiness. Its direct TurboQuant q2/q4 rows drop too much for default quantized promotion, and direct q8 is closer but still has nDCG drops on all three short-set datasets. The q4/fp16 overfetch250 evidence above remains useful compact-profile evidence, but it was measured against the previously selected candidate/path; refresh it against targeted-v3 before the shipping alias points at this dense artifact.
 
 For candidate iteration, prefer the guarded runner so training, scoring, and the scoreboard gate produce one acceptance manifest:
 
@@ -544,9 +546,15 @@ Token-pair eval JSONL:
 
 ## Release Gate
 
-Current sealed-verified local anchor: `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z/manta-embed-v1.sealed.mll`, SHA256 `a7461b47784ea7434cf6048f33f6c281ef19887cfa9d0c699b6f2fba079f2b67`. This is a legacy-named `manta-embed-v1` artifact for the `eos-embed-v1` lineage. It scores above the previous sealed anchor on all retrieval rows, with macro nDCG@10 `0.265891` versus `0.148144` and macro recall@100 `0.452844` versus `0.339353`. The sealed scoreboard is under `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-sealed-scoreboard/`.
+Current dense promotion candidate: `runs/eos-embed-v1-targeted-neargate-v3-low-lr-restorebest-20260614T000000Z/targeted-v3-lr000002-restorebest-manta/manta-embed-v1.sealed.mll`, SHA256 `ea776e2fca7fdade7ee05396b2ee8980e220899e2515853c83a4bca34cf87242`. It was trained from `43` extremely targeted rows with no `teacher_scores` and passed dense short-set gates against both the June 10 strict anchor and the v2 candidate.
 
-The sealed-vs-train-package comparison recorded zero nonzero quality or count deltas against `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-scoreboard/`. Treat this as the local sealed anchor; broader release claims still require the normal release-gate evidence below.
+| Dataset | targeted-v3 nDCG@10 | targeted-v3 recall@100 | Delta vs June 10 strict anchor nDCG@10 | Delta vs June 10 strict anchor recall@100 | Delta vs v2 nDCG@10 | Delta vs v2 recall@100 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| SciFact | 0.562322 | 0.796444 | +0.079915 | +0.020667 | +0.007146 | +0.000000 |
+| NFCorpus | 0.204117 | 0.242032 | +0.006384 | +0.006475 | +0.000341 | +0.000040 |
+| FiQA | 0.120294 | 0.350444 | +0.002761 | +0.003247 | +0.003840 | +0.001569 |
+
+The previous strict sealed anchor is `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z/manta-embed-v1.sealed.mll`, SHA256 `a7461b47784ea7434cf6048f33f6c281ef19887cfa9d0c699b6f2fba079f2b67`, with sealed scoreboard under `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-sealed-scoreboard/`. Its sealed-vs-train-package comparison recorded zero nonzero quality or count deltas against `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-scoreboard/`. Treat targeted-v3 as a measured dense short-set promotion candidate; broader release claims and quantized default serving still require the normal release-gate evidence below.
 
 A candidate is releasable only when:
 

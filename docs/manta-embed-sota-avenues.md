@@ -24,7 +24,7 @@ Sources consulted:
 - https://arxiv.org/abs/2107.05720
 - https://arxiv.org/abs/2004.12832
 
-## Current Anchor
+## Current Dense Candidate
 
 The previous sealed in-repo anchor was:
 
@@ -32,24 +32,31 @@ The previous sealed in-repo anchor was:
 runs/manta-embed-v1-teacher-hybrid-w005-tw020-tt150-nf3train-lr10-20260507T053803Z/candidate/manta-embed-v1.sealed.mll
 ```
 
-The current sealed-verified local anchor is:
+The current dense local candidate is:
+
+```text
+runs/eos-embed-v1-targeted-neargate-v3-low-lr-restorebest-20260614T000000Z/targeted-v3-lr000002-restorebest-manta/manta-embed-v1.sealed.mll
+```
+
+Status: sealed and dense short-set gate verified after the targeted-v3 low-LR restore-best run. The sealed artifact SHA256 is `ea776e2fca7fdade7ee05396b2ee8980e220899e2515853c83a4bca34cf87242`. The training data was deliberately narrow: `43` rows, no `teacher_scores`, with sources `fiqa:targeted-v3-blocker=15`, `fiqa:targeted-v3-protect=8`, `nfcorpus:targeted-v3-regression=6`, and `nfcorpus:targeted-v3-protect=14`.
+
+The previous strict sealed anchor is:
 
 ```text
 runs/manta-embed-v1-deephard-full-ft-20260610T0000Z/manta-embed-v1.sealed.mll
 ```
 
-Status: sealed, inspected, and full-scoreboard verified after the 2026-06-10 deephard-full run. The sealed artifact SHA256 is `a7461b47784ea7434cf6048f33f6c281ef19887cfa9d0c699b6f2fba079f2b67`. The sealed scoreboard is under `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-sealed-scoreboard/`, and the sealed-vs-train-package comparison recorded zero nonzero quality or count deltas.
+That June 10 deephard-full artifact is sealed, inspected, and full-scoreboard verified. Its SHA256 is `a7461b47784ea7434cf6048f33f6c281ef19887cfa9d0c699b6f2fba079f2b67`; the sealed scoreboard is under `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-sealed-scoreboard/`, and the sealed-vs-train-package comparison recorded zero nonzero quality or count deltas.
 
-Scoreboard comparison against the previous sealed anchor:
+Dense comparison against the June 10 strict anchor and v2 candidate:
 
-| Dataset | Previous sealed anchor nDCG@10 | Current sealed anchor nDCG@10 | Delta | Previous sealed anchor recall@100 | Current sealed anchor recall@100 | Delta |
+| Dataset | targeted-v3 nDCG@10 | targeted-v3 recall@100 | Delta vs June 10 nDCG@10 | Delta vs June 10 recall@100 | Delta vs v2 nDCG@10 | Delta vs v2 recall@100 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| SciFact | 0.331139 | 0.482406 | +0.151267 | 0.724111 | 0.775778 | +0.051667 |
-| NFCorpus | 0.084325 | 0.197733 | +0.113408 | 0.129067 | 0.235557 | +0.106490 |
-| FiQA | 0.028967 | 0.117533 | +0.088566 | 0.164881 | 0.347197 | +0.182316 |
-| Macro | 0.148144 | 0.265891 | +0.117747 | 0.339353 | 0.452844 | +0.113491 |
+| SciFact | 0.562322 | 0.796444 | +0.079915 | +0.020667 | +0.007146 | +0.000000 |
+| NFCorpus | 0.204117 | 0.242032 | +0.006384 | +0.006475 | +0.000341 | +0.000040 |
+| FiQA | 0.120294 | 0.350444 | +0.002761 | +0.003247 | +0.003840 | +0.001569 |
 
-Pairwise eval-only rows completed with `optimizer_updates=0` and CUDA forward backend: eval AUC `0.825890`, hard AUC `0.812725`.
+Targeted-v3 is a dense candidate only. Its direct TurboQuant q2/q4 drops are too large for default quantized promotion, and direct q8 is closer but still has nDCG drops on all three short-set datasets. Existing q4/fp16 overfetch250 compact-profile evidence remains useful but should be refreshed against targeted-v3 before final default alias promotion.
 
 Historical rejected probes from the prior sealed-anchor lane:
 
@@ -99,7 +106,7 @@ Sweep:
 
 Gate:
 
-- candidate macro nDCG@10 beats the previous sealed anchor `0.148144` and the current June 10 sealed anchor `0.265891`
+- candidate macro nDCG@10 beats the previous sealed anchor `0.148144`, the June 10 strict anchor `0.265891`, and the accepted targeted-v3 dense candidate once that scoreboard is the active comparison
 - no dataset violates nDCG or recall floors
 - pairwise AUC does not fall below `0.818`
 
@@ -178,9 +185,10 @@ Status:
 | prior best local `embed-m` LR `0.0000025` | 0.365759 | 0.152676 | 0.040834 | 0.186423 | 0.331864 | comparison point for the dense local gate |
 | half-frontier triple-SciFact guard `embed-m` | 0.366213 | 0.152950 | 0.040485 | 0.186549 | 0.333135 | current local dense `embed-m` frontier; passes previous-best macro and SciFact floor |
 | half-frontier compact q8/fp16 overfetch-200 | 0.366273 | 0.152950 | 0.040485 | 0.186569 | 0.333135 | selected compact profile for this artifact only; `1.324138x` total compression |
-| current dense anchor | 0.482406 | 0.197733 | 0.117533 | 0.265891 | 0.452844 | remains far ahead |
+| June 10 strict anchor | 0.482406 | 0.197733 | 0.117533 | 0.265891 | 0.452844 | previous strict dense anchor |
+| targeted-v3 dense candidate | 0.562322 | 0.204117 | 0.120294 | 0.295578 | 0.462973 | current dense candidate |
 
-The half-frontier triple-SciFact guard run is `runs/eos-embed-m-half-frontier-triple-scifact-guard-20260615T000000Z/stage-c-half-frontier-triple-scifact-guard-lr25e-7-hn3-b16/`, sealed SHA256 `58b5b80a71520342062c6e6b7062b35ff95a425cccf9a683d23608192e2ac876`. It starts from the balanced Stage B baseline and trains one LR `0.0000025`, HN3, no-teacher continuation on `240` rows: `48` FiQA dev-frontier rows, `48` NFCorpus dev-frontier rows, and `144` SciFact protective replay rows. It passes the dense local `embed-m` gate against prior best macro nDCG `0.186423` and SciFact floor `0.365459`, but remains far below the current dense anchor macro nDCG `0.265891`.
+The half-frontier triple-SciFact guard run is `runs/eos-embed-m-half-frontier-triple-scifact-guard-20260615T000000Z/stage-c-half-frontier-triple-scifact-guard-lr25e-7-hn3-b16/`, sealed SHA256 `58b5b80a71520342062c6e6b7062b35ff95a425cccf9a683d23608192e2ac876`. It starts from the balanced Stage B baseline and trains one LR `0.0000025`, HN3, no-teacher continuation on `240` rows: `48` FiQA dev-frontier rows, `48` NFCorpus dev-frontier rows, and `144` SciFact protective replay rows. It passes the dense local `embed-m` gate against prior best macro nDCG `0.186423` and SciFact floor `0.365459`, but remains far below the targeted-v3 dense candidate macro nDCG `0.295578`.
 
 The selected compact profile for this exact artifact is q8/fp16 rerank overfetch-200, method `turboquant_ip_b8_overfetch200_fp16_rerank`, with total compression `1.324138x`. q4/fp16 overfetch `300`, `400`, and `500` preserved nDCG but missed FiQA recall by `-0.000257`, so q4 is not selected for this `embed-m` artifact despite better compression `1.586777x`.
 

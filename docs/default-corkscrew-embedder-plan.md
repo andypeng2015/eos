@@ -2,18 +2,25 @@
 
 This plan is scoped to `eos-embed-v1`, the small sealed local default embedder candidate for CorkScrewDB, with reproducible local training, retrieval scoring, and TurboQuant-first serving gates. The shipping alias is `corkscrewdb-default-embedder` once the promotion gates pass. This plan does not claim state-of-the-art quality or superiority over hosted/open embedding models until scored rows exist in the baseline matrix.
 
-## Current Anchor
+## Current Dense Candidate
 
-- Artifact: `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z/manta-embed-v1.sealed.mll`
-- SHA256: `a7461b47784ea7434cf6048f33f6c281ef19887cfa9d0c699b6f2fba079f2b67`
-- Macro nDCG@10: `0.265891`
-- Macro recall@100: `0.452844`
+- Artifact: `runs/eos-embed-v1-targeted-neargate-v3-low-lr-restorebest-20260614T000000Z/targeted-v3-lr000002-restorebest-manta/manta-embed-v1.sealed.mll`
+- SHA256: `ea776e2fca7fdade7ee05396b2ee8980e220899e2515853c83a4bca34cf87242`
+- Training data: `43` targeted rows, no `teacher_scores`; sources were `fiqa:targeted-v3-blocker=15`, `fiqa:targeted-v3-protect=8`, `nfcorpus:targeted-v3-regression=6`, and `nfcorpus:targeted-v3-protect=14`.
 
-Treat this as the local sealed anchor, not as a default-promotion decision by itself. The `manta-embed-v1` artifact and run directory names are legacy names for the same `eos-embed-v1` lineage.
+Dense short-set rows:
+
+| Dataset | nDCG@10 | recall@100 | Delta vs June 10 strict anchor nDCG@10 | Delta vs June 10 strict anchor recall@100 | Delta vs v2 nDCG@10 | Delta vs v2 recall@100 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| SciFact | 0.562322 | 0.796444 | +0.079915 | +0.020667 | +0.007146 | +0.000000 |
+| NFCorpus | 0.204117 | 0.242032 | +0.006384 | +0.006475 | +0.000341 | +0.000040 |
+| FiQA | 0.120294 | 0.350444 | +0.002761 | +0.003247 | +0.003840 | +0.001569 |
+
+Treat targeted-v3 as the current dense promotion candidate for `eos-embed-v1` on the measured short retrieval set, not as broad robustness or hosted-model parity. The June 10 deephard-full artifact, `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z/manta-embed-v1.sealed.mll` with SHA256 `a7461b47784ea7434cf6048f33f6c281ef19887cfa9d0c699b6f2fba079f2b67`, remains the previous strict sealed anchor and comparison baseline. The `manta-embed-v1` artifact and run directory names are legacy names for the same `eos-embed-v1` lineage.
 
 ## Scoreboard Promotion Gate
 
-Default embedder candidates must pass the scoreboard gate against the sealed anchor before promotion. The gate compares every selected dataset and metric independently; macro gains are reported for context but do not hide a per-dataset miss.
+Default embedder candidates must pass the scoreboard gate against the accepted dense candidate before promotion. The gate compares every selected dataset and metric independently; macro gains are reported for context but do not hide a per-dataset miss. The historical targeted-v3 acceptance used both the June 10 strict sealed anchor and the v2 candidate as zero-tolerance comparisons; once targeted-v3 is accepted, future dense candidates should compare against the targeted-v3 scoreboard.
 
 ```bash
 go run ./cmd/eos gate-scoreboard \
@@ -22,10 +29,10 @@ go run ./cmd/eos gate-scoreboard \
   --datasets scifact,nfcorpus,fiqa \
   --metrics ndcg_at_10,recall_at_100 \
   runs/<candidate-scoreboard>/scoreboard.json \
-  runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-sealed-scoreboard/scoreboard.json
+  runs/<accepted-dense-scoreboard>/scoreboard.json
 ```
 
-Use `--tolerance` only for an explicitly accepted numeric rounding margin. For TurboQuant rows, add the matching `--baseline`, `--method`, and `--bits` filters so the command compares one unambiguous row per dataset in both scoreboards. The current promoted compact retrieval profile is `--baseline eos-turboquant-rerank --method turboquant_ip_b4_overfetch250_fp16_rerank --bits 4` with `--metrics ndcg_at_10,recall_at_100,total_compression_ratio`, backed by `runs/eos-q4-fp16-overfetch250-gate-20260615T000000Z/`.
+Use `--tolerance` only for an explicitly accepted numeric rounding margin. For TurboQuant rows, add the matching `--baseline`, `--method`, and `--bits` filters so the command compares one unambiguous row per dataset in both scoreboards. The existing q4/fp16 overfetch250 compact-profile evidence, `--baseline eos-turboquant-rerank --method turboquant_ip_b4_overfetch250_fp16_rerank --bits 4` with `--metrics ndcg_at_10,recall_at_100,total_compression_ratio`, is backed by `runs/eos-q4-fp16-overfetch250-gate-20260615T000000Z/` against the previously selected candidate/path. Refresh that compact-profile gate against targeted-v3 before shipping an alias that points at this dense candidate.
 `--baseline eos` falls back to legacy `manta` rows when exact `eos` rows are absent, so the gate can compare new scoreboards with the current legacy-named anchor without rewriting provenance.
 
 Hybrid retrieval rows are eligible only as calibrated retrieval-surface evidence. Run `scripts/calibrate_eos_embed_hybrid_retrieval.fw` first, select method/alpha/RRF settings on the configured dev split, and apply the selected setting unchanged to test. The calibration summary must include dense and BM25 sanity rows plus the protection gate deltas against dense `ndcg_at_10` and `recall_at_100`; use that selected setting in any later `eos-hybrid` scoreboard row. Hybrid per-query rows expose optional dense/BM25 component ranks plus raw and normalized component scores for fused candidates, so routing experiments should prefer those diagnostics over query-ID allowlists. `--dense-protect-top-k N` is the narrow product guard for preserving dense winners without query-ID special cases; report it separately from the selected fusion setting. Do not treat a passing hybrid calibration as a dense model promotion.
@@ -210,7 +217,7 @@ ferrous-wheel run scripts/smoke_corkscrewdb_child_vectors.fw
 
 That smoke defaults to a tiny synthetic time-series child-vector cache, can consume externally prepared child/query/qrels paths with `EOS_CORKSCREW_SMOKE_CHILD_VECTORS`, `EOS_CORKSCREW_SMOKE_QUERY_VECTORS`, and `EOS_CORKSCREW_SMOKE_QRELS`, and requires a local CorkScrewDB checkout rather than silently pulling a network dependency. `EOS_CORKSCREW_SMOKE_OVERFETCH` accepts comma-separated values such as `100,12468`; the harness loads one DB per bit width and reuses it across overfetch values so serving recall/latency sweeps avoid repeated insert cost. Use exhaustive/full child overfetch when comparing against offline cache-evaluator parity, with the expectation that latency rises. Treat it as local flat CorkScrewDB load/index/search/storage accounting evidence, not remote/federation/HNSW evidence or a model-quality benchmark.
 
-Current local Eos TurboQuant result: q4/fp16 sidecar rerank at overfetch250 is the promoted compact retrieval profile. It passed the selected-vs-anchor scoreboard gate on SciFact, NFCorpus, and FiQA for `ndcg_at_10,recall_at_100,total_compression_ratio` as `eos-turboquant-rerank` / `turboquant_ip_b4_overfetch250_fp16_rerank` / bits `4`, with total compression `1.590062x`, in `runs/eos-q4-fp16-overfetch250-gate-20260615T000000Z/`. This is a two-stage compact retrieval profile, not q4-only retrieval: direct q4 loses quality on SciFact and FiQA and is not a default-promotion candidate. Direct q8 also remains outside the promoted default path because the useful lower-risk compact fallback is the two-stage q8/fp16 sidecar profile.
+Current local Eos TurboQuant result: q4/fp16 sidecar rerank at overfetch250 remains compact-profile evidence from `runs/eos-q4-fp16-overfetch250-gate-20260615T000000Z/`. It passed the selected-vs-anchor scoreboard gate on SciFact, NFCorpus, and FiQA for `ndcg_at_10,recall_at_100,total_compression_ratio` as `eos-turboquant-rerank` / `turboquant_ip_b4_overfetch250_fp16_rerank` / bits `4`, with total compression `1.590062x`, against the previously selected candidate/path. This is a two-stage compact retrieval profile, not q4-only retrieval, and it must be refreshed against targeted-v3 before final default alias promotion. Direct targeted-v3 q2/q4 drops are too large for default quantized promotion, and direct q8 is closer but still has nDCG drops on SciFact, NFCorpus, and FiQA.
 
 Keep q8/fp16 sidecar rerank at overfetch125 as the lower-risk, lower-rerank-cost fallback: `turboquant_ip_b8_overfetch125_fp16_rerank`, total compression `1.326425x`, evidence in `runs/eos-fp16-overfetch125-gate-20260614T000000Z/`.
 
@@ -443,7 +450,7 @@ Do not promote a default CorkScrewDB embedder until all of these are true:
 
 ## Next Actions
 
-1. Run `scripts/smoke_corkscrewdb_child_vectors.fw` with candidate child/query/qrels inputs for the compact retrieval profile, using the scaled q4 time-series packed-vs-separate evidence as the current local flat storage reference. Keep q4/fp16 rerank quality evidence separate because this API smoke exercises direct quantized child or exact packed-parent vector search, not sidecar rerank.
-2. Measure p95 serving latency for q4/fp16/overfetch250 and decide whether the q8/fp16/overfetch125 fallback is needed for lower rerank cost.
-3. Keep the full short-set external matrix current, with Qwen3 FiQA labeled as full exportable-text rather than raw-row-complete or judged-coverage complete.
-4. Run a protected teacher/data experiment targeted at the remaining quality gap.
+1. Refresh the q4/fp16 overfetch250 and q8/fp16 overfetch125 compact rerank profile against the targeted-v3 dense artifact before changing the `corkscrewdb-default-embedder` alias.
+2. Run `scripts/smoke_corkscrewdb_child_vectors.fw` with targeted-v3 candidate child/query/qrels inputs for the compact retrieval profile, using the scaled q4 time-series packed-vs-separate evidence as the current local flat storage reference. Keep q4/fp16 rerank quality evidence separate because this API smoke exercises direct quantized child or exact packed-parent vector search, not sidecar rerank.
+3. Measure p95 serving latency for the refreshed q4/fp16/overfetch250 profile and decide whether the q8/fp16/overfetch125 fallback is needed for lower rerank cost.
+4. Keep the full short-set external matrix current, with Qwen3 FiQA labeled as full exportable-text rather than raw-row-complete or judged-coverage complete.
