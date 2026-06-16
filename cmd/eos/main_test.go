@@ -1458,6 +1458,53 @@ func TestRunEvalRetrievalVectorsHybridWritesMetricsJSON(t *testing.T) {
 	if row.FirstRelevantRank != 1 || len(row.TopK) == 0 || row.TopK[0].DocID != "d1" {
 		t.Fatalf("per-query row = %+v", row)
 	}
+
+	protectedMetricsPath := filepath.Join(dir, "vectors.hybrid.protected.metrics.json")
+	protectedPerQueryPath := filepath.Join(dir, "vectors.hybrid.protected.per-query.jsonl")
+	protectedOutput := captureRunOutput(t, []string{
+		"eval-retrieval-vectors-hybrid",
+		"--dataset", "tiny",
+		"--backend", "qwen-cache-hybrid",
+		"--artifact", "qwen3-embedding",
+		"--doc-vectors", docVectorsPath,
+		"--query-vectors", queryVectorsPath,
+		"--method", "minmax",
+		"--alpha", "0.75",
+		"--dense-protect-top-k", "1",
+		"--metrics-json", protectedMetricsPath,
+		"--per-query-jsonl", protectedPerQueryPath,
+		datasetDir,
+	})
+	for _, want := range []string{
+		"retrieval vectors hybrid: dataset=tiny backend=qwen-cache-hybrid",
+		"dense_protect_top_k=1",
+		"metrics: " + protectedMetricsPath,
+		"per_query: " + protectedPerQueryPath,
+	} {
+		if !strings.Contains(protectedOutput, want) {
+			t.Fatalf("protected eval-retrieval-vectors-hybrid output missing %q\noutput:\n%s", want, protectedOutput)
+		}
+	}
+	data, err = os.ReadFile(protectedMetricsPath)
+	if err != nil {
+		t.Fatalf("read protected metrics: %v", err)
+	}
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		t.Fatalf("decode protected metrics: %v", err)
+	}
+	if metrics.Config.Hybrid == nil || metrics.Config.Hybrid.DenseProtectTopK != 1 {
+		t.Fatalf("protected hybrid config = %+v", metrics.Config.Hybrid)
+	}
+	perQueryData, err = os.ReadFile(protectedPerQueryPath)
+	if err != nil {
+		t.Fatalf("read protected per-query JSONL: %v", err)
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(perQueryData))), &row); err != nil {
+		t.Fatalf("decode protected per-query row: %v", err)
+	}
+	if row.FirstRelevantRank != 2 || len(row.TopK) < 2 || row.TopK[0].DocID != "d2" || row.TopK[1].DocID != "d1" {
+		t.Fatalf("protected per-query row = %+v", row)
+	}
 }
 
 func TestRunEvalRetrievalVectorsTurboQuantWritesMetricsJSONAndTSV(t *testing.T) {

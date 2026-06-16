@@ -283,15 +283,19 @@ func normalizeRetrievalEvalHybridConfig(cfg RetrievalEvalHybridConfig) (Retrieva
 	if cfg.RRFLambda < 0 {
 		return RetrievalEvalHybridConfig{}, fmt.Errorf("hybrid rrf-lambda must be non-negative, got %g", cfg.RRFLambda)
 	}
+	if cfg.DenseProtectTopK < 0 {
+		return RetrievalEvalHybridConfig{}, fmt.Errorf("hybrid dense-protect-top-k must be non-negative, got %d", cfg.DenseProtectTopK)
+	}
 	return cfg, nil
 }
 
 func retrievalEvalHybridMetrics(cfg RetrievalEvalHybridConfig) *RetrievalEvalHybridMetrics {
 	return &RetrievalEvalHybridMetrics{
-		Method:    cfg.Method,
-		Alpha:     cfg.Alpha,
-		RRFK:      cfg.RRFK,
-		RRFLambda: cfg.RRFLambda,
+		Method:           cfg.Method,
+		Alpha:            cfg.Alpha,
+		RRFK:             cfg.RRFK,
+		RRFLambda:        cfg.RRFLambda,
+		DenseProtectTopK: cfg.DenseProtectTopK,
 	}
 }
 
@@ -438,10 +442,49 @@ func fuseHybridScores(denseScores, bm25Scores []retrievalScoredDoc, topK int, cf
 		}
 		return strings.Compare(a.ID, b.ID)
 	})
+	if cfg.DenseProtectTopK > 0 {
+		fused = protectDensePrefix(fused, denseScores, cfg.DenseProtectTopK, topK)
+	}
 	if len(fused) > topK {
 		return fused[:topK]
 	}
 	return fused
+}
+
+func protectDensePrefix(fused, denseScores []retrievalScoredDoc, protectTopK, topK int) []retrievalScoredDoc {
+	if protectTopK <= 0 || len(fused) == 0 {
+		return fused
+	}
+	if topK <= 0 {
+		topK = 100
+	}
+	fusedByID := make(map[string]retrievalScoredDoc, len(fused))
+	for _, score := range fused {
+		fusedByID[score.ID] = score
+	}
+	protected := make(map[string]bool, min(protectTopK, len(denseScores)))
+	out := make([]retrievalScoredDoc, 0, min(topK, len(fused)))
+	for _, dense := range denseScores {
+		if len(out) >= protectTopK || len(out) >= topK {
+			break
+		}
+		score, ok := fusedByID[dense.ID]
+		if !ok || protected[dense.ID] {
+			continue
+		}
+		out = append(out, score)
+		protected[dense.ID] = true
+	}
+	for _, score := range fused {
+		if len(out) >= topK {
+			break
+		}
+		if protected[score.ID] {
+			continue
+		}
+		out = append(out, score)
+	}
+	return out
 }
 
 func retrievalScoresByID(scores []retrievalScoredDoc) (map[string]int, map[string]float64) {

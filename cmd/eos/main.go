@@ -776,6 +776,7 @@ func runEvalRetrievalHybrid(args []string) error {
 	alpha := fs.Float64("alpha", 0.75, "BM25 weight for minmax/zscore hybrid blending")
 	rrfK := fs.Float64("rrf-k", 60, "RRF rank constant")
 	rrfLambda := fs.Float64("rrf-lambda", 1.0, "BM25 contribution multiplier for RRF")
+	denseProtectTopK := fs.Int("dense-protect-top-k", 0, "preserve the dense top-N prefix before appending fused hybrid tail candidates")
 	metricsPath := fs.String("metrics-json", "", "write retrieval metrics JSON")
 	perQueryPath := fs.String("per-query-jsonl", "", "write one retrieval diagnostics JSONL row per evaluated query")
 	if err := fs.Parse(args); err != nil {
@@ -811,11 +812,12 @@ func runEvalRetrievalHybrid(args []string) error {
 		MaxQueries:        *maxQueries,
 		PerQueryJSONLPath: *perQueryPath,
 		Hybrid: eosruntime.RetrievalEvalHybridConfig{
-			Method:    *method,
-			Alpha:     *alpha,
-			AlphaSet:  true,
-			RRFK:      *rrfK,
-			RRFLambda: *rrfLambda,
+			Method:           *method,
+			Alpha:            *alpha,
+			AlphaSet:         true,
+			RRFK:             *rrfK,
+			RRFLambda:        *rrfLambda,
+			DenseProtectTopK: *denseProtectTopK,
 		},
 	})
 	if err != nil {
@@ -864,6 +866,7 @@ func runEvalRetrievalVectorsHybrid(args []string) error {
 	alpha := fs.Float64("alpha", 0.75, "BM25 weight for minmax/zscore hybrid blending")
 	rrfK := fs.Float64("rrf-k", 60, "RRF rank constant")
 	rrfLambda := fs.Float64("rrf-lambda", 1.0, "BM25 contribution multiplier for RRF")
+	denseProtectTopK := fs.Int("dense-protect-top-k", 0, "preserve the dense top-N prefix before appending fused hybrid tail candidates")
 	metricsPath := fs.String("metrics-json", "", "write retrieval metrics JSON")
 	perQueryPath := fs.String("per-query-jsonl", "", "write one retrieval diagnostics JSONL row per evaluated query")
 	if err := fs.Parse(args); err != nil {
@@ -894,11 +897,12 @@ func runEvalRetrievalVectorsHybrid(args []string) error {
 		MaxQueries:        *maxQueries,
 		PerQueryJSONLPath: *perQueryPath,
 		Hybrid: eosruntime.RetrievalEvalHybridConfig{
-			Method:    *method,
-			Alpha:     *alpha,
-			AlphaSet:  true,
-			RRFK:      *rrfK,
-			RRFLambda: *rrfLambda,
+			Method:           *method,
+			Alpha:            *alpha,
+			AlphaSet:         true,
+			RRFK:             *rrfK,
+			RRFLambda:        *rrfLambda,
+			DenseProtectTopK: *denseProtectTopK,
 		},
 	})
 	if err != nil {
@@ -935,7 +939,7 @@ func printRetrievalHybridConfig(metrics eosruntime.RetrievalEvalMetrics) {
 		return
 	}
 	hybrid := metrics.Config.Hybrid
-	fmt.Printf("hybrid: method=%s alpha=%.6g rrf_k=%.6g rrf_lambda=%.6g\n", hybrid.Method, hybrid.Alpha, hybrid.RRFK, hybrid.RRFLambda)
+	fmt.Printf("hybrid: method=%s alpha=%.6g rrf_k=%.6g rrf_lambda=%.6g dense_protect_top_k=%d\n", hybrid.Method, hybrid.Alpha, hybrid.RRFK, hybrid.RRFLambda, hybrid.DenseProtectTopK)
 }
 
 func runEvalRetrievalTurboQuant(args []string) error {

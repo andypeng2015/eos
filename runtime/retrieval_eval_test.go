@@ -95,6 +95,61 @@ func TestComputeHybridRetrievalQualityMinmaxAlphaWeightsBM25(t *testing.T) {
 	}
 }
 
+func TestFuseHybridScoresDefaultLeavesFusedOrder(t *testing.T) {
+	denseScores := []retrievalScoredDoc{
+		{ID: "dense-winner", Score: 1},
+		{ID: "tail", Score: 0.5},
+		{ID: "lexical-winner", Score: 0},
+	}
+	bm25Scores := []retrievalScoredDoc{
+		{ID: "lexical-winner", Score: 10},
+		{ID: "tail", Score: 5},
+		{ID: "dense-winner", Score: 0},
+	}
+
+	got := fuseHybridScores(denseScores, bm25Scores, 100, RetrievalEvalHybridConfig{
+		Method: "minmax_blend",
+		Alpha:  0.75,
+	})
+	if len(got) < 3 {
+		t.Fatalf("fused length = %d, want at least 3", len(got))
+	}
+	want := []string{"lexical-winner", "tail", "dense-winner"}
+	for i, id := range want {
+		if got[i].ID != id {
+			t.Fatalf("fused[%d] = %q, want %q; got=%+v", i, got[i].ID, id, got[:3])
+		}
+	}
+}
+
+func TestFuseHybridScoresDenseProtectTopKPreservesDensePrefix(t *testing.T) {
+	denseScores := []retrievalScoredDoc{
+		{ID: "dense-winner", Score: 1},
+		{ID: "dense-second", Score: 0.9},
+		{ID: "lexical-winner", Score: 0},
+	}
+	bm25Scores := []retrievalScoredDoc{
+		{ID: "lexical-winner", Score: 10},
+		{ID: "dense-second", Score: 5},
+		{ID: "dense-winner", Score: 0},
+	}
+
+	got := fuseHybridScores(denseScores, bm25Scores, 100, RetrievalEvalHybridConfig{
+		Method:           "minmax_blend",
+		Alpha:            0.75,
+		DenseProtectTopK: 2,
+	})
+	if len(got) < 3 {
+		t.Fatalf("fused length = %d, want at least 3", len(got))
+	}
+	want := []string{"dense-winner", "dense-second", "lexical-winner"}
+	for i, id := range want {
+		if got[i].ID != id {
+			t.Fatalf("protected fused[%d] = %q, want %q; got=%+v", i, got[i].ID, id, got[:3])
+		}
+	}
+}
+
 func TestEvaluateTurboQuantVectorRetrievalReportsQualityAndCost(t *testing.T) {
 	docs := []retrievalVectorRecord{
 		{ID: "d1", Vector: normalizeRetrievalVector([]float32{1, 0, 0, 0, 0, 0, 0, 0})},

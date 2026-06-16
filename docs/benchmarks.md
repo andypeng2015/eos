@@ -73,7 +73,7 @@ EOS_HYBRID_CAL_TEST_SPLIT=test \
 ferrous-wheel run scripts/calibrate_eos_embed_hybrid_retrieval.fw
 ```
 
-The calibration run measures dense, BM25, and candidate hybrid settings on dev, chooses by nDCG@10 with MRR@10 and recall@100 tie-breakers, then evaluates only the selected setting on test. Its summary JSON/TSV/Markdown includes dense/BM25 comparisons, selected test metrics, protection gate deltas against dense, command logs, and optional sentinel query rows from `EOS_HYBRID_CAL_SENTINEL_QUERY_IDS`.
+The calibration run measures dense, BM25, and candidate hybrid settings on dev, chooses by nDCG@10 with MRR@10 and recall@100 tie-breakers, then evaluates only the selected setting on test. Its summary JSON/TSV/Markdown includes dense/BM25 comparisons, selected test metrics, protection gate deltas against dense, command logs, and optional sentinel query rows from `EOS_HYBRID_CAL_SENTINEL_QUERY_IDS`. When applying a selected setting with `eos eval-retrieval-hybrid` or `eos eval-retrieval-vectors-hybrid`, `--dense-protect-top-k N` preserves the original dense top-N prefix before appending the fused hybrid tail; leave it at `0` for the unguarded fusion order.
 
 Retrieval metric glossary:
 
