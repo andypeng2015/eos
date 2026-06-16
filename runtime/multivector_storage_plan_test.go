@@ -37,6 +37,9 @@ func TestPlanMultiVectorStorageUsesTurboQuantIPPayloadBytes(t *testing.T) {
 	if row.VectorOverheadBytes != 0 || row.DenseVectorStorageBytes != 512 || row.QuantizedVectorStorageBytes != 36 {
 		t.Fatalf("storage bytes = overhead:%d dense:%d quantized:%d", row.VectorOverheadBytes, row.DenseVectorStorageBytes, row.QuantizedVectorStorageBytes)
 	}
+	if row.PackedObjectOverheadBytes != 0 || row.PackedQuantizedStorageBytes != 36 || row.PackedTotalQuantizedBytes != 36000 {
+		t.Fatalf("packed bytes = overhead:%d storage:%d total:%d", row.PackedObjectOverheadBytes, row.PackedQuantizedStorageBytes, row.PackedTotalQuantizedBytes)
+	}
 	if row.TotalQuantizedBytes != 36000 {
 		t.Fatalf("total quantized bytes = %d", row.TotalQuantizedBytes)
 	}
@@ -136,6 +139,58 @@ func TestPlanMultiVectorStorageAccountsForPerVectorOverhead(t *testing.T) {
 	}
 	if plan.Rows[2].StorageMultipleOfDenseParentCost < 1.4129 || plan.Rows[2].StorageMultipleOfDenseParentCost > 1.4130 {
 		t.Fatalf("storage multiple = %.6f", plan.Rows[2].StorageMultipleOfDenseParentCost)
+	}
+}
+
+func TestPlanMultiVectorStorageAccountsForPackedParentObjectOverhead(t *testing.T) {
+	plan, err := PlanMultiVectorStorage(MultiVectorStoragePlanInput{
+		Dim:                       128,
+		BaselineDim:               3072,
+		Bits:                      []int{2, 4, 8},
+		Objects:                   1000,
+		VectorsPerObject:          []int{100},
+		VectorOverheadBytes:       32,
+		PackedObjectOverheadBytes: 32,
+	})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if plan.Config.PackedObjectOverheadBytes != 32 {
+		t.Fatalf("config packed object overhead = %d", plan.Config.PackedObjectOverheadBytes)
+	}
+	tests := []struct {
+		bits             int
+		vectorBytes      int64
+		currentFit       int64
+		packedFit        int64
+		packedStorage    int64
+		packedTotal      int64
+		packedFitsTarget bool
+	}{
+		{bits: 2, vectorBytes: 36, currentFit: 181, packedFit: 341, packedStorage: 3632, packedTotal: 3632000, packedFitsTarget: true},
+		{bits: 4, vectorBytes: 68, currentFit: 123, packedFit: 180, packedStorage: 6832, packedTotal: 6832000, packedFitsTarget: true},
+		{bits: 8, vectorBytes: 132, currentFit: 75, packedFit: 93, packedStorage: 13232, packedTotal: 13232000, packedFitsTarget: false},
+	}
+	for i, tt := range tests {
+		row := plan.Rows[i]
+		if row.Bits != tt.bits {
+			t.Fatalf("row %d bits = %d, want %d", i, row.Bits, tt.bits)
+		}
+		if row.QuantizedVectorBytes != tt.vectorBytes {
+			t.Fatalf("q%d vector bytes = %d, want %d", tt.bits, row.QuantizedVectorBytes, tt.vectorBytes)
+		}
+		if row.VectorsThatFitInOneDenseVector != tt.currentFit {
+			t.Fatalf("q%d current fit = %d, want %d", tt.bits, row.VectorsThatFitInOneDenseVector, tt.currentFit)
+		}
+		if row.PackedVectorsThatFitInOneDenseVector != tt.packedFit {
+			t.Fatalf("q%d packed fit = %d, want %d", tt.bits, row.PackedVectorsThatFitInOneDenseVector, tt.packedFit)
+		}
+		if row.PackedObjectOverheadBytes != 32 || row.PackedQuantizedStorageBytes != tt.packedStorage || row.PackedTotalQuantizedBytes != tt.packedTotal {
+			t.Fatalf("q%d packed bytes = overhead:%d storage:%d total:%d", tt.bits, row.PackedObjectOverheadBytes, row.PackedQuantizedStorageBytes, row.PackedTotalQuantizedBytes)
+		}
+		if row.PackedFitsInOneDenseVectorStorage != tt.packedFitsTarget {
+			t.Fatalf("q%d packed target fit = %t, want %t", tt.bits, row.PackedFitsInOneDenseVectorStorage, tt.packedFitsTarget)
+		}
 	}
 }
 
@@ -255,5 +310,20 @@ func TestPlanMultiVectorStorageRejectsNegativePerVectorOverhead(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("plan succeeded with negative vector overhead")
+	}
+}
+
+func TestPlanMultiVectorStorageRejectsNegativePackedObjectOverhead(t *testing.T) {
+	_, err := PlanMultiVectorStorage(MultiVectorStoragePlanInput{
+		Dim:                       128,
+		Bits:                      []int{2},
+		Objects:                   1,
+		PackedObjectOverheadBytes: -1,
+	})
+	if err == nil {
+		t.Fatal("plan succeeded with negative packed object overhead")
+	}
+	if !strings.Contains(err.Error(), "packed object overhead bytes must be non-negative") {
+		t.Fatalf("error = %q, want packed overhead message", err)
 	}
 }

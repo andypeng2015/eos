@@ -25,10 +25,17 @@ type planRow struct {
 	DenseVectorStorageBytes          int64   `json:"dense_vector_storage_bytes"`
 	QuantizedVectorStorageBytes      int64   `json:"quantized_vector_storage_bytes"`
 	TotalQuantizedBytes              int64   `json:"total_quantized_bytes"`
+	PackedObjectOverheadBytes        int64   `json:"packed_object_overhead_bytes"`
+	PackedQuantizedStorageBytes      int64   `json:"packed_quantized_storage_bytes"`
+	PackedTotalQuantizedBytes        int64   `json:"packed_total_quantized_bytes"`
 	TotalCompressionRatio            float64 `json:"total_compression_ratio"`
+	PackedTotalCompressionRatio      float64 `json:"packed_total_compression_ratio"`
 	VectorsThatFitInOneDenseVector   int64   `json:"vectors_that_fit_in_one_dense_vector"`
 	FitsInOneDenseVectorStorage      bool    `json:"fits_in_one_dense_vector_storage"`
 	StorageMultipleOfDenseParentCost float64 `json:"storage_multiple_of_dense_parent_cost"`
+	PackedVectorsThatFitInOneDenseVector   int64   `json:"packed_vectors_that_fit_in_one_dense_vector"`
+	PackedFitsInOneDenseVectorStorage      bool    `json:"packed_fits_in_one_dense_vector_storage"`
+	PackedStorageMultipleOfDenseParentCost float64 `json:"packed_storage_multiple_of_dense_parent_cost"`
 }
 
 type storagePlan struct {
@@ -44,16 +51,24 @@ type summaryRow struct {
 	VectorsPerObject                     int     `json:"vectors_per_object"`
 	TargetChildCount                     int     `json:"target_child_count"`
 	VectorOverheadBytes                  int64   `json:"vector_overhead_bytes"`
+	PackedObjectOverheadBytes            int64   `json:"packed_object_overhead_bytes"`
 	QuantizedPayloadBytes                int64   `json:"quantized_payload_bytes"`
 	QuantizedVectorBytes                 int64   `json:"quantized_vector_bytes"`
 	QuantizedVectorStorageBytes          int64   `json:"quantized_vector_storage_bytes"`
+	PackedQuantizedStorageBytes          int64   `json:"packed_quantized_storage_bytes"`
 	DenseVectorStorageBytes              int64   `json:"dense_vector_storage_bytes"`
 	VectorsThatFitInOneDenseVector       int64   `json:"vectors_that_fit_in_one_dense_vector"`
+	PackedVectorsThatFitInOneDenseVector int64   `json:"packed_vectors_that_fit_in_one_dense_vector"`
 	ConfiguredChildCountFits             bool    `json:"configured_child_count_fits"`
+	PackedConfiguredChildCountFits       bool    `json:"packed_configured_child_count_fits"`
 	TargetChildCountFitsInOneDenseVector bool    `json:"target_child_count_fits_in_one_dense_vector"`
+	PackedTargetChildCountFitsInOneDenseVector bool `json:"packed_target_child_count_fits_in_one_dense_vector"`
 	StorageMultipleOfDenseParentCost     float64 `json:"storage_multiple_of_dense_parent_cost"`
+	PackedStorageMultipleOfDenseParentCost float64 `json:"packed_storage_multiple_of_dense_parent_cost"`
 	TotalCompressionRatio                float64 `json:"total_compression_ratio"`
+	PackedTotalCompressionRatio          float64 `json:"packed_total_compression_ratio"`
 	HundredVectorCapable                 bool    `json:"hundred_vector_capable"`
+	PackedHundredVectorCapable           bool    `json:"packed_hundred_vector_capable"`
 }
 
 type commandRecord struct {
@@ -75,12 +90,16 @@ type manifest struct {
 	Bits                []int           `json:"bits"`
 	VectorsPerObject    []int           `json:"vectors_per_object"`
 	Objects             int             `json:"objects"`
-	VectorOverheadBytes int64           `json:"vector_overhead_bytes"`
-	SidecarStorage      string          `json:"sidecar_storage"`
-	TargetChildren      int             `json:"target_children"`
-	MinQ2Fit            int64           `json:"min_q2_fit"`
-	MinQ4Fit            int64           `json:"min_q4_fit"`
-	MinQ8Fit            int64           `json:"min_q8_fit"`
+	VectorOverheadBytes       int64           `json:"vector_overhead_bytes"`
+	PackedObjectOverheadBytes int64           `json:"packed_object_overhead_bytes"`
+	SidecarStorage            string          `json:"sidecar_storage"`
+	TargetChildren            int             `json:"target_children"`
+	MinQ2Fit                  int64           `json:"min_q2_fit"`
+	MinQ4Fit                  int64           `json:"min_q4_fit"`
+	MinQ8Fit                  int64           `json:"min_q8_fit"`
+	MinPackedQ2Fit            int64           `json:"min_packed_q2_fit"`
+	MinPackedQ4Fit            int64           `json:"min_packed_q4_fit"`
+	MinPackedQ8Fit            int64           `json:"min_packed_q8_fit"`
 	Rows                []summaryRow    `json:"rows"`
 	Gates               []string        `json:"gates"`
 	Caveats             []string        `json:"caveats"`
@@ -103,12 +122,16 @@ Environment:
   EOS_MV_BUDGET_SMOKE_BITS=2,4,8
   EOS_MV_BUDGET_SMOKE_VECTORS_PER_OBJECT=1,16,64,100,128,181,256,341
   EOS_MV_BUDGET_SMOKE_VECTOR_OVERHEAD_BYTES=32
+  EOS_MV_BUDGET_SMOKE_PACKED_OBJECT_OVERHEAD_BYTES=32
   EOS_MV_BUDGET_SMOKE_OBJECTS=1000
   EOS_MV_BUDGET_SMOKE_SIDECAR_STORAGE=none
   EOS_MV_BUDGET_SMOKE_TARGET_CHILDREN=100
   EOS_MV_BUDGET_SMOKE_MIN_Q2_FIT=181
   EOS_MV_BUDGET_SMOKE_MIN_Q4_FIT=100
-  EOS_MV_BUDGET_SMOKE_MIN_Q8_FIT=64`)
+  EOS_MV_BUDGET_SMOKE_MIN_Q8_FIT=64
+  EOS_MV_BUDGET_SMOKE_MIN_PACKED_Q2_FIT=341
+  EOS_MV_BUDGET_SMOKE_MIN_PACKED_Q4_FIT=180
+  EOS_MV_BUDGET_SMOKE_MIN_PACKED_Q8_FIT=93`)
 }
 
 func getenv(name string, fallback string) string {
@@ -266,16 +289,24 @@ func makeSummaryRows(plan storagePlan, targetChildren int) []summaryRow {
 			VectorsPerObject:                     row.VectorsPerObject,
 			TargetChildCount:                     targetChildren,
 			VectorOverheadBytes:                  row.VectorOverheadBytes,
+			PackedObjectOverheadBytes:            row.PackedObjectOverheadBytes,
 			QuantizedPayloadBytes:                row.QuantizedPayloadBytes,
 			QuantizedVectorBytes:                 row.QuantizedVectorBytes,
 			QuantizedVectorStorageBytes:          row.QuantizedVectorStorageBytes,
+			PackedQuantizedStorageBytes:          row.PackedQuantizedStorageBytes,
 			DenseVectorStorageBytes:              row.DenseVectorStorageBytes,
 			VectorsThatFitInOneDenseVector:       row.VectorsThatFitInOneDenseVector,
+			PackedVectorsThatFitInOneDenseVector: row.PackedVectorsThatFitInOneDenseVector,
 			ConfiguredChildCountFits:             row.FitsInOneDenseVectorStorage,
+			PackedConfiguredChildCountFits:       row.PackedFitsInOneDenseVectorStorage,
 			TargetChildCountFitsInOneDenseVector: row.VectorsThatFitInOneDenseVector >= int64(targetChildren),
+			PackedTargetChildCountFitsInOneDenseVector: row.PackedVectorsThatFitInOneDenseVector >= int64(targetChildren),
 			StorageMultipleOfDenseParentCost:     row.StorageMultipleOfDenseParentCost,
+			PackedStorageMultipleOfDenseParentCost: row.PackedStorageMultipleOfDenseParentCost,
 			TotalCompressionRatio:                row.TotalCompressionRatio,
+			PackedTotalCompressionRatio:          row.PackedTotalCompressionRatio,
 			HundredVectorCapable:                 row.VectorsThatFitInOneDenseVector >= 100,
+			PackedHundredVectorCapable:           row.PackedVectorsThatFitInOneDenseVector >= 100,
 		})
 	}
 	return rows
@@ -283,9 +314,9 @@ func makeSummaryRows(plan storagePlan, targetChildren int) []summaryRow {
 
 func writeSummaryTSV(path string, rows []summaryRow) error {
 	var b strings.Builder
-	b.WriteString("dim\tbaseline_dim\tbits\tobjects\tvectors_per_object\ttarget_child_count\tvector_overhead_bytes\tquantized_payload_bytes\tquantized_vector_bytes\tquantized_vector_storage_bytes\tdense_vector_storage_bytes\tvectors_that_fit_in_one_dense_vector\tconfigured_child_count_fits\ttarget_child_count_fits_in_one_dense_vector\tstorage_multiple_of_dense_parent_cost\ttotal_compression_ratio\thundred_vector_capable\n")
+	b.WriteString("dim\tbaseline_dim\tbits\tobjects\tvectors_per_object\ttarget_child_count\tvector_overhead_bytes\tpacked_object_overhead_bytes\tquantized_payload_bytes\tquantized_vector_bytes\tquantized_vector_storage_bytes\tpacked_quantized_storage_bytes\tdense_vector_storage_bytes\tvectors_that_fit_in_one_dense_vector\tpacked_vectors_that_fit_in_one_dense_vector\tconfigured_child_count_fits\tpacked_configured_child_count_fits\ttarget_child_count_fits_in_one_dense_vector\tpacked_target_child_count_fits_in_one_dense_vector\tstorage_multiple_of_dense_parent_cost\tpacked_storage_multiple_of_dense_parent_cost\ttotal_compression_ratio\tpacked_total_compression_ratio\thundred_vector_capable\tpacked_hundred_vector_capable\n")
 	for _, row := range rows {
-		fmt.Fprintf(&b, "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%t\t%t\t%.6f\t%.6f\t%t\n",
+		fmt.Fprintf(&b, "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%t\t%t\t%t\t%t\t%.6f\t%.6f\t%.6f\t%.6f\t%t\t%t\n",
 			row.Dim,
 			row.BaselineDim,
 			row.Bits,
@@ -293,16 +324,24 @@ func writeSummaryTSV(path string, rows []summaryRow) error {
 			row.VectorsPerObject,
 			row.TargetChildCount,
 			row.VectorOverheadBytes,
+			row.PackedObjectOverheadBytes,
 			row.QuantizedPayloadBytes,
 			row.QuantizedVectorBytes,
 			row.QuantizedVectorStorageBytes,
+			row.PackedQuantizedStorageBytes,
 			row.DenseVectorStorageBytes,
 			row.VectorsThatFitInOneDenseVector,
+			row.PackedVectorsThatFitInOneDenseVector,
 			row.ConfiguredChildCountFits,
+			row.PackedConfiguredChildCountFits,
 			row.TargetChildCountFitsInOneDenseVector,
+			row.PackedTargetChildCountFitsInOneDenseVector,
 			row.StorageMultipleOfDenseParentCost,
+			row.PackedStorageMultipleOfDenseParentCost,
 			row.TotalCompressionRatio,
-			row.HundredVectorCapable)
+			row.PackedTotalCompressionRatio,
+			row.HundredVectorCapable,
+			row.PackedHundredVectorCapable)
 	}
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
@@ -312,6 +351,16 @@ func maxFitByBit(rows []summaryRow, bits int) int64 {
 	for _, row := range rows {
 		if row.Bits == bits && row.VectorsThatFitInOneDenseVector > maxFit {
 			maxFit = row.VectorsThatFitInOneDenseVector
+		}
+	}
+	return maxFit
+}
+
+func maxPackedFitByBit(rows []summaryRow, bits int) int64 {
+	var maxFit int64
+	for _, row := range rows {
+		if row.Bits == bits && row.PackedVectorsThatFitInOneDenseVector > maxFit {
+			maxFit = row.PackedVectorsThatFitInOneDenseVector
 		}
 	}
 	return maxFit
@@ -336,6 +385,20 @@ func checkMinFit(rows []summaryRow, bits int, minFit int64) error {
 	}
 	if fit < minFit {
 		return fmt.Errorf("q%d fits %d child vectors in one dense-vector budget, below required %d", bits, fit, minFit)
+	}
+	return nil
+}
+
+func checkMinPackedFit(rows []summaryRow, bits int, minFit int64) error {
+	if minFit <= 0 {
+		return nil
+	}
+	fit := maxPackedFitByBit(rows, bits)
+	if fit == 0 {
+		return fmt.Errorf("q%d packed planner rows are missing; include %d in EOS_MV_BUDGET_SMOKE_BITS", bits, bits)
+	}
+	if fit < minFit {
+		return fmt.Errorf("q%d packed layout fits %d child vectors in one dense-vector budget, below required %d", bits, fit, minFit)
 	}
 	return nil
 }
@@ -397,6 +460,19 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	if vectorOverheadBytes < 0 {
+		fmt.Fprintln(os.Stderr, "EOS_MV_BUDGET_SMOKE_VECTOR_OVERHEAD_BYTES must be non-negative")
+		os.Exit(1)
+	}
+	packedObjectOverheadBytes, err := parseInt64Env("EOS_MV_BUDGET_SMOKE_PACKED_OBJECT_OVERHEAD_BYTES", 32)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if packedObjectOverheadBytes < 0 {
+		fmt.Fprintln(os.Stderr, "EOS_MV_BUDGET_SMOKE_PACKED_OBJECT_OVERHEAD_BYTES must be non-negative")
+		os.Exit(1)
+	}
 	sidecarStorage := getenv("EOS_MV_BUDGET_SMOKE_SIDECAR_STORAGE", "none")
 	targetChildren, err := parseIntEnv("EOS_MV_BUDGET_SMOKE_TARGET_CHILDREN", 100)
 	if err != nil {
@@ -422,6 +498,21 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	minPackedQ2Fit, err := parseInt64Env("EOS_MV_BUDGET_SMOKE_MIN_PACKED_Q2_FIT", 341)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	minPackedQ4Fit, err := parseInt64Env("EOS_MV_BUDGET_SMOKE_MIN_PACKED_Q4_FIT", 180)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	minPackedQ8Fit, err := parseInt64Env("EOS_MV_BUDGET_SMOKE_MIN_PACKED_Q8_FIT", 93)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	commands := []commandRecord{}
 	plannerJSONPaths := []string{}
@@ -435,6 +526,7 @@ func main() {
 			"--bits", intListCSV(bits),
 			"--vectors-per-object", intListCSV(vectorsPerObject),
 			"--vector-overhead-bytes", strconv.FormatInt(vectorOverheadBytes, 10),
+			"--packed-object-overhead-bytes", strconv.FormatInt(packedObjectOverheadBytes, 10),
 			"--objects", strconv.Itoa(objects),
 			"--sidecar-storage", sidecarStorage,
 			"--json", jsonPath,
@@ -466,6 +558,18 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	for _, gate := range []struct {
+		bits   int
+		minFit int64
+	}{{2, minPackedQ2Fit}, {4, minPackedQ4Fit}, {8, minPackedQ8Fit}} {
+		if !bitConfigured(bits, gate.bits) {
+			continue
+		}
+		if err := checkMinPackedFit(rows, gate.bits, gate.minFit); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
 
 	summaryTSV := filepath.Join(runDir, "summary.tsv")
 	if err := writeSummaryTSV(summaryTSV, rows); err != nil {
@@ -474,7 +578,7 @@ func main() {
 	}
 
 	out := manifest{
-		Schema:              "eos.multivector_budget_frontier_smoke.v1",
+		Schema:              "eos.multivector_budget_frontier_smoke.v2",
 		GeneratedAt:         time.Now().UTC().Format(time.RFC3339),
 		RunDir:              runDir,
 		RepoRoot:            root,
@@ -486,17 +590,24 @@ func main() {
 		Bits:                bits,
 		VectorsPerObject:    vectorsPerObject,
 		Objects:             objects,
-		VectorOverheadBytes: vectorOverheadBytes,
-		SidecarStorage:      sidecarStorage,
-		TargetChildren:      targetChildren,
-		MinQ2Fit:            minQ2Fit,
-		MinQ4Fit:            minQ4Fit,
-		MinQ8Fit:            minQ8Fit,
-		Rows:                rows,
+		VectorOverheadBytes:       vectorOverheadBytes,
+		PackedObjectOverheadBytes: packedObjectOverheadBytes,
+		SidecarStorage:            sidecarStorage,
+		TargetChildren:            targetChildren,
+		MinQ2Fit:                  minQ2Fit,
+		MinQ4Fit:                  minQ4Fit,
+		MinQ8Fit:                  minQ8Fit,
+		MinPackedQ2Fit:            minPackedQ2Fit,
+		MinPackedQ4Fit:            minPackedQ4Fit,
+		MinPackedQ8Fit:            minPackedQ8Fit,
+		Rows:                      rows,
 		Gates: []string{
-			fmt.Sprintf("q2 vectors_that_fit_in_one_dense_vector >= %d when q2 is included", minQ2Fit),
-			fmt.Sprintf("q4 vectors_that_fit_in_one_dense_vector >= %d when q4 is included", minQ4Fit),
-			fmt.Sprintf("q8 vectors_that_fit_in_one_dense_vector >= %d when q8 is included", minQ8Fit),
+			fmt.Sprintf("q2 current per-child-entry vectors_that_fit_in_one_dense_vector >= %d when q2 is included", minQ2Fit),
+			fmt.Sprintf("q4 current per-child-entry vectors_that_fit_in_one_dense_vector >= %d when q4 is included", minQ4Fit),
+			fmt.Sprintf("q8 current per-child-entry vectors_that_fit_in_one_dense_vector >= %d when q8 is included", minQ8Fit),
+			fmt.Sprintf("q2 packed-parent packed_vectors_that_fit_in_one_dense_vector >= %d when q2 is included", minPackedQ2Fit),
+			fmt.Sprintf("q4 packed-parent packed_vectors_that_fit_in_one_dense_vector >= %d when q4 is included", minPackedQ4Fit),
+			fmt.Sprintf("q8 packed-parent packed_vectors_that_fit_in_one_dense_vector >= %d when q8 is included", minPackedQ8Fit),
 			"planner command success and JSON parse required for every configured dimension",
 		},
 		Caveats: []string{
@@ -504,6 +615,7 @@ func main() {
 			"This does not measure CorkScrewDB API latency, remote mode, federation, HNSW, WAL, compaction, or end-to-end serving behavior.",
 			"The planner is the source of truth for byte accounting; this smoke only summarizes and gates its JSON output.",
 			"Per-vector overhead is an explicit input, not a measured CorkScrewDB directory-size overhead.",
+			"Packed-parent overhead is a planner/design target unless a CorkScrewDB API smoke separately measures packed parent-object persistence.",
 		},
 	}
 	data, err := json.MarshalIndent(out, "", "  ")
@@ -521,11 +633,16 @@ func main() {
 	fmt.Printf("manifest: %s\n", manifestJSON)
 	for _, bit := range bits {
 		fit := maxFitByBit(rows, bit)
-		fmt.Printf("q%d: vectors_that_fit_in_one_dense_vector=%d target%d=%t hundred_vector_capable=%t\n",
+		packedFit := maxPackedFitByBit(rows, bit)
+		fmt.Printf("q%d: current_vectors_that_fit_in_one_dense_vector=%d current_target%d=%t current_hundred_vector_capable=%t packed_vectors_that_fit_in_one_dense_vector=%d packed_target%d=%t packed_hundred_vector_capable=%t\n",
 			bit,
 			fit,
 			targetChildren,
 			fit >= int64(targetChildren),
-			fit >= 100)
+			fit >= 100,
+			packedFit,
+			targetChildren,
+			packedFit >= int64(targetChildren),
+			packedFit >= 100)
 	}
 }

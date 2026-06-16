@@ -197,7 +197,7 @@ EOS_REPO_ROOT=$PWD \
 ferrous-wheel run scripts/smoke_eos_multivector_budget_frontier.fw
 ```
 
-This smoke calls `go run ./cmd/eos plan-multivector-storage` for the default `128d` compact-child versus `3072d` dense-baseline shape, records planner JSON, command logs, `summary.tsv`, and `manifest.json` under `runs/eos-multivector-budget-frontier-smoke-<timestamp>/`, and gates the default overhead-aware fit counts at q2 >= 181, q4 >= 100, and q8 >= 64 children per dense-vector budget. Interpret it beside the time-series and CorkScrewDB API smokes as byte accounting only: it does not measure retrieval quality or CorkScrewDB API latency.
+This smoke calls `go run ./cmd/eos plan-multivector-storage` for the default `128d` compact-child versus `3072d` dense-baseline shape, records planner JSON, command logs, `summary.tsv`, and `manifest.json` under `runs/eos-multivector-budget-frontier-smoke-<timestamp>/`, and gates current per-child-entry fit counts at q2 >= 181, q4 >= 100, q8 >= 64 plus packed-parent target fit counts at q2 >= 341, q4 >= 180, q8 >= 93 children per dense-vector budget. Interpret it beside the time-series and CorkScrewDB API smokes as byte accounting only: it does not measure retrieval quality, CorkScrewDB API latency, or current end-to-end packed parent-object storage.
 
 For the combined cache-only quality plus overhead-aware budget gate, run:
 

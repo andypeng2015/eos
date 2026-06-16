@@ -225,6 +225,7 @@ go run ./cmd/eos plan-multivector-storage \
   --bits 2,4,8 \
   --vectors-per-object 64,128,256,384 \
   --vector-overhead-bytes 32 \
+  --packed-object-overhead-bytes 32 \
   --objects 1000
 ```
 
@@ -239,12 +240,13 @@ go run ./cmd/eos plan-multivector-storage \
   --window-size 64 \
   --window-stride 16 \
   --vector-overhead-bytes 32 \
+  --packed-object-overhead-bytes 32 \
   --objects 1000
 ```
 
 The planner uses one vector per covering window, including a tail window when needed. This is a storage gate for the TurboQuant time-series vector hypothesis, not a numeric time-series quality benchmark; run a retrieval or forecasting quality harness separately before making quality claims. Do not pass `--vectors-per-object` with `--series-lengths`; explicit conflicts fail so manual and derived modes remain separate.
 
-The TSV/JSON rows report `baseline_dim`, `dense_parent_bytes`, `dense_baseline_bytes`, raw `quantized_vector_bytes`, `vector_overhead_bytes`, `dense_vector_storage_bytes`, `quantized_vector_storage_bytes`, `total_quantized_bytes`, compression ratios, `vectors_that_fit_in_one_dense_vector`, and optional time-series fields `series_length`, `window_size`, `window_stride`, and `derived_window_count`. When `--baseline-dim` is omitted or `0`, the dense budget is the same dimension as the child vector, preserving the same-dim interpretation: 128-dimensional q2 stores a child vector payload in 36 bytes, so 14 payload-only children fit inside one 512-byte fp32 vector budget. When modeling compact children against a larger baseline, pass `--dim 128 --baseline-dim 3072`; one dense baseline vector is 12,288 payload bytes, so 341 q2 payload-only children fit in that one-vector budget and 128 children cost about `0.375x` of it before object/index metadata. Ideal payload math can fit q2/q4/q8 as measured, but CorkScrewDB product claims require overhead-aware planning with `--vector-overhead-bytes` because every stored vector/index entry has metadata and layout cost.
+The TSV/JSON rows report `baseline_dim`, `dense_parent_bytes`, `dense_baseline_bytes`, raw `quantized_vector_bytes`, `vector_overhead_bytes`, `dense_vector_storage_bytes`, `quantized_vector_storage_bytes`, `total_quantized_bytes`, packed-parent fields such as `packed_object_overhead_bytes`, `packed_quantized_storage_bytes`, `packed_total_quantized_bytes`, `packed_vectors_that_fit_in_one_dense_vector`, compression ratios, and optional time-series fields `series_length`, `window_size`, `window_stride`, and `derived_window_count`. When `--baseline-dim` is omitted or `0`, the dense budget is the same dimension as the child vector, preserving the same-dim interpretation: 128-dimensional q2 stores a child vector payload in 36 bytes, so 14 payload-only children fit inside one 512-byte fp32 vector budget. When modeling compact children against a larger baseline, pass `--dim 128 --baseline-dim 3072`; one dense baseline vector is 12,288 payload bytes, so 341 q2 payload-only children fit in that one-vector budget and 128 children cost about `0.375x` of it before object/index metadata. Current CorkScrewDB-style per-child-entry accounting uses `--vector-overhead-bytes`; packed-parent target accounting uses `--packed-object-overhead-bytes` to pay object overhead once per parent while each child remains a compact TurboQuant payload. Treat the packed-parent numbers as an architecture target until a CorkScrewDB API smoke directly measures packed parent-object persistence.
 
 For an executable overhead-aware budget-frontier artifact, run:
 
@@ -252,7 +254,7 @@ For an executable overhead-aware budget-frontier artifact, run:
 EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_multivector_budget_frontier.fw
 ```
 
-The smoke uses the planner as the source of truth and writes `summary.tsv`, `manifest.json`, planner JSON, and command logs under `runs/eos-multivector-budget-frontier-smoke-<timestamp>/`. Defaults model `128d` compact children against a `3072d` dense baseline, q2/q4/q8, child counts `1,16,64,100,128,181,256,341`, `32` bytes per stored vector, no sidecar, and `1000` objects. The default gates are q2 >= `181`, q4 >= `100`, and q8 >= `64` children fitting in one dense-vector budget. Read this beside the time-series smoke and local CorkScrewDB API smoke: it proves byte accounting only, not retrieval quality, remote serving, HNSW, federation, or API latency.
+The smoke uses the planner as the source of truth and writes `summary.tsv`, `manifest.json`, planner JSON, and command logs under `runs/eos-multivector-budget-frontier-smoke-<timestamp>/`. Defaults model `128d` compact children against a `3072d` dense baseline, q2/q4/q8, child counts `1,16,64,100,128,181,256,341`, `32` bytes per current stored vector, `32` bytes per packed parent object, no sidecar, and `1000` objects. The default gates are current q2 >= `181`, current q4 >= `100`, current q8 >= `64`, packed q2 >= `341`, packed q4 >= `180`, and packed q8 >= `93` children fitting in one dense-vector budget. Read this beside the time-series smoke and local CorkScrewDB API smoke: it proves byte accounting only, not retrieval quality, remote serving, HNSW, federation, API latency, or current end-to-end packed parent-object storage.
 
 For the executable bridge from byte accounting to cache-only quality, run:
 
