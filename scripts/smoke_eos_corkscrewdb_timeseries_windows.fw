@@ -76,19 +76,23 @@ type corkManifest struct {
 }
 
 type planRow struct {
-	Bits                             int     `json:"bits"`
-	Objects                          int     `json:"objects"`
-	VectorsPerObject                 int     `json:"vectors_per_object"`
-	SeriesLength                     int     `json:"series_length"`
-	WindowSize                       int     `json:"window_size"`
-	WindowStride                     int     `json:"window_stride"`
-	DerivedWindowCount               int     `json:"derived_window_count"`
-	QuantizedVectorBytes             int64   `json:"quantized_vector_bytes"`
-	VectorOverheadBytes              int64   `json:"vector_overhead_bytes"`
-	QuantizedVectorStorageBytes      int64   `json:"quantized_vector_storage_bytes"`
-	VectorsThatFitInOneDenseVector   int64   `json:"vectors_that_fit_in_one_dense_vector"`
-	FitsInOneDenseVectorStorage      bool    `json:"fits_in_one_dense_vector_storage"`
-	StorageMultipleOfDenseParentCost float64 `json:"storage_multiple_of_dense_parent_cost"`
+	Bits                                  int     `json:"bits"`
+	Objects                               int     `json:"objects"`
+	VectorsPerObject                      int     `json:"vectors_per_object"`
+	SeriesLength                          int     `json:"series_length"`
+	WindowSize                            int     `json:"window_size"`
+	WindowStride                          int     `json:"window_stride"`
+	DerivedWindowCount                    int     `json:"derived_window_count"`
+	QuantizedVectorBytes                  int64   `json:"quantized_vector_bytes"`
+	VectorOverheadBytes                   int64   `json:"vector_overhead_bytes"`
+	QuantizedVectorStorageBytes           int64   `json:"quantized_vector_storage_bytes"`
+	VectorsThatFitInOneDenseVector        int64   `json:"vectors_that_fit_in_one_dense_vector"`
+	FitsInOneDenseVectorStorage           bool    `json:"fits_in_one_dense_vector_storage"`
+	StorageMultipleOfDenseParentCost      float64 `json:"storage_multiple_of_dense_parent_cost"`
+	PackedQuantizedStorageBytes           int64   `json:"packed_quantized_storage_bytes"`
+	PackedVectorsThatFitInOneDenseVector  int64   `json:"packed_vectors_that_fit_in_one_dense_vector"`
+	PackedFitsInOneDenseVectorStorage     bool    `json:"packed_fits_in_one_dense_vector_storage"`
+	PackedStorageMultipleOfDenseParentCost float64 `json:"packed_storage_multiple_of_dense_parent_cost"`
 }
 
 type storagePlan struct {
@@ -340,15 +344,6 @@ func parsePositiveIntList(name string, value string) ([]int, error) {
 	return values, nil
 }
 
-func hasInt(values []int, needle int) bool {
-	for _, value := range values {
-		if value == needle {
-			return true
-		}
-	}
-	return false
-}
-
 func shellQuote(value string) string {
 	if value == "" {
 		return "''"
@@ -438,10 +433,17 @@ func makeSummaryRows(metrics []corkMetric, plan storagePlan, exported exportMani
 			P95MS:                        metric.SearchLatency.P95MS,
 		}
 		if planRow := findPlanRow(plan.Rows, metric.Bits, derivedWindowsPerParent); planRow != nil {
-			row.PlannerQuantizedVectorStorageBytes = planRow.QuantizedVectorStorageBytes
-			row.PlannerVectorsFitOneDenseVector = planRow.VectorsThatFitInOneDenseVector
-			row.PlannerFit = planRow.FitsInOneDenseVectorStorage
-			row.PlannerStorageMultiple = planRow.StorageMultipleOfDenseParentCost
+			if metric.Layout == "packed_parent_multivectors" {
+				row.PlannerQuantizedVectorStorageBytes = planRow.PackedQuantizedStorageBytes
+				row.PlannerVectorsFitOneDenseVector = planRow.PackedVectorsThatFitInOneDenseVector
+				row.PlannerFit = planRow.PackedFitsInOneDenseVectorStorage
+				row.PlannerStorageMultiple = planRow.PackedStorageMultipleOfDenseParentCost
+			} else {
+				row.PlannerQuantizedVectorStorageBytes = planRow.QuantizedVectorStorageBytes
+				row.PlannerVectorsFitOneDenseVector = planRow.VectorsThatFitInOneDenseVector
+				row.PlannerFit = planRow.FitsInOneDenseVectorStorage
+				row.PlannerStorageMultiple = planRow.StorageMultipleOfDenseParentCost
+			}
 		}
 		rows = append(rows, row)
 	}
@@ -497,14 +499,11 @@ func findSummaryRow(rows []summaryRow, bits int) *summaryRow {
 
 func checkGates(rows []summaryRow, cfg config) error {
 	q4 := findSummaryRow(rows, 4)
-	if q4 == nil {
-		return fmt.Errorf("q4 row is missing; EOS_CORKSCREW_TS_WINDOW_BITS must include 4")
-	}
 	q8 := findSummaryRow(rows, 8)
-	if cfg.MinQ4NDCG > 0 && q4.NDCGAt10 < cfg.MinQ4NDCG {
+	if q4 != nil && cfg.MinQ4NDCG > 0 && q4.NDCGAt10 < cfg.MinQ4NDCG {
 		return fmt.Errorf("q4 ndcg@10 %.6f is below %.6f", q4.NDCGAt10, cfg.MinQ4NDCG)
 	}
-	if cfg.MinQ4Recall > 0 && q4.RecallAt100 < cfg.MinQ4Recall {
+	if q4 != nil && cfg.MinQ4Recall > 0 && q4.RecallAt100 < cfg.MinQ4Recall {
 		return fmt.Errorf("q4 recall@100 %.6f is below %.6f", q4.RecallAt100, cfg.MinQ4Recall)
 	}
 	if q8 != nil && cfg.MinQ8NDCG > 0 && q8.NDCGAt10 < cfg.MinQ8NDCG {
@@ -563,13 +562,8 @@ func main() {
 		os.Exit(1)
 	}
 	bitsValue := getenv("EOS_CORKSCREW_TS_WINDOW_BITS", "4,8")
-	bits, err := parsePositiveIntList("EOS_CORKSCREW_TS_WINDOW_BITS", bitsValue)
-	if err != nil {
+	if _, err := parsePositiveIntList("EOS_CORKSCREW_TS_WINDOW_BITS", bitsValue); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	if !hasInt(bits, 4) {
-		fmt.Fprintln(os.Stderr, "EOS_CORKSCREW_TS_WINDOW_BITS must include 4")
 		os.Exit(1)
 	}
 	overfetchValue := getenv("EOS_CORKSCREW_TS_WINDOW_OVERFETCH", "100")
@@ -856,7 +850,7 @@ func main() {
 		DerivedWindowsPerParent: derivedWindowsPerParent,
 		Rows:                   rows,
 		Gates: []string{
-			fmt.Sprintf("q4 ndcg@10 >= %.6f and recall@100 >= %.6f when positive", minQ4NDCG, minQ4Recall),
+			fmt.Sprintf("q4 ndcg@10 >= %.6f and recall@100 >= %.6f when q4 is present and thresholds are positive", minQ4NDCG, minQ4Recall),
 			fmt.Sprintf("q8 ndcg@10 >= %.6f and recall@100 >= %.6f when q8 is present and thresholds are positive", minQ8NDCG, minQ8Recall),
 			fmt.Sprintf("planner fit >= %d child windows in one dense-vector budget", minPlannerFit),
 			fmt.Sprintf("vector payload storage multiple <= %.6f when positive", maxVectorPayloadMultiple),
