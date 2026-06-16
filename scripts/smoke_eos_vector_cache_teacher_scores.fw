@@ -1,0 +1,455 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+type commandRecord struct {
+	Label string   `json:"label"`
+	Args  []string `json:"args"`
+	Log   string   `json:"log"`
+}
+
+type scoreStats struct {
+	Min    float64 `json:"min"`
+	Max    float64 `json:"max"`
+	Mean   float64 `json:"mean"`
+	Median float64 `json:"median"`
+	Pstdev float64 `json:"pstdev"`
+}
+
+type bridgeCoverage struct {
+	ExamplesSeen       int `json:"examples_seen"`
+	ExamplesWritten    int `json:"examples_written"`
+	ExamplesScored     int `json:"examples_scored"`
+	MissingExamples    int `json:"missing_examples"`
+	CandidateRowsScored int `json:"candidate_rows_scored"`
+	ImportScoreRows    int `json:"import_score_rows"`
+	MissingQueryText   int `json:"missing_query_text"`
+	MissingDocText     int `json:"missing_doc_text"`
+	MissingQueryVector int `json:"missing_query_vector"`
+	MissingDocVector   int `json:"missing_doc_vector"`
+}
+
+type bridgeScores struct {
+	Margin           scoreStats `json:"margin"`
+	PositiveTop1Rate float64    `json:"positive_top1_rate"`
+}
+
+type bridgeManifest struct {
+	Schema         string         `json:"schema"`
+	Dataset        string         `json:"dataset"`
+	TeacherModelID string         `json:"teacher_model_id"`
+	ScoreScale     string         `json:"score_scale"`
+	Coverage       bridgeCoverage `json:"coverage"`
+	Scores         bridgeScores   `json:"scores"`
+}
+
+type auditSummary struct {
+	Schema              string             `json:"schema"`
+	InputJSONL          string             `json:"input_jsonl"`
+	Mode                string             `json:"mode"`
+	Examples            int                `json:"examples"`
+	ScoredExamples      int                `json:"scored_examples"`
+	MissingExamples     int                `json:"missing_examples"`
+	Candidates          int                `json:"candidates"`
+	ScoredCandidates    int                `json:"scored_candidates"`
+	PositiveTop1        int                `json:"positive_top1"`
+	PositiveTop1Rate    float64            `json:"positive_top1_rate"`
+	PositiveMeanMargin  float64            `json:"positive_mean_margin"`
+	Sources             map[string]auditSource `json:"sources,omitempty"`
+}
+
+type auditSource struct {
+	Examples           int     `json:"examples"`
+	ScoredExamples     int     `json:"scored_examples"`
+	MissingExamples    int     `json:"missing_examples"`
+	PositiveTop1Rate   float64 `json:"positive_top1_rate"`
+	PositiveMeanMargin float64 `json:"positive_mean_margin"`
+}
+
+type smokeManifest struct {
+	Schema         string          `json:"schema"`
+	GeneratedAt    string          `json:"generated_at"`
+	RunDir         string          `json:"run_dir"`
+	RepoRoot       string          `json:"repo_root"`
+	DatasetDir     string          `json:"dataset_dir"`
+	HardNegatives  string          `json:"hard_negatives"`
+	ScoredHardNegatives string     `json:"scored_hard_negatives"`
+	ScoresJSONL    string          `json:"scores_jsonl"`
+	BridgeManifest string          `json:"bridge_manifest"`
+	AuditJSON      string          `json:"audit_json"`
+	SummaryTSV     string          `json:"summary_tsv"`
+	Commands       []commandRecord `json:"commands"`
+	Bridge         bridgeManifest  `json:"bridge"`
+	Audit          auditSummary    `json:"audit"`
+	Gates          []string        `json:"gates"`
+	Caveats        []string        `json:"caveats"`
+}
+
+func usage() {
+	fmt.Println(`Eos vector-cache teacher-score smoke.
+
+Run:
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_vector_cache_teacher_scores.fw
+
+Environment:
+  EOS_VECTOR_CACHE_TEACHER_SMOKE_RUN_ROOT=runs
+  EOS_VECTOR_CACHE_TEACHER_SMOKE_RUN_DIR=runs/eos-vector-cache-teacher-score-smoke-<timestamp>`)
+}
+
+func getenv(name string, fallback string) string {
+	value := os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	if pwd := os.Getenv("PWD"); hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func resolveRunPath(root string, path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return filepath.Abs(path)
+	}
+	return filepath.Abs(filepath.Join(root, path))
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func renderCommand(args []string) string {
+	parts := []string{}
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func runCommand(root string, logDir string, label string, args []string) (commandRecord, error) {
+	fmt.Println("\n== " + label + " ==")
+	fmt.Println("+ " + renderCommand(args))
+	logPath := filepath.Join(logDir, label+".log")
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if writeErr := os.WriteFile(logPath, append([]byte(renderCommand(args)+"\n\n"), output...), 0o644); writeErr != nil {
+		return commandRecord{}, writeErr
+	}
+	fmt.Print(string(output))
+	record := commandRecord{Label: label, Args: args, Log: logPath}
+	if err != nil {
+		return record, fmt.Errorf("%s failed: %w", label, err)
+	}
+	return record, nil
+}
+
+func writeFile(path string, text string) error {
+	return os.WriteFile(path, []byte(text), 0o644)
+}
+
+func writeFixtures(runDir string) (string, string, string, string, error) {
+	datasetDir := filepath.Join(runDir, "beir-smoke")
+	if err := os.MkdirAll(datasetDir, 0o755); err != nil {
+		return "", "", "", "", err
+	}
+
+	corpus := strings.Join([]string{
+		`{"_id":"d-pos-1","title":"","text":"alpha positive document about vector caches"}`,
+		`{"_id":"d-neg-1a","title":"","text":"orthogonal beta distractor for alpha"}`,
+		`{"_id":"d-neg-1b","title":"","text":"near alpha distractor with weaker vector"}`,
+		`{"_id":"d-pos-2","title":"","text":"beta positive document about teacher imports"}`,
+		`{"_id":"d-neg-2a","title":"","text":"orthogonal alpha distractor for beta"}`,
+		`{"_id":"d-neg-2b","title":"","text":"near beta distractor with weaker vector"}`,
+	}, "\n") + "\n"
+	queries := strings.Join([]string{
+		`{"_id":"q-alpha","text":"find the alpha vector cache positive"}`,
+		`{"_id":"q-beta","text":"find the beta teacher import positive"}`,
+	}, "\n") + "\n"
+	docVectors := strings.Join([]string{
+		`{"id":"d-pos-1","embedding":[1.0,0.0]}`,
+		`{"id":"d-neg-1a","embedding":[0.0,1.0]}`,
+		`{"id":"d-neg-1b","embedding":[0.6,0.8]}`,
+		`{"id":"d-pos-2","embedding":[0.0,1.0]}`,
+		`{"id":"d-neg-2a","embedding":[1.0,0.0]}`,
+		`{"id":"d-neg-2b","embedding":[0.8,0.6]}`,
+	}, "\n") + "\n"
+	queryVectors := strings.Join([]string{
+		`{"id":"q-alpha","embedding":[1.0,0.0]}`,
+		`{"id":"q-beta","embedding":[0.0,1.0]}`,
+	}, "\n") + "\n"
+	hardNegatives := strings.Join([]string{
+		`{"source":"smoke","query":"find the alpha vector cache positive","positive":"alpha positive document about vector caches","negatives":["orthogonal beta distractor for alpha","near alpha distractor with weaker vector"],"group_id":"smoke-alpha"}`,
+		`{"source":"smoke","query":"find the beta teacher import positive","positive":"beta positive document about teacher imports","negatives":["orthogonal alpha distractor for beta","near beta distractor with weaker vector"],"group_id":"smoke-beta"}`,
+	}, "\n") + "\n"
+
+	if err := writeFile(filepath.Join(datasetDir, "corpus.jsonl"), corpus); err != nil {
+		return "", "", "", "", err
+	}
+	if err := writeFile(filepath.Join(datasetDir, "queries.jsonl"), queries); err != nil {
+		return "", "", "", "", err
+	}
+	docVectorPath := filepath.Join(runDir, "doc-vectors.jsonl")
+	queryVectorPath := filepath.Join(runDir, "query-vectors.jsonl")
+	hardNegativePath := filepath.Join(runDir, "hard-negatives.jsonl")
+	if err := writeFile(docVectorPath, docVectors); err != nil {
+		return "", "", "", "", err
+	}
+	if err := writeFile(queryVectorPath, queryVectors); err != nil {
+		return "", "", "", "", err
+	}
+	if err := writeFile(hardNegativePath, hardNegatives); err != nil {
+		return "", "", "", "", err
+	}
+	return datasetDir, docVectorPath, queryVectorPath, hardNegativePath, nil
+}
+
+func readJSON(path string, target any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, target)
+}
+
+func writeSummaryTSV(path string, bridge bridgeManifest, audit auditSummary) error {
+	var b strings.Builder
+	b.WriteString("examples_seen\texamples_scored\tbridge_missing_examples\tbridge_positive_top1_rate\tbridge_positive_mean_margin\taudit_examples\taudit_scored_examples\taudit_missing_examples\taudit_positive_top1_rate\taudit_positive_mean_margin\n")
+	fmt.Fprintf(&b, "%d\t%d\t%d\t%.6f\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\n",
+		bridge.Coverage.ExamplesSeen,
+		bridge.Coverage.ExamplesScored,
+		bridge.Coverage.MissingExamples,
+		bridge.Scores.PositiveTop1Rate,
+		bridge.Scores.Margin.Mean,
+		audit.Examples,
+		audit.ScoredExamples,
+		audit.MissingExamples,
+		audit.PositiveTop1Rate,
+		audit.PositiveMeanMargin)
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func checkGates(bridge bridgeManifest, audit auditSummary) ([]string, error) {
+	gates := []string{
+		"bridge examples_scored equals examples_seen",
+		"bridge missing_examples equals 0",
+		"bridge positive_top1_rate >= 1.0",
+		"bridge positive mean margin > 0",
+		"audit scored_examples equals examples",
+		"audit missing_examples equals 0",
+		"audit positive_top1_rate >= 1.0",
+		"audit positive_mean_margin > 0",
+	}
+	if bridge.Coverage.ExamplesSeen == 0 {
+		return gates, fmt.Errorf("bridge saw no examples")
+	}
+	if bridge.Coverage.ExamplesScored != bridge.Coverage.ExamplesSeen {
+		return gates, fmt.Errorf("bridge scored %d examples, want %d", bridge.Coverage.ExamplesScored, bridge.Coverage.ExamplesSeen)
+	}
+	if bridge.Coverage.MissingExamples != 0 {
+		return gates, fmt.Errorf("bridge missing_examples=%d", bridge.Coverage.MissingExamples)
+	}
+	if bridge.Scores.PositiveTop1Rate < 1.0 {
+		return gates, fmt.Errorf("bridge positive_top1_rate %.6f < 1.0", bridge.Scores.PositiveTop1Rate)
+	}
+	if bridge.Scores.Margin.Mean <= 0 {
+		return gates, fmt.Errorf("bridge positive mean margin %.6f <= 0", bridge.Scores.Margin.Mean)
+	}
+	if audit.Examples == 0 {
+		return gates, fmt.Errorf("audit saw no examples")
+	}
+	if audit.ScoredExamples != audit.Examples {
+		return gates, fmt.Errorf("audit scored %d examples, want %d", audit.ScoredExamples, audit.Examples)
+	}
+	if audit.MissingExamples != 0 {
+		return gates, fmt.Errorf("audit missing_examples=%d", audit.MissingExamples)
+	}
+	if audit.PositiveTop1Rate < 1.0 {
+		return gates, fmt.Errorf("audit positive_top1_rate %.6f < 1.0", audit.PositiveTop1Rate)
+	}
+	if audit.PositiveMeanMargin <= 0 {
+		return gates, fmt.Errorf("audit positive_mean_margin %.6f <= 0", audit.PositiveMeanMargin)
+	}
+	return gates, nil
+}
+
+func writeSmokeManifest(path string, manifest smokeManifest) error {
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	runRoot := getenv("EOS_VECTOR_CACHE_TEACHER_SMOKE_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir := getenv("EOS_VECTOR_CACHE_TEACHER_SMOKE_RUN_DIR", filepath.Join(runRoot, "eos-vector-cache-teacher-score-smoke-"+time.Now().UTC().Format("20060102T150405Z")))
+	runDir, err = resolveRunPath(root, runDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	logDir := filepath.Join(runDir, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	datasetDir, docVectorPath, queryVectorPath, hardNegativePath, err := writeFixtures(runDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	scoredHardNegativesPath := filepath.Join(runDir, "scored-hard-negatives.jsonl")
+	scoresPath := filepath.Join(runDir, "teacher-scores.jsonl")
+	bridgeManifestPath := filepath.Join(runDir, "bridge-manifest.json")
+	auditPath := filepath.Join(runDir, "audit.json")
+	summaryPath := filepath.Join(runDir, "summary.tsv")
+	smokeManifestPath := filepath.Join(runDir, "manifest.json")
+
+	commands := []commandRecord{}
+	scoreCommand := []string{
+		"python3",
+		"scripts/score_teacher_with_vector_cache.py",
+		"--hard-negatives", hardNegativePath,
+		"--dataset-dir", datasetDir,
+		"--doc-vectors", docVectorPath,
+		"--query-vectors", queryVectorPath,
+		"--output-jsonl", scoredHardNegativesPath,
+		"--scores-jsonl", scoresPath,
+		"--manifest", bridgeManifestPath,
+		"--model-id", "smoke-vector-cache-teacher",
+		"--dataset", "smoke",
+		"--score", "cosine",
+	}
+	record, err := runCommand(root, logDir, "score-vector-cache-teacher", scoreCommand)
+	commands = append(commands, record)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	auditCommand := []string{
+		"go",
+		"run",
+		"./cmd/eos",
+		"audit-teacher-scores",
+		scoredHardNegativesPath,
+		auditPath,
+	}
+	record, err = runCommand(root, logDir, "audit-teacher-scores", auditCommand)
+	commands = append(commands, record)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	var bridge bridgeManifest
+	if err := readJSON(bridgeManifestPath, &bridge); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	var audit auditSummary
+	if err := readJSON(auditPath, &audit); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	gates, err := checkGates(bridge, audit)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := writeSummaryTSV(summaryPath, bridge, audit); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	smoke := smokeManifest{
+		Schema: "manta.eos_vector_cache_teacher_score_smoke.v1",
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		RunDir: runDir,
+		RepoRoot: root,
+		DatasetDir: datasetDir,
+		HardNegatives: hardNegativePath,
+		ScoredHardNegatives: scoredHardNegativesPath,
+		ScoresJSONL: scoresPath,
+		BridgeManifest: bridgeManifestPath,
+		AuditJSON: auditPath,
+		SummaryTSV: summaryPath,
+		Commands: commands,
+		Bridge: bridge,
+		Audit: audit,
+		Gates: gates,
+		Caveats: []string{"Fixture-only smoke with deterministic 2d cosine vectors; it proves bridge and audit plumbing, not model quality."},
+	}
+	if err := writeSmokeManifest(smokeManifestPath, smoke); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("\nsummary: %s\n", summaryPath)
+	fmt.Printf("manifest: %s\n", smokeManifestPath)
+	fmt.Printf("run_dir: %s\n", runDir)
+	fmt.Printf("bridge: examples=%d scored=%d missing=%d positive_top1_rate=%.6f mean_margin=%.6f\n",
+		bridge.Coverage.ExamplesSeen,
+		bridge.Coverage.ExamplesScored,
+		bridge.Coverage.MissingExamples,
+		bridge.Scores.PositiveTop1Rate,
+		bridge.Scores.Margin.Mean)
+	fmt.Printf("audit: examples=%d scored=%d missing=%d positive_top1_rate=%.6f mean_margin=%.6f\n",
+		audit.Examples,
+		audit.ScoredExamples,
+		audit.MissingExamples,
+		audit.PositiveTop1Rate,
+		audit.PositiveMeanMargin)
+}
