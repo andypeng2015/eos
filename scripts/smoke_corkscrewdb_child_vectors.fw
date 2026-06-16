@@ -843,6 +843,7 @@ import (
 	"time"
 
 	corkscrewdb "m31labs.dev/corkscrewdb"
+	"m31labs.dev/turboquant"
 )
 
 type vectorRow struct {
@@ -1185,9 +1186,8 @@ func main() {
 		fatalf("size db dir: %v", err)
 	}
 
-	quantizedVectorBytes := int64((dim**bits + 7) / 8)
-	quantizedVectorBytes += int64((dim + 7) / 8)
-	quantizedVectorBytes += 4
+	mseBytes, signBytes := turboquant.IPQuantizedSizes(dim, *bits)
+	quantizedVectorBytes := int64(mseBytes + signBytes + 4)
 	insertCount := len(children)
 	if *layout == "single_parent_vectors" {
 		insertCount = parentCount
