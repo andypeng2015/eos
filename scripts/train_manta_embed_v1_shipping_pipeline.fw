@@ -86,7 +86,7 @@ Useful knobs:
   EOS_SHIP_FIQA_RESCUE=1
   EOS_INSTALL_CORKSCREW=1
   EOS_CORKSCREW_ROOT=$HOME/work/corkscrewdb
-  EOS_CORKSCREW_ASSET_ID=manta-embed-v0`)
+  EOS_CORKSCREW_ASSET_ID=corkscrewdb-default-embedder`)
 }
 
 func getenv(name string, fallback string) string {
@@ -234,7 +234,7 @@ func prepareConfig(root string) (shippingConfig, error) {
 	finalEvalID := getenv("EOS_SHIP_FINAL_EVAL_ID", "final-retrieval-eval")
 	corkscrewRoot, err := filepath.Abs(getenv("EOS_CORKSCREW_ROOT", filepath.Join(os.Getenv("HOME"), "work", "corkscrewdb")))
 	guard err == nil else return shippingConfig{}, err
-	assetID := getenv("EOS_CORKSCREW_ASSET_ID", "manta-embed-v0")
+	assetID := getenv("EOS_CORKSCREW_ASSET_ID", "corkscrewdb-default-embedder")
 	minSciFact, err := parseFloatEnv("EOS_SHIP_MIN_SCIFACT_NDCG10", 0.55)
 	guard err == nil else return shippingConfig{}, err
 	minNFCorpus, err := parseFloatEnv("EOS_SHIP_MIN_NFCORPUS_NDCG10", 0.14)
