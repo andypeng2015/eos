@@ -37,6 +37,7 @@ type EmbeddingTrainConfig struct {
 	TeacherLossWeight         float32
 	TeacherTemperature        float32
 	TeacherSourceTemperatures map[string]float32
+	TeacherSourceWeights      map[string]float32
 }
 
 // EmbeddingTrainMetrics summarizes one training/eval batch.
@@ -1325,10 +1326,12 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 		teacherQueryGrads := newEmbeddingPooledGradBuffers(queries)
 		teacherCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
 		teacherTemperatures := make([]float32, len(batch))
+		teacherSourceWeights := make([]float32, len(batch))
 		for i, example := range batch {
 			teacherTemperatures[i] = hardNegativeTeacherTemperature(t.config.TeacherSourceTemperatures, example.Source, t.config.TeacherTemperature)
+			teacherSourceWeights[i] = hardNegativeTeacherWeight(t.config.TeacherSourceWeights, example.Source)
 		}
-		teacherLoss, teacherScore, pairs := accumulateTeacherDistributionHardNegativeGrads(queries, candidates, candidateSpans, teacherScores, teacherTemperatures, t.config.Temperature, t.config.TeacherTemperature, teacherQueryGrads, teacherCandidateGrads)
+		teacherLoss, teacherScore, pairs := accumulateTeacherDistributionHardNegativeGrads(queries, candidates, candidateSpans, teacherScores, teacherTemperatures, teacherSourceWeights, t.config.Temperature, t.config.TeacherTemperature, teacherQueryGrads, teacherCandidateGrads)
 		if pairs > 0 {
 			baseScale := float32(1) / (1 + teacherWeight)
 			teacherScale := teacherWeight / (1 + teacherWeight)
@@ -3035,7 +3038,7 @@ func accumulateGroupedInfoNCEHardNegativeGrads(queries, candidates []*embeddingE
 	return totalLoss, totalScore
 }
 
-func accumulateTeacherDistributionHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, teacherScores [][]float32, teacherTemperatures []float32, modelTemperature, teacherTemperature float32, queryGrads, candidateGrads [][]float32) (float32, float32, int) {
+func accumulateTeacherDistributionHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, teacherScores [][]float32, teacherTemperatures []float32, teacherSourceWeights []float32, modelTemperature, teacherTemperature float32, queryGrads, candidateGrads [][]float32) (float32, float32, int) {
 	totalLoss := float32(0)
 	totalScore := float32(0)
 	pairCount := 0
@@ -3067,6 +3070,13 @@ func accumulateTeacherDistributionHardNegativeGrads(queries, candidates []*embed
 		if i >= len(teacherScores) || len(teacherScores[i]) == 0 {
 			continue
 		}
+		exampleWeight := float32(1)
+		if i < len(teacherSourceWeights) {
+			exampleWeight = teacherSourceWeights[i]
+		}
+		if exampleWeight <= 0 {
+			continue
+		}
 		span := groupedCandidateSpan(candidateSpans, i, len(candidates))
 		count := span.End - span.Start
 		if count < 2 || len(teacherScores[i]) != count {
@@ -3079,7 +3089,7 @@ func accumulateTeacherDistributionHardNegativeGrads(queries, candidates []*embed
 			local := j - span.Start
 			score := cosineScoreWithNorms(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j])
 			scores[local] = score
-			totalScore += score
+			totalScore += exampleWeight * score
 		}
 		model := modelProbs[:count]
 		teacher := teacherProbs[:count]
@@ -3094,9 +3104,9 @@ func accumulateTeacherDistributionHardNegativeGrads(queries, candidates []*embed
 			if prob < 1e-12 {
 				prob = 1e-12
 			}
-			totalLoss -= target * float32(math.Log(float64(prob)))
+			totalLoss -= exampleWeight * target * float32(math.Log(float64(prob)))
 			j := span.Start + local
-			scale := (model[local] - target) / modelTemperature
+			scale := exampleWeight * (model[local] - target) / modelTemperature
 			accumulateCosineGradFromScore(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j], scores[local], scale, queryGrads[i], candidateGrads[j])
 		}
 		pairCount += count
@@ -4008,6 +4018,7 @@ func normalizedTrainConfig(cfg EmbeddingTrainConfig, params ...eosartifact.Param
 		cfg.TeacherTemperature = 1
 	}
 	cfg.TeacherSourceTemperatures = normalizeHardNegativeTeacherTemperatures(cfg.TeacherSourceTemperatures)
+	cfg.TeacherSourceWeights = normalizeHardNegativeTeacherWeights(cfg.TeacherSourceWeights)
 	cfg.GroupedLossWeight = effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
 	return cfg
 }
@@ -4036,6 +4047,14 @@ func validateTrainConfig(cfg EmbeddingTrainConfig) error {
 		}
 		if temp <= 0 {
 			return fmt.Errorf("teacher_source_temperatures[%s] must be positive", source)
+		}
+	}
+	for source, weight := range cfg.TeacherSourceWeights {
+		if strings.TrimSpace(source) == "" {
+			return fmt.Errorf("teacher_source_weights has an empty source")
+		}
+		if weight < 0 || math.IsNaN(float64(weight)) || math.IsInf(float64(weight), 0) {
+			return fmt.Errorf("teacher_source_weights[%s] must be finite and non-negative", source)
 		}
 	}
 	return nil

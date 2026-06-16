@@ -434,6 +434,8 @@ ferrous-wheel run scripts/run_manta_embed_v1_guarded_candidate.fw
 
 The runner inherits the normal `EOS_TRAIN_JSONL`, `EOS_EVAL_JSONL`, `EOS_HARD_EVAL_JSONL`, tokenizer, training, and scoreboard knobs. It defaults to `scifact,nfcorpus,fiqa`, `ndcg_at_10,recall_at_100`, `short_retrieval`, and `eos`, writes `runs/eos-embed-v1-guarded-<timestamp>/manifest.json`, and exits nonzero when the candidate is rejected. Set `EOS_GUARD_BASELINE=manta` only for legacy-labeled candidate scoreboards. Set `EOS_GUARD_FAIL_ON_GATE=0` only when you need a non-failing smoke that still records `"gate_status": "rejected"`. Dirty working trees remain blocked by the training script unless the caller sets `EOS_ALLOW_DIRTY=1` or explicitly sets `EOS_GUARD_ALLOW_DIRTY=1`.
 
+For hard-negative teacher runs, use `EOS_TEACHER_SOURCE_WEIGHTS` when teacher audits agree with labels on some sources but hurt others. Source keys use exact, family, then `*` fallback, and weight `0` disables teacher contribution for that source. The next guarded Qwen3 shape should pair global `EOS_TEACHER_LOSS_WEIGHT=0.10` with `EOS_TEACHER_SOURCE_WEIGHTS=scifact=1,nfcorpus=0,fiqa=0.25`.
+
 For a dry smoke with existing artifacts:
 
 ```bash

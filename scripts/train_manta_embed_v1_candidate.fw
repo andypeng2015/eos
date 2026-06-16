@@ -55,6 +55,7 @@ type candidateConfig struct {
 	TeacherLossWeight   string
 	TeacherTemperature  string
 	TeacherSourceTemperatures string
+	TeacherSourceWeights string
 	TeacherScoreNormalization string
 	EvalEvery           string
 	EvalEverySteps      string
@@ -501,6 +502,7 @@ func writeManifest(cfg candidateConfig, status string) error {
     "teacher_loss_weight": %s,
     "teacher_temperature": %s,
     "teacher_source_temperatures": %s,
+    "teacher_source_weights": %s,
     "teacher_score_normalization": %s,
     "select_metric": %s,
     "quality_target": %s,
@@ -560,6 +562,7 @@ func writeManifest(cfg candidateConfig, status string) error {
 		cfg.TeacherLossWeight,
 		cfg.TeacherTemperature,
 		jsonString(cfg.TeacherSourceTemperatures),
+		jsonString(cfg.TeacherSourceWeights),
 		jsonString(cfg.TeacherScoreNormalization),
 		jsonString(cfg.SelectMetric),
 		jsonString(cfg.QualityTarget),
@@ -683,6 +686,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		TeacherLossWeight:   getenv("EOS_TEACHER_LOSS_WEIGHT", "0"),
 		TeacherTemperature:  getenv("EOS_TEACHER_TEMPERATURE", "1"),
 		TeacherSourceTemperatures: getenv("EOS_TEACHER_SOURCE_TEMPERATURES", ""),
+		TeacherSourceWeights: getenv("EOS_TEACHER_SOURCE_WEIGHTS", ""),
 		TeacherScoreNormalization: getenv("EOS_TEACHER_SCORE_NORMALIZATION", ""),
 		EvalEvery:           getenv("EOS_EVAL_EVERY", "1"),
 		EvalEverySteps:      getenv("EOS_EVAL_EVERY_STEPS", "0"),
@@ -831,6 +835,9 @@ func trainCommonArgs(cfg candidateConfig) []string {
 	}
 	if cfg.TeacherSourceTemperatures != "" {
 		args = append(args, "--teacher-source-temperatures", cfg.TeacherSourceTemperatures)
+	}
+	if cfg.TeacherSourceWeights != "" {
+		args = append(args, "--teacher-source-weights", cfg.TeacherSourceWeights)
 	}
 	if cfg.TeacherScoreNormalization != "" {
 		args = append(args, "--teacher-score-normalization", cfg.TeacherScoreNormalization)

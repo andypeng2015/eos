@@ -954,6 +954,75 @@ func TestHardNegativeTeacherTemperatureUsesFamilyUnlessExactExists(t *testing.T)
 	}
 }
 
+func TestHardNegativeTeacherWeightUsesExactFamilyWildcardAndDefault(t *testing.T) {
+	weights := normalizeHardNegativeTeacherWeights(map[string]float32{
+		"fiqa":       0.25,
+		"fiqa:model": 0,
+		"*":          0.75,
+	})
+	if got := hardNegativeTeacherWeight(weights, "fiqa:bm25"); got != 0.25 {
+		t.Fatalf("fiqa:bm25 teacher weight = %f, want 0.25", got)
+	}
+	if got := hardNegativeTeacherWeight(weights, "fiqa:model"); got != 0 {
+		t.Fatalf("fiqa:model teacher weight = %f, want exact zero", got)
+	}
+	if got := hardNegativeTeacherWeight(weights, "scifact"); got != 0.75 {
+		t.Fatalf("scifact teacher weight = %f, want wildcard", got)
+	}
+	if got := hardNegativeTeacherWeight(nil, "nfcorpus"); got != 1 {
+		t.Fatalf("default teacher weight = %f, want 1", got)
+	}
+}
+
+func TestAccumulateTeacherDistributionHardNegativeGradsSkipsZeroWeightedSource(t *testing.T) {
+	queries := []*embeddingEncodedSequence{
+		{pooled: []float32{1, 0}},
+		{pooled: []float32{0, 1}},
+	}
+	candidates := []*embeddingEncodedSequence{
+		{pooled: []float32{1, 0}},
+		{pooled: []float32{0, 1}},
+		{pooled: []float32{0, 1}},
+		{pooled: []float32{1, 0}},
+	}
+	spans := []embeddingCandidateSpan{
+		{Start: 0, End: 2},
+		{Start: 2, End: 4},
+	}
+	teacherScores := [][]float32{
+		{1, 0},
+		{0, 1},
+	}
+	teacherTemperatures := []float32{1, 1}
+	teacherSourceWeights := []float32{1, 0}
+	queryGrads := newEmbeddingPooledGradBuffers(queries)
+	candidateGrads := newEmbeddingPooledGradBuffers(candidates)
+
+	loss, score, pairs := accumulateTeacherDistributionHardNegativeGrads(queries, candidates, spans, teacherScores, teacherTemperatures, teacherSourceWeights, 0.05, 1, queryGrads, candidateGrads)
+
+	if pairs != 2 {
+		t.Fatalf("teacher pairs = %d, want only first source's two candidates", pairs)
+	}
+	if loss <= 0 {
+		t.Fatalf("teacher loss = %f, want positive contribution from weighted source", loss)
+	}
+	if score == 0 {
+		t.Fatalf("teacher score = %f, want weighted source model scores counted", score)
+	}
+	for i, grad := range queryGrads[1] {
+		if grad != 0 {
+			t.Fatalf("zero-weighted query grad[%d] = %f, want 0", i, grad)
+		}
+	}
+	for row := 2; row < 4; row++ {
+		for col, grad := range candidateGrads[row] {
+			if grad != 0 {
+				t.Fatalf("zero-weighted candidate %d grad[%d] = %f, want 0", row, col, grad)
+			}
+		}
+	}
+}
+
 func TestNormalizeHardNegativeTeacherScoresForRunSourceZScore(t *testing.T) {
 	trainSet := []EmbeddingHardNegativeExample{
 		{Source: "scifact", TeacherScores: []float32{10, 20}},

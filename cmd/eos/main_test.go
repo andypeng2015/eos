@@ -217,6 +217,28 @@ func TestRunDoctorReportsRuntimeFacts(t *testing.T) {
 	}
 }
 
+func TestParseNonNegativeFloatMapAllowsZeroTeacherSourceWeight(t *testing.T) {
+	got, err := parseNonNegativeFloatMap("scifact=1,nfcorpus=0,fiqa=0.25")
+	if err != nil {
+		t.Fatalf("parse non-negative float map: %v", err)
+	}
+	if got["scifact"] != 1 {
+		t.Fatalf("scifact weight = %f, want 1", got["scifact"])
+	}
+	if got["nfcorpus"] != 0 {
+		t.Fatalf("nfcorpus weight = %f, want 0", got["nfcorpus"])
+	}
+	if got["fiqa"] != 0.25 {
+		t.Fatalf("fiqa weight = %f, want 0.25", got["fiqa"])
+	}
+}
+
+func TestParseNonNegativeFloatMapRejectsNegativeTeacherSourceWeight(t *testing.T) {
+	if _, err := parseNonNegativeFloatMap("fiqa=-0.1"); err == nil {
+		t.Fatal("parse non-negative float map succeeded for negative weight")
+	}
+}
+
 func TestFormatTrainThroughputIncludesExamplePairAndStepRates(t *testing.T) {
 	summary := eosruntime.EmbeddingTrainRunSummary{
 		Workload: eosruntime.EmbeddingTrainWorkload{

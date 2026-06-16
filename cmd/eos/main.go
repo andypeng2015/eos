@@ -3279,6 +3279,7 @@ func runTrainEmbed(args []string) error {
 	var teacherLossWeight float64
 	var teacherTemperature float64
 	var teacherSourceTemperatures string
+	var teacherSourceWeights string
 	var teacherScoreNormalization string
 	var retrievalEvalDir string
 	var retrievalEvalSplit string
@@ -3314,6 +3315,7 @@ func runTrainEmbed(args []string) error {
 	fs.Float64Var(&teacherLossWeight, "teacher-loss-weight", 0, "teacher score distillation weight for hard-negative training")
 	fs.Float64Var(&teacherTemperature, "teacher-temperature", 0, "teacher score softmax temperature for hard-negative distillation")
 	fs.StringVar(&teacherSourceTemperatures, "teacher-source-temperatures", "", "comma-separated source=temperature overrides for teacher distillation, for example scifact=10,nfcorpus:model=1.5")
+	fs.StringVar(&teacherSourceWeights, "teacher-source-weights", "", "comma-separated source=weight overrides for teacher distillation influence, for example scifact=1,nfcorpus=0,fiqa=0.25")
 	fs.StringVar(&teacherScoreNormalization, "teacher-score-normalization", "", "normalize hard-negative teacher_scores before distillation: none, source_zscore, family_zscore, or example_zscore")
 	fs.StringVar(&retrievalEvalDir, "retrieval-eval-dir", "", "BEIR-style dataset dir for per-epoch retrieval nDCG@10 eval with current weights; enables -select-metric retrieval_ndcg")
 	fs.StringVar(&retrievalEvalSplit, "retrieval-eval-split", "test", "qrels split for retrieval eval (test/dev/train)")
@@ -3362,11 +3364,18 @@ func runTrainEmbed(args []string) error {
 	if parseErr != nil {
 		return fmt.Errorf("teacher-source-temperatures: %w", parseErr)
 	}
+	parsedTeacherSourceWeights, parseErr := parseNonNegativeFloatMap(teacherSourceWeights)
+	if parseErr != nil {
+		return fmt.Errorf("teacher-source-weights: %w", parseErr)
+	}
 	if len(parsedSourceWeights) > 0 && !hardNegativeTrain {
 		return fmt.Errorf("--hard-negative-source-weights requires --hard-negative-train")
 	}
 	if len(parsedTeacherSourceTemperatures) > 0 && !hardNegativeTrain {
 		return fmt.Errorf("--teacher-source-temperatures requires --hard-negative-train")
+	}
+	if len(parsedTeacherSourceWeights) > 0 && !hardNegativeTrain {
+		return fmt.Errorf("--teacher-source-weights requires --hard-negative-train")
 	}
 	if strings.TrimSpace(teacherScoreNormalization) != "" && !hardNegativeTrain {
 		return fmt.Errorf("--teacher-score-normalization requires --hard-negative-train")
@@ -3409,6 +3418,7 @@ func runTrainEmbed(args []string) error {
 		TeacherLossWeight:         float32(teacherLossWeight),
 		TeacherTemperature:        float32(teacherTemperature),
 		TeacherSourceTemperatures: parsedTeacherSourceTemperatures,
+		TeacherSourceWeights:      parsedTeacherSourceWeights,
 		TeacherScoreNormalization: teacherScoreNormalization,
 		ProgressEverySteps:        progressEvery,
 		EvalOnly:                  evalOnly,
@@ -3567,6 +3577,37 @@ func parsePositiveFloatMap(raw string) (map[string]float32, error) {
 		parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 32)
 		if err != nil || parsed <= 0 {
 			return nil, fmt.Errorf("entry %q must use a positive float value", item)
+		}
+		out[key] = float32(parsed)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+func parseNonNegativeFloatMap(raw string) (map[string]float32, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	out := map[string]float32{}
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(item, "=")
+		if !ok {
+			return nil, fmt.Errorf("entry %q must be source=value", item)
+		}
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" {
+			return nil, fmt.Errorf("entry %q has an empty source", item)
+		}
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 32)
+		if err != nil || parsed < 0 || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+			return nil, fmt.Errorf("entry %q must use a non-negative float value", item)
 		}
 		out[key] = float32(parsed)
 	}
@@ -4042,6 +4083,7 @@ type trainRunConfigJSON struct {
 	TeacherLossWeight         float32            `json:"teacher_loss_weight,omitempty"`
 	TeacherTemperature        float32            `json:"teacher_temperature,omitempty"`
 	TeacherSourceTemperatures map[string]float32 `json:"teacher_source_temperatures,omitempty"`
+	TeacherSourceWeights      map[string]float32 `json:"teacher_source_weights,omitempty"`
 	TeacherScoreNormalization string             `json:"teacher_score_normalization,omitempty"`
 	ProgressEverySteps        int                `json:"progress_every_steps"`
 	EvalOnly                  bool               `json:"eval_only"`
@@ -4209,6 +4251,7 @@ func trainRunConfigPayload(cfg eosruntime.EmbeddingTrainRunConfig) trainRunConfi
 		TeacherLossWeight:         cfg.TeacherLossWeight,
 		TeacherTemperature:        cfg.TeacherTemperature,
 		TeacherSourceTemperatures: cfg.TeacherSourceTemperatures,
+		TeacherSourceWeights:      cfg.TeacherSourceWeights,
 		TeacherScoreNormalization: cfg.TeacherScoreNormalization,
 		ProgressEverySteps:        cfg.ProgressEverySteps,
 		EvalOnly:                  cfg.EvalOnly,

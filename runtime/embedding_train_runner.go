@@ -37,6 +37,7 @@ type EmbeddingTrainRunConfig struct {
 	TeacherLossWeight         float32
 	TeacherTemperature        float32
 	TeacherSourceTemperatures map[string]float32
+	TeacherSourceWeights      map[string]float32
 	TeacherScoreNormalization string
 	ProgressEverySteps        int
 	Progress                  EmbeddingTrainProgressFunc
@@ -1229,6 +1230,24 @@ func hardNegativeTeacherTemperature(temperatures map[string]float32, source stri
 	return fallback
 }
 
+func hardNegativeTeacherWeight(weights map[string]float32, source string) float32 {
+	if len(weights) == 0 {
+		return 1
+	}
+	exact := normalizedHardNegativeSource(source)
+	if weight, ok := weights[exact]; ok {
+		return weight
+	}
+	family := hardNegativeSourceFamily(source)
+	if weight, ok := weights[family]; ok {
+		return weight
+	}
+	if weight, ok := weights["*"]; ok {
+		return weight
+	}
+	return 1
+}
+
 func hardNegativeSourceFamily(source string) string {
 	source = normalizedHardNegativeSource(source)
 	if idx := strings.IndexByte(source, ':'); idx > 0 {
@@ -1274,6 +1293,21 @@ func normalizeHardNegativeTeacherTemperatures(temperatures map[string]float32) m
 			continue
 		}
 		out[key] = temp
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeHardNegativeTeacherWeights(weights map[string]float32) map[string]float32 {
+	if len(weights) == 0 {
+		return nil
+	}
+	out := map[string]float32{}
+	for source, weight := range weights {
+		key := normalizedHardNegativeSource(source)
+		out[key] = weight
 	}
 	if len(out) == 0 {
 		return nil
@@ -1803,6 +1837,7 @@ func normalizedTrainRunConfig(cfg EmbeddingTrainRunConfig) EmbeddingTrainRunConf
 	cfg.GroupedLossWeight = effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
 	cfg.HardNegativeSourceWeights = normalizeHardNegativeSourceWeights(cfg.HardNegativeSourceWeights)
 	cfg.TeacherSourceTemperatures = normalizeHardNegativeTeacherTemperatures(cfg.TeacherSourceTemperatures)
+	cfg.TeacherSourceWeights = normalizeHardNegativeTeacherWeights(cfg.TeacherSourceWeights)
 	cfg.TeacherScoreNormalization = normalizeTeacherScoreNormalization(cfg.TeacherScoreNormalization)
 	return cfg
 }
@@ -1841,6 +1876,10 @@ func (t *EmbeddingTrainer) applyTrainRunOverrides(cfg EmbeddingTrainRunConfig) e
 		next.TeacherSourceTemperatures = normalizeHardNegativeTeacherTemperatures(cfg.TeacherSourceTemperatures)
 		changed = true
 	}
+	if len(cfg.TeacherSourceWeights) > 0 {
+		next.TeacherSourceWeights = normalizeHardNegativeTeacherWeights(cfg.TeacherSourceWeights)
+		changed = true
+	}
 	if !changed {
 		return nil
 	}
@@ -1871,8 +1910,12 @@ func (t *EmbeddingTrainer) syncTrainRunObjectiveConfig(cfg EmbeddingTrainRunConf
 	if len(cfg.TeacherSourceTemperatures) == 0 && len(t.config.TeacherSourceTemperatures) > 0 {
 		cfg.TeacherSourceTemperatures = t.config.TeacherSourceTemperatures
 	}
+	if len(cfg.TeacherSourceWeights) == 0 && len(t.config.TeacherSourceWeights) > 0 {
+		cfg.TeacherSourceWeights = t.config.TeacherSourceWeights
+	}
 	cfg.GroupedLossWeight = effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
 	cfg.TeacherSourceTemperatures = normalizeHardNegativeTeacherTemperatures(cfg.TeacherSourceTemperatures)
+	cfg.TeacherSourceWeights = normalizeHardNegativeTeacherWeights(cfg.TeacherSourceWeights)
 	cfg.TeacherScoreNormalization = normalizeTeacherScoreNormalization(cfg.TeacherScoreNormalization)
 	return cfg
 }
