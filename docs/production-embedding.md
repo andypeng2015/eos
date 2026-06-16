@@ -236,6 +236,15 @@ ferrous-wheel run scripts/smoke_eos_corkscrewdb_hnsw_quality.fw
 
 The HNSW wrapper feeds the same Eos 128d SciFact child cache into `scripts/smoke_corkscrewdb_child_vectors.fw` with `index_type=hnsw`, `vector_storage=raw`, and a post-load HNSW rebuild, then joins the same q4 planner row. Current default evidence: q4 overfetch100 has `ndcg@10=0.392775`, `recall@100=0.685778`, raw HNSW DB directory multiple `0.347691x`, rebuild time about `20.9s`, and p95 search latency about `1.78ms`; q4 full overfetch has `recall@100=0.741889` and p95 about `33.1ms`. CorkScrewDB rejects HNSW with `quantized_only`, so this is raw-vector index-search validation. It intentionally does not claim the flat quantized-only DB-size multiple; use the vector payload/planner columns only for compact q4 planning comparisons.
 
+Use the time-series/window CorkScrewDB smoke when the child vectors should be generated from synthetic parent series and then proven through the actual local flat API:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+ferrous-wheel run scripts/smoke_eos_corkscrewdb_timeseries_windows.fw
+```
+
+The wrapper runs `scripts/smoke_eos_timeseries_window_vectors.fw` into a nested `timeseries/` directory, then loads the generated window child vectors into CorkScrewDB with flat `quantized_only` persistence. Its joined summary shows parent count, child-window count, derived windows per parent, q4/q8 quality, planner fit, DB directory multiple, vector payload multiple, and p95 latency. Current default result: `5` parents, `25` child windows, `5` derived windows per parent; q4 flat/quantized_only records `ndcg@10=1.000000`, `recall@100=1.000000`, planner fit `123`, vector payload multiple `0.034180x`, and DB directory multiple `0.117643x`; q8 records `ndcg@10=0.926186`, `recall@100=1.000000`, planner fit `75`, vector payload multiple `0.060221x`, and DB directory multiple `0.143685x`. Observed p95 latency for the default synthetic smoke has been sub-ms, but it varies by run. This is local `PutVector`/`SearchVector` evidence for synthetic text-rendered numeric windows only, not remote/federation/HNSW and not a trained numeric time-series encoder. Keep measured DB directory size separate from planner/vector payload accounting.
+
 To move from storage math to a cache-only quality harness for time-series windows, export text-rendered numeric windows and reuse the existing multivector TurboQuant evaluator. The series JSONL has one parent series per row with `id` or `_id` and numeric `values`; qrels must use the parent series IDs as corpus IDs:
 
 ```bash

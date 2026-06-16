@@ -317,6 +317,14 @@ EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_timeseries_window_vectors
 
 This script creates a tiny synthetic five-series dataset, regenerates the time-series child-vector cache with the sealed Eos artifact, runs dense/q2/q4/q8 multivector TurboQuant evaluation, and then runs the storage planner with overhead-aware baseline accounting. Its `summary.tsv` and `manifest.json` demonstrate the narrow economics claim: many 128d quantized window vectors can fit under one 3072d dense-vector budget while q8 stays at dense quality on this controlled smoke. Override `EOS_TS_WINDOW_SMOKE_ARTIFACT`, `EOS_TS_WINDOW_SMOKE_OUTPUT_DIM`, `EOS_TS_WINDOW_SMOKE_WINDOW_SIZE`, `EOS_TS_WINDOW_SMOKE_WINDOW_STRIDE`, `EOS_TS_WINDOW_SMOKE_BITS`, `EOS_TS_WINDOW_SMOKE_BASELINE_DIM`, and `EOS_TS_WINDOW_SMOKE_VECTOR_OVERHEAD_BYTES` to reuse the harness on another artifact or shape.
 
+To prove the same synthetic window child vectors through local CorkScrewDB `PutVector`/`SearchVector`, run:
+
+```bash
+EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_corkscrewdb_timeseries_windows.fw
+```
+
+The wrapper nests the time-series smoke under `timeseries/`, feeds the generated `child-doc-vectors.jsonl`, `query-vectors.jsonl`, and `qrels.tsv` into `scripts/smoke_corkscrewdb_child_vectors.fw`, and defaults CorkScrewDB to flat `quantized_only` storage. Its joined `summary.tsv` reports parent count, child-window count, derived windows per parent, q4/q8 quality, planner fit, measured DB directory multiple, vector payload multiple, and p95 latency. Current default result: `5` parents, `25` child windows, `5` derived windows per parent; q4 flat/quantized_only records `ndcg@10=1.000000`, `recall@100=1.000000`, planner fit `123`, vector payload multiple `0.034180x`, and DB directory multiple `0.117643x`; q8 records `ndcg@10=0.926186`, `recall@100=1.000000`, planner fit `75`, vector payload multiple `0.060221x`, and DB directory multiple `0.143685x`. Observed p95 latency for the default synthetic smoke has been sub-ms, but it varies by run. This is local flat API evidence for synthetic text-rendered numeric windows only; it is not remote mode, federation, HNSW, a trained numeric time-series encoder, or a claim that DB directory bytes and planner/vector payload bytes are the same accounting layer.
+
 The first quality harness for that lane is cache-only and still outside the CorkScrewDB API:
 
 ```bash
