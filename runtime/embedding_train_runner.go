@@ -40,6 +40,9 @@ type EmbeddingTrainRunConfig struct {
 	TeacherSourceWeights      map[string]float32
 	MatryoshkaDims            []int
 	MatryoshkaWeights         []float32
+	TurboQuantPrefixBits      []int
+	TurboQuantPrefixWeight    float32
+	TurboQuantPrefixSeed      int64
 	TeacherScoreNormalization string
 	ProgressEverySteps        int
 	Progress                  EmbeddingTrainProgressFunc
@@ -861,7 +864,7 @@ func RetargetWorkloadToPairwiseEval(workload EmbeddingTrainWorkload, evalPairs i
 func EstimateContrastiveTrainWorkload(trainExamples, evalExamples int, cfg EmbeddingTrainRunConfig) EmbeddingTrainWorkload {
 	cfg = normalizedTrainRunConfig(cfg)
 	batches, trainPairsPerEpoch := contrastiveBatchWork(trainExamples, cfg.BatchSize)
-	trainPairsPerEpoch *= int64(matryoshkaPairMultiplier(cfg.MatryoshkaDims))
+	trainPairsPerEpoch *= int64(compactPrefixObjectiveMultiplier(cfg))
 	evalPairsPerPass := contrastiveEvalPairs(evalExamples)
 	evalPasses := plannedEvalPassCount(evalExamples, cfg.Epochs, cfg.EvalEveryEpoch)
 	if cfg.RestoreBest && evalExamples > 0 {
@@ -900,7 +903,7 @@ func EstimateHardNegativeTrainWorkload(trainExamples, negativesPerExample, evalE
 	if negativesPerExample < 0 {
 		negativesPerExample = 0
 	}
-	batches, trainPairsPerEpoch := hardNegativeBatchWork(trainExamples, cfg.BatchSize, negativesPerExample, cfg.ContrastiveLoss, cfg.TeacherLossWeight, matryoshkaPairMultiplier(cfg.MatryoshkaDims))
+	batches, trainPairsPerEpoch := hardNegativeBatchWork(trainExamples, cfg.BatchSize, negativesPerExample, cfg.ContrastiveLoss, cfg.TeacherLossWeight, compactPrefixObjectiveMultiplier(cfg))
 	evalPasses := plannedEvalPassCount(evalExamples, cfg.Epochs, cfg.EvalEveryEpoch)
 	if cfg.RestoreBest && evalExamples > 0 {
 		evalPasses++
@@ -1538,6 +1541,7 @@ func (t *EmbeddingTrainer) runContrastiveEpoch(trainSet []EmbeddingContrastiveEx
 	var totalPairs int64
 	batchIndex := 0
 	totalBatches, plannedEpochPairs := contrastiveBatchWork(len(order), batchSize)
+	plannedEpochPairs *= int64(compactPrefixObjectiveMultiplier(cfg))
 	for start := 0; start < len(order); start += batchSize {
 		end := start + batchSize
 		if end > len(order) {
@@ -1624,7 +1628,7 @@ func (t *EmbeddingTrainer) runHardNegativeEpoch(trainSet []EmbeddingHardNegative
 	if len(cfg.HardNegativeSourceWeights) == 0 {
 		order = spreadHardNegativeOrderByQuery(trainSet, order)
 	}
-	totalBatches, plannedEpochPairs := hardNegativeBatchWork(len(order), batchSize, cfg.HardNegativesPerQuery, cfg.ContrastiveLoss, cfg.TeacherLossWeight, matryoshkaPairMultiplier(cfg.MatryoshkaDims))
+	totalBatches, plannedEpochPairs := hardNegativeBatchWork(len(order), batchSize, cfg.HardNegativesPerQuery, cfg.ContrastiveLoss, cfg.TeacherLossWeight, compactPrefixObjectiveMultiplier(cfg))
 	for start := 0; start < len(order); start += batchSize {
 		end := start + batchSize
 		if end > len(order) {
@@ -1850,6 +1854,15 @@ func normalizedTrainRunConfig(cfg EmbeddingTrainRunConfig) EmbeddingTrainRunConf
 		cfg.MatryoshkaDims = dims
 		cfg.MatryoshkaWeights = weights
 	}
+	if bits, err := normalizeTurboQuantPrefixBits(cfg.TurboQuantPrefixBits); err == nil {
+		cfg.TurboQuantPrefixBits = bits
+	}
+	if len(cfg.TurboQuantPrefixBits) > 0 {
+		if cfg.TurboQuantPrefixWeight == 0 {
+			cfg.TurboQuantPrefixWeight = 1
+		}
+		cfg.TurboQuantPrefixSeed = effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
+	}
 	cfg.TeacherScoreNormalization = normalizeTeacherScoreNormalization(cfg.TeacherScoreNormalization)
 	return cfg
 }
@@ -1897,6 +1910,12 @@ func (t *EmbeddingTrainer) applyTrainRunOverrides(cfg EmbeddingTrainRunConfig) e
 		next.MatryoshkaWeights = append([]float32(nil), cfg.MatryoshkaWeights...)
 		changed = true
 	}
+	if len(cfg.TurboQuantPrefixBits) > 0 {
+		next.TurboQuantPrefixBits = append([]int(nil), cfg.TurboQuantPrefixBits...)
+		next.TurboQuantPrefixWeight = cfg.TurboQuantPrefixWeight
+		next.TurboQuantPrefixSeed = cfg.TurboQuantPrefixSeed
+		changed = true
+	}
 	if !changed {
 		return nil
 	}
@@ -1939,10 +1958,22 @@ func (t *EmbeddingTrainer) syncTrainRunObjectiveConfig(cfg EmbeddingTrainRunConf
 		cfg.MatryoshkaDims = append([]int(nil), t.config.MatryoshkaDims...)
 		cfg.MatryoshkaWeights = append([]float32(nil), t.config.MatryoshkaWeights...)
 	}
+	if len(cfg.TurboQuantPrefixBits) == 0 && len(t.config.TurboQuantPrefixBits) > 0 {
+		cfg.TurboQuantPrefixBits = append([]int(nil), t.config.TurboQuantPrefixBits...)
+		cfg.TurboQuantPrefixWeight = t.config.TurboQuantPrefixWeight
+		cfg.TurboQuantPrefixSeed = t.config.TurboQuantPrefixSeed
+	}
 	cfg.GroupedLossWeight = effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
 	cfg.TeacherSourceTemperatures = normalizeHardNegativeTeacherTemperatures(cfg.TeacherSourceTemperatures)
 	cfg.TeacherSourceWeights = normalizeHardNegativeTeacherWeights(cfg.TeacherSourceWeights)
 	cfg.MatryoshkaDims, cfg.MatryoshkaWeights, _ = normalizeMatryoshkaDimsAndWeights(cfg.MatryoshkaDims, cfg.MatryoshkaWeights, trainerEmbeddingDim(t))
+	cfg.TurboQuantPrefixBits, _ = normalizeTurboQuantPrefixBits(cfg.TurboQuantPrefixBits)
+	if len(cfg.TurboQuantPrefixBits) > 0 {
+		if cfg.TurboQuantPrefixWeight == 0 {
+			cfg.TurboQuantPrefixWeight = 1
+		}
+		cfg.TurboQuantPrefixSeed = effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
+	}
 	cfg.TeacherScoreNormalization = normalizeTeacherScoreNormalization(cfg.TeacherScoreNormalization)
 	return cfg
 }

@@ -110,21 +110,24 @@ func (m EmbeddingTrainManifest) nameOrDefault() string {
 
 func (m EmbeddingTrainManifest) mllValues() map[string]authoredManifestValue {
 	values := map[string]authoredManifestValue{
-		"name":                       authoredString(m.Name),
-		"config.optimizer":           authoredString(m.Config.Optimizer),
-		"config.weight_bits":         authoredInt(int64(m.Config.WeightBits)),
-		"config.learning_rate":       authoredFloat(float64(m.Config.LearningRate)),
-		"config.weight_decay":        authoredFloat(float64(m.Config.WeightDecay)),
-		"config.beta1":               authoredFloat(float64(m.Config.Beta1)),
-		"config.beta2":               authoredFloat(float64(m.Config.Beta2)),
-		"config.epsilon":             authoredFloat(float64(m.Config.Epsilon)),
-		"config.contrastive_loss":    authoredString(m.Config.ContrastiveLoss),
-		"config.temperature":         authoredFloat(float64(m.Config.Temperature)),
-		"config.grouped_loss_weight": authoredFloat(float64(m.Config.GroupedLossWeight)),
-		"config.teacher_loss_weight": authoredFloat(float64(m.Config.TeacherLossWeight)),
-		"config.teacher_temperature": authoredFloat(float64(m.Config.TeacherTemperature)),
-		"config.matryoshka_dims":     authoredString(formatMatryoshkaDims(m.Config.MatryoshkaDims)),
-		"config.matryoshka_weights":  authoredString(formatMatryoshkaWeights(m.Config.MatryoshkaWeights)),
+		"name":                            authoredString(m.Name),
+		"config.optimizer":                authoredString(m.Config.Optimizer),
+		"config.weight_bits":              authoredInt(int64(m.Config.WeightBits)),
+		"config.learning_rate":            authoredFloat(float64(m.Config.LearningRate)),
+		"config.weight_decay":             authoredFloat(float64(m.Config.WeightDecay)),
+		"config.beta1":                    authoredFloat(float64(m.Config.Beta1)),
+		"config.beta2":                    authoredFloat(float64(m.Config.Beta2)),
+		"config.epsilon":                  authoredFloat(float64(m.Config.Epsilon)),
+		"config.contrastive_loss":         authoredString(m.Config.ContrastiveLoss),
+		"config.temperature":              authoredFloat(float64(m.Config.Temperature)),
+		"config.grouped_loss_weight":      authoredFloat(float64(m.Config.GroupedLossWeight)),
+		"config.teacher_loss_weight":      authoredFloat(float64(m.Config.TeacherLossWeight)),
+		"config.teacher_temperature":      authoredFloat(float64(m.Config.TeacherTemperature)),
+		"config.matryoshka_dims":          authoredString(formatMatryoshkaDims(m.Config.MatryoshkaDims)),
+		"config.matryoshka_weights":       authoredString(formatMatryoshkaWeights(m.Config.MatryoshkaWeights)),
+		"config.turboquant_prefix_bits":   authoredString(formatIntList(m.Config.TurboQuantPrefixBits)),
+		"config.turboquant_prefix_weight": authoredFloat(float64(m.Config.TurboQuantPrefixWeight)),
+		"config.turboquant_prefix_seed":   authoredInt(m.Config.TurboQuantPrefixSeed),
 	}
 	for key, value := range m.Embedding.mllValues() {
 		values["embedding."+key] = value
@@ -222,16 +225,39 @@ func embeddingTrainManifestFromDoc(doc authoredManifestDoc) (EmbeddingTrainManif
 		}
 		manifest.Config.MatryoshkaWeights = weights
 	}
+	if value, ok, err := doc.string("config.turboquant_prefix_bits"); err != nil {
+		return EmbeddingTrainManifest{}, err
+	} else if ok {
+		bits, err := parseMatryoshkaDims(value)
+		if err != nil {
+			return EmbeddingTrainManifest{}, err
+		}
+		manifest.Config.TurboQuantPrefixBits = bits
+	}
+	if value, ok, err := doc.float("config.turboquant_prefix_weight"); err != nil {
+		return EmbeddingTrainManifest{}, err
+	} else if ok {
+		manifest.Config.TurboQuantPrefixWeight = float32(value)
+	}
+	if value, ok, err := doc.int("config.turboquant_prefix_seed"); err != nil {
+		return EmbeddingTrainManifest{}, err
+	} else if ok {
+		manifest.Config.TurboQuantPrefixSeed = value
+	}
 	return manifest, nil
 }
 
 func formatMatryoshkaDims(dims []int) string {
-	if len(dims) == 0 {
+	return formatIntList(dims)
+}
+
+func formatIntList(values []int) string {
+	if len(values) == 0 {
 		return ""
 	}
-	parts := make([]string, 0, len(dims))
-	for _, dim := range dims {
-		parts = append(parts, strconv.Itoa(dim))
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, strconv.Itoa(value))
 	}
 	return strings.Join(parts, ",")
 }

@@ -54,6 +54,25 @@ func TestEstimateContrastiveTrainWorkloadWithMatryoshkaPrefixes(t *testing.T) {
 	}
 }
 
+func TestEstimateContrastiveTrainWorkloadWithTurboQuantPrefixes(t *testing.T) {
+	workload := EstimateContrastiveTrainWorkload(512, 128, EmbeddingTrainRunConfig{
+		Epochs:               1,
+		BatchSize:            64,
+		EvalEveryEpoch:       4,
+		MatryoshkaDims:       []int{64, 128},
+		TurboQuantPrefixBits: []int{2, 4},
+	})
+	if workload.TrainPairsPerEpoch != 229376 {
+		t.Fatalf("train pairs/epoch = %d, want 229376", workload.TrainPairsPerEpoch)
+	}
+	if workload.EvalPairsPerPass != 16384 {
+		t.Fatalf("eval pairs/pass = %d, want unchanged 16384", workload.EvalPairsPerPass)
+	}
+	if workload.PlannedTotalPairs != 245760 {
+		t.Fatalf("planned total pairs = %d, want 245760", workload.PlannedTotalPairs)
+	}
+}
+
 func TestEstimateGroupedHardNegativeTrainWorkload(t *testing.T) {
 	workload := EstimateHardNegativeTrainWorkload(128, 1, 0, EmbeddingTrainRunConfig{
 		Epochs:          1,
@@ -244,6 +263,33 @@ func TestEmbeddingTrainerFitContrastiveRejectsInvalidMatryoshkaConfig(t *testing
 	}
 }
 
+func TestEmbeddingTrainerFitContrastiveRejectsInvalidTurboQuantPrefixConfig(t *testing.T) {
+	trainSet := tinyEmbeddingContrastiveDataset()
+	if _, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:               1,
+		BatchSize:            2,
+		MatryoshkaDims:       []int{2},
+		TurboQuantPrefixBits: []int{1},
+	}); err == nil {
+		t.Fatal("expected invalid turboquant prefix bit error")
+	}
+	if _, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:               1,
+		BatchSize:            2,
+		TurboQuantPrefixBits: []int{2},
+	}); err == nil {
+		t.Fatal("expected turboquant prefix bits to require matryoshka dims")
+	}
+	if _, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:               1,
+		BatchSize:            2,
+		MatryoshkaDims:       []int{1},
+		TurboQuantPrefixBits: []int{2},
+	}); err == nil {
+		t.Fatal("expected turboquant prefix dims to require dim >= 2")
+	}
+}
+
 func TestEmbeddingTrainerFitContrastiveMatryoshkaPrefixRunsAndTracksWork(t *testing.T) {
 	trainer := newTinyTrainableEmbeddingTrainer(t, 0.05)
 	trainSet := tinyEmbeddingContrastiveDataset()
@@ -268,6 +314,73 @@ func TestEmbeddingTrainerFitContrastiveMatryoshkaPrefixRunsAndTracksWork(t *test
 	}
 	if summary.FinalTrain.Loss <= 0 {
 		t.Fatalf("final train loss = %f, want positive", summary.FinalTrain.Loss)
+	}
+}
+
+func TestEmbeddingTrainerFitContrastiveTurboQuantPrefixRunsAndTracksWork(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	trainSet := tinyEmbeddingContrastiveDataset()
+	summary, err := trainer.FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:                 1,
+		BatchSize:              2,
+		Shuffle:                false,
+		MatryoshkaDims:         []int{2, 3},
+		MatryoshkaWeights:      []float32{0.5, 1},
+		TurboQuantPrefixBits:   []int{4, 2},
+		TurboQuantPrefixWeight: 0.25,
+	})
+	if err != nil {
+		t.Fatalf("fit contrastive turboquant prefix: %v", err)
+	}
+	if got, want := summary.Config.MatryoshkaDims, []int{2}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("normalized matryoshka dims = %v, want %v", got, want)
+	}
+	if got, want := summary.Config.TurboQuantPrefixBits, []int{2, 4}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("normalized turboquant prefix bits = %v, want %v", got, want)
+	}
+	if summary.Config.TurboQuantPrefixSeed != DefaultTurboQuantMultiVectorQuantizerSeed {
+		t.Fatalf("turboquant prefix seed = %d, want default %d", summary.Config.TurboQuantPrefixSeed, DefaultTurboQuantMultiVectorQuantizerSeed)
+	}
+	if summary.FinalTrain.BatchSize != 16 {
+		t.Fatalf("final train batch size = %d, want base+dense-prefix+2 turboquant prefixes pair count 16", summary.FinalTrain.BatchSize)
+	}
+	if summary.Workload.PlannedTrainPairs != 16 || summary.Workload.ActualTrainPairs != 16 {
+		t.Fatalf("train pairs planned/actual = %d/%d, want 16/16", summary.Workload.PlannedTrainPairs, summary.Workload.ActualTrainPairs)
+	}
+	if summary.FinalTrain.Loss <= 0 {
+		t.Fatalf("final train loss = %f, want positive", summary.FinalTrain.Loss)
+	}
+}
+
+func TestEmbeddingTrainerTurboQuantPrefixDisablesContrastiveAccelerator(t *testing.T) {
+	batch := tinyEmbeddingContrastiveDataset()
+	accelerated := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	accelerated.config.ContrastiveLoss = "infonce"
+	accelerated.config.Temperature = 0.05
+	accel := &countingContrastiveAccelerator{}
+	accelerated.contrastiveAccel = accel
+	if _, err := accelerated.TrainContrastiveStep(batch); err != nil {
+		t.Fatalf("train accelerated contrastive: %v", err)
+	}
+	if accel.squareCalls != 1 {
+		t.Fatalf("accelerator square calls = %d, want 1 when compact-prefix objective unset", accel.squareCalls)
+	}
+
+	host := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	host.config.ContrastiveLoss = "infonce"
+	host.config.Temperature = 0.05
+	host.config.MatryoshkaDims = []int{2}
+	host.config.MatryoshkaWeights = []float32{1}
+	host.config.TurboQuantPrefixBits = []int{2}
+	host.config.TurboQuantPrefixWeight = 1
+	host.config.TurboQuantPrefixSeed = DefaultTurboQuantMultiVectorQuantizerSeed
+	hostAccel := &countingContrastiveAccelerator{}
+	host.contrastiveAccel = hostAccel
+	if _, err := host.TrainContrastiveStep(batch); err != nil {
+		t.Fatalf("train turboquant prefix contrastive: %v", err)
+	}
+	if hostAccel.squareCalls != 0 || hostAccel.rectCalls != 0 {
+		t.Fatalf("accelerator calls square=%d rect=%d, want host path when turboquant prefix objective is enabled", hostAccel.squareCalls, hostAccel.rectCalls)
 	}
 }
 
@@ -1280,6 +1393,54 @@ pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16
 		"projection": backend.NewTensorF32([]int{2, 2}, []float32{
 			1, 0,
 			0, 1,
+		}),
+	}, EmbeddingTrainConfig{LearningRate: learningRate})
+	if err != nil {
+		t.Fatalf("new trainer: %v", err)
+	}
+	return trainer
+}
+
+func newTinyTrainable3DEmbeddingTrainer(t *testing.T, learningRate float32) *EmbeddingTrainer {
+	t.Helper()
+	src := []byte(`
+param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable
+param projection: q8[D, E] @weight("weights/projection") @trainable
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let projection_f = dequant(projection)
+    let projected = @matmul(hidden, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let projection_f = dequant(projection)
+    let projected = @matmul(hidden, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+`)
+
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "tiny_train_embed_3d_q8"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	manifest := tinyMaskedEmbeddingManifest()
+	manifest.Name = "tiny_train_embed_3d_q8"
+	trainer, err := NewEmbeddingTrainer(bundle.Artifact, manifest, map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF32([]int{3, 2}, []float32{
+			1, 0,
+			0, 1,
+			1, 1,
+		}),
+		"projection": backend.NewTensorF32([]int{2, 3}, []float32{
+			1, 0, 0.5,
+			0, 1, 0.5,
 		}),
 	}, EmbeddingTrainConfig{LearningRate: learningRate})
 	if err != nil {

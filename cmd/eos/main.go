@@ -3654,6 +3654,9 @@ func runTrainEmbed(args []string) error {
 	var teacherScoreNormalization string
 	var matryoshkaDims string
 	var matryoshkaWeights string
+	var turboQuantPrefixBits string
+	var turboQuantPrefixWeight float64
+	var turboQuantPrefixSeed int64
 	var retrievalEvalDir string
 	var retrievalEvalSplit string
 	var retrievalEvalMaxDocs int
@@ -3692,6 +3695,9 @@ func runTrainEmbed(args []string) error {
 	fs.StringVar(&teacherScoreNormalization, "teacher-score-normalization", "", "normalize hard-negative teacher_scores before distillation: none, source_zscore, family_zscore, or example_zscore")
 	fs.StringVar(&matryoshkaDims, "matryoshka-dims", "", "comma-separated compact prefix dimensions to train with InfoNCE, for example 64,128")
 	fs.StringVar(&matryoshkaWeights, "matryoshka-weights", "", "optional comma-separated positive weights matching --matryoshka-dims")
+	fs.StringVar(&turboQuantPrefixBits, "turboquant-prefix-bits", "", "comma-separated TurboQuant bit widths for quantized compact-prefix InfoNCE, supported: 2..8")
+	fs.Float64Var(&turboQuantPrefixWeight, "turboquant-prefix-weight", 0, "optional weight for each TurboQuant compact-prefix objective (default 1 when bits are set)")
+	fs.Int64Var(&turboQuantPrefixSeed, "turboquant-prefix-seed", 0, "TurboQuant compact-prefix quantizer seed (default matches multivector retrieval)")
 	fs.StringVar(&retrievalEvalDir, "retrieval-eval-dir", "", "BEIR-style dataset dir for per-epoch retrieval nDCG@10 eval with current weights; enables -select-metric retrieval_ndcg")
 	fs.StringVar(&retrievalEvalSplit, "retrieval-eval-split", "test", "qrels split for retrieval eval (test/dev/train)")
 	fs.IntVar(&retrievalEvalMaxDocs, "retrieval-eval-max-docs", 5000, "cap corpus docs embedded per retrieval eval (0 = all); smaller is faster per-epoch")
@@ -3718,6 +3724,9 @@ func runTrainEmbed(args []string) error {
 	}
 	if teacherTemperature < 0 {
 		return fmt.Errorf("teacher-temperature must be non-negative")
+	}
+	if turboQuantPrefixWeight < 0 {
+		return fmt.Errorf("turboquant-prefix-weight must be non-negative")
 	}
 	if progressEvery < 0 {
 		return fmt.Errorf("progress-every must be non-negative")
@@ -3750,6 +3759,13 @@ func runTrainEmbed(args []string) error {
 	parsedMatryoshkaWeights, parseErr := parsePositiveFloatList(matryoshkaWeights)
 	if parseErr != nil {
 		return fmt.Errorf("matryoshka-weights: %w", parseErr)
+	}
+	parsedTurboQuantPrefixBits, parseErr := parsePositiveIntList(turboQuantPrefixBits)
+	if parseErr != nil {
+		return fmt.Errorf("turboquant-prefix-bits: %w", parseErr)
+	}
+	if err := validateTurboQuantPrefixBitsFlag(parsedTurboQuantPrefixBits); err != nil {
+		return err
 	}
 	if len(parsedSourceWeights) > 0 && !hardNegativeTrain {
 		return fmt.Errorf("--hard-negative-source-weights requires --hard-negative-train")
@@ -3805,6 +3821,9 @@ func runTrainEmbed(args []string) error {
 		TeacherScoreNormalization: teacherScoreNormalization,
 		MatryoshkaDims:            parsedMatryoshkaDims,
 		MatryoshkaWeights:         parsedMatryoshkaWeights,
+		TurboQuantPrefixBits:      parsedTurboQuantPrefixBits,
+		TurboQuantPrefixWeight:    float32(turboQuantPrefixWeight),
+		TurboQuantPrefixSeed:      turboQuantPrefixSeed,
 		ProgressEverySteps:        progressEvery,
 		EvalOnly:                  evalOnly,
 		PairwiseTrain:             pairwiseTrain,
@@ -3992,6 +4011,15 @@ func parsePositiveIntList(raw string) ([]int, error) {
 		return nil, nil
 	}
 	return out, nil
+}
+
+func validateTurboQuantPrefixBitsFlag(bits []int) error {
+	for _, bitWidth := range bits {
+		if bitWidth < 2 || bitWidth > 8 {
+			return fmt.Errorf("turboquant-prefix-bits must be in supported range 2..8")
+		}
+	}
+	return nil
 }
 
 func parsePositiveFloatList(raw string) ([]float32, error) {
@@ -4325,6 +4353,9 @@ func runTrainCorpus(args []string) error {
 	var teacherTemperature float64
 	var matryoshkaDims string
 	var matryoshkaWeights string
+	var turboQuantPrefixBits string
+	var turboQuantPrefixWeight float64
+	var turboQuantPrefixSeed int64
 	fs.IntVar(&epochs, "epochs", 10, "number of epochs")
 	fs.IntVar(&batchSize, "batch-size", 8, "batch size")
 	fs.BoolVar(&shuffle, "shuffle", true, "shuffle training set each epoch")
@@ -4354,6 +4385,9 @@ func runTrainCorpus(args []string) error {
 	fs.Float64Var(&teacherTemperature, "teacher-temperature", 0, "teacher score softmax temperature for hard-negative distillation")
 	fs.StringVar(&matryoshkaDims, "matryoshka-dims", "", "comma-separated compact prefix dimensions to train with InfoNCE, for example 64,128")
 	fs.StringVar(&matryoshkaWeights, "matryoshka-weights", "", "optional comma-separated positive weights matching --matryoshka-dims")
+	fs.StringVar(&turboQuantPrefixBits, "turboquant-prefix-bits", "", "comma-separated TurboQuant bit widths for quantized compact-prefix InfoNCE, supported: 2..8")
+	fs.Float64Var(&turboQuantPrefixWeight, "turboquant-prefix-weight", 0, "optional weight for each TurboQuant compact-prefix objective (default 1 when bits are set)")
+	fs.Int64Var(&turboQuantPrefixSeed, "turboquant-prefix-seed", 0, "TurboQuant compact-prefix quantizer seed (default matches multivector retrieval)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -4375,6 +4409,9 @@ func runTrainCorpus(args []string) error {
 	if teacherTemperature < 0 {
 		return fmt.Errorf("teacher-temperature must be non-negative")
 	}
+	if turboQuantPrefixWeight < 0 {
+		return fmt.Errorf("turboquant-prefix-weight must be non-negative")
+	}
 	if progressEvery < 0 {
 		return fmt.Errorf("progress-every must be non-negative")
 	}
@@ -4389,29 +4426,39 @@ func runTrainCorpus(args []string) error {
 	if parseErr != nil {
 		return fmt.Errorf("matryoshka-weights: %w", parseErr)
 	}
+	parsedTurboQuantPrefixBits, parseErr := parsePositiveIntList(turboQuantPrefixBits)
+	if parseErr != nil {
+		return fmt.Errorf("turboquant-prefix-bits: %w", parseErr)
+	}
+	if err := validateTurboQuantPrefixBitsFlag(parsedTurboQuantPrefixBits); err != nil {
+		return err
+	}
 	path := fs.Arg(0)
 	corpusPath := fs.Arg(1)
 	runConfig := eosruntime.EmbeddingTrainRunConfig{
-		Epochs:                epochs,
-		BatchSize:             batchSize,
-		Shuffle:               shuffle,
-		Seed:                  seed,
-		EvalEveryEpoch:        evalEvery,
-		EvalEverySteps:        evalEverySteps,
-		EarlyStoppingPatience: patience,
-		SelectMetric:          selectMetric,
-		MinDelta:              float32(minDelta),
-		RestoreBest:           restoreBest,
-		LengthBucketBatches:   lengthBucketBatches,
-		LearningRate:          float32(learningRate),
-		ContrastiveLoss:       contrastiveLoss,
-		Temperature:           float32(temperature),
-		GroupedLossWeight:     float32(groupedLossWeight),
-		TeacherLossWeight:     float32(teacherLossWeight),
-		TeacherTemperature:    float32(teacherTemperature),
-		MatryoshkaDims:        parsedMatryoshkaDims,
-		MatryoshkaWeights:     parsedMatryoshkaWeights,
-		ProgressEverySteps:    progressEvery,
+		Epochs:                 epochs,
+		BatchSize:              batchSize,
+		Shuffle:                shuffle,
+		Seed:                   seed,
+		EvalEveryEpoch:         evalEvery,
+		EvalEverySteps:         evalEverySteps,
+		EarlyStoppingPatience:  patience,
+		SelectMetric:           selectMetric,
+		MinDelta:               float32(minDelta),
+		RestoreBest:            restoreBest,
+		LengthBucketBatches:    lengthBucketBatches,
+		LearningRate:           float32(learningRate),
+		ContrastiveLoss:        contrastiveLoss,
+		Temperature:            float32(temperature),
+		GroupedLossWeight:      float32(groupedLossWeight),
+		TeacherLossWeight:      float32(teacherLossWeight),
+		TeacherTemperature:     float32(teacherTemperature),
+		MatryoshkaDims:         parsedMatryoshkaDims,
+		MatryoshkaWeights:      parsedMatryoshkaWeights,
+		TurboQuantPrefixBits:   parsedTurboQuantPrefixBits,
+		TurboQuantPrefixWeight: float32(turboQuantPrefixWeight),
+		TurboQuantPrefixSeed:   turboQuantPrefixSeed,
+		ProgressEverySteps:     progressEvery,
 	}
 	if progressEvery > 0 {
 		runConfig.Progress = printTrainProgress
@@ -4532,6 +4579,9 @@ type trainRunConfigJSON struct {
 	TeacherScoreNormalization string             `json:"teacher_score_normalization,omitempty"`
 	MatryoshkaDims            []int              `json:"matryoshka_dims,omitempty"`
 	MatryoshkaWeights         []float32          `json:"matryoshka_weights,omitempty"`
+	TurboQuantPrefixBits      []int              `json:"turboquant_prefix_bits,omitempty"`
+	TurboQuantPrefixWeight    float32            `json:"turboquant_prefix_weight,omitempty"`
+	TurboQuantPrefixSeed      int64              `json:"turboquant_prefix_seed,omitempty"`
 	ProgressEverySteps        int                `json:"progress_every_steps"`
 	EvalOnly                  bool               `json:"eval_only"`
 	PairwiseTrain             bool               `json:"pairwise_train"`
@@ -4702,6 +4752,9 @@ func trainRunConfigPayload(cfg eosruntime.EmbeddingTrainRunConfig) trainRunConfi
 		TeacherScoreNormalization: cfg.TeacherScoreNormalization,
 		MatryoshkaDims:            cfg.MatryoshkaDims,
 		MatryoshkaWeights:         cfg.MatryoshkaWeights,
+		TurboQuantPrefixBits:      cfg.TurboQuantPrefixBits,
+		TurboQuantPrefixWeight:    cfg.TurboQuantPrefixWeight,
+		TurboQuantPrefixSeed:      cfg.TurboQuantPrefixSeed,
 		ProgressEverySteps:        cfg.ProgressEverySteps,
 		EvalOnly:                  cfg.EvalOnly,
 		PairwiseTrain:             cfg.PairwiseTrain,

@@ -2508,6 +2508,28 @@ func TestRunTrainEmbedFitsContrastivePackage(t *testing.T) {
 	}
 }
 
+func TestRunTrainEmbedRejectsInvalidTurboQuantPrefixBits(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	trainPath := filepath.Join(t.TempDir(), "train.jsonl")
+	examples := []eosruntime.EmbeddingContrastiveExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
+	}
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
+		t.Fatalf("write train dataset: %v", err)
+	}
+	err := run([]string{"train-embed", "--epochs", "1", "--batch-size", "2", "--contrastive-loss", "infonce", "--matryoshka-dims", "2", "--turboquant-prefix-bits", "1", path, trainPath})
+	if err == nil {
+		t.Fatal("expected invalid turboquant prefix bits error")
+	}
+	if !strings.Contains(err.Error(), "turboquant-prefix-bits") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestRunRenameEmbedRewritesPackageIdentity(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {

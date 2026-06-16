@@ -59,6 +59,9 @@ type candidateConfig struct {
 	TeacherScoreNormalization string
 	MatryoshkaDims      string
 	MatryoshkaWeights   string
+	TurboQuantPrefixBits string
+	TurboQuantPrefixWeight string
+	TurboQuantPrefixSeed string
 	EvalEvery           string
 	EvalEverySteps      string
 	Patience            string
@@ -510,6 +513,9 @@ func writeManifest(cfg candidateConfig, status string) error {
     "teacher_score_normalization": %s,
     "matryoshka_dims": %s,
     "matryoshka_weights": %s,
+    "turboquant_prefix_bits": %s,
+    "turboquant_prefix_weight": %s,
+    "turboquant_prefix_seed": %s,
     "select_metric": %s,
     "quality_target": %s,
     "eval_every": %s,
@@ -572,6 +578,9 @@ func writeManifest(cfg candidateConfig, status string) error {
 		jsonString(cfg.TeacherScoreNormalization),
 		jsonString(cfg.MatryoshkaDims),
 		jsonString(cfg.MatryoshkaWeights),
+		jsonString(cfg.TurboQuantPrefixBits),
+		jsonString(cfg.TurboQuantPrefixWeight),
+		jsonString(cfg.TurboQuantPrefixSeed),
 		jsonString(cfg.SelectMetric),
 		jsonString(cfg.QualityTarget),
 		cfg.EvalEvery,
@@ -698,6 +707,9 @@ func prepareConfig(root string) (candidateConfig, error) {
 		TeacherScoreNormalization: getenv("EOS_TEACHER_SCORE_NORMALIZATION", ""),
 		MatryoshkaDims:      getenv("EOS_MATRYOSHKA_DIMS", ""),
 		MatryoshkaWeights:   getenv("EOS_MATRYOSHKA_WEIGHTS", ""),
+		TurboQuantPrefixBits: getenv("EOS_TURBOQUANT_PREFIX_BITS", ""),
+		TurboQuantPrefixWeight: getenv("EOS_TURBOQUANT_PREFIX_WEIGHT", ""),
+		TurboQuantPrefixSeed: getenv("EOS_TURBOQUANT_PREFIX_SEED", ""),
 		EvalEvery:           getenv("EOS_EVAL_EVERY", "1"),
 		EvalEverySteps:      getenv("EOS_EVAL_EVERY_STEPS", "0"),
 		Patience:            getenv("EOS_PATIENCE", "3"),
@@ -857,6 +869,15 @@ func trainCommonArgs(cfg candidateConfig) []string {
 	}
 	if cfg.MatryoshkaWeights != "" {
 		args = append(args, "--matryoshka-weights", cfg.MatryoshkaWeights)
+	}
+	if cfg.TurboQuantPrefixBits != "" {
+		args = append(args, "--turboquant-prefix-bits", cfg.TurboQuantPrefixBits)
+	}
+	if cfg.TurboQuantPrefixWeight != "" {
+		args = append(args, "--turboquant-prefix-weight", cfg.TurboQuantPrefixWeight)
+	}
+	if cfg.TurboQuantPrefixSeed != "" {
+		args = append(args, "--turboquant-prefix-seed", cfg.TurboQuantPrefixSeed)
 	}
 	return args
 }

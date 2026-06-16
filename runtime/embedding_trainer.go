@@ -10,6 +10,7 @@ import (
 
 	eosartifact "m31labs.dev/eos/artifact/eos"
 	"m31labs.dev/eos/runtime/backend"
+	"m31labs.dev/turboquant"
 )
 
 // EmbeddingPairExample is one supervised pairwise training example.
@@ -40,6 +41,9 @@ type EmbeddingTrainConfig struct {
 	TeacherSourceWeights      map[string]float32
 	MatryoshkaDims            []int
 	MatryoshkaWeights         []float32
+	TurboQuantPrefixBits      []int
+	TurboQuantPrefixWeight    float32
+	TurboQuantPrefixSeed      int64
 }
 
 // EmbeddingTrainMetrics summarizes one training/eval batch.
@@ -1171,14 +1175,16 @@ func (t *EmbeddingTrainer) TrainContrastiveStep(batch []EmbeddingContrastiveExam
 	} else {
 		totalLoss, totalScore = accumulatePairMSEContrastiveGrads(queries, positives, queryGrads, positiveGrads)
 	}
-	if prefixLoss, prefixScore, prefixPairs := accumulateMatryoshkaContrastiveGrads(queries, positives, t.config, queryGrads, positiveGrads); prefixPairs > 0 {
-		weightSum := matryoshkaWeightSum(t.config.MatryoshkaWeights)
+	prefixLoss, prefixScore, prefixPairs := accumulateMatryoshkaContrastiveGrads(queries, positives, t.config, queryGrads, positiveGrads)
+	turboPrefixLoss, turboPrefixScore, turboPrefixPairs := accumulateTurboQuantPrefixContrastiveGrads(queries, positives, t.config, queryGrads, positiveGrads)
+	if prefixPairs+turboPrefixPairs > 0 {
+		weightSum := matryoshkaWeightSum(t.config.MatryoshkaWeights) + turboQuantPrefixWeightSum(t.config)
 		objectiveScale := float32(1) / (1 + weightSum)
 		scaleEmbeddingGradBuffers(queryGrads, objectiveScale)
 		scaleEmbeddingGradBuffers(positiveGrads, objectiveScale)
-		totalLoss = totalLoss*objectiveScale + prefixLoss*objectiveScale
-		totalScore += prefixScore
-		pairCount += prefixPairs
+		totalLoss = totalLoss*objectiveScale + (prefixLoss+turboPrefixLoss)*objectiveScale
+		totalScore += prefixScore + turboPrefixScore
+		pairCount += prefixPairs + turboPrefixPairs
 	}
 
 	if !t.tryBackpropContrastiveBatch(
@@ -1368,14 +1374,16 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 		}
 	}
 	pairCount := hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, t.config.ContrastiveLoss) + teacherPairCount
-	if prefixLoss, prefixScore, prefixPairs := accumulateMatryoshkaHardNegativeGrads(queries, candidates, targetIndexes, candidateSpans, t.config, queryGrads, candidateGrads); prefixPairs > 0 {
-		weightSum := matryoshkaWeightSum(t.config.MatryoshkaWeights)
+	prefixLoss, prefixScore, prefixPairs := accumulateMatryoshkaHardNegativeGrads(queries, candidates, targetIndexes, candidateSpans, t.config, queryGrads, candidateGrads)
+	turboPrefixLoss, turboPrefixScore, turboPrefixPairs := accumulateTurboQuantPrefixHardNegativeGrads(queries, candidates, targetIndexes, candidateSpans, t.config, queryGrads, candidateGrads)
+	if prefixPairs+turboPrefixPairs > 0 {
+		weightSum := matryoshkaWeightSum(t.config.MatryoshkaWeights) + turboQuantPrefixWeightSum(t.config)
 		objectiveScale := float32(1) / (1 + weightSum)
 		scaleEmbeddingGradBuffers(queryGrads, objectiveScale)
 		scaleEmbeddingGradBuffers(candidateGrads, objectiveScale)
-		totalLoss = totalLoss*objectiveScale + prefixLoss*objectiveScale
-		totalScore += prefixScore
-		pairCount += prefixPairs
+		totalLoss = totalLoss*objectiveScale + (prefixLoss+turboPrefixLoss)*objectiveScale
+		totalScore += prefixScore + turboPrefixScore
+		pairCount += prefixPairs + turboPrefixPairs
 	}
 	if !t.tryBackpropContrastiveBatch(
 		queries,
@@ -2755,6 +2763,29 @@ func newContrastivePrefixPooledMatrix(seqs []*embeddingEncodedSequence, dim int)
 	return matrix
 }
 
+func newTurboQuantDequantizedPrefixPooledMatrix(seqs []*embeddingEncodedSequence, dim, bitWidth int, seed int64) contrastivePooledMatrix {
+	matrix := contrastivePooledMatrix{
+		rows:  len(seqs),
+		norms: make([]float32, len(seqs)),
+	}
+	if len(seqs) == 0 || seqs[0] == nil || dim <= 0 || len(seqs[0].pooled) < dim {
+		return matrix
+	}
+	matrix.width = dim
+	matrix.data = make([]float32, matrix.rows*matrix.width)
+	q := turboquant.NewIPWithSeed(dim, bitWidth, seed)
+	for row, seq := range seqs {
+		if seq == nil || len(seq.pooled) < matrix.width {
+			continue
+		}
+		values := matrix.row(row)
+		dequantized := q.Dequantize(q.Quantize(seq.pooled[:matrix.width]))
+		copy(values, dequantized)
+		matrix.norms[row] = vectorNorm(values)
+	}
+	return matrix
+}
+
 func (m contrastivePooledMatrix) row(index int) []float32 {
 	if index < 0 || index >= m.rows || m.width == 0 {
 		return nil
@@ -3041,6 +3072,44 @@ func accumulatePrefixInfoNCEContrastiveGrads(queries, positives []*embeddingEnco
 	return totalLoss, totalScore
 }
 
+func accumulateTurboQuantPrefixInfoNCEContrastiveGrads(queries, positives []*embeddingEncodedSequence, dim, bitWidth int, seed int64, temperature float32, queryGrads, positiveGrads [][]float32) (float32, float32) {
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	if dim <= 0 {
+		return 0, 0
+	}
+	if temperature <= 0 {
+		temperature = 0.05
+	}
+	queryMatrix := newContrastivePrefixPooledMatrix(queries, dim)
+	positiveMatrix := newTurboQuantDequantizedPrefixPooledMatrix(positives, dim, bitWidth, seed)
+	if queryMatrix.width == 0 || positiveMatrix.width != queryMatrix.width {
+		return 0, 0
+	}
+	rowScores := make([]float32, len(positives))
+	rowProbs := make([]float32, len(positives))
+	for i := range queries {
+		query := queryMatrix.row(i)
+		queryNorm := queryMatrix.norms[i]
+		for j := range positives {
+			score := cosineScoreWithNorms(query, positiveMatrix.row(j), queryNorm, positiveMatrix.norms[j])
+			rowScores[j] = score
+			totalScore += score
+		}
+		rowLoss := infoNCERowProbsAndLossInto(rowScores, i, temperature, rowProbs)
+		totalLoss += rowLoss
+		for j, prob := range rowProbs {
+			target := float32(0)
+			if i == j {
+				target = 1
+			}
+			scale := (prob - target) / temperature
+			accumulateCosineGradFromScore(query, positiveMatrix.row(j), queryNorm, positiveMatrix.norms[j], rowScores[j], scale, queryGrads[i], positiveGrads[j])
+		}
+	}
+	return totalLoss, totalScore
+}
+
 func accumulateMatryoshkaContrastiveGrads(queries, positives []*embeddingEncodedSequence, cfg EmbeddingTrainConfig, queryGrads, positiveGrads [][]float32) (float32, float32, int) {
 	if len(cfg.MatryoshkaDims) == 0 {
 		return 0, 0, 0
@@ -3064,6 +3133,33 @@ func accumulateMatryoshkaContrastiveGrads(queries, positives []*embeddingEncoded
 		totalLoss += loss * weight
 		totalScore += score
 		pairCount += len(queries) * len(positives)
+	}
+	return totalLoss, totalScore, pairCount
+}
+
+func accumulateTurboQuantPrefixContrastiveGrads(queries, positives []*embeddingEncodedSequence, cfg EmbeddingTrainConfig, queryGrads, positiveGrads [][]float32) (float32, float32, int) {
+	if len(cfg.MatryoshkaDims) == 0 || len(cfg.TurboQuantPrefixBits) == 0 {
+		return 0, 0, 0
+	}
+	weight := effectiveTurboQuantPrefixWeight(cfg)
+	if weight <= 0 {
+		return 0, 0, 0
+	}
+	seed := effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	pairCount := 0
+	for _, dim := range cfg.MatryoshkaDims {
+		for _, bitWidth := range cfg.TurboQuantPrefixBits {
+			dimQueryGrads := newEmbeddingPooledGradBuffers(queries)
+			dimPositiveGrads := newEmbeddingPooledGradBuffers(positives)
+			loss, score := accumulateTurboQuantPrefixInfoNCEContrastiveGrads(queries, positives, dim, bitWidth, seed, cfg.Temperature, dimQueryGrads, dimPositiveGrads)
+			addScaledEmbeddingGradBuffers(queryGrads, dimQueryGrads, weight)
+			addScaledEmbeddingGradBuffers(positiveGrads, dimPositiveGrads, weight)
+			totalLoss += loss * weight
+			totalScore += score
+			pairCount += len(queries) * len(positives)
+		}
 	}
 	return totalLoss, totalScore, pairCount
 }
@@ -3115,6 +3211,48 @@ func accumulatePrefixInfoNCEHardNegativeGrads(queries, candidates []*embeddingEn
 	}
 	queryMatrix := newContrastivePrefixPooledMatrix(queries, dim)
 	candidateMatrix := newContrastivePrefixPooledMatrix(candidates, dim)
+	if queryMatrix.width == 0 || candidateMatrix.width != queryMatrix.width {
+		return 0, 0
+	}
+	rowScores := make([]float32, len(candidates))
+	rowProbs := make([]float32, len(candidates))
+	for i := range queries {
+		query := queryMatrix.row(i)
+		queryNorm := queryMatrix.norms[i]
+		for j := range candidates {
+			score := cosineScoreWithNorms(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j])
+			rowScores[j] = score
+			totalScore += score
+		}
+		targetIndex := -1
+		if i < len(targetIndexes) {
+			targetIndex = targetIndexes[i]
+		}
+		rowLoss := infoNCERowProbsAndLossInto(rowScores, targetIndex, temperature, rowProbs)
+		totalLoss += rowLoss
+		for j, prob := range rowProbs {
+			target := float32(0)
+			if j == targetIndex {
+				target = 1
+			}
+			scale := (prob - target) / temperature
+			accumulateCosineGradFromScore(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j], rowScores[j], scale, queryGrads[i], candidateGrads[j])
+		}
+	}
+	return totalLoss, totalScore
+}
+
+func accumulateTurboQuantPrefixInfoNCEHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, targetIndexes []int, dim, bitWidth int, seed int64, temperature float32, queryGrads, candidateGrads [][]float32) (float32, float32) {
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	if dim <= 0 {
+		return 0, 0
+	}
+	if temperature <= 0 {
+		temperature = 0.05
+	}
+	queryMatrix := newContrastivePrefixPooledMatrix(queries, dim)
+	candidateMatrix := newTurboQuantDequantizedPrefixPooledMatrix(candidates, dim, bitWidth, seed)
 	if queryMatrix.width == 0 || candidateMatrix.width != queryMatrix.width {
 		return 0, 0
 	}
@@ -3251,6 +3389,59 @@ func accumulatePrefixGroupedInfoNCEHardNegativeGrads(queries, candidates []*embe
 	return totalLoss, totalScore
 }
 
+func accumulateTurboQuantPrefixGroupedInfoNCEHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, dim, bitWidth int, seed int64, temperature float32, queryGrads, candidateGrads [][]float32) (float32, float32) {
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	if dim <= 0 {
+		return 0, 0
+	}
+	if temperature <= 0 {
+		temperature = 0.05
+	}
+	queryMatrix := newContrastivePrefixPooledMatrix(queries, dim)
+	candidateMatrix := newTurboQuantDequantizedPrefixPooledMatrix(candidates, dim, bitWidth, seed)
+	if queryMatrix.width == 0 || candidateMatrix.width != queryMatrix.width {
+		return 0, 0
+	}
+	maxCandidates := 0
+	for i := range queries {
+		span := groupedCandidateSpan(candidateSpans, i, len(candidates))
+		if n := span.End - span.Start; n > maxCandidates {
+			maxCandidates = n
+		}
+	}
+	rowScores := make([]float32, maxCandidates)
+	rowProbs := make([]float32, maxCandidates)
+	for i := range queries {
+		span := groupedCandidateSpan(candidateSpans, i, len(candidates))
+		if span.End-span.Start < 2 {
+			continue
+		}
+		query := queryMatrix.row(i)
+		queryNorm := queryMatrix.norms[i]
+		scores := rowScores[:span.End-span.Start]
+		probs := rowProbs[:span.End-span.Start]
+		for j := span.Start; j < span.End; j++ {
+			local := j - span.Start
+			score := cosineScoreWithNorms(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j])
+			scores[local] = score
+			totalScore += score
+		}
+		rowLoss := infoNCERowProbsAndLossInto(scores, 0, temperature, probs)
+		totalLoss += rowLoss
+		for local, prob := range probs {
+			target := float32(0)
+			if local == 0 {
+				target = 1
+			}
+			j := span.Start + local
+			scale := (prob - target) / temperature
+			accumulateCosineGradFromScore(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j], scores[local], scale, queryGrads[i], candidateGrads[j])
+		}
+	}
+	return totalLoss, totalScore
+}
+
 func accumulateMatryoshkaHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, targetIndexes []int, candidateSpans []embeddingCandidateSpan, cfg EmbeddingTrainConfig, queryGrads, candidateGrads [][]float32) (float32, float32, int) {
 	if len(cfg.MatryoshkaDims) == 0 {
 		return 0, 0, 0
@@ -3301,6 +3492,60 @@ func accumulateMatryoshkaHardNegativeGrads(queries, candidates []*embeddingEncod
 		totalLoss += loss * weight
 		totalScore += score
 		pairCount += pairs
+	}
+	return totalLoss, totalScore, pairCount
+}
+
+func accumulateTurboQuantPrefixHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, targetIndexes []int, candidateSpans []embeddingCandidateSpan, cfg EmbeddingTrainConfig, queryGrads, candidateGrads [][]float32) (float32, float32, int) {
+	if len(cfg.MatryoshkaDims) == 0 || len(cfg.TurboQuantPrefixBits) == 0 {
+		return 0, 0, 0
+	}
+	weight := effectiveTurboQuantPrefixWeight(cfg)
+	if weight <= 0 {
+		return 0, 0, 0
+	}
+	seed := effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	pairCount := 0
+	for _, dim := range cfg.MatryoshkaDims {
+		for _, bitWidth := range cfg.TurboQuantPrefixBits {
+			dimQueryGrads := newEmbeddingPooledGradBuffers(queries)
+			dimCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
+			loss := float32(0)
+			score := float32(0)
+			pairs := 0
+			switch cfg.ContrastiveLoss {
+			case "grouped_infonce":
+				loss, score = accumulateTurboQuantPrefixGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, dim, bitWidth, seed, cfg.Temperature, dimQueryGrads, dimCandidateGrads)
+				pairs = hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, "grouped_infonce")
+			case "hybrid_infonce":
+				globalQueryGrads := newEmbeddingPooledGradBuffers(queries)
+				globalCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
+				globalLoss, globalScore := accumulateTurboQuantPrefixInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, dim, bitWidth, seed, cfg.Temperature, globalQueryGrads, globalCandidateGrads)
+				groupedQueryGrads := newEmbeddingPooledGradBuffers(queries)
+				groupedCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
+				groupedLoss, groupedScore := accumulateTurboQuantPrefixGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, dim, bitWidth, seed, cfg.Temperature, groupedQueryGrads, groupedCandidateGrads)
+				groupedWeight := effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
+				globalScale := float32(1) / (1 + groupedWeight)
+				groupedScale := groupedWeight / (1 + groupedWeight)
+				addScaledEmbeddingGradBuffers(dimQueryGrads, globalQueryGrads, globalScale)
+				addScaledEmbeddingGradBuffers(dimCandidateGrads, globalCandidateGrads, globalScale)
+				addScaledEmbeddingGradBuffers(dimQueryGrads, groupedQueryGrads, groupedScale)
+				addScaledEmbeddingGradBuffers(dimCandidateGrads, groupedCandidateGrads, groupedScale)
+				loss = globalLoss*globalScale + groupedLoss*groupedScale
+				score = globalScore + groupedScore
+				pairs = hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, "hybrid_infonce")
+			default:
+				loss, score = accumulateTurboQuantPrefixInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, dim, bitWidth, seed, cfg.Temperature, dimQueryGrads, dimCandidateGrads)
+				pairs = hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, "infonce")
+			}
+			addScaledEmbeddingGradBuffers(queryGrads, dimQueryGrads, weight)
+			addScaledEmbeddingGradBuffers(candidateGrads, dimCandidateGrads, weight)
+			totalLoss += loss * weight
+			totalScore += score
+			pairCount += pairs
+		}
 	}
 	return totalLoss, totalScore, pairCount
 }
@@ -4291,6 +4536,15 @@ func normalizedTrainConfig(cfg EmbeddingTrainConfig, params ...eosartifact.Param
 		cfg.MatryoshkaDims = dims
 		cfg.MatryoshkaWeights = weights
 	}
+	if bits, err := normalizeTurboQuantPrefixBits(cfg.TurboQuantPrefixBits); err == nil {
+		cfg.TurboQuantPrefixBits = bits
+	}
+	if len(cfg.TurboQuantPrefixBits) > 0 {
+		if cfg.TurboQuantPrefixWeight == 0 {
+			cfg.TurboQuantPrefixWeight = 1
+		}
+		cfg.TurboQuantPrefixSeed = effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
+	}
 	return cfg
 }
 
@@ -4301,6 +4555,17 @@ func normalizeMatryoshkaTrainConfig(cfg EmbeddingTrainConfig, embeddingDim int) 
 	}
 	cfg.MatryoshkaDims = dims
 	cfg.MatryoshkaWeights = weights
+	bits, err := normalizeTurboQuantPrefixBits(cfg.TurboQuantPrefixBits)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.TurboQuantPrefixBits = bits
+	if len(cfg.TurboQuantPrefixBits) > 0 {
+		if cfg.TurboQuantPrefixWeight == 0 {
+			cfg.TurboQuantPrefixWeight = 1
+		}
+		cfg.TurboQuantPrefixSeed = effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
+	}
 	return cfg, nil
 }
 
@@ -4367,6 +4632,17 @@ func matryoshkaPairMultiplier(dims []int) int {
 	return 1 + len(dims)
 }
 
+func compactPrefixObjectiveMultiplier(cfg EmbeddingTrainRunConfig) int {
+	if len(cfg.MatryoshkaDims) == 0 {
+		return 1
+	}
+	multiplier := 1 + len(cfg.MatryoshkaDims)
+	if len(cfg.TurboQuantPrefixBits) > 0 {
+		multiplier += len(cfg.MatryoshkaDims) * len(cfg.TurboQuantPrefixBits)
+	}
+	return multiplier
+}
+
 func matryoshkaWeightSum(weights []float32) float32 {
 	if len(weights) == 0 {
 		return 0
@@ -4378,6 +4654,51 @@ func matryoshkaWeightSum(weights []float32) float32 {
 		}
 	}
 	return sum
+}
+
+func normalizeTurboQuantPrefixBits(bits []int) ([]int, error) {
+	if len(bits) == 0 {
+		return nil, nil
+	}
+	out := make([]int, 0, len(bits))
+	seen := map[int]bool{}
+	for i, bitWidth := range bits {
+		if bitWidth < 2 || bitWidth > 8 {
+			return nil, fmt.Errorf("turboquant_prefix_bits[%d]=%d outside supported range 2..8", i, bitWidth)
+		}
+		if seen[bitWidth] {
+			continue
+		}
+		seen[bitWidth] = true
+		out = append(out, bitWidth)
+	}
+	sort.Ints(out)
+	return out, nil
+}
+
+func effectiveTurboQuantPrefixWeight(cfg EmbeddingTrainConfig) float32 {
+	if len(cfg.TurboQuantPrefixBits) == 0 {
+		return 0
+	}
+	if cfg.TurboQuantPrefixWeight <= 0 {
+		return 1
+	}
+	return cfg.TurboQuantPrefixWeight
+}
+
+func effectiveTurboQuantPrefixSeed(seed int64) int64 {
+	if seed == 0 {
+		return DefaultTurboQuantMultiVectorQuantizerSeed
+	}
+	return seed
+}
+
+func turboQuantPrefixWeightSum(cfg EmbeddingTrainConfig) float32 {
+	weight := effectiveTurboQuantPrefixWeight(cfg)
+	if weight <= 0 || len(cfg.MatryoshkaDims) == 0 || len(cfg.TurboQuantPrefixBits) == 0 {
+		return 0
+	}
+	return weight * float32(len(cfg.MatryoshkaDims)*len(cfg.TurboQuantPrefixBits))
 }
 
 func validateTrainConfig(cfg EmbeddingTrainConfig) error {
@@ -4428,6 +4749,24 @@ func validateTrainConfig(cfg EmbeddingTrainConfig) error {
 	for i, weight := range cfg.MatryoshkaWeights {
 		if weight <= 0 || math.IsNaN(float64(weight)) || math.IsInf(float64(weight), 0) {
 			return fmt.Errorf("matryoshka_weights[%d] must be finite and positive", i)
+		}
+	}
+	if len(cfg.TurboQuantPrefixBits) > 0 {
+		if len(cfg.MatryoshkaDims) == 0 {
+			return fmt.Errorf("turboquant_prefix_bits requires matryoshka_dims")
+		}
+		for i, dim := range cfg.MatryoshkaDims {
+			if dim < 2 {
+				return fmt.Errorf("matryoshka_dims[%d]=%d must be at least 2 when turboquant_prefix_bits is enabled", i, dim)
+			}
+		}
+		for i, bitWidth := range cfg.TurboQuantPrefixBits {
+			if bitWidth < 2 || bitWidth > 8 {
+				return fmt.Errorf("turboquant_prefix_bits[%d]=%d outside supported range 2..8", i, bitWidth)
+			}
+		}
+		if cfg.TurboQuantPrefixWeight < 0 || math.IsNaN(float64(cfg.TurboQuantPrefixWeight)) || math.IsInf(float64(cfg.TurboQuantPrefixWeight), 0) {
+			return fmt.Errorf("turboquant_prefix_weight must be finite and non-negative")
 		}
 	}
 	return nil

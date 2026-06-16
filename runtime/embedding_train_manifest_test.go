@@ -20,14 +20,19 @@ func TestEmbeddingTrainManifestRoundTrip(t *testing.T) {
 		Name:      "tiny_train_embed_q8",
 		Embedding: tinyMaskedEmbeddingManifest(),
 		Config: EmbeddingTrainConfig{
-			LearningRate:    0.05,
-			WeightBits:      8,
-			Optimizer:       "adamw",
-			Beta1:           0.9,
-			Beta2:           0.999,
-			Epsilon:         1e-8,
-			ContrastiveLoss: "infonce",
-			Temperature:     0.05,
+			LearningRate:           0.05,
+			WeightBits:             8,
+			Optimizer:              "adamw",
+			Beta1:                  0.9,
+			Beta2:                  0.999,
+			Epsilon:                1e-8,
+			ContrastiveLoss:        "infonce",
+			Temperature:            0.05,
+			MatryoshkaDims:         []int{64, 128},
+			MatryoshkaWeights:      []float32{0.5, 1},
+			TurboQuantPrefixBits:   []int{2, 4},
+			TurboQuantPrefixWeight: 0.25,
+			TurboQuantPrefixSeed:   DefaultTurboQuantMultiVectorQuantizerSeed,
 		},
 	}
 	if err := want.WriteFile(path); err != nil {
@@ -39,6 +44,15 @@ func TestEmbeddingTrainManifestRoundTrip(t *testing.T) {
 	}
 	if got.Name != want.Name || got.Embedding.Name != want.Embedding.Name || got.Config.Optimizer != want.Config.Optimizer || got.Config.ContrastiveLoss != want.Config.ContrastiveLoss || got.Config.Temperature != want.Config.Temperature {
 		t.Fatalf("manifest mismatch:\nwant: %+v\ngot:  %+v", want, got)
+	}
+	if len(got.Config.TurboQuantPrefixBits) != 2 || got.Config.TurboQuantPrefixBits[0] != 2 || got.Config.TurboQuantPrefixBits[1] != 4 {
+		t.Fatalf("turboquant prefix bits = %v, want [2 4]", got.Config.TurboQuantPrefixBits)
+	}
+	if got.Config.TurboQuantPrefixWeight != 0.25 {
+		t.Fatalf("turboquant prefix weight = %f, want 0.25", got.Config.TurboQuantPrefixWeight)
+	}
+	if got.Config.TurboQuantPrefixSeed != DefaultTurboQuantMultiVectorQuantizerSeed {
+		t.Fatalf("turboquant prefix seed = %d, want %d", got.Config.TurboQuantPrefixSeed, DefaultTurboQuantMultiVectorQuantizerSeed)
 	}
 }
 
