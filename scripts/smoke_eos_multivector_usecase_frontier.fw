@@ -1,0 +1,613 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type planRow struct {
+	Dim                                    int     `json:"dim"`
+	BaselineDim                            int     `json:"baseline_dim"`
+	Bits                                   int     `json:"bits"`
+	Objects                                int     `json:"objects"`
+	VectorsPerObject                       int     `json:"vectors_per_object"`
+	SeriesLength                           int     `json:"series_length"`
+	WindowSize                             int     `json:"window_size"`
+	WindowStride                           int     `json:"window_stride"`
+	DerivedWindowCount                     int     `json:"derived_window_count"`
+	QuantizedPayloadBytes                  int64   `json:"quantized_payload_bytes"`
+	SidecarStorage                         string  `json:"sidecar_storage"`
+	SidecarBytesPerVector                  int64   `json:"sidecar_bytes_per_vector"`
+	QuantizedVectorBytes                   int64   `json:"quantized_vector_bytes"`
+	VectorOverheadBytes                    int64   `json:"vector_overhead_bytes"`
+	DenseVectorStorageBytes                int64   `json:"dense_vector_storage_bytes"`
+	QuantizedVectorStorageBytes            int64   `json:"quantized_vector_storage_bytes"`
+	PackedObjectOverheadBytes              int64   `json:"packed_object_overhead_bytes"`
+	PackedQuantizedStorageBytes            int64   `json:"packed_quantized_storage_bytes"`
+	VectorsThatFitInOneDenseVector         int64   `json:"vectors_that_fit_in_one_dense_vector"`
+	FitsInOneDenseVectorStorage            bool    `json:"fits_in_one_dense_vector_storage"`
+	StorageMultipleOfDenseParentCost       float64 `json:"storage_multiple_of_dense_parent_cost"`
+	PackedVectorsThatFitInOneDenseVector   int64   `json:"packed_vectors_that_fit_in_one_dense_vector"`
+	PackedFitsInOneDenseVectorStorage      bool    `json:"packed_fits_in_one_dense_vector_storage"`
+	PackedStorageMultipleOfDenseParentCost float64 `json:"packed_storage_multiple_of_dense_parent_cost"`
+}
+
+type storagePlan struct {
+	Schema string    `json:"schema"`
+	Rows   []planRow `json:"rows"`
+}
+
+type scenario struct {
+	Name             string `json:"name"`
+	UseCase          string `json:"use_case"`
+	Interpretation   string `json:"interpretation"`
+	Dim              int    `json:"dim"`
+	BaselineDim      int    `json:"baseline_dim"`
+	VectorsPerObject int    `json:"vectors_per_object,omitempty"`
+	SeriesLength     int    `json:"series_length,omitempty"`
+	WindowSize       int    `json:"window_size,omitempty"`
+	WindowStride     int    `json:"window_stride,omitempty"`
+}
+
+type summaryRow struct {
+	ScenarioName                         string  `json:"scenario_name"`
+	UseCase                              string  `json:"use_case"`
+	Interpretation                       string  `json:"interpretation"`
+	Dim                                  int     `json:"dim"`
+	BaselineDim                          int     `json:"baseline_dim"`
+	Bits                                 int     `json:"bits"`
+	Objects                              int     `json:"objects"`
+	VectorsPerObject                     int     `json:"vectors_per_object"`
+	SeriesLength                         int     `json:"series_length,omitempty"`
+	WindowSize                           int     `json:"window_size,omitempty"`
+	WindowStride                         int     `json:"window_stride,omitempty"`
+	DerivedWindowCount                   int     `json:"derived_window_count,omitempty"`
+	CurrentFitCount                      int64   `json:"current_fit_count"`
+	PackedFitCount                       int64   `json:"packed_fit_count"`
+	CurrentFitsConfiguredCount           bool    `json:"current_fits_configured_count"`
+	PackedFitsConfiguredCount            bool    `json:"packed_fits_configured_count"`
+	CurrentStorageMultipleDenseParent    float64 `json:"current_storage_multiple_dense_parent"`
+	PackedStorageMultipleDenseParent     float64 `json:"packed_storage_multiple_dense_parent"`
+	QuantizedPayloadBytes                int64   `json:"quantized_payload_bytes"`
+	QuantizedVectorBytes                 int64   `json:"quantized_vector_bytes"`
+	QuantizedVectorStorageBytes          int64   `json:"quantized_vector_storage_bytes"`
+	PackedQuantizedStorageBytes          int64   `json:"packed_quantized_storage_bytes"`
+	DenseVectorStorageBytes              int64   `json:"dense_vector_storage_bytes"`
+	VectorOverheadBytes                  int64   `json:"vector_overhead_bytes"`
+	PackedObjectOverheadBytes            int64   `json:"packed_object_overhead_bytes"`
+	SidecarStorage                       string  `json:"sidecar_storage"`
+}
+
+type commandRecord struct {
+	Label string   `json:"label"`
+	Args  []string `json:"args"`
+	Log   string   `json:"log"`
+}
+
+type manifest struct {
+	Schema                    string          `json:"schema"`
+	GeneratedAt               string          `json:"generated_at"`
+	RunDir                    string          `json:"run_dir"`
+	RepoRoot                  string          `json:"repo_root"`
+	SummaryTSV                string          `json:"summary_tsv"`
+	PlannerJSONPaths          []string        `json:"planner_json_paths"`
+	Commands                  []commandRecord `json:"commands"`
+	Scenarios                 []scenario      `json:"scenarios"`
+	Rows                      []summaryRow    `json:"rows"`
+	Bits                      []int           `json:"bits"`
+	Objects                   int             `json:"objects"`
+	VectorOverheadBytes        int64           `json:"vector_overhead_bytes"`
+	PackedObjectOverheadBytes  int64           `json:"packed_object_overhead_bytes"`
+	SidecarStorage            string          `json:"sidecar_storage"`
+	Gates                     []string        `json:"gates"`
+	Caveats                   []string        `json:"caveats"`
+}
+
+func usage() {
+	fmt.Println(`Eos multi-vector use-case frontier smoke.
+
+Run:
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_multivector_usecase_frontier.fw
+
+This smoke calls:
+  go run ./cmd/eos plan-multivector-storage
+
+It records exact planner-backed rows for representative product shapes:
+same-dimension controls, document spans, time-series windows, event histories,
+and a q2 frontier row.
+
+Environment:
+  EOS_MV_USECASE_SMOKE_RUN_ROOT=runs
+  EOS_MV_USECASE_SMOKE_RUN_DIR=runs/eos-multivector-usecase-frontier-smoke-<timestamp>
+  EOS_MV_USECASE_SMOKE_BITS=2,4,8
+  EOS_MV_USECASE_SMOKE_OBJECTS=1000
+  EOS_MV_USECASE_SMOKE_VECTOR_OVERHEAD_BYTES=32
+  EOS_MV_USECASE_SMOKE_PACKED_OBJECT_OVERHEAD_BYTES=32
+  EOS_MV_USECASE_SMOKE_SIDECAR_STORAGE=none`)
+}
+
+func getenv(name string, fallback string) string {
+	value := os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	if pwd := os.Getenv("PWD"); hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func parseIntEnv(name string, fallback int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parseInt64Env(name string, fallback int64) (int64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parsePositiveIntList(name string, value string) ([]int, error) {
+	parts := strings.Split(value, ",")
+	values := []int{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		parsed, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, fmt.Errorf("%s contains invalid integer %q: %w", name, part, err)
+		}
+		if parsed <= 0 {
+			return nil, fmt.Errorf("%s values must be positive: %d", name, parsed)
+		}
+		values = append(values, parsed)
+	}
+	if len(values) == 0 {
+		return nil, fmt.Errorf("%s must include at least one positive integer", name)
+	}
+	return values, nil
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func renderCommand(args []string) string {
+	parts := []string{}
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func runCommand(root string, logDir string, label string, args []string) (commandRecord, error) {
+	fmt.Println("\n== " + label + " ==")
+	fmt.Println("+ " + renderCommand(args))
+	logPath := filepath.Join(logDir, label+".log")
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if writeErr := os.WriteFile(logPath, append([]byte(renderCommand(args)+"\n\n"), output...), 0o644); writeErr != nil {
+		return commandRecord{}, writeErr
+	}
+	fmt.Print(string(output))
+	record := commandRecord{Label: label, Args: args, Log: logPath}
+	if err != nil {
+		return record, fmt.Errorf("%s failed: %w", label, err)
+	}
+	return record, nil
+}
+
+func readJSON(path string, target any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, target)
+}
+
+func resolveRunPath(root string, path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return filepath.Abs(path)
+	}
+	return filepath.Abs(filepath.Join(root, path))
+}
+
+func intListCSV(values []int) string {
+	parts := []string{}
+	for _, value := range values {
+		parts = append(parts, strconv.Itoa(value))
+	}
+	return strings.Join(parts, ",")
+}
+
+func defaultScenarios() []scenario {
+	return []scenario{
+		{
+			Name:             "same_dim_control_100",
+			UseCase:          "same-dim control",
+			Interpretation:   "100 compact 128d children do not fit when the dense baseline is also 128d.",
+			Dim:              128,
+			BaselineDim:      128,
+			VectorsPerObject: 100,
+		},
+		{
+			Name:             "document_spans_100",
+			UseCase:          "document spans / per-object chunks",
+			Interpretation:   "100 packed q2/q4 128d spans fit under one 3072d dense parent-vector budget; q8 is intentionally not gated to fit.",
+			Dim:              128,
+			BaselineDim:      3072,
+			VectorsPerObject: 100,
+		},
+		{
+			Name:           "timeseries_windows_1648_64_16",
+			UseCase:        "time-series windows",
+			Interpretation: "series_length=1648, window_size=64, window_stride=16 derives exactly 100 child windows per parent.",
+			Dim:            128,
+			BaselineDim:    3072,
+			SeriesLength:   1648,
+			WindowSize:     64,
+			WindowStride:   16,
+		},
+		{
+			Name:             "event_history_180",
+			UseCase:          "event history / trace timeline",
+			Interpretation:   "180 packed q4 128d events is the edge of one 3072d dense parent-vector budget; q2 has more headroom.",
+			Dim:              128,
+			BaselineDim:      3072,
+			VectorsPerObject: 180,
+		},
+		{
+			Name:             "q2_frontier_341",
+			UseCase:          "packed q2 frontier",
+			Interpretation:   "341 packed q2 128d children still fit under one 3072d dense parent-vector budget.",
+			Dim:              128,
+			BaselineDim:      3072,
+			VectorsPerObject: 341,
+		},
+	}
+}
+
+func plannerArgs(s scenario, bits []int, objects int, vectorOverheadBytes int64, packedObjectOverheadBytes int64, sidecarStorage string, jsonPath string) []string {
+	args := []string{
+		"go", "run", "./cmd/eos", "plan-multivector-storage",
+		"--dim", strconv.Itoa(s.Dim),
+		"--baseline-dim", strconv.Itoa(s.BaselineDim),
+		"--bits", intListCSV(bits),
+		"--vector-overhead-bytes", strconv.FormatInt(vectorOverheadBytes, 10),
+		"--packed-object-overhead-bytes", strconv.FormatInt(packedObjectOverheadBytes, 10),
+		"--objects", strconv.Itoa(objects),
+		"--sidecar-storage", sidecarStorage,
+		"--json", jsonPath,
+	}
+	if s.SeriesLength > 0 {
+		args = append(args,
+			"--series-lengths", strconv.Itoa(s.SeriesLength),
+			"--window-size", strconv.Itoa(s.WindowSize),
+			"--window-stride", strconv.Itoa(s.WindowStride),
+		)
+	} else {
+		args = append(args, "--vectors-per-object", strconv.Itoa(s.VectorsPerObject))
+	}
+	return args
+}
+
+func makeSummaryRows(s scenario, plan storagePlan) []summaryRow {
+	rows := []summaryRow{}
+	for _, row := range plan.Rows {
+		rows = append(rows, summaryRow{
+			ScenarioName:                      s.Name,
+			UseCase:                           s.UseCase,
+			Interpretation:                    s.Interpretation,
+			Dim:                               row.Dim,
+			BaselineDim:                       row.BaselineDim,
+			Bits:                              row.Bits,
+			Objects:                           row.Objects,
+			VectorsPerObject:                  row.VectorsPerObject,
+			SeriesLength:                      row.SeriesLength,
+			WindowSize:                        row.WindowSize,
+			WindowStride:                      row.WindowStride,
+			DerivedWindowCount:                row.DerivedWindowCount,
+			CurrentFitCount:                   row.VectorsThatFitInOneDenseVector,
+			PackedFitCount:                    row.PackedVectorsThatFitInOneDenseVector,
+			CurrentFitsConfiguredCount:        row.FitsInOneDenseVectorStorage,
+			PackedFitsConfiguredCount:         row.PackedFitsInOneDenseVectorStorage,
+			CurrentStorageMultipleDenseParent: row.StorageMultipleOfDenseParentCost,
+			PackedStorageMultipleDenseParent:  row.PackedStorageMultipleOfDenseParentCost,
+			QuantizedPayloadBytes:             row.QuantizedPayloadBytes,
+			QuantizedVectorBytes:              row.QuantizedVectorBytes,
+			QuantizedVectorStorageBytes:       row.QuantizedVectorStorageBytes,
+			PackedQuantizedStorageBytes:       row.PackedQuantizedStorageBytes,
+			DenseVectorStorageBytes:           row.DenseVectorStorageBytes,
+			VectorOverheadBytes:               row.VectorOverheadBytes,
+			PackedObjectOverheadBytes:         row.PackedObjectOverheadBytes,
+			SidecarStorage:                    row.SidecarStorage,
+		})
+	}
+	return rows
+}
+
+func writeSummaryTSV(path string, rows []summaryRow) error {
+	var b strings.Builder
+	b.WriteString("scenario_name\tuse_case\tdim\tbaseline_dim\tbits\tobjects\tvectors_per_object\tseries_length\twindow_size\twindow_stride\tderived_window_count\tcurrent_fit_count\tpacked_fit_count\tcurrent_fits_configured_count\tpacked_fits_configured_count\tcurrent_storage_multiple_dense_parent\tpacked_storage_multiple_dense_parent\tquantized_payload_bytes\tquantized_vector_bytes\tquantized_vector_storage_bytes\tpacked_quantized_storage_bytes\tdense_vector_storage_bytes\tvector_overhead_bytes\tpacked_object_overhead_bytes\tsidecar_storage\tinterpretation\n")
+	for _, row := range rows {
+		fmt.Fprintf(&b, "%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%t\t%t\t%.6f\t%.6f\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%s\n",
+			row.ScenarioName,
+			row.UseCase,
+			row.Dim,
+			row.BaselineDim,
+			row.Bits,
+			row.Objects,
+			row.VectorsPerObject,
+			row.SeriesLength,
+			row.WindowSize,
+			row.WindowStride,
+			row.DerivedWindowCount,
+			row.CurrentFitCount,
+			row.PackedFitCount,
+			row.CurrentFitsConfiguredCount,
+			row.PackedFitsConfiguredCount,
+			row.CurrentStorageMultipleDenseParent,
+			row.PackedStorageMultipleDenseParent,
+			row.QuantizedPayloadBytes,
+			row.QuantizedVectorBytes,
+			row.QuantizedVectorStorageBytes,
+			row.PackedQuantizedStorageBytes,
+			row.DenseVectorStorageBytes,
+			row.VectorOverheadBytes,
+			row.PackedObjectOverheadBytes,
+			row.SidecarStorage,
+			row.Interpretation)
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func findRow(rows []summaryRow, scenarioName string, bits int) (summaryRow, bool) {
+	for _, row := range rows {
+		if row.ScenarioName == scenarioName && row.Bits == bits {
+			return row, true
+		}
+	}
+	return summaryRow{}, false
+}
+
+func requireRow(rows []summaryRow, scenarioName string, bits int) summaryRow {
+	row, ok := findRow(rows, scenarioName, bits)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "missing row scenario=%s bits=%d\n", scenarioName, bits)
+		os.Exit(1)
+	}
+	return row
+}
+
+func failGate(message string) {
+	fmt.Fprintln(os.Stderr, message)
+	os.Exit(1)
+}
+
+func checkGates(rows []summaryRow) {
+	controlQ2 := requireRow(rows, "same_dim_control_100", 2)
+	controlQ4 := requireRow(rows, "same_dim_control_100", 4)
+	if controlQ2.PackedFitsConfiguredCount || controlQ4.PackedFitsConfiguredCount {
+		failGate("same-dim control unexpectedly fits 100 packed q2/q4 children")
+	}
+	for _, scenarioName := range []string{"document_spans_100", "timeseries_windows_1648_64_16"} {
+		q2 := requireRow(rows, scenarioName, 2)
+		q4 := requireRow(rows, scenarioName, 4)
+		if !q2.PackedFitsConfiguredCount || !q4.PackedFitsConfiguredCount {
+			failGate(fmt.Sprintf("%s expected packed q2/q4 100-child rows to fit", scenarioName))
+		}
+	}
+	tsQ4 := requireRow(rows, "timeseries_windows_1648_64_16", 4)
+	if tsQ4.DerivedWindowCount != 100 || tsQ4.VectorsPerObject != 100 {
+		failGate(fmt.Sprintf("time-series scenario derived %d windows, expected 100", tsQ4.DerivedWindowCount))
+	}
+	eventQ2 := requireRow(rows, "event_history_180", 2)
+	eventQ4 := requireRow(rows, "event_history_180", 4)
+	if !eventQ2.PackedFitsConfiguredCount || !eventQ4.PackedFitsConfiguredCount {
+		failGate("event history expected packed q2/q4 180-child rows to fit")
+	}
+	frontierQ2 := requireRow(rows, "q2_frontier_341", 2)
+	if !frontierQ2.PackedFitsConfiguredCount {
+		failGate("q2 frontier expected 341 packed children to fit")
+	}
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	runRoot := getenv("EOS_MV_USECASE_SMOKE_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir := getenv("EOS_MV_USECASE_SMOKE_RUN_DIR", filepath.Join(runRoot, "eos-multivector-usecase-frontier-smoke-"+time.Now().UTC().Format("20060102T150405Z")))
+	runDir, err = resolveRunPath(root, runDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	logDir := filepath.Join(runDir, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	bitsValue := getenv("EOS_MV_USECASE_SMOKE_BITS", "2,4,8")
+	bits, err := parsePositiveIntList("EOS_MV_USECASE_SMOKE_BITS", bitsValue)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	objects, err := parseIntEnv("EOS_MV_USECASE_SMOKE_OBJECTS", 1000)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if objects <= 0 {
+		fmt.Fprintln(os.Stderr, "EOS_MV_USECASE_SMOKE_OBJECTS must be positive")
+		os.Exit(1)
+	}
+	vectorOverheadBytes, err := parseInt64Env("EOS_MV_USECASE_SMOKE_VECTOR_OVERHEAD_BYTES", 32)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if vectorOverheadBytes < 0 {
+		fmt.Fprintln(os.Stderr, "EOS_MV_USECASE_SMOKE_VECTOR_OVERHEAD_BYTES must be non-negative")
+		os.Exit(1)
+	}
+	packedObjectOverheadBytes, err := parseInt64Env("EOS_MV_USECASE_SMOKE_PACKED_OBJECT_OVERHEAD_BYTES", 32)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if packedObjectOverheadBytes < 0 {
+		fmt.Fprintln(os.Stderr, "EOS_MV_USECASE_SMOKE_PACKED_OBJECT_OVERHEAD_BYTES must be non-negative")
+		os.Exit(1)
+	}
+	sidecarStorage := getenv("EOS_MV_USECASE_SMOKE_SIDECAR_STORAGE", "none")
+	scenarios := defaultScenarios()
+
+	commands := []commandRecord{}
+	plannerJSONPaths := []string{}
+	rows := []summaryRow{}
+	for _, scenario := range scenarios {
+		jsonPath := filepath.Join(runDir, "planner-"+scenario.Name+".json")
+		args := plannerArgs(scenario, bits, objects, vectorOverheadBytes, packedObjectOverheadBytes, sidecarStorage, jsonPath)
+		record, err := runCommand(root, logDir, "planner-"+scenario.Name, args)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		commands = append(commands, record)
+		plannerJSONPaths = append(plannerJSONPaths, jsonPath)
+		var plan storagePlan
+		if err := readJSON(jsonPath, &plan); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		rows = append(rows, makeSummaryRows(scenario, plan)...)
+	}
+	checkGates(rows)
+
+	summaryTSV := filepath.Join(runDir, "summary.tsv")
+	if err := writeSummaryTSV(summaryTSV, rows); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	out := manifest{
+		Schema:                   "eos.multivector_usecase_frontier_smoke.v1",
+		GeneratedAt:              time.Now().UTC().Format(time.RFC3339),
+		RunDir:                   runDir,
+		RepoRoot:                 root,
+		SummaryTSV:               summaryTSV,
+		PlannerJSONPaths:         plannerJSONPaths,
+		Commands:                 commands,
+		Scenarios:                scenarios,
+		Rows:                     rows,
+		Bits:                     bits,
+		Objects:                  objects,
+		VectorOverheadBytes:       vectorOverheadBytes,
+		PackedObjectOverheadBytes: packedObjectOverheadBytes,
+		SidecarStorage:           sidecarStorage,
+		Gates: []string{
+			"same_dim_control_100 packed q2/q4 100-child rows must not fit",
+			"document_spans_100 packed q2/q4 100-child rows must fit under a 3072d dense baseline",
+			"timeseries_windows_1648_64_16 must derive exactly 100 windows and packed q2/q4 rows must fit",
+			"event_history_180 packed q2/q4 rows must fit; q4 is expected to be the edge case",
+			"q2_frontier_341 packed q2 row must fit",
+		},
+		Caveats: []string{
+			"Storage/accounting only: this does not measure retrieval quality, ranking quality, or forecasting quality.",
+			"Rows are planner-backed; this smoke does not duplicate TurboQuant or storage arithmetic.",
+			"q8 100-child packed rows are reported but intentionally not gated to fit by default.",
+			"Same-dimension 128d baseline rows are controls and should not be described as hundreds of children for the cost of one.",
+			"fp16 rerank sidecars are intentionally not included in the direct multi-vector lane.",
+			"CorkScrewDB API latency and DB directory size require the separate CorkScrewDB smokes.",
+		},
+	}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	manifestJSON := filepath.Join(runDir, "manifest.json")
+	if err := os.WriteFile(manifestJSON, append(data, '\n'), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("\nsummary_tsv: %s\n", summaryTSV)
+	fmt.Printf("manifest: %s\n", manifestJSON)
+	for _, row := range rows {
+		fmt.Printf("%s q%d vectors=%d current_fit=%d packed_fit=%d current_fits=%t packed_fits=%t current_multiple=%.6f packed_multiple=%.6f\n",
+			row.ScenarioName,
+			row.Bits,
+			row.VectorsPerObject,
+			row.CurrentFitCount,
+			row.PackedFitCount,
+			row.CurrentFitsConfiguredCount,
+			row.PackedFitsConfiguredCount,
+			row.CurrentStorageMultipleDenseParent,
+			row.PackedStorageMultipleDenseParent)
+	}
+}

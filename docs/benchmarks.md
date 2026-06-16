@@ -201,6 +201,15 @@ ferrous-wheel run scripts/smoke_eos_multivector_budget_frontier.fw
 
 This smoke calls `go run ./cmd/eos plan-multivector-storage` for the default `128d` compact-child versus `3072d` dense-baseline shape, records planner JSON, command logs, `summary.tsv`, and `manifest.json` under `runs/eos-multivector-budget-frontier-smoke-<timestamp>/`, and gates current per-child-entry fit counts at q2 >= 181, q4 >= 100, q8 >= 64 plus packed-parent target fit counts at q2 >= 341, q4 >= 180, q8 >= 93 children per dense-vector budget. Interpret it beside the time-series and CorkScrewDB API smokes as byte accounting only: it does not measure retrieval quality, CorkScrewDB API latency, or current end-to-end packed parent-object storage.
 
+For the product/use-case frontier, run:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+ferrous-wheel run scripts/smoke_eos_multivector_usecase_frontier.fw
+```
+
+This smoke also calls the planner, but records named scenarios in `summary.tsv` and `manifest.json`: same-dim 100-child control, 100-child document spans, 100 time-series windows derived from `series_length=1648`, `window_size=64`, `window_stride=16`, a 180-child event/trace timeline, and a 341-child q2 frontier. Its gates keep the claim narrow: same-dim 100-child packed q2/q4 fails, 3072d-baseline packed q2/q4 100-child scenarios fit, packed q4 fits 180 children at the edge, and packed q2 fits 341 children. q8 rows are reported as contrast rather than required to fit.
+
 For the combined cache-only quality plus overhead-aware budget gate, run:
 
 ```bash

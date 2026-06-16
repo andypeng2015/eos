@@ -213,6 +213,14 @@ EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_multivector_budget_fronti
 
 The default smoke runs the planner for `128d` compact children against a `3072d` dense baseline with q2/q4/q8, child counts `1,16,64,100,128,181,256,341`, `32` bytes of current per-vector overhead, `32` bytes of packed parent-object overhead, no sidecar, and `1000` objects. Set `EOS_MV_BUDGET_SMOKE_BASELINE_DIMS=128,384,768,1024,1536,3072` to measure the same compact-child shape against multiple dense parent dimensions in one run; this comma-list takes precedence over the backward-compatible singular `EOS_MV_BUDGET_SMOKE_BASELINE_DIM`. It writes `summary.tsv`, `manifest.json`, planner JSON, and command logs under `runs/eos-multivector-budget-frontier-smoke-<timestamp>/`; the default gates assert current per-child-entry fit counts q2 >= `181`, q4 >= `100`, q8 >= `64`, and packed-parent target fit counts q2 >= `341`, q4 >= `180`, q8 >= `93`. This is storage/accounting only, not retrieval quality, not CorkScrewDB API latency, and not proof that CorkScrewDB already stores packed parent objects end to end.
 
+Use the use-case frontier smoke when product examples need exact planner rows:
+
+```bash
+EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_multivector_usecase_frontier.fw
+```
+
+The default scenarios cover the same-dim 100-child control, 100-child document spans, 100 time-series windows derived from `1648/64/16`, a 180-child event/trace timeline, and a 341-child q2 frontier. The smoke writes `summary.tsv`, `manifest.json`, planner JSON, and logs under `runs/eos-multivector-usecase-frontier-smoke-<timestamp>/`; gates require same-dim 100-child q2/q4 packed rows to fail, 3072d-baseline 100-child q2/q4 packed rows to fit, 180-child packed q4 to fit at the edge, and 341-child packed q2 to fit. q8 rows are present for contrast but are not required to fit.
+
 Use the budget-quality smoke when the claim must include both cache-only retrieval quality and overhead-aware planner capacity:
 
 ```bash

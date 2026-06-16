@@ -256,6 +256,14 @@ EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_multivector_budget_fronti
 
 The smoke uses the planner as the source of truth and writes `summary.tsv`, `manifest.json`, planner JSON, and command logs under `runs/eos-multivector-budget-frontier-smoke-<timestamp>/`. Defaults model `128d` compact children against a `3072d` dense baseline, q2/q4/q8, child counts `1,16,64,100,128,181,256,341`, `32` bytes per current stored vector, `32` bytes per packed parent object, no sidecar, and `1000` objects. Set `EOS_MV_BUDGET_SMOKE_BASELINE_DIMS=128,384,768,1024,1536,3072` to measure the same compact-child shape against multiple dense parent dimensions in one run; this comma-list takes precedence over the backward-compatible `EOS_MV_BUDGET_SMOKE_BASELINE_DIM`. The default gates are current q2 >= `181`, current q4 >= `100`, current q8 >= `64`, packed q2 >= `341`, packed q4 >= `180`, and packed q8 >= `93` children fitting in one dense-vector budget. A deterministic parent-budget frontier run should use `EOS_MV_BUDGET_SMOKE_VECTORS_PER_OBJECT=64,100,128,180,256,341` with the baseline list above to document the precise claim: same-dimension children fit only single-digit to low-tens counts, while a 3072d dense-parent budget fits hundreds of packed q2/q4 child vectors and tens of q8 child vectors. Read this beside the time-series smoke and local CorkScrewDB API smoke: it proves byte accounting only, not retrieval quality, remote serving, HNSW, federation, API latency, or current end-to-end packed parent-object storage.
 
+Use the use-case frontier smoke when the claim needs named product shapes rather than a dimension grid:
+
+```bash
+EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_multivector_usecase_frontier.fw
+```
+
+This smoke still uses `plan-multivector-storage` as the source of truth, but emits planner-backed rows for representative usages: a same-dim `128d` baseline control with `100` children, document spans with `100` children against a `3072d` dense parent-vector budget, time-series windows derived from `series_length=1648`, `window_size=64`, `window_stride=16` into exactly `100` windows, an event/trace timeline with `180` children, and a q2 frontier at `341` children. It writes `summary.tsv`, `manifest.json`, planner JSON, and logs under `runs/eos-multivector-usecase-frontier-smoke-<timestamp>/`. The default gates assert the narrow thesis: same-dimension 100-child packed q2/q4 does not fit, packed q2/q4 100-child document and time-series profiles do fit under a 3072d dense baseline, packed q4 fits `180` children at the edge, and packed q2 fits `341` children. q8 100-child rows are reported but intentionally not gated to fit.
+
 For the executable bridge from byte accounting to cache-only quality, run:
 
 ```bash
