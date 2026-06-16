@@ -420,7 +420,16 @@ func fuseHybridScores(denseScores, bm25Scores []retrievalScoredDoc, topK int, cf
 		case "minmax_blend", "zscore_blend":
 			score = (1-cfg.Alpha)*denseNorm[id] + cfg.Alpha*bm25Norm[id]
 		}
-		fused = append(fused, retrievalScoredDoc{ID: id, Score: float32(score)})
+		fused = append(fused, retrievalScoredDoc{
+			ID:                   id,
+			Score:                float32(score),
+			DenseRank:            denseRank[id],
+			BM25Rank:             bm25Rank[id],
+			DenseScore:           optionalFloat64(denseRaw, id),
+			BM25Score:            optionalFloat64(bm25Raw, id),
+			DenseNormalizedScore: optionalFloat64(denseNorm, id),
+			BM25NormalizedScore:  optionalFloat64(bm25Norm, id),
+		})
 	}
 	const missingRank = int(^uint(0)>>1) / 4
 	slices.SortFunc(fused, func(a, b retrievalScoredDoc) int {
@@ -449,6 +458,14 @@ func fuseHybridScores(denseScores, bm25Scores []retrievalScoredDoc, topK int, cf
 		return fused[:topK]
 	}
 	return fused
+}
+
+func optionalFloat64(values map[string]float64, id string) *float64 {
+	value, ok := values[id]
+	if !ok {
+		return nil
+	}
+	return &value
 }
 
 func protectDensePrefix(fused, denseScores []retrievalScoredDoc, protectTopK, topK int) []retrievalScoredDoc {

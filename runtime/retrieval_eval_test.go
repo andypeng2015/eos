@@ -120,6 +120,15 @@ func TestFuseHybridScoresDefaultLeavesFusedOrder(t *testing.T) {
 			t.Fatalf("fused[%d] = %q, want %q; got=%+v", i, got[i].ID, id, got[:3])
 		}
 	}
+	if got[0].DenseRank != 3 || got[0].BM25Rank != 1 {
+		t.Fatalf("lexical winner component ranks = dense:%d bm25:%d, want 3/1", got[0].DenseRank, got[0].BM25Rank)
+	}
+	if got[0].DenseScore == nil || *got[0].DenseScore != 0 || got[0].BM25Score == nil || *got[0].BM25Score != 10 {
+		t.Fatalf("lexical winner component raw scores = dense:%v bm25:%v, want 0/10", got[0].DenseScore, got[0].BM25Score)
+	}
+	if got[0].DenseNormalizedScore == nil || *got[0].DenseNormalizedScore != 0 || got[0].BM25NormalizedScore == nil || *got[0].BM25NormalizedScore != 1 {
+		t.Fatalf("lexical winner component normalized scores = dense:%v bm25:%v, want 0/1", got[0].DenseNormalizedScore, got[0].BM25NormalizedScore)
+	}
 }
 
 func TestFuseHybridScoresDenseProtectTopKPreservesDensePrefix(t *testing.T) {
@@ -147,6 +156,15 @@ func TestFuseHybridScoresDenseProtectTopKPreservesDensePrefix(t *testing.T) {
 		if got[i].ID != id {
 			t.Fatalf("protected fused[%d] = %q, want %q; got=%+v", i, got[i].ID, id, got[:3])
 		}
+	}
+	if got[0].DenseRank != 1 || got[0].BM25Rank != 3 {
+		t.Fatalf("protected dense winner component ranks = dense:%d bm25:%d, want 1/3", got[0].DenseRank, got[0].BM25Rank)
+	}
+	if got[0].DenseScore == nil || *got[0].DenseScore != 1 || got[0].BM25Score == nil || *got[0].BM25Score != 0 {
+		t.Fatalf("protected dense winner component raw scores = dense:%v bm25:%v, want 1/0", got[0].DenseScore, got[0].BM25Score)
+	}
+	if got[0].DenseNormalizedScore == nil || *got[0].DenseNormalizedScore != 1 || got[0].BM25NormalizedScore == nil || *got[0].BM25NormalizedScore != 0 {
+		t.Fatalf("protected dense winner component normalized scores = dense:%v bm25:%v, want 1/0", got[0].DenseNormalizedScore, got[0].BM25NormalizedScore)
 	}
 }
 

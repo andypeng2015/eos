@@ -1458,6 +1458,12 @@ func TestRunEvalRetrievalVectorsHybridWritesMetricsJSON(t *testing.T) {
 	if row.FirstRelevantRank != 1 || len(row.TopK) == 0 || row.TopK[0].DocID != "d1" {
 		t.Fatalf("per-query row = %+v", row)
 	}
+	if row.TopK[0].DenseRank == nil || *row.TopK[0].DenseRank != 3 || row.TopK[0].BM25Rank == nil || *row.TopK[0].BM25Rank != 1 {
+		t.Fatalf("hybrid component ranks = dense:%v bm25:%v, want 3/1", row.TopK[0].DenseRank, row.TopK[0].BM25Rank)
+	}
+	if row.TopK[0].DenseScore == nil || row.TopK[0].BM25Score == nil || row.TopK[0].DenseNormalizedScore == nil || row.TopK[0].BM25NormalizedScore == nil {
+		t.Fatalf("hybrid component scores missing from per-query top doc: %+v", row.TopK[0])
+	}
 
 	protectedMetricsPath := filepath.Join(dir, "vectors.hybrid.protected.metrics.json")
 	protectedPerQueryPath := filepath.Join(dir, "vectors.hybrid.protected.per-query.jsonl")
@@ -1504,6 +1510,9 @@ func TestRunEvalRetrievalVectorsHybridWritesMetricsJSON(t *testing.T) {
 	}
 	if row.FirstRelevantRank != 2 || len(row.TopK) < 2 || row.TopK[0].DocID != "d2" || row.TopK[1].DocID != "d1" {
 		t.Fatalf("protected per-query row = %+v", row)
+	}
+	if row.TopK[0].DenseRank == nil || *row.TopK[0].DenseRank != 1 || row.TopK[0].BM25Rank == nil || row.TopK[0].DenseScore == nil || row.TopK[0].BM25Score == nil {
+		t.Fatalf("protected hybrid component evidence missing from per-query top doc: %+v", row.TopK[0])
 	}
 }
 

@@ -138,10 +138,16 @@ type RetrievalEvalPerQueryRow struct {
 }
 
 type RetrievalEvalPerQueryTopDoc struct {
-	Rank      int     `json:"rank"`
-	DocID     string  `json:"doc_id"`
-	Score     float32 `json:"score"`
-	Relevance float64 `json:"relevance"`
+	Rank                 int      `json:"rank"`
+	DocID                string   `json:"doc_id"`
+	Score                float32  `json:"score"`
+	Relevance            float64  `json:"relevance"`
+	DenseRank            *int     `json:"dense_rank,omitempty"`
+	BM25Rank             *int     `json:"bm25_rank,omitempty"`
+	DenseScore           *float64 `json:"dense_score,omitempty"`
+	BM25Score            *float64 `json:"bm25_score,omitempty"`
+	DenseNormalizedScore *float64 `json:"dense_normalized_score,omitempty"`
+	BM25NormalizedScore  *float64 `json:"bm25_normalized_score,omitempty"`
 }
 
 type retrievalTextRecord struct {
@@ -933,8 +939,14 @@ func normalizeRetrievalVector(in []float32) []float32 {
 }
 
 type retrievalScoredDoc struct {
-	ID    string
-	Score float32
+	ID                   string
+	Score                float32
+	DenseRank            int
+	BM25Rank             int
+	DenseScore           *float64
+	BM25Score            *float64
+	DenseNormalizedScore *float64
+	BM25NormalizedScore  *float64
 }
 
 func computeRetrievalQuality(queries, docs []retrievalVectorRecord, qrels retrievalQrels, topK int) (RetrievalEvalQualityMetrics, int, int, int, int) {
@@ -1134,13 +1146,26 @@ func buildRetrievalPerQueryRow(datasetName, queryID string, scores []retrievalSc
 	}
 	for i, score := range scores {
 		row.TopK = append(row.TopK, RetrievalEvalPerQueryTopDoc{
-			Rank:      i + 1,
-			DocID:     score.ID,
-			Score:     score.Score,
-			Relevance: rels[score.ID],
+			Rank:                 i + 1,
+			DocID:                score.ID,
+			Score:                score.Score,
+			Relevance:            rels[score.ID],
+			DenseRank:            optionalPositiveInt(score.DenseRank),
+			BM25Rank:             optionalPositiveInt(score.BM25Rank),
+			DenseScore:           score.DenseScore,
+			BM25Score:            score.BM25Score,
+			DenseNormalizedScore: score.DenseNormalizedScore,
+			BM25NormalizedScore:  score.BM25NormalizedScore,
 		})
 	}
 	return row
+}
+
+func optionalPositiveInt(value int) *int {
+	if value <= 0 {
+		return nil
+	}
+	return &value
 }
 
 func firstRelevantRank(scores []retrievalScoredDoc, rels map[string]float64) int {
