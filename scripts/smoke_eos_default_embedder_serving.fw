@@ -6,13 +6,27 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-const selectedMethod = "turboquant_ip_b4_overfetch250_fp16_rerank"
-const fallbackMethod = "turboquant_ip_b8_overfetch125_fp16_rerank"
+const defaultSelectedBits = 4
+const defaultSelectedOverfetch = 250
+const defaultFallbackBits = 8
+const defaultFallbackOverfetch = 125
+const defaultRerankStorage = "fp16"
+const defaultSelectedMethod = "turboquant_ip_b4_overfetch250_fp16_rerank"
+const defaultFallbackMethod = "turboquant_ip_b8_overfetch125_fp16_rerank"
+
+type compactProfile struct {
+	Bits int
+	RerankOverfetch int
+	RerankStorage string
+	Method string
+	Label string
+}
 
 type latencyMetrics struct {
 	Count int     `json:"count"`
@@ -65,6 +79,10 @@ type manifest struct {
 	SummaryTSV string `json:"summary_tsv"`
 	Command []string `json:"command"`
 	Rows []summaryRow `json:"rows"`
+	SelectedProfile string `json:"selected_profile"`
+	FallbackProfile string `json:"fallback_profile"`
+	SelectedCompactProfile *summaryRow `json:"selected_compact_profile"`
+	FallbackCompactProfile *summaryRow `json:"fallback_compact_profile"`
 	Selected *summaryRow `json:"selected_q4_overfetch250_fp16"`
 	Fallback *summaryRow `json:"fallback_q8_overfetch125_fp16"`
 }
@@ -88,6 +106,13 @@ Environment:
   EOS_SERVE_SMOKE_RUN_ROOT=runs/eos-default-embedder-serving-smoke-<timestamp>
   EOS_SERVE_SMOKE_MAX_DOCS=300      # set 0 for full corpus
   EOS_SERVE_SMOKE_MAX_QUERIES=20    # set 0 for full query set
+  EOS_SERVE_SMOKE_SELECTED_BITS=4
+  EOS_SERVE_SMOKE_SELECTED_OVERFETCH=250
+  EOS_SERVE_SMOKE_FALLBACK_BITS=8
+  EOS_SERVE_SMOKE_FALLBACK_OVERFETCH=125
+  EOS_SERVE_SMOKE_RERANK_STORAGE=fp16
+  EOS_SERVE_SMOKE_BITS=4,8          # optional explicit eval bits
+  EOS_SERVE_SMOKE_RERANK_OVERFETCH=125,250 # optional explicit eval overfetches
   EOS_SERVE_SMOKE_MIN_TOTAL_COMPRESSION=1.0
   EOS_SERVE_SMOKE_MAX_P95_MS=0      # set nonzero to gate selected/fallback p95`)
 }
@@ -157,6 +182,51 @@ func parseFloatEnv(name string, fallback float64) (float64, error) {
 		return 0, fmt.Errorf("%s must be a float: %w", name, err)
 	}
 	return parsed, nil
+}
+
+func parseIntEnv(name string, fallback int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func buildCompactProfile(label string, bits int, overfetch int, storage string) compactProfile {
+	method := fmt.Sprintf("turboquant_ip_b%d_overfetch%d_%s_rerank", bits, overfetch, storage)
+	return compactProfile{
+		Bits: bits,
+		RerankOverfetch: overfetch,
+		RerankStorage: storage,
+		Method: method,
+		Label: fmt.Sprintf("%s q%d/%s/%d", label, bits, storage, overfetch),
+	}
+}
+
+func compactProfileName(profile compactProfile) string {
+	return fmt.Sprintf("q%d/%s/rerank-overfetch=%d", profile.Bits, profile.RerankStorage, profile.RerankOverfetch)
+}
+
+func uniqueIntCSV(values []int) string {
+	seen := map[int]bool{}
+	unique := []int{}
+	for _, value := range values {
+		if seen[value] {
+			continue
+		}
+		seen[value] = true
+		unique = append(unique, value)
+	}
+	sort.Ints(unique)
+	parts := []string{}
+	for _, value := range unique {
+		parts = append(parts, strconv.Itoa(value))
+	}
+	return strings.Join(parts, ",")
 }
 
 func runCommand(root string, args []string) error {
@@ -285,6 +355,31 @@ func main() {
 
 	maxDocs := getenv("EOS_SERVE_SMOKE_MAX_DOCS", "300")
 	maxQueries := getenv("EOS_SERVE_SMOKE_MAX_QUERIES", "20")
+	selectedBits, err := parseIntEnv("EOS_SERVE_SMOKE_SELECTED_BITS", defaultSelectedBits)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	selectedOverfetch, err := parseIntEnv("EOS_SERVE_SMOKE_SELECTED_OVERFETCH", defaultSelectedOverfetch)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fallbackBits, err := parseIntEnv("EOS_SERVE_SMOKE_FALLBACK_BITS", defaultFallbackBits)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fallbackOverfetch, err := parseIntEnv("EOS_SERVE_SMOKE_FALLBACK_OVERFETCH", defaultFallbackOverfetch)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	rerankStorage := getenv("EOS_SERVE_SMOKE_RERANK_STORAGE", defaultRerankStorage)
+	selectedProfile := buildCompactProfile("selected", selectedBits, selectedOverfetch, rerankStorage)
+	fallbackProfile := buildCompactProfile("fallback", fallbackBits, fallbackOverfetch, rerankStorage)
+	bitsCSV := getenv("EOS_SERVE_SMOKE_BITS", uniqueIntCSV([]int{selectedProfile.Bits, fallbackProfile.Bits}))
+	rerankOverfetchCSV := getenv("EOS_SERVE_SMOKE_RERANK_OVERFETCH", uniqueIntCSV([]int{selectedProfile.RerankOverfetch, fallbackProfile.RerankOverfetch}))
 	minCompression, err := parseFloatEnv("EOS_SERVE_SMOKE_MIN_TOTAL_COMPRESSION", 1.0)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -302,9 +397,9 @@ func main() {
 		"--split", getenv("EOS_SERVE_SMOKE_SPLIT", "test"),
 		"--top-k", getenv("EOS_SERVE_SMOKE_TOP_K", "100"),
 		"--batch-size", getenv("EOS_SERVE_SMOKE_BATCH_SIZE", "512"),
-		"--bits", "4,8",
-		"--rerank-overfetch", "125,250",
-		"--rerank-storage", "fp16",
+		"--bits", bitsCSV,
+		"--rerank-overfetch", rerankOverfetchCSV,
+		"--rerank-storage", rerankStorage,
 		"--metrics-json", metricsJSON,
 		"--metrics-tsv", metricsTSV,
 	}
@@ -326,13 +421,13 @@ func main() {
 		os.Exit(1)
 	}
 	rows := rowsFromMetrics(metrics)
-	selected := findRow(rows, selectedMethod)
-	fallback := findRow(rows, fallbackMethod)
-	if err := checkGate(selected, "selected q4/fp16/250", minCompression, maxP95MS); err != nil {
+	selected := findRow(rows, selectedProfile.Method)
+	fallback := findRow(rows, fallbackProfile.Method)
+	if err := checkGate(selected, selectedProfile.Label, minCompression, maxP95MS); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if err := checkGate(fallback, "fallback q8/fp16/125", minCompression, maxP95MS); err != nil {
+	if err := checkGate(fallback, fallbackProfile.Label, minCompression, maxP95MS); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -354,8 +449,12 @@ func main() {
 		SummaryTSV: summaryTSV,
 		Command: args,
 		Rows: rows,
-		Selected: selected,
-		Fallback: fallback,
+		SelectedProfile: compactProfileName(selectedProfile),
+		FallbackProfile: compactProfileName(fallbackProfile),
+		SelectedCompactProfile: selected,
+		FallbackCompactProfile: fallback,
+		Selected: findRow(rows, defaultSelectedMethod),
+		Fallback: findRow(rows, defaultFallbackMethod),
 	}
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
@@ -370,8 +469,10 @@ func main() {
 
 	fmt.Printf("summary_tsv: %s\n", summaryTSV)
 	fmt.Printf("manifest: %s\n", manifestJSON)
-	fmt.Printf("selected q4/fp16/250: ndcg@10=%.6f recall@100=%.6f compression=%.6fx p95_ms=%.6f p99_ms=%.6f scores/s=%.2f\n",
+	fmt.Printf("%s: ndcg@10=%.6f recall@100=%.6f compression=%.6fx p95_ms=%.6f p99_ms=%.6f scores/s=%.2f\n",
+		selectedProfile.Label,
 		selected.NDCGAt10, selected.RecallAt100, selected.TotalCompressionRatio, selected.QueryLatency.P95MS, selected.QueryLatency.P99MS, selected.ScoresPerSecond)
-	fmt.Printf("fallback q8/fp16/125: ndcg@10=%.6f recall@100=%.6f compression=%.6fx p95_ms=%.6f p99_ms=%.6f scores/s=%.2f\n",
+	fmt.Printf("%s: ndcg@10=%.6f recall@100=%.6f compression=%.6fx p95_ms=%.6f p99_ms=%.6f scores/s=%.2f\n",
+		fallbackProfile.Label,
 		fallback.NDCGAt10, fallback.RecallAt100, fallback.TotalCompressionRatio, fallback.QueryLatency.P95MS, fallback.QueryLatency.P99MS, fallback.ScoresPerSecond)
 }
