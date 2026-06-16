@@ -181,8 +181,10 @@ Environment:
   EOS_TS_WINDOW_SMOKE_RUN_ROOT=runs
   EOS_TS_WINDOW_SMOKE_RUN_DIR=runs/eos-timeseries-window-vector-smoke-<timestamp>
   EOS_TS_WINDOW_SMOKE_OUTPUT_DIM=128
+  EOS_TS_WINDOW_SMOKE_SERIES_LENGTH=12
   EOS_TS_WINDOW_SMOKE_WINDOW_SIZE=4
   EOS_TS_WINDOW_SMOKE_WINDOW_STRIDE=2
+  EOS_TS_WINDOW_SMOKE_BATCH_SIZE=64
   EOS_TS_WINDOW_SMOKE_BITS=2,4,8
   EOS_TS_WINDOW_SMOKE_BASELINE_DIM=3072
   EOS_TS_WINDOW_SMOKE_VECTOR_OVERHEAD_BYTES=32
@@ -305,13 +307,82 @@ func runCommand(root string, logDir string, label string, args []string) error {
 	return nil
 }
 
-func writeSyntheticInputs(seriesPath string, queriesPath string, qrelsPath string) error {
-	series := []string{
-		`{"id":"series-rising","label":"rising load","text":"steady upward sensor ramp with increasing load","values":[1,2,3,4,5,6,7,8,9,10,11,12]}`,
-		`{"id":"series-falling","label":"falling load","text":"steady downward sensor ramp with decreasing load","values":[12,11,10,9,8,7,6,5,4,3,2,1]}`,
-		`{"id":"series-spike","label":"sharp spike","text":"mostly calm signal with a sharp central spike event","values":[2,2,2,2,2,12,13,2,2,2,2,2]}`,
-		`{"id":"series-valley","label":"deep valley","text":"high signal with a deep central valley event","values":[12,12,12,12,12,3,2,12,12,12,12,12]}`,
-		`{"id":"series-wave","label":"oscillating wave","text":"repeating oscillating wave pattern across the series","values":[1,4,1,4,1,4,1,4,1,4,1,4]}`,
+type syntheticSeries struct {
+	ID     string `json:"id"`
+	Label  string `json:"label"`
+	Text   string `json:"text"`
+	Values []int  `json:"values"`
+}
+
+func risingValues(length int) []int {
+	values := make([]int, length)
+	for i := range values {
+		values[i] = i + 1
+	}
+	return values
+}
+
+func fallingValues(length int) []int {
+	values := make([]int, length)
+	for i := range values {
+		values[i] = length - i
+	}
+	return values
+}
+
+func spikeValues(length int) []int {
+	values := make([]int, length)
+	for i := range values {
+		values[i] = 2
+	}
+	left := (length - 1) / 2
+	values[left] = 12
+	if left+1 < length {
+		values[left+1] = 13
+	}
+	return values
+}
+
+func valleyValues(length int) []int {
+	values := make([]int, length)
+	for i := range values {
+		values[i] = 12
+	}
+	left := (length - 1) / 2
+	values[left] = 3
+	if left+1 < length {
+		values[left+1] = 2
+	}
+	return values
+}
+
+func waveValues(length int) []int {
+	values := make([]int, length)
+	for i := range values {
+		if i%2 == 0 {
+			values[i] = 1
+		} else {
+			values[i] = 4
+		}
+	}
+	return values
+}
+
+func writeSyntheticInputs(seriesPath string, queriesPath string, qrelsPath string, seriesLength int) error {
+	seriesRecords := []syntheticSeries{
+		{ID: "series-rising", Label: "rising load", Text: "steady upward sensor ramp with increasing load", Values: risingValues(seriesLength)},
+		{ID: "series-falling", Label: "falling load", Text: "steady downward sensor ramp with decreasing load", Values: fallingValues(seriesLength)},
+		{ID: "series-spike", Label: "sharp spike", Text: "mostly calm signal with a sharp central spike event", Values: spikeValues(seriesLength)},
+		{ID: "series-valley", Label: "deep valley", Text: "high signal with a deep central valley event", Values: valleyValues(seriesLength)},
+		{ID: "series-wave", Label: "oscillating wave", Text: "repeating oscillating wave pattern across the series", Values: waveValues(seriesLength)},
+	}
+	series := []string{}
+	for _, record := range seriesRecords {
+		data, err := json.Marshal(record)
+		if err != nil {
+			return err
+		}
+		series = append(series, string(data))
 	}
 	queries := []string{
 		`{"id":"q-rising","text":"find the series with a steady upward increasing ramp"}`,
@@ -428,7 +499,7 @@ func writeSummaryTSV(path string, rows []summaryRow) error {
 func checkGates(metrics evalMetrics, maxNDCGDrop float64, maxRecallDrop float64, maxQ8Storage float64, disableQuality bool) error {
 	q8 := findBitRow(metrics.Rows, 8)
 	if q8 == nil {
-		return fmt.Errorf("q8 metrics row is missing; include 8 in EOS_TS_WINDOW_SMOKE_BITS")
+		return nil
 	}
 	if !disableQuality {
 		if q8.Quality.NDCGAt10+maxNDCGDrop < metrics.Dense.Quality.NDCGAt10 {
@@ -489,6 +560,15 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	seriesLength, err := parseIntEnv("EOS_TS_WINDOW_SMOKE_SERIES_LENGTH", 12)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if seriesLength <= 0 {
+		fmt.Fprintf(os.Stderr, "EOS_TS_WINDOW_SMOKE_SERIES_LENGTH must be a positive integer, got %d\n", seriesLength)
+		os.Exit(1)
+	}
 	baselineDim, err := parseIntEnv("EOS_TS_WINDOW_SMOKE_BASELINE_DIM", 3072)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -528,7 +608,7 @@ func main() {
 	summaryTSV := filepath.Join(runDir, "summary.tsv")
 	manifestJSON := filepath.Join(runDir, "manifest.json")
 
-	if err := writeSyntheticInputs(seriesPath, queriesPath, qrelsPath); err != nil {
+	if err := writeSyntheticInputs(seriesPath, queriesPath, qrelsPath, seriesLength); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -576,7 +656,7 @@ func main() {
 		"--baseline-dim", strconv.Itoa(baselineDim),
 		"--bits", bits,
 		"--objects", "5",
-		"--series-lengths", "12",
+		"--series-lengths", strconv.Itoa(seriesLength),
 		"--window-size", strconv.Itoa(windowSize),
 		"--window-stride", strconv.Itoa(windowStride),
 		"--vector-overhead-bytes", strconv.FormatInt(vectorOverhead, 10),
@@ -622,7 +702,7 @@ func main() {
 		WindowSize:      windowSize,
 		WindowStride:    windowStride,
 		SeriesCount:     exported.Series,
-		SeriesLength:    12,
+		SeriesLength:    seriesLength,
 		Bits:            bits,
 		BaselineDim:     baselineDim,
 		VectorOverhead:  vectorOverhead,
@@ -644,8 +724,8 @@ func main() {
 			"Cache-only evaluator: this does not load/index/query CorkScrewDB.",
 			"Planner overhead is configurable and defaults to 32 bytes per stored vector/index entry.",
 		},
-		QualityGate: fmt.Sprintf("q8 must be within ndcg@10 %.6f and recall@100 %.6f of dense unless EOS_TS_WINDOW_SMOKE_DISABLE_QUALITY_GATE=1", maxNDCGDrop, maxRecallDrop),
-		StorageGate: fmt.Sprintf("q8 eval storage multiple must be <= %.6f when positive", maxQ8Storage),
+		QualityGate: fmt.Sprintf("q8 must be within ndcg@10 %.6f and recall@100 %.6f of dense when q8 is present unless EOS_TS_WINDOW_SMOKE_DISABLE_QUALITY_GATE=1", maxNDCGDrop, maxRecallDrop),
+		StorageGate: fmt.Sprintf("q8 eval storage multiple must be <= %.6f when q8 is present and threshold is positive", maxQ8Storage),
 	}
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {

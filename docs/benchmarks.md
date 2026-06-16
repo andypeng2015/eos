@@ -235,6 +235,24 @@ ferrous-wheel run scripts/smoke_eos_corkscrewdb_timeseries_windows.fw
 
 This wrapper first runs `scripts/smoke_eos_timeseries_window_vectors.fw` into a nested `timeseries/` directory, then feeds the generated `child-doc-vectors.jsonl`, `query-vectors.jsonl`, and `qrels.tsv` into `scripts/smoke_corkscrewdb_child_vectors.fw` using flat `quantized_only` storage by default. It writes a joined `summary.tsv` and `manifest.json` under `runs/eos-corkscrewdb-timeseries-window-smoke-<timestamp>/`, plus nested `timeseries/` and `corkscrewdb/` artifacts. Current default result: `5` parents, `25` child windows, `5` derived windows per parent; q4 flat/quantized_only records `ndcg@10=1.000000`, `recall@100=1.000000`, planner fit `123`, vector payload multiple `0.034180x`, and DB directory multiple `0.117643x`; q8 records `ndcg@10=0.926186`, `recall@100=1.000000`, planner fit `75`, vector payload multiple `0.060221x`, and DB directory multiple `0.143685x`. Observed p95 latency for the default synthetic smoke has been sub-ms, but it varies by run. Treat this as proof that cheap child/window vectors under parent series are usable through local CorkScrewDB `PutVector`/`SearchVector`; the inputs are synthetic text-rendered numeric windows, not a trained numeric time-series encoder, and DB directory size is measured separately from vector-payload/planner accounting.
 
+For a q4-only scale/stress profile with 100 child windows per parent, run:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+EOS_CORKSCREW_TS_WINDOW_BITS=4 \
+EOS_CORKSCREW_TS_WINDOW_SERIES_LENGTH=1648 \
+EOS_CORKSCREW_TS_WINDOW_WINDOW_SIZE=64 \
+EOS_CORKSCREW_TS_WINDOW_WINDOW_STRIDE=16 \
+EOS_CORKSCREW_TS_WINDOW_TARGET_CHILDREN=100 \
+EOS_CORKSCREW_TS_WINDOW_TOP_PARENTS=5 \
+EOS_CORKSCREW_TS_WINDOW_OVERFETCH=100 \
+EOS_CORKSCREW_TS_WINDOW_MAX_VECTOR_PAYLOAD_MULTIPLE=0.70 \
+EOS_CORKSCREW_TS_WINDOW_MAX_DB_DIR_MULTIPLE=0 \
+ferrous-wheel run scripts/smoke_eos_corkscrewdb_timeseries_windows.fw
+```
+
+The 1648/64/16 shape derives exactly 100 covering windows per parent. Verified run `runs/eos-corkscrewdb-timeseries-window-scale-q4-100-20260616T000000Z/` recorded `5` parents, `500` child windows, and `100` derived windows per parent. Its q4 flat/`quantized_only` row recorded `ndcg@10=0.500000`, `recall@100=0.600000`, planner fit `123`, planner storage multiple `0.811688x`, vector payload multiple `0.683594x`, measured DB directory multiple `2.180306x`, and p95 `0.614712ms`. This proves the q4 planner/vector-payload budget target through the local flat API; it does not prove that measured DB directory bytes are already under one dense-vector budget for the tiny five-parent DB. Quality is an early synthetic signal and remains a training/representation target, not solved. Keep the DB directory max disabled unless a fresh run establishes a stable machine-local threshold.
+
 Current measured local result: q4/fp16 sidecar rerank at overfetch250 is the promoted compact retrieval profile. It passed the selected-vs-anchor scoreboard gate on SciFact, NFCorpus, and FiQA for `ndcg_at_10,recall_at_100,total_compression_ratio` as `eos-turboquant-rerank` / `turboquant_ip_b4_overfetch250_fp16_rerank` / bits `4`, with total compression `1.590062x`, in `runs/eos-q4-fp16-overfetch250-gate-20260615T000000Z/`. This is not q4-only retrieval: direct q4 misses dense quality on SciFact and FiQA, and direct q8 is not the promoted default path. Keep q8/fp16 sidecar rerank at overfetch125 as the lower-risk, lower-rerank-cost fallback: `turboquant_ip_b8_overfetch125_fp16_rerank`, total compression `1.326425x`, evidence in `runs/eos-fp16-overfetch125-gate-20260614T000000Z/`.
 
 Current sealed-verified local anchor:

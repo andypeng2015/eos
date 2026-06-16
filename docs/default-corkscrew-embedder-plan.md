@@ -325,6 +325,24 @@ EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_corkscrewdb_timeseries_wi
 
 The wrapper nests the time-series smoke under `timeseries/`, feeds the generated `child-doc-vectors.jsonl`, `query-vectors.jsonl`, and `qrels.tsv` into `scripts/smoke_corkscrewdb_child_vectors.fw`, and defaults CorkScrewDB to flat `quantized_only` storage. Its joined `summary.tsv` reports parent count, child-window count, derived windows per parent, q4/q8 quality, planner fit, measured DB directory multiple, vector payload multiple, and p95 latency. Current default result: `5` parents, `25` child windows, `5` derived windows per parent; q4 flat/quantized_only records `ndcg@10=1.000000`, `recall@100=1.000000`, planner fit `123`, vector payload multiple `0.034180x`, and DB directory multiple `0.117643x`; q8 records `ndcg@10=0.926186`, `recall@100=1.000000`, planner fit `75`, vector payload multiple `0.060221x`, and DB directory multiple `0.143685x`. Observed p95 latency for the default synthetic smoke has been sub-ms, but it varies by run. This is local flat API evidence for synthetic text-rendered numeric windows only; it is not remote mode, federation, HNSW, a trained numeric time-series encoder, or a claim that DB directory bytes and planner/vector payload bytes are the same accounting layer.
 
+Scale the same path to 100 q4 child windows per parent with:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+EOS_CORKSCREW_TS_WINDOW_BITS=4 \
+EOS_CORKSCREW_TS_WINDOW_SERIES_LENGTH=1648 \
+EOS_CORKSCREW_TS_WINDOW_WINDOW_SIZE=64 \
+EOS_CORKSCREW_TS_WINDOW_WINDOW_STRIDE=16 \
+EOS_CORKSCREW_TS_WINDOW_TARGET_CHILDREN=100 \
+EOS_CORKSCREW_TS_WINDOW_TOP_PARENTS=5 \
+EOS_CORKSCREW_TS_WINDOW_OVERFETCH=100 \
+EOS_CORKSCREW_TS_WINDOW_MAX_VECTOR_PAYLOAD_MULTIPLE=0.70 \
+EOS_CORKSCREW_TS_WINDOW_MAX_DB_DIR_MULTIPLE=0 \
+ferrous-wheel run scripts/smoke_eos_corkscrewdb_timeseries_windows.fw
+```
+
+The 1648/64/16 windowing derives exactly 100 child windows per parent and keeps q8 out of the run. Verified run `runs/eos-corkscrewdb-timeseries-window-scale-q4-100-20260616T000000Z/` recorded `5` parents, `500` child windows, and `100` derived windows per parent. Its q4 flat/`quantized_only` row recorded `ndcg@10=0.500000`, `recall@100=0.600000`, planner fit `123`, planner storage multiple `0.811688x`, vector payload multiple `0.683594x`, measured DB directory multiple `2.180306x`, and p95 `0.614712ms`. This proves the q4 planner/vector-payload budget target through the local flat API; it does not prove that measured DB directory bytes are already under one dense-vector budget for the tiny five-parent DB. Quality is an early synthetic signal and remains a training/representation target, not solved. Keep DB directory max disabled unless you are pinning a measured machine-local threshold.
+
 The first quality harness for that lane is cache-only and still outside the CorkScrewDB API:
 
 ```bash

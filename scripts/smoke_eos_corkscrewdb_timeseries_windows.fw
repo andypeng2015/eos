@@ -102,6 +102,11 @@ type config struct {
 	CorkScrewDBRepo     string  `json:"corkscrewdb_repo"`
 	Bits                string  `json:"bits"`
 	OverfetchChildren   string  `json:"overfetch_children"`
+	OutputDim           int     `json:"output_dim"`
+	WindowSize          int     `json:"window_size"`
+	WindowStride        int     `json:"window_stride"`
+	SeriesLength        int     `json:"series_length"`
+	BatchSize           string  `json:"batch_size"`
 	BaselineDim         int     `json:"baseline_dim"`
 	TopParents          int     `json:"top_parents"`
 	TargetChildren      int     `json:"target_children"`
@@ -187,6 +192,11 @@ Environment:
   EOS_CORKSCREW_TS_WINDOW_CORKSCREWDB_REPO=/home/draco/work/corkscrewdb
   EOS_CORKSCREW_TS_WINDOW_BITS=4,8
   EOS_CORKSCREW_TS_WINDOW_OVERFETCH=100
+  EOS_CORKSCREW_TS_WINDOW_OUTPUT_DIM=128
+  EOS_CORKSCREW_TS_WINDOW_SERIES_LENGTH=12
+  EOS_CORKSCREW_TS_WINDOW_WINDOW_SIZE=4
+  EOS_CORKSCREW_TS_WINDOW_WINDOW_STRIDE=2
+  EOS_CORKSCREW_TS_WINDOW_BATCH_SIZE=64
   EOS_CORKSCREW_TS_WINDOW_BASELINE_DIM=3072
   EOS_CORKSCREW_TS_WINDOW_TOP_PARENTS=100
   EOS_CORKSCREW_TS_WINDOW_TARGET_CHILDREN=5
@@ -452,19 +462,16 @@ func checkGates(rows []summaryRow, cfg config) error {
 		return fmt.Errorf("q4 row is missing; EOS_CORKSCREW_TS_WINDOW_BITS must include 4")
 	}
 	q8 := findSummaryRow(rows, 8)
-	if q8 == nil {
-		return fmt.Errorf("q8 row is missing; EOS_CORKSCREW_TS_WINDOW_BITS must include 8")
-	}
 	if cfg.MinQ4NDCG > 0 && q4.NDCGAt10 < cfg.MinQ4NDCG {
 		return fmt.Errorf("q4 ndcg@10 %.6f is below %.6f", q4.NDCGAt10, cfg.MinQ4NDCG)
 	}
 	if cfg.MinQ4Recall > 0 && q4.RecallAt100 < cfg.MinQ4Recall {
 		return fmt.Errorf("q4 recall@100 %.6f is below %.6f", q4.RecallAt100, cfg.MinQ4Recall)
 	}
-	if cfg.MinQ8NDCG > 0 && q8.NDCGAt10 < cfg.MinQ8NDCG {
+	if q8 != nil && cfg.MinQ8NDCG > 0 && q8.NDCGAt10 < cfg.MinQ8NDCG {
 		return fmt.Errorf("q8 ndcg@10 %.6f is below %.6f", q8.NDCGAt10, cfg.MinQ8NDCG)
 	}
-	if cfg.MinQ8Recall > 0 && q8.RecallAt100 < cfg.MinQ8Recall {
+	if q8 != nil && cfg.MinQ8Recall > 0 && q8.RecallAt100 < cfg.MinQ8Recall {
 		return fmt.Errorf("q8 recall@100 %.6f is below %.6f", q8.RecallAt100, cfg.MinQ8Recall)
 	}
 	for _, row := range rows {
@@ -522,11 +529,36 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if !hasInt(bits, 4) || !hasInt(bits, 8) {
-		fmt.Fprintln(os.Stderr, "EOS_CORKSCREW_TS_WINDOW_BITS must include 4 and 8")
+	if !hasInt(bits, 4) {
+		fmt.Fprintln(os.Stderr, "EOS_CORKSCREW_TS_WINDOW_BITS must include 4")
 		os.Exit(1)
 	}
 	overfetchValue := getenv("EOS_CORKSCREW_TS_WINDOW_OVERFETCH", "100")
+	outputDim, err := parseIntEnv("EOS_CORKSCREW_TS_WINDOW_OUTPUT_DIM", 128)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	windowSize, err := parseIntEnv("EOS_CORKSCREW_TS_WINDOW_WINDOW_SIZE", 4)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	windowStride, err := parseIntEnv("EOS_CORKSCREW_TS_WINDOW_WINDOW_STRIDE", 2)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	seriesLength, err := parseIntEnv("EOS_CORKSCREW_TS_WINDOW_SERIES_LENGTH", 12)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if seriesLength <= 0 {
+		fmt.Fprintf(os.Stderr, "EOS_CORKSCREW_TS_WINDOW_SERIES_LENGTH must be a positive integer, got %d\n", seriesLength)
+		os.Exit(1)
+	}
+	batchSize := getenv("EOS_CORKSCREW_TS_WINDOW_BATCH_SIZE", "64")
 	baselineDim, err := parseIntEnv("EOS_CORKSCREW_TS_WINDOW_BASELINE_DIM", 3072)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -600,6 +632,11 @@ func main() {
 		CorkScrewDBRepo:     corkscrewRepo,
 		Bits:                bitsValue,
 		OverfetchChildren:   overfetchValue,
+		OutputDim:           outputDim,
+		WindowSize:          windowSize,
+		WindowStride:        windowStride,
+		SeriesLength:        seriesLength,
+		BatchSize:           batchSize,
 		BaselineDim:         baselineDim,
 		TopParents:          topParents,
 		TargetChildren:      targetChildren,
@@ -623,6 +660,11 @@ func main() {
 		"EOS_REPO_ROOT="+root,
 		"EOS_TS_WINDOW_SMOKE_RUN_DIR="+timeseriesRunDir,
 		"EOS_TS_WINDOW_SMOKE_BITS="+bitsValue,
+		"EOS_TS_WINDOW_SMOKE_OUTPUT_DIM="+strconv.Itoa(outputDim),
+		"EOS_TS_WINDOW_SMOKE_WINDOW_SIZE="+strconv.Itoa(windowSize),
+		"EOS_TS_WINDOW_SMOKE_WINDOW_STRIDE="+strconv.Itoa(windowStride),
+		"EOS_TS_WINDOW_SMOKE_SERIES_LENGTH="+strconv.Itoa(seriesLength),
+		"EOS_TS_WINDOW_SMOKE_BATCH_SIZE="+batchSize,
 		"EOS_TS_WINDOW_SMOKE_BASELINE_DIM="+strconv.Itoa(baselineDim),
 		"EOS_TS_WINDOW_SMOKE_VECTOR_OVERHEAD_BYTES="+strconv.FormatInt(vectorOverheadBytes, 10),
 	)
@@ -733,6 +775,11 @@ func main() {
 			"query_vectors": queryVectors,
 			"qrels": qrels,
 			"corkscrewdb_repo": corkscrewRepo,
+			"series_length": strconv.Itoa(seriesLength),
+			"window_size": strconv.Itoa(windowSize),
+			"window_stride": strconv.Itoa(windowStride),
+			"output_dim": strconv.Itoa(outputDim),
+			"batch_size": batchSize,
 		},
 		Commands:               commands,
 		TimeseriesRunDir:        timeseriesRunDir,
@@ -750,7 +797,7 @@ func main() {
 		Rows:                   rows,
 		Gates: []string{
 			fmt.Sprintf("q4 ndcg@10 >= %.6f and recall@100 >= %.6f when positive", minQ4NDCG, minQ4Recall),
-			fmt.Sprintf("q8 ndcg@10 >= %.6f and recall@100 >= %.6f when positive", minQ8NDCG, minQ8Recall),
+			fmt.Sprintf("q8 ndcg@10 >= %.6f and recall@100 >= %.6f when q8 is present and thresholds are positive", minQ8NDCG, minQ8Recall),
 			fmt.Sprintf("planner fit >= %d child windows in one dense-vector budget", minPlannerFit),
 			fmt.Sprintf("vector payload storage multiple <= %.6f when positive", maxVectorPayloadMultiple),
 			fmt.Sprintf("DB directory storage multiple <= %.6f when positive", maxDBDirMultiple),
