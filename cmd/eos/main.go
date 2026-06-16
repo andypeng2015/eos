@@ -111,6 +111,8 @@ func run(args []string) error {
 		return runExportRetrievalVectors(args[1:])
 	case "export-timeseries-vectors":
 		return runExportTimeSeriesVectors(args[1:])
+	case "export-event-trace-vectors":
+		return runExportEventTraceVectors(args[1:])
 	case "eval-retrieval":
 		return runEvalRetrieval(args[1:])
 	case "eval-retrieval-hybrid":
@@ -542,6 +544,71 @@ func runExportTimeSeriesVectors(args []string) error {
 		fmt.Printf("model_dim: %d\n", summary.ModelDimension)
 	}
 	fmt.Printf("windows: size=%d stride=%d\n", summary.WindowSize, summary.WindowStride)
+	fmt.Printf("dataset_dir: %s\n", summary.OutputDir)
+	fmt.Printf("corpus: %s\n", summary.CorpusPath)
+	fmt.Printf("queries: %s\n", summary.BEIRQueriesPath)
+	fmt.Printf("child_doc_vectors: %s\n", summary.ChildDocVectorPath)
+	fmt.Printf("query_vectors: %s\n", summary.QueryVectorPath)
+	if *manifestPath != "" {
+		fmt.Printf("manifest: %s\n", *manifestPath)
+	}
+	return nil
+}
+
+func runExportEventTraceVectors(args []string) error {
+	fs := flag.NewFlagSet("export-event-trace-vectors", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	datasetName := fs.String("dataset", "", "dataset name for manifest/status output")
+	batchSize := fs.Int("batch-size", 64, "embedding batch size")
+	maxTraces := fs.Int("max-traces", 0, "limit trace rows for smoke exports")
+	maxQueries := fs.Int("max-queries", 0, "limit query rows for smoke exports")
+	outputDim := fs.Int("output-dim", 0, "when positive, prefix-truncate embeddings to this dimension and L2-renormalize before writing")
+	tracePrefix := fs.String("trace-prefix", "", "prefix prepended to rendered trace-event text before embedding")
+	queryPrefix := fs.String("query-prefix", "", "prefix prepended to query text before embedding")
+	manifestPath := fs.String("manifest-json", "", "write export summary JSON manifest")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 4 || fs.Arg(0) == "" || fs.Arg(1) == "" || fs.Arg(2) == "" || fs.Arg(3) == "" {
+		return fmt.Errorf("usage: eos export-event-trace-vectors [flags] <artifact.mll> <traces.jsonl> <queries.jsonl> <output-dir>")
+	}
+	artifactPath := fs.Arg(0)
+	tracesPath := fs.Arg(1)
+	queriesPath := fs.Arg(2)
+	outputDir := fs.Arg(3)
+	if *datasetName == "" {
+		*datasetName = strings.TrimSuffix(filepath.Base(tracesPath), filepath.Ext(tracesPath))
+		if *datasetName == "" {
+			*datasetName = "event-traces"
+		}
+	}
+
+	rt := eosruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+	model, err := rt.LoadEmbeddingPackage(context.Background(), artifactPath)
+	if err != nil {
+		return err
+	}
+	summary, err := eosruntime.ExportEventTraceVectors(context.Background(), model, eosruntime.EventTraceVectorExportConfig{
+		DatasetName:      *datasetName,
+		ArtifactPath:     artifactPath,
+		TracesPath:       tracesPath,
+		QueriesPath:      queriesPath,
+		OutputDir:        outputDir,
+		BatchSize:        *batchSize,
+		MaxTraces:        *maxTraces,
+		MaxQueries:       *maxQueries,
+		OutputDim:        *outputDim,
+		TracePrefix:      *tracePrefix,
+		QueryPrefix:      *queryPrefix,
+		ManifestJSONPath: *manifestPath,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("exported event trace vectors: dataset=%s backend=%s traces=%d queries=%d child_event_vectors=%d dim=%d\n", summary.Dataset, summary.Backend, summary.Traces, summary.Queries, summary.ChildVectors, summary.Dimension)
+	if summary.ModelDimension != 0 && summary.ModelDimension != summary.Dimension {
+		fmt.Printf("model_dim: %d\n", summary.ModelDimension)
+	}
 	fmt.Printf("dataset_dir: %s\n", summary.OutputDir)
 	fmt.Printf("corpus: %s\n", summary.CorpusPath)
 	fmt.Printf("queries: %s\n", summary.BEIRQueriesPath)
@@ -5888,6 +5955,7 @@ func printUsage() {
 	fmt.Println("  eos embed-text <artifact.mll> <text...>")
 	fmt.Println("  eos export-retrieval-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
 	fmt.Println("  eos export-timeseries-vectors [flags] <artifact.mll> <series.jsonl> <queries.jsonl> <output-dir>")
+	fmt.Println("  eos export-event-trace-vectors [flags] <artifact.mll> <traces.jsonl> <queries.jsonl> <output-dir>")
 	fmt.Println("  eos eval-retrieval [flags] <artifact.mll> <beir-dataset-dir>")
 	fmt.Println("  eos eval-retrieval-hybrid [flags] <artifact.mll> <beir-dataset-dir>")
 	fmt.Println("  eos eval-retrieval-turboquant [flags] <artifact.mll> <beir-dataset-dir>")
@@ -5933,6 +6001,7 @@ func printUsage() {
 	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
 	fmt.Println("export-retrieval-vectors writes BEIR document/query vector caches from a packaged or sealed Eos embedding .mll, optionally as parent-child document chunks.")
 	fmt.Println("export-timeseries-vectors writes text-rendered time-series window child-vector caches plus query vectors for the multivector TurboQuant quality harness.")
+	fmt.Println("export-event-trace-vectors writes text-rendered event/trace child-vector caches plus query vectors for the multivector TurboQuant quality harness.")
 	fmt.Println("eval-retrieval scores a sealed embedding .mll on BEIR-style corpus/query/qrels files with nDCG/MRR/Recall metrics.")
 	fmt.Println("eval-retrieval-hybrid fuses sealed embedding dense top-k with BM25 top-k using minmax, zscore, or RRF scoring.")
 	fmt.Println("eval-retrieval-turboquant compares dense retrieval quality/cost against TurboQuant IP-preserving quantized document vectors.")

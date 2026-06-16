@@ -37,6 +37,7 @@ This is a default-embedder product lane for CorkScrewDB: Eos can emit compact ch
 
 - Keep `plan-multivector-storage` and `scripts/smoke_eos_multivector_usecase_frontier.fw` as the byte-accounting gate. Report both same-dim controls and large-baseline rows.
 - Use `scripts/smoke_eos_multivector_budget_quality.fw` when cache-only ranking quality must be cited beside overhead-aware fit counts.
+- Use `eos export-event-trace-vectors` or `scripts/smoke_eos_event_trace_vectors.fw` for the synthetic event/trace proof lane. It renders one parent trace into many deterministic event child vectors, then reuses the multivector TurboQuant evaluator and planner; do not treat it as production incident-retrieval evidence by itself.
 - Use `scripts/smoke_eos_corkscrewdb_budget_quality.fw` or `scripts/smoke_corkscrewdb_child_vectors.fw` with candidate-specific child/query/qrels inputs when the actual local flat CorkScrewDB API path must pass.
 - Promote packed-parent evidence only when layout, metadata mode, child-ID mode, DB bytes, p95 latency, and parent-search mode are recorded.
 - Before broader product claims, run larger real-document and real-event workloads, native/trained compact heads or Matryoshka experiments, and remote/HNSW/federation-specific CorkScrewDB smokes rather than extrapolating from local flat rows.

@@ -223,6 +223,8 @@ EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_multivector_usecase_front
 
 The default scenarios cover the same-dim 100-child control, 100-child document spans, 100 time-series windows derived from `1648/64/16`, a 180-child event/trace timeline, and a 341-child q2 frontier. The smoke writes `summary.tsv`, `manifest.json`, planner JSON, and logs under `runs/eos-multivector-usecase-frontier-smoke-<timestamp>/`; gates require same-dim 100-child q2/q4 packed rows to fail, 3072d-baseline 100-child q2/q4 packed rows to fit, 180-child packed q4 to fit at the edge, and 341-child packed q2 to fit. q8 rows are present for contrast but are not required to fit.
 
+For a synthetic event/trace cache-only proof lane, use `eos export-event-trace-vectors` or run `scripts/smoke_eos_event_trace_vectors.fw`. The exporter accepts one parent trace per JSONL row with `id` or `_id` and an `events` array, renders each event into a deterministic child vector text row, writes BEIR helper files, and feeds `eval-retrieval-multivector-turboquant`. This is text-rendered synthetic event evidence only; real incident/session retrieval needs a real workload and separate CorkScrewDB API measurement.
+
 Use the budget-quality smoke when the claim must include both cache-only retrieval quality and overhead-aware planner capacity:
 
 ```bash

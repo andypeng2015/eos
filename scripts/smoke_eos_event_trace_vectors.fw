@@ -1,0 +1,790 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const defaultArtifactRel = "runs/eos-embed-v1-splitclean-modelhard-followup-20260614T000000Z/candidate-june10-modelhard-lr000002-1epoch/manta-embed-v1.sealed.mll"
+
+type exportManifest struct {
+	Schema             string `json:"schema"`
+	Dataset            string `json:"dataset"`
+	Artifact           string `json:"artifact"`
+	Traces             int    `json:"trace_count"`
+	Queries            int    `json:"query_count"`
+	ChildVectors       int    `json:"child_event_vectors"`
+	Dimension          int    `json:"dimension"`
+	ModelDimension     int    `json:"model_dimension"`
+	OutputDimension    int    `json:"output_dimension"`
+	CorpusPath         string `json:"corpus_path"`
+	BEIRQueriesPath    string `json:"beir_queries_path"`
+	ChildDocVectorPath string `json:"child_doc_vector_path"`
+	QueryVectorPath    string `json:"query_vector_path"`
+}
+
+type qualityMetrics struct {
+	NDCGAt10    float64 `json:"ndcg_at_10"`
+	NDCGAt100   float64 `json:"ndcg_at_100"`
+	RecallAt100 float64 `json:"recall_at_100"`
+}
+
+type latencyMetrics struct {
+	P50MS float64 `json:"p50_ms"`
+	P95MS float64 `json:"p95_ms"`
+	P99MS float64 `json:"p99_ms"`
+	MaxMS float64 `json:"max_ms"`
+}
+
+type denseMetrics struct {
+	Quality                          qualityMetrics `json:"quality"`
+	BaselineDim                      int            `json:"baseline_dim"`
+	ParentCount                      int            `json:"parent_count"`
+	ChildCount                       int            `json:"child_count"`
+	AvgChildrenPerParent             float64        `json:"avg_children_per_parent"`
+	MaxChildrenPerParent             int            `json:"max_children_per_parent"`
+	DenseBaselineBytes               int64          `json:"dense_baseline_bytes"`
+	DenseBaselineTotalBytes          int64          `json:"dense_baseline_total_bytes"`
+	DenseChildBytes                  int64          `json:"dense_child_bytes"`
+	VectorsThatFitInOneDenseBaseline int64          `json:"vectors_that_fit_in_one_dense_baseline"`
+	StorageMultipleOfDenseBaseline   float64        `json:"storage_multiple_of_dense_baseline"`
+	ParentBudgetStorageMultiple      float64        `json:"parent_budget_storage_multiple"`
+	ScoresPerSecond                  float64        `json:"scores_per_second"`
+	QueryLatency                     latencyMetrics `json:"query_latency"`
+}
+
+type bitMetrics struct {
+	Bits                             int            `json:"bits"`
+	Method                           string         `json:"method"`
+	QuantizerSeed                    int64          `json:"quantizer_seed"`
+	Quality                          qualityMetrics `json:"quality"`
+	NDCGAt10Delta                    float64        `json:"ndcg_at_10_delta"`
+	RecallAt100Delta                 float64        `json:"recall_at_100_delta"`
+	BaselineDim                      int            `json:"baseline_dim"`
+	ParentCount                      int            `json:"parent_count"`
+	ChildCount                       int            `json:"child_count"`
+	AvgChildrenPerParent             float64        `json:"avg_children_per_parent"`
+	MaxChildrenPerParent             int            `json:"max_children_per_parent"`
+	QuantizedVectorBytes             int64          `json:"quantized_vector_bytes"`
+	QuantizedChildBytes              int64          `json:"quantized_child_bytes"`
+	DenseBaselineBytes               int64          `json:"dense_baseline_bytes"`
+	DenseBaselineTotalBytes          int64          `json:"dense_baseline_total_bytes"`
+	DenseChildBytes                  int64          `json:"dense_child_bytes"`
+	DenseChildCompression            float64        `json:"dense_child_compression_ratio"`
+	VectorsThatFitInOneDenseBaseline int64          `json:"vectors_that_fit_in_one_dense_baseline"`
+	StorageMultipleOfDenseBaseline   float64        `json:"storage_multiple_of_dense_baseline"`
+	ParentBudgetStorageMultiple      float64        `json:"parent_budget_storage_multiple"`
+	ScoresPerSecond                  float64        `json:"scores_per_second"`
+	QueryLatency                     latencyMetrics `json:"query_latency"`
+}
+
+type evalMetrics struct {
+	Schema  string       `json:"schema"`
+	Dataset string       `json:"dataset"`
+	Backend string       `json:"backend"`
+	Dense   denseMetrics `json:"dense"`
+	Rows    []bitMetrics `json:"rows"`
+}
+
+type planRow struct {
+	Dim                                    int     `json:"dim"`
+	BaselineDim                            int     `json:"baseline_dim"`
+	Bits                                   int     `json:"bits"`
+	Objects                                int     `json:"objects"`
+	VectorsPerObject                       int     `json:"vectors_per_object"`
+	QuantizedPayloadBytes                  int64   `json:"quantized_payload_bytes"`
+	QuantizedVectorBytes                   int64   `json:"quantized_vector_bytes"`
+	VectorOverheadBytes                    int64   `json:"vector_overhead_bytes"`
+	DenseVectorStorageBytes                int64   `json:"dense_vector_storage_bytes"`
+	QuantizedVectorStorageBytes            int64   `json:"quantized_vector_storage_bytes"`
+	PackedObjectOverheadBytes              int64   `json:"packed_object_overhead_bytes"`
+	PackedQuantizedStorageBytes            int64   `json:"packed_quantized_storage_bytes"`
+	VectorsThatFitInOneDenseVector         int64   `json:"vectors_that_fit_in_one_dense_vector"`
+	FitsInOneDenseVectorStorage            bool    `json:"fits_in_one_dense_vector_storage"`
+	StorageMultipleOfDenseParentCost       float64 `json:"storage_multiple_of_dense_parent_cost"`
+	PackedVectorsThatFitInOneDenseVector   int64   `json:"packed_vectors_that_fit_in_one_dense_vector"`
+	PackedFitsInOneDenseVectorStorage      bool    `json:"packed_fits_in_one_dense_vector_storage"`
+	PackedStorageMultipleOfDenseParentCost float64 `json:"packed_storage_multiple_of_dense_parent_cost"`
+}
+
+type storagePlan struct {
+	Schema string    `json:"schema"`
+	Rows   []planRow `json:"rows"`
+}
+
+type summaryRow struct {
+	Row                              string  `json:"row"`
+	Bits                             int     `json:"bits,omitempty"`
+	Method                           string  `json:"method,omitempty"`
+	NDCGAt10                         float64 `json:"ndcg_at_10"`
+	RecallAt100                      float64 `json:"recall_at_100"`
+	NDCGAt10Delta                    float64 `json:"ndcg_at_10_delta,omitempty"`
+	RecallAt100Delta                 float64 `json:"recall_at_100_delta,omitempty"`
+	EvalStorageMultiple              float64 `json:"eval_storage_multiple_of_dense_baseline"`
+	PlannerStorageMultiple           float64 `json:"planner_storage_multiple_of_dense_parent_cost,omitempty"`
+	PackedPlannerStorageMultiple     float64 `json:"packed_planner_storage_multiple_of_dense_parent_cost,omitempty"`
+	PackedFitsConfiguredCount        bool    `json:"packed_fits_configured_count,omitempty"`
+	VectorsThatFitInOneDenseBaseline int64   `json:"vectors_that_fit_in_one_dense_baseline"`
+	PackedFitCount                   int64   `json:"packed_fit_count,omitempty"`
+	QuantizedVectorBytes             int64   `json:"quantized_vector_bytes,omitempty"`
+	VectorOverheadBytes              int64   `json:"vector_overhead_bytes,omitempty"`
+	PackedObjectOverheadBytes        int64   `json:"packed_object_overhead_bytes,omitempty"`
+	ScoresPerSecond                  float64 `json:"scores_per_second"`
+	QueryP95MS                       float64 `json:"query_p95_ms"`
+}
+
+type manifest struct {
+	Schema                    string       `json:"schema"`
+	GeneratedAt               string       `json:"generated_at"`
+	RunDir                    string       `json:"run_dir"`
+	Artifact                  string       `json:"artifact"`
+	Dataset                   string       `json:"dataset"`
+	OutputDim                 int          `json:"output_dim"`
+	EventsPerTrace            int          `json:"events_per_trace"`
+	TraceVariants             int          `json:"trace_variants"`
+	TraceCount                int          `json:"trace_count"`
+	Bits                      string       `json:"bits"`
+	BaselineDim               int          `json:"baseline_dim"`
+	VectorOverhead            int64        `json:"vector_overhead_bytes"`
+	PackedObjectOverheadBytes int64        `json:"packed_object_overhead_bytes"`
+	TracesPath                string       `json:"traces_path"`
+	QueriesPath               string       `json:"queries_path"`
+	QrelsPath                 string       `json:"qrels_path"`
+	ExportDir                 string       `json:"export_dir"`
+	ExportManifest            string       `json:"export_manifest"`
+	MetricsJSON               string       `json:"metrics_json"`
+	MetricsTSV                string       `json:"metrics_tsv"`
+	StoragePlanJSON           string       `json:"storage_plan_json"`
+	SummaryTSV                string       `json:"summary_tsv"`
+	ExportCommand             []string     `json:"export_command"`
+	EvalCommand               []string     `json:"eval_command"`
+	PlannerCommand            []string     `json:"planner_command"`
+	Rows                      []summaryRow `json:"rows"`
+	Caveats                   []string     `json:"caveats"`
+	QualityGate               string       `json:"quality_gate"`
+	StorageGate               string       `json:"storage_gate"`
+}
+
+type syntheticTrace struct {
+	ID     string           `json:"id"`
+	Label  string           `json:"label"`
+	Text   string           `json:"text"`
+	Events []syntheticEvent `json:"events"`
+}
+
+type syntheticEvent struct {
+	ID       string            `json:"id"`
+	Type     string            `json:"type"`
+	Time     string            `json:"time"`
+	Role     string            `json:"role"`
+	Actor    string            `json:"actor"`
+	Text     string            `json:"text"`
+	Message  string            `json:"message"`
+	Summary  string            `json:"summary"`
+	Metadata map[string]string `json:"metadata"`
+}
+
+type syntheticPattern struct {
+	Name      string
+	QueryID   string
+	BaseID    string
+	Label     string
+	Text      string
+	QueryText string
+	Terms     []string
+	Actor     string
+}
+
+func usage() {
+	fmt.Println(`Synthetic Eos event/trace child-vector smoke for TurboQuant multi-vector economics.
+
+Run:
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_event_trace_vectors.fw
+
+Environment:
+  EOS_EVENT_TRACE_SMOKE_ARTIFACT=/path/to/manta-embed-v1.sealed.mll
+  EOS_EVENT_TRACE_SMOKE_RUN_ROOT=runs
+  EOS_EVENT_TRACE_SMOKE_RUN_DIR=runs/eos-event-trace-vector-smoke-<timestamp>
+  EOS_EVENT_TRACE_SMOKE_OUTPUT_DIM=128
+  EOS_EVENT_TRACE_SMOKE_EVENTS_PER_TRACE=24
+  EOS_EVENT_TRACE_SMOKE_TRACE_VARIANTS=1
+  EOS_EVENT_TRACE_SMOKE_BATCH_SIZE=64
+  EOS_EVENT_TRACE_SMOKE_BITS=2,4,8
+  EOS_EVENT_TRACE_SMOKE_BASELINE_DIM=3072
+  EOS_EVENT_TRACE_SMOKE_VECTOR_OVERHEAD_BYTES=32
+  EOS_EVENT_TRACE_SMOKE_PACKED_OBJECT_OVERHEAD_BYTES=32
+  EOS_EVENT_TRACE_SMOKE_DISABLE_QUALITY_GATE=1
+  EOS_EVENT_TRACE_SMOKE_Q8_MAX_NDCG_DROP=0.050000
+  EOS_EVENT_TRACE_SMOKE_Q8_MAX_RECALL_DROP=0.050000`)
+}
+
+func getenv(name string, fallback string) string {
+	value := os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envEnabled(name string) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	if pwd := os.Getenv("PWD"); hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func parseIntEnv(name string, fallback int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parseInt64Env(name string, fallback int64) (int64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parseFloatEnv(name string, fallback float64) (float64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a float: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func renderCommand(args []string) string {
+	parts := []string{}
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func runCommand(root string, logDir string, label string, args []string) error {
+	fmt.Println("\n== " + label + " ==")
+	fmt.Println("+ " + renderCommand(args))
+	logPath := filepath.Join(logDir, label+".log")
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if writeErr := os.WriteFile(logPath, append([]byte(renderCommand(args)+"\n\n"), output...), 0o644); writeErr != nil {
+		return writeErr
+	}
+	fmt.Print(string(output))
+	if err != nil {
+		return fmt.Errorf("%s failed: %w", label, err)
+	}
+	return nil
+}
+
+func syntheticPatterns() []syntheticPattern {
+	return []syntheticPattern{
+		{Name: "incident-spike", QueryID: "q-incident-spike", BaseID: "trace-incident-spike", Label: "incident spike", Text: "checkout latency incident with payment retry spike", QueryText: "find the checkout incident with payment retry latency spike", Terms: []string{"checkout", "latency", "payment", "retry", "spike"}, Actor: "payments-api"},
+		{Name: "auth-failure", QueryID: "q-auth-failure", BaseID: "trace-auth-failure", Label: "auth failure", Text: "authentication failure burst across login sessions", QueryText: "find the login authentication failure burst", Terms: []string{"login", "authentication", "failure", "token", "burst"}, Actor: "auth-service"},
+		{Name: "payment-retry", QueryID: "q-payment-retry", BaseID: "trace-payment-retry", Label: "payment retry", Text: "card processor retry loop with idempotency recovery", QueryText: "find the card payment processor retry loop", Terms: []string{"card", "processor", "retry", "idempotency", "recovery"}, Actor: "billing-worker"},
+		{Name: "deploy-rollback", QueryID: "q-deploy-rollback", BaseID: "trace-deploy-rollback", Label: "deploy rollback", Text: "deployment rollback after elevated error rate", QueryText: "find the deployment rollback after elevated errors", Terms: []string{"deploy", "rollback", "error", "release", "canary"}, Actor: "deploy-bot"},
+		{Name: "support-escalation", QueryID: "q-support-escalation", BaseID: "trace-support-escalation", Label: "support escalation", Text: "customer support escalation through triage and resolution", QueryText: "find the support escalation with triage and resolution", Terms: []string{"support", "customer", "escalation", "triage", "resolution"}, Actor: "support-agent"},
+	}
+}
+
+func eventFor(pattern syntheticPattern, traceID string, index int, variant int) syntheticEvent {
+	term := pattern.Terms[index%len(pattern.Terms)]
+	next := pattern.Terms[(index+1)%len(pattern.Terms)]
+	stage := "observe"
+	if index%5 == 1 {
+		stage = "detect"
+	} else if index%5 == 2 {
+		stage = "mitigate"
+	} else if index%5 == 3 {
+		stage = "verify"
+	} else if index%5 == 4 {
+		stage = "resolve"
+	}
+	minute := index + variant*3
+	return syntheticEvent{
+		ID:      fmt.Sprintf("evt-%04d", index),
+		Type:    stage,
+		Time:    fmt.Sprintf("2026-06-01T00:%02d:00Z", minute%60),
+		Role:    "service",
+		Actor:   pattern.Actor,
+		Text:    fmt.Sprintf("%s event %03d for %s %s", stage, index, term, next),
+		Message: fmt.Sprintf("%s trace %s records %s and %s signal variant %03d", pattern.Name, traceID, term, next, variant),
+		Summary: fmt.Sprintf("%s %s state", pattern.Label, stage),
+		Metadata: map[string]string{
+			"pattern": pattern.Name,
+			"stage":   stage,
+			"term":    term,
+			"variant": strconv.Itoa(variant),
+		},
+	}
+}
+
+func writeSyntheticInputs(tracesPath string, queriesPath string, qrelsPath string, eventsPerTrace int, variants int) error {
+	patterns := syntheticPatterns()
+	traceLines := []string{}
+	for _, pattern := range patterns {
+		for variant := 0; variant < variants; variant++ {
+			id := pattern.BaseID
+			label := pattern.Label
+			text := pattern.Text
+			if variants > 1 {
+				id = fmt.Sprintf("%s-v%03d", pattern.BaseID, variant)
+				label = fmt.Sprintf("%s variant %03d", pattern.Label, variant)
+				text = fmt.Sprintf("%s; deterministic %s parent variant %03d", pattern.Text, pattern.Name, variant)
+			}
+			events := []syntheticEvent{}
+			for i := 0; i < eventsPerTrace; i++ {
+				events = append(events, eventFor(pattern, id, i, variant))
+			}
+			record := syntheticTrace{ID: id, Label: label, Text: text, Events: events}
+			data, err := json.Marshal(record)
+			if err != nil {
+				return err
+			}
+			traceLines = append(traceLines, string(data))
+		}
+	}
+	queryLines := []string{}
+	qrels := []string{"query-id\tcorpus-id\tscore"}
+	for _, pattern := range patterns {
+		queryLines = append(queryLines, fmt.Sprintf(`{"id":%q,"text":%q}`, pattern.QueryID, pattern.QueryText))
+		for variant := 0; variant < variants; variant++ {
+			id := pattern.BaseID
+			if variants > 1 {
+				id = fmt.Sprintf("%s-v%03d", pattern.BaseID, variant)
+			}
+			qrels = append(qrels, fmt.Sprintf("%s\t%s\t1", pattern.QueryID, id))
+		}
+	}
+	if err := os.WriteFile(tracesPath, []byte(strings.Join(traceLines, "\n")+"\n"), 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(queriesPath, []byte(strings.Join(queryLines, "\n")+"\n"), 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(qrelsPath, []byte(strings.Join(qrels, "\n")+"\n"), 0o644); err != nil {
+		return err
+	}
+	return nil
+}
+
+func readJSON(path string, target any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, target)
+}
+
+func findBitRow(rows []bitMetrics, bits int) *bitMetrics {
+	for i := range rows {
+		if rows[i].Bits == bits {
+			return &rows[i]
+		}
+	}
+	return nil
+}
+
+func findPlanRow(rows []planRow, bits int) *planRow {
+	for i := range rows {
+		if rows[i].Bits == bits {
+			return &rows[i]
+		}
+	}
+	return nil
+}
+
+func makeSummaryRows(metrics evalMetrics, plan storagePlan) []summaryRow {
+	rows := []summaryRow{{
+		Row:                              "dense",
+		Method:                           "dense-child",
+		NDCGAt10:                         metrics.Dense.Quality.NDCGAt10,
+		RecallAt100:                      metrics.Dense.Quality.RecallAt100,
+		EvalStorageMultiple:              metrics.Dense.StorageMultipleOfDenseBaseline,
+		VectorsThatFitInOneDenseBaseline: metrics.Dense.VectorsThatFitInOneDenseBaseline,
+		ScoresPerSecond:                  metrics.Dense.ScoresPerSecond,
+		QueryP95MS:                       metrics.Dense.QueryLatency.P95MS,
+	}}
+	for _, bit := range metrics.Rows {
+		planRow := findPlanRow(plan.Rows, bit.Bits)
+		out := summaryRow{
+			Row:                              fmt.Sprintf("q%d", bit.Bits),
+			Bits:                             bit.Bits,
+			Method:                           bit.Method,
+			NDCGAt10:                         bit.Quality.NDCGAt10,
+			RecallAt100:                      bit.Quality.RecallAt100,
+			NDCGAt10Delta:                    bit.NDCGAt10Delta,
+			RecallAt100Delta:                 bit.RecallAt100Delta,
+			EvalStorageMultiple:              bit.StorageMultipleOfDenseBaseline,
+			VectorsThatFitInOneDenseBaseline: bit.VectorsThatFitInOneDenseBaseline,
+			QuantizedVectorBytes:             bit.QuantizedVectorBytes,
+			ScoresPerSecond:                  bit.ScoresPerSecond,
+			QueryP95MS:                       bit.QueryLatency.P95MS,
+		}
+		if planRow != nil {
+			out.PlannerStorageMultiple = planRow.StorageMultipleOfDenseParentCost
+			out.PackedPlannerStorageMultiple = planRow.PackedStorageMultipleOfDenseParentCost
+			out.PackedFitsConfiguredCount = planRow.PackedFitsInOneDenseVectorStorage
+			out.PackedFitCount = planRow.PackedVectorsThatFitInOneDenseVector
+			out.VectorOverheadBytes = planRow.VectorOverheadBytes
+			out.PackedObjectOverheadBytes = planRow.PackedObjectOverheadBytes
+		}
+		rows = append(rows, out)
+	}
+	return rows
+}
+
+func writeSummaryTSV(path string, rows []summaryRow) error {
+	var b strings.Builder
+	b.WriteString("row\tbits\tmethod\tndcg_at_10\trecall_at_100\tndcg_at_10_delta\trecall_at_100_delta\teval_storage_multiple_of_dense_baseline\tplanner_storage_multiple_of_dense_parent_cost\tpacked_planner_storage_multiple_of_dense_parent_cost\tpacked_fits_configured_count\tvectors_that_fit_in_one_dense_baseline\tpacked_fit_count\tquantized_vector_bytes\tvector_overhead_bytes\tpacked_object_overhead_bytes\tscores_per_second\tquery_p95_ms\n")
+	for _, row := range rows {
+		fmt.Fprintf(&b, "%s\t%d\t%s\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%t\t%d\t%d\t%d\t%d\t%d\t%.2f\t%.6f\n",
+			row.Row,
+			row.Bits,
+			row.Method,
+			row.NDCGAt10,
+			row.RecallAt100,
+			row.NDCGAt10Delta,
+			row.RecallAt100Delta,
+			row.EvalStorageMultiple,
+			row.PlannerStorageMultiple,
+			row.PackedPlannerStorageMultiple,
+			row.PackedFitsConfiguredCount,
+			row.VectorsThatFitInOneDenseBaseline,
+			row.PackedFitCount,
+			row.QuantizedVectorBytes,
+			row.VectorOverheadBytes,
+			row.PackedObjectOverheadBytes,
+			row.ScoresPerSecond,
+			row.QueryP95MS)
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func checkGates(metrics evalMetrics, plan storagePlan, maxNDCGDrop float64, maxRecallDrop float64, disableQuality bool) error {
+	q4Plan := findPlanRow(plan.Rows, 4)
+	if q4Plan == nil {
+		return fmt.Errorf("missing q4 planner row; EOS_EVENT_TRACE_SMOKE_BITS must include 4 for the default packed storage fit gate")
+	}
+	if !q4Plan.PackedFitsInOneDenseVectorStorage {
+		return fmt.Errorf("q4 packed storage row does not fit configured events_per_trace=%d; packed_multiple=%.6f", q4Plan.VectorsPerObject, q4Plan.PackedStorageMultipleOfDenseParentCost)
+	}
+	if disableQuality {
+		return nil
+	}
+	q8 := findBitRow(metrics.Rows, 8)
+	if q8 == nil {
+		return nil
+	}
+	if q8.Quality.NDCGAt10+maxNDCGDrop < metrics.Dense.Quality.NDCGAt10 {
+		return fmt.Errorf("q8 ndcg@10 %.6f is worse than dense %.6f by more than %.6f", q8.Quality.NDCGAt10, metrics.Dense.Quality.NDCGAt10, maxNDCGDrop)
+	}
+	if q8.Quality.RecallAt100+maxRecallDrop < metrics.Dense.Quality.RecallAt100 {
+		return fmt.Errorf("q8 recall@100 %.6f is worse than dense %.6f by more than %.6f", q8.Quality.RecallAt100, metrics.Dense.Quality.RecallAt100, maxRecallDrop)
+	}
+	return nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	defaultArtifact := filepath.Join(root, defaultArtifactRel)
+	artifact := getenv("EOS_EVENT_TRACE_SMOKE_ARTIFACT", defaultArtifact)
+	if info, err := os.Stat(artifact); err != nil || info.IsDir() {
+		fmt.Fprintf(os.Stderr, "artifact does not exist: %s\nset EOS_EVENT_TRACE_SMOKE_ARTIFACT=/path/to/manta-embed-v1.sealed.mll or restore the default real artifact at %s\n", artifact, defaultArtifact)
+		os.Exit(1)
+	}
+
+	runRoot := getenv("EOS_EVENT_TRACE_SMOKE_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir := getenv("EOS_EVENT_TRACE_SMOKE_RUN_DIR", filepath.Join(runRoot, "eos-event-trace-vector-smoke-"+time.Now().UTC().Format("20060102T150405Z")))
+	runDir, err = filepath.Abs(runDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(filepath.Join(runDir, "logs"), 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	outputDim, err := parseIntEnv("EOS_EVENT_TRACE_SMOKE_OUTPUT_DIM", 128)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	eventsPerTrace, err := parseIntEnv("EOS_EVENT_TRACE_SMOKE_EVENTS_PER_TRACE", 24)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if eventsPerTrace <= 0 {
+		fmt.Fprintf(os.Stderr, "EOS_EVENT_TRACE_SMOKE_EVENTS_PER_TRACE must be a positive integer, got %d\n", eventsPerTrace)
+		os.Exit(1)
+	}
+	traceVariants, err := parseIntEnv("EOS_EVENT_TRACE_SMOKE_TRACE_VARIANTS", 1)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if traceVariants <= 0 {
+		fmt.Fprintf(os.Stderr, "EOS_EVENT_TRACE_SMOKE_TRACE_VARIANTS must be a positive integer, got %d\n", traceVariants)
+		os.Exit(1)
+	}
+	baselineDim, err := parseIntEnv("EOS_EVENT_TRACE_SMOKE_BASELINE_DIM", 3072)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	vectorOverhead, err := parseInt64Env("EOS_EVENT_TRACE_SMOKE_VECTOR_OVERHEAD_BYTES", 32)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	packedObjectOverhead, err := parseInt64Env("EOS_EVENT_TRACE_SMOKE_PACKED_OBJECT_OVERHEAD_BYTES", 32)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	maxNDCGDrop, err := parseFloatEnv("EOS_EVENT_TRACE_SMOKE_Q8_MAX_NDCG_DROP", 0.05)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	maxRecallDrop, err := parseFloatEnv("EOS_EVENT_TRACE_SMOKE_Q8_MAX_RECALL_DROP", 0.05)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	dataset := getenv("EOS_EVENT_TRACE_SMOKE_DATASET", "synthetic-event-traces")
+	bits := getenv("EOS_EVENT_TRACE_SMOKE_BITS", "2,4,8")
+	tracesPath := filepath.Join(runDir, "traces.jsonl")
+	queriesPath := filepath.Join(runDir, "queries.jsonl")
+	qrelsPath := filepath.Join(runDir, "qrels.tsv")
+	exportDir := filepath.Join(runDir, "event-trace-cache")
+	exportManifestPath := filepath.Join(runDir, "event-trace-cache.manifest.json")
+	metricsJSON := filepath.Join(runDir, "multivector-metrics.json")
+	metricsTSV := filepath.Join(runDir, "multivector-metrics.tsv")
+	storagePlanJSON := filepath.Join(runDir, "storage-plan.json")
+	summaryTSV := filepath.Join(runDir, "summary.tsv")
+	manifestJSON := filepath.Join(runDir, "manifest.json")
+
+	if err := writeSyntheticInputs(tracesPath, queriesPath, qrelsPath, eventsPerTrace, traceVariants); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	exportArgs := []string{
+		"go", "run", "./cmd/eos", "export-event-trace-vectors",
+		"--dataset", dataset,
+		"--batch-size", getenv("EOS_EVENT_TRACE_SMOKE_BATCH_SIZE", "64"),
+		"--output-dim", strconv.Itoa(outputDim),
+		"--manifest-json", exportManifestPath,
+		artifact,
+		tracesPath,
+		queriesPath,
+		exportDir,
+	}
+	if err := runCommand(root, filepath.Join(runDir, "logs"), "export-event-trace-vectors", exportArgs); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	evalArgs := []string{
+		"go", "run", "./cmd/eos", "eval-retrieval-multivector-turboquant",
+		"--dataset", dataset,
+		"--backend", "text-rendered-event-traces",
+		"--artifact", filepath.Base(artifact),
+		"--doc-vectors", filepath.Join(exportDir, "child-doc-vectors.jsonl"),
+		"--query-vectors", filepath.Join(exportDir, "query-vectors.jsonl"),
+		"--qrels", qrelsPath,
+		"--bits", bits,
+		"--baseline-dim", strconv.Itoa(baselineDim),
+		"--metrics-json", metricsJSON,
+		"--metrics-tsv", metricsTSV,
+		exportDir,
+	}
+	if err := runCommand(root, filepath.Join(runDir, "logs"), "eval-retrieval-multivector-turboquant", evalArgs); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	plannerArgs := []string{
+		"go", "run", "./cmd/eos", "plan-multivector-storage",
+		"--dim", strconv.Itoa(outputDim),
+		"--baseline-dim", strconv.Itoa(baselineDim),
+		"--bits", bits,
+		"--objects", strconv.Itoa(len(syntheticPatterns())*traceVariants),
+		"--vectors-per-object", strconv.Itoa(eventsPerTrace),
+		"--vector-overhead-bytes", strconv.FormatInt(vectorOverhead, 10),
+		"--packed-object-overhead-bytes", strconv.FormatInt(packedObjectOverhead, 10),
+		"--json", storagePlanJSON,
+	}
+	if err := runCommand(root, filepath.Join(runDir, "logs"), "plan-multivector-storage", plannerArgs); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	var exported exportManifest
+	if err := readJSON(exportManifestPath, &exported); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	var metrics evalMetrics
+	if err := readJSON(metricsJSON, &metrics); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	var plan storagePlan
+	if err := readJSON(storagePlanJSON, &plan); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := checkGates(metrics, plan, maxNDCGDrop, maxRecallDrop, envEnabled("EOS_EVENT_TRACE_SMOKE_DISABLE_QUALITY_GATE")); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	rows := makeSummaryRows(metrics, plan)
+	if err := writeSummaryTSV(summaryTSV, rows); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	out := manifest{
+		Schema:                    "eos.event_trace_vector_smoke.v1",
+		GeneratedAt:               time.Now().UTC().Format(time.RFC3339),
+		RunDir:                    runDir,
+		Artifact:                  artifact,
+		Dataset:                   dataset,
+		OutputDim:                 outputDim,
+		EventsPerTrace:            eventsPerTrace,
+		TraceVariants:             traceVariants,
+		TraceCount:                exported.Traces,
+		Bits:                      bits,
+		BaselineDim:               baselineDim,
+		VectorOverhead:            vectorOverhead,
+		PackedObjectOverheadBytes: packedObjectOverhead,
+		TracesPath:                tracesPath,
+		QueriesPath:               queriesPath,
+		QrelsPath:                 qrelsPath,
+		ExportDir:                 exportDir,
+		ExportManifest:            exportManifestPath,
+		MetricsJSON:               metricsJSON,
+		MetricsTSV:                metricsTSV,
+		StoragePlanJSON:           storagePlanJSON,
+		SummaryTSV:                summaryTSV,
+		ExportCommand:             exportArgs,
+		EvalCommand:               evalArgs,
+		PlannerCommand:            plannerArgs,
+		Rows:                      rows,
+		Caveats: []string{
+			"Synthetic smoke only: text-rendered event timelines, not production incident-retrieval evidence.",
+			"Cache-only evaluator: this does not load/index/query CorkScrewDB.",
+			"Planner overhead defaults to 32 bytes per vector and 32 bytes per packed parent object.",
+			"Quality gate is optional because synthetic text semantics may vary with the artifact.",
+		},
+		QualityGate: fmt.Sprintf("optional q8 gate: within ndcg@10 %.6f and recall@100 %.6f of dense unless EOS_EVENT_TRACE_SMOKE_DISABLE_QUALITY_GATE=1", maxNDCGDrop, maxRecallDrop),
+		StorageGate: "q4 packed planner row must fit the configured events_per_trace under one 3072d dense parent-vector budget",
+	}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(manifestJSON, append(data, '\n'), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	q4 := findBitRow(metrics.Rows, 4)
+	q4Plan := findPlanRow(plan.Rows, 4)
+	fmt.Printf("\nsummary_tsv: %s\n", summaryTSV)
+	fmt.Printf("manifest: %s\n", manifestJSON)
+	fmt.Printf("dense: ndcg@10=%.6f recall@100=%.6f\n", metrics.Dense.Quality.NDCGAt10, metrics.Dense.Quality.RecallAt100)
+	if q4 != nil {
+		fmt.Printf("q4: ndcg@10=%.6f delta=%+.6f recall@100=%.6f delta=%+.6f eval_storage_multiple=%.6fx vectors_per_baseline=%d\n",
+			q4.Quality.NDCGAt10,
+			q4.NDCGAt10Delta,
+			q4.Quality.RecallAt100,
+			q4.RecallAt100Delta,
+			q4.StorageMultipleOfDenseBaseline,
+			q4.VectorsThatFitInOneDenseBaseline)
+	}
+	if q4Plan != nil {
+		fmt.Printf("q4 packed planner: events_per_trace=%d fits=%t packed_multiple=%.6fx packed_fit_count=%d\n",
+			q4Plan.VectorsPerObject,
+			q4Plan.PackedFitsInOneDenseVectorStorage,
+			q4Plan.PackedStorageMultipleOfDenseParentCost,
+			q4Plan.PackedVectorsThatFitInOneDenseVector)
+	}
+	fmt.Printf("events: traces=%d child_event_vectors=%d dim=%d events_per_trace=%d\n", exported.Traces, exported.ChildVectors, exported.Dimension, eventsPerTrace)
+}
