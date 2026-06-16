@@ -1624,6 +1624,7 @@ func TestEmbeddingTrainerActivationAccelShapeLimitAllowsBoundInputs(t *testing.T
 }
 
 func TestEmbeddingTrainerSoftmaxBackwardAcceleratorMatchesHost(t *testing.T) {
+	t.Setenv("EOS_TRAIN_ENABLE_ACTIVATION_ACCEL", "")
 	t.Setenv("EOS_TRAIN_ENABLE_SOFTMAX_BACKWARD_ACCEL", "1")
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.05)
 	if trainer.activationAccel == nil {
