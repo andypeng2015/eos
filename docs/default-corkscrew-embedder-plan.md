@@ -216,6 +216,8 @@ Keep q8/fp16 sidecar rerank at overfetch125 as the lower-risk, lower-rerank-cost
 
 ## Multi-Vector Storage Planning
 
+For the concise product thesis, exact claim boundaries, current evidence numbers, and next promotion gates for many compact child vectors per CorkScrewDB parent object, see [TurboQuant Multi-Vector Frontier](turboquant-multivector-frontier.md). This section remains the command-level operating reference.
+
 The direct multi-vector lane is a storage/accounting thesis, not a retrieval-quality claim: one parent CorkScrewDB object can keep many quantized child vectors for windows, events, spans, or time-series observations while staying near the byte budget of one dense fp32 parent vector. Measure that budget with:
 
 ```bash

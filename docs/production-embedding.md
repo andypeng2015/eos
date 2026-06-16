@@ -173,6 +173,8 @@ The JSON/TSV rows include the dense float32 reference, TurboQuant bit width, nDC
 
 Interpret the metric groups separately for promotion. Quality metrics decide whether the candidate ranks relevant documents well enough: nDCG and MAP capture ordering, precision/hit@k capture first-screen success, and recall@100 captures candidate-pool coverage. Compression metrics decide whether q4/q8 are worth the footprint reduction. Throughput metrics are path-specific: sealed Eos evals can include local encoder time, while cached external-vector rows only measure cache load/scoring and do not represent live provider or external model encoding throughput.
 
+For the productized CorkScrewDB default-embedder thesis around many compact child vectors per parent object, including exact fit boundaries and current evidence numbers, see [TurboQuant Multi-Vector Frontier](turboquant-multivector-frontier.md). Keep that thesis separate from the q4/fp16 sidecar rerank gate in this section.
+
 For CorkScrewDB multi-vector and time-series designs, use the storage planner before running quality experiments:
 
 ```bash

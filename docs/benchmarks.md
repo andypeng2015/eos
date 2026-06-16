@@ -6,6 +6,8 @@ Eos has three benchmark layers:
 - End-to-end training smokes for the native default embedding-model path.
 - Embedder scoreboards for retrieval quality and serving efficiency claims.
 
+For the compact child-vector storage frontier that sits beside the embedding benchmarks, see [TurboQuant Multi-Vector Frontier](turboquant-multivector-frontier.md). It centralizes the CorkScrewDB/Eos many-child-vectors-per-parent thesis, evidence boundaries, and promotion gates.
+
 Run the default microbenchmarks with Ferrous Wheel:
 
 ```bash
