@@ -511,13 +511,21 @@ func writeSummaryTSV(path string, rows []summaryRow) error {
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
-func checkGates(rows []summaryRow, overfetchValues []int, cfg config) error {
-	q4Bounded := findSummaryRow(rows, 4, 100)
-	if q4Bounded == nil && len(overfetchValues) > 0 {
-		q4Bounded = findSummaryRow(rows, 4, overfetchValues[0])
+func effectiveBoundedOverfetch(layout string, overfetchValues []int) int {
+	if layout == "packed_parent_multivectors" {
+		return 0
 	}
+	if len(overfetchValues) > 0 {
+		return overfetchValues[0]
+	}
+	return 100
+}
+
+func checkGates(rows []summaryRow, overfetchValues []int, cfg config) error {
+	boundedOverfetch := effectiveBoundedOverfetch(cfg.Layout, overfetchValues)
+	q4Bounded := findSummaryRow(rows, 4, boundedOverfetch)
 	if q4Bounded == nil {
-		return fmt.Errorf("q4 bounded overfetch row is missing; include bits=4 and at least one overfetch value")
+		return fmt.Errorf("q4 bounded evidence row overfetch%d is missing; include bits=4 and a matching layout", boundedOverfetch)
 	}
 	if q4Bounded.NDCGAt10 < cfg.MinOverfetchNDCG {
 		return fmt.Errorf("q4 overfetch%d ndcg@10 %.6f is below %.6f", q4Bounded.OverfetchChildren, q4Bounded.NDCGAt10, cfg.MinOverfetchNDCG)
@@ -857,15 +865,16 @@ func main() {
 		ChildCount:          childCount,
 		Rows:                rows,
 		Gates: []string{
-			fmt.Sprintf("q4 bounded overfetch ndcg@10 >= %.6f", minNDCG),
-			fmt.Sprintf("q4 bounded overfetch recall@100 >= %.6f", minRecall),
+			fmt.Sprintf("q4 bounded evidence row ndcg@10 >= %.6f", minNDCG),
+			fmt.Sprintf("q4 bounded evidence row recall@100 >= %.6f", minRecall),
 			fmt.Sprintf("q4 full/exhaustive overfetch recall@100 >= %.6f when a distinct full row is present", minFullRecall),
 			fmt.Sprintf("q4 planner vectors_that_fit_in_one_dense_vector >= %d", minPlannerFit),
 			fmt.Sprintf("q4 target children %d fits in one dense-vector budget", targetChildren),
-			fmt.Sprintf("q4 bounded overfetch DB directory storage multiple <= %.6f when positive", maxDBDirMultiple),
+			fmt.Sprintf("q4 bounded evidence row DB directory storage multiple <= %.6f when positive", maxDBDirMultiple),
 		},
 		Caveats: []string{
 			"Local CorkScrewDB API smoke only: separate layout uses PutVector/SearchVector child overfetch rollup; packed layout uses PutMultiVector/SearchParentsVector exact flat parent rollup.",
+			"Packed parent multivector mode records the requested overfetch configuration but validates the exact parent-search evidence row reported as overfetch_children=0.",
 			"The Eos 128d SciFact child cache is a compact prefix bridge, not a native Matryoshka artifact.",
 			"The joined planner overhead is explicit byte accounting; DB directory size is measured separately from the local smoke run.",
 			"Default exhaustive overfetch is the full current child count for this cache; override overfetch when using another cache size.",
