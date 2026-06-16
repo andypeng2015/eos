@@ -14,39 +14,40 @@ import (
 
 // EmbeddingTrainRunConfig controls dataset-level native training.
 type EmbeddingTrainRunConfig struct {
-	Epochs                    int
-	BatchSize                 int
-	Shuffle                   bool
-	Seed                      int64
-	EvalEveryEpoch            int
-	EvalEverySteps            int
-	EarlyStoppingPatience     int
-	SelectMetric              string
-	MinDelta                  float32
-	RestoreBest               bool
-	EvalOnly                  bool
-	PairwiseTrain             bool
-	HardNegativeTrain         bool
-	HardNegativesPerQuery     int
-	HardNegativeSourceWeights map[string]int
-	LengthBucketBatches       bool
-	LearningRate              float32
-	ContrastiveLoss           string
-	Temperature               float32
-	GroupedLossWeight         float32
-	TeacherLossWeight         float32
-	TeacherTemperature        float32
-	TeacherSourceTemperatures map[string]float32
-	TeacherSourceWeights      map[string]float32
-	MatryoshkaDims            []int
-	MatryoshkaWeights         []float32
-	TurboQuantPrefixBits      []int
-	TurboQuantPrefixWeight    float32
-	TurboQuantPrefixSeed      int64
-	TurboQuantPrefixScoreMode string
-	TeacherScoreNormalization string
-	ProgressEverySteps        int
-	Progress                  EmbeddingTrainProgressFunc
+	Epochs                     int
+	BatchSize                  int
+	Shuffle                    bool
+	Seed                       int64
+	EvalEveryEpoch             int
+	EvalEverySteps             int
+	EarlyStoppingPatience      int
+	SelectMetric               string
+	MinDelta                   float32
+	RestoreBest                bool
+	EvalOnly                   bool
+	PairwiseTrain              bool
+	HardNegativeTrain          bool
+	HardNegativesPerQuery      int
+	HardNegativeSourceWeights  map[string]int
+	LengthBucketBatches        bool
+	LearningRate               float32
+	ContrastiveLoss            string
+	Temperature                float32
+	GroupedLossWeight          float32
+	TeacherLossWeight          float32
+	TeacherTemperature         float32
+	TeacherSourceTemperatures  map[string]float32
+	TeacherSourceWeights       map[string]float32
+	MatryoshkaDims             []int
+	MatryoshkaWeights          []float32
+	TurboQuantPrefixBits       []int
+	TurboQuantPrefixObjectives []TurboQuantPrefixObjective
+	TurboQuantPrefixWeight     float32
+	TurboQuantPrefixSeed       int64
+	TurboQuantPrefixScoreMode  string
+	TeacherScoreNormalization  string
+	ProgressEverySteps         int
+	Progress                   EmbeddingTrainProgressFunc
 	// Retrieval-nDCG eval gate (optional). When RetrievalEvalRuntime and a
 	// complete RetrievalEval (corpus/queries/qrels) are set, each eval also
 	// reports nDCG@10 over that held-out set, usable as -select-metric
@@ -1858,9 +1859,14 @@ func normalizedTrainRunConfig(cfg EmbeddingTrainRunConfig) EmbeddingTrainRunConf
 	if bits, err := normalizeTurboQuantPrefixBits(cfg.TurboQuantPrefixBits); err == nil {
 		cfg.TurboQuantPrefixBits = bits
 	}
-	if len(cfg.TurboQuantPrefixBits) > 0 {
+	if objectives, err := normalizeTurboQuantPrefixObjectives(cfg.TurboQuantPrefixObjectives, cfg.MatryoshkaDims); err == nil {
+		cfg.TurboQuantPrefixObjectives = objectives
+	}
+	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 {
 		if cfg.TurboQuantPrefixWeight == 0 {
-			cfg.TurboQuantPrefixWeight = 1
+			if len(cfg.TurboQuantPrefixBits) > 0 {
+				cfg.TurboQuantPrefixWeight = 1
+			}
 		}
 		cfg.TurboQuantPrefixSeed = effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
 		if mode, err := normalizeTurboQuantPrefixScoreMode(cfg.TurboQuantPrefixScoreMode); err == nil {
@@ -1916,6 +1922,15 @@ func (t *EmbeddingTrainer) applyTrainRunOverrides(cfg EmbeddingTrainRunConfig) e
 	}
 	if len(cfg.TurboQuantPrefixBits) > 0 {
 		next.TurboQuantPrefixBits = append([]int(nil), cfg.TurboQuantPrefixBits...)
+		next.TurboQuantPrefixObjectives = nil
+		next.TurboQuantPrefixWeight = cfg.TurboQuantPrefixWeight
+		next.TurboQuantPrefixSeed = cfg.TurboQuantPrefixSeed
+		next.TurboQuantPrefixScoreMode = cfg.TurboQuantPrefixScoreMode
+		changed = true
+	}
+	if len(cfg.TurboQuantPrefixObjectives) > 0 {
+		next.TurboQuantPrefixObjectives = append([]TurboQuantPrefixObjective(nil), cfg.TurboQuantPrefixObjectives...)
+		next.TurboQuantPrefixBits = nil
 		next.TurboQuantPrefixWeight = cfg.TurboQuantPrefixWeight
 		next.TurboQuantPrefixSeed = cfg.TurboQuantPrefixSeed
 		next.TurboQuantPrefixScoreMode = cfg.TurboQuantPrefixScoreMode
@@ -1963,8 +1978,14 @@ func (t *EmbeddingTrainer) syncTrainRunObjectiveConfig(cfg EmbeddingTrainRunConf
 		cfg.MatryoshkaDims = append([]int(nil), t.config.MatryoshkaDims...)
 		cfg.MatryoshkaWeights = append([]float32(nil), t.config.MatryoshkaWeights...)
 	}
-	if len(cfg.TurboQuantPrefixBits) == 0 && len(t.config.TurboQuantPrefixBits) > 0 {
+	if len(cfg.TurboQuantPrefixObjectives) == 0 && len(cfg.TurboQuantPrefixBits) == 0 && len(t.config.TurboQuantPrefixBits) > 0 {
 		cfg.TurboQuantPrefixBits = append([]int(nil), t.config.TurboQuantPrefixBits...)
+		cfg.TurboQuantPrefixWeight = t.config.TurboQuantPrefixWeight
+		cfg.TurboQuantPrefixSeed = t.config.TurboQuantPrefixSeed
+		cfg.TurboQuantPrefixScoreMode = t.config.TurboQuantPrefixScoreMode
+	}
+	if len(cfg.TurboQuantPrefixBits) == 0 && len(cfg.TurboQuantPrefixObjectives) == 0 && len(t.config.TurboQuantPrefixObjectives) > 0 {
+		cfg.TurboQuantPrefixObjectives = append([]TurboQuantPrefixObjective(nil), t.config.TurboQuantPrefixObjectives...)
 		cfg.TurboQuantPrefixWeight = t.config.TurboQuantPrefixWeight
 		cfg.TurboQuantPrefixSeed = t.config.TurboQuantPrefixSeed
 		cfg.TurboQuantPrefixScoreMode = t.config.TurboQuantPrefixScoreMode
@@ -1974,9 +1995,12 @@ func (t *EmbeddingTrainer) syncTrainRunObjectiveConfig(cfg EmbeddingTrainRunConf
 	cfg.TeacherSourceWeights = normalizeHardNegativeTeacherWeights(cfg.TeacherSourceWeights)
 	cfg.MatryoshkaDims, cfg.MatryoshkaWeights, _ = normalizeMatryoshkaDimsAndWeights(cfg.MatryoshkaDims, cfg.MatryoshkaWeights, trainerEmbeddingDim(t))
 	cfg.TurboQuantPrefixBits, _ = normalizeTurboQuantPrefixBits(cfg.TurboQuantPrefixBits)
-	if len(cfg.TurboQuantPrefixBits) > 0 {
+	cfg.TurboQuantPrefixObjectives, _ = normalizeTurboQuantPrefixObjectives(cfg.TurboQuantPrefixObjectives, cfg.MatryoshkaDims)
+	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 {
 		if cfg.TurboQuantPrefixWeight == 0 {
-			cfg.TurboQuantPrefixWeight = 1
+			if len(cfg.TurboQuantPrefixBits) > 0 {
+				cfg.TurboQuantPrefixWeight = 1
+			}
 		}
 		cfg.TurboQuantPrefixSeed = effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
 		if mode, err := normalizeTurboQuantPrefixScoreMode(cfg.TurboQuantPrefixScoreMode); err == nil {

@@ -2533,6 +2533,31 @@ func TestRunTrainEmbedAcceptsPreparedTurboQuantPrefixScoreMode(t *testing.T) {
 	}
 }
 
+func TestRunTrainEmbedAcceptsTurboQuantPrefixObjectives(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	trainPath := filepath.Join(t.TempDir(), "train.jsonl")
+	examples := []eosruntime.EmbeddingContrastiveExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
+	}
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
+		t.Fatalf("write train dataset: %v", err)
+	}
+	if err := run([]string{"train-embed", "--epochs", "1", "--batch-size", "2", "--contrastive-loss", "infonce", "--matryoshka-dims", "2", "--turboquant-prefix-objectives", "2:2=0.25", path, trainPath}); err != nil {
+		t.Fatalf("run train-embed turboquant prefix objectives: %v", err)
+	}
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(eosruntime.DefaultEmbeddingCheckpointPath(path))
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if got := checkpoint.Config.TurboQuantPrefixObjectives; len(got) != 1 || got[0].Dim != 2 || got[0].BitWidth != 2 || got[0].Weight != 0.25 {
+		t.Fatalf("turboquant prefix objectives = %+v", got)
+	}
+}
+
 func TestRunTrainEmbedRejectsInvalidTurboQuantPrefixBits(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
@@ -2551,6 +2576,50 @@ func TestRunTrainEmbedRejectsInvalidTurboQuantPrefixBits(t *testing.T) {
 		t.Fatal("expected invalid turboquant prefix bits error")
 	}
 	if !strings.Contains(err.Error(), "turboquant-prefix-bits") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunTrainEmbedRejectsInvalidTurboQuantPrefixObjectives(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	trainPath := filepath.Join(t.TempDir(), "train.jsonl")
+	examples := []eosruntime.EmbeddingContrastiveExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
+	}
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
+		t.Fatalf("write train dataset: %v", err)
+	}
+	err := run([]string{"train-embed", "--epochs", "1", "--batch-size", "2", "--contrastive-loss", "infonce", "--matryoshka-dims", "2", "--turboquant-prefix-objectives", "2:1=0.25", path, trainPath})
+	if err == nil {
+		t.Fatal("expected invalid turboquant prefix objectives error")
+	}
+	if !strings.Contains(err.Error(), "turboquant-prefix-objectives") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunTrainEmbedRejectsMixedTurboQuantPrefixObjectivesAndBits(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	trainPath := filepath.Join(t.TempDir(), "train.jsonl")
+	examples := []eosruntime.EmbeddingContrastiveExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
+	}
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
+		t.Fatalf("write train dataset: %v", err)
+	}
+	err := run([]string{"train-embed", "--epochs", "1", "--batch-size", "2", "--contrastive-loss", "infonce", "--matryoshka-dims", "2", "--turboquant-prefix-bits", "2", "--turboquant-prefix-objectives", "2:2=0.25", path, trainPath})
+	if err == nil {
+		t.Fatal("expected mixed turboquant prefix objectives/bits error")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -2583,6 +2652,26 @@ func TestRunTrainCorpusRejectsInvalidTurboQuantPrefixScoreMode(t *testing.T) {
 		t.Fatal("expected invalid turboquant prefix score mode error")
 	}
 	if !strings.Contains(err.Error(), "turboquant_prefix_score_mode") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunTrainCorpusRejectsInvalidTurboQuantPrefixObjectives(t *testing.T) {
+	err := run([]string{"train-corpus", "--matryoshka-dims", "2", "--turboquant-prefix-objectives", "2:1=0.25", filepath.Join(t.TempDir(), "artifact.mll"), filepath.Join(t.TempDir(), "corpus.txt")})
+	if err == nil {
+		t.Fatal("expected invalid turboquant prefix objectives error")
+	}
+	if !strings.Contains(err.Error(), "turboquant-prefix-objectives") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunTrainCorpusRejectsMixedTurboQuantPrefixObjectivesAndBits(t *testing.T) {
+	err := run([]string{"train-corpus", "--matryoshka-dims", "2", "--turboquant-prefix-bits", "2", "--turboquant-prefix-objectives", "2:2=0.25", filepath.Join(t.TempDir(), "artifact.mll"), filepath.Join(t.TempDir(), "corpus.txt")})
+	if err == nil {
+		t.Fatal("expected mixed turboquant prefix objectives/bits error")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

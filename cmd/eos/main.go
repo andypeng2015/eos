@@ -3655,6 +3655,7 @@ func runTrainEmbed(args []string) error {
 	var matryoshkaDims string
 	var matryoshkaWeights string
 	var turboQuantPrefixBits string
+	var turboQuantPrefixObjectives string
 	var turboQuantPrefixWeight float64
 	var turboQuantPrefixSeed int64
 	var turboQuantPrefixScoreMode string
@@ -3697,6 +3698,7 @@ func runTrainEmbed(args []string) error {
 	fs.StringVar(&matryoshkaDims, "matryoshka-dims", "", "comma-separated compact prefix dimensions to train with InfoNCE, for example 64,128")
 	fs.StringVar(&matryoshkaWeights, "matryoshka-weights", "", "optional comma-separated positive weights matching --matryoshka-dims")
 	fs.StringVar(&turboQuantPrefixBits, "turboquant-prefix-bits", "", "comma-separated TurboQuant bit widths for quantized compact-prefix InfoNCE, supported: 2..8")
+	fs.StringVar(&turboQuantPrefixObjectives, "turboquant-prefix-objectives", "", "comma-separated TurboQuant compact-prefix objectives as dim:bit=weight, for example 128:4=0.5")
 	fs.Float64Var(&turboQuantPrefixWeight, "turboquant-prefix-weight", 0, "optional weight for each TurboQuant compact-prefix objective (default 1 when bits are set)")
 	fs.Int64Var(&turboQuantPrefixSeed, "turboquant-prefix-seed", 0, "TurboQuant compact-prefix quantizer seed (default matches multivector retrieval)")
 	fs.StringVar(&turboQuantPrefixScoreMode, "turboquant-prefix-score-mode", "", "TurboQuant compact-prefix score mode: reconstruct_cosine (default) or prepared_ip")
@@ -3769,6 +3771,16 @@ func runTrainEmbed(args []string) error {
 	if err := validateTurboQuantPrefixBitsFlag(parsedTurboQuantPrefixBits); err != nil {
 		return err
 	}
+	parsedTurboQuantPrefixObjectives, parseErr := eosruntime.ParseTurboQuantPrefixObjectives(turboQuantPrefixObjectives)
+	if parseErr != nil {
+		return fmt.Errorf("turboquant-prefix-objectives: %w", parseErr)
+	}
+	if len(parsedTurboQuantPrefixObjectives) > 0 && len(parsedTurboQuantPrefixBits) > 0 {
+		return fmt.Errorf("--turboquant-prefix-objectives is mutually exclusive with --turboquant-prefix-bits")
+	}
+	if len(parsedTurboQuantPrefixObjectives) > 0 && turboQuantPrefixWeight != 0 {
+		return fmt.Errorf("--turboquant-prefix-weight must not be set with --turboquant-prefix-objectives")
+	}
 	parsedTurboQuantPrefixScoreMode := ""
 	if strings.TrimSpace(turboQuantPrefixScoreMode) != "" {
 		mode, parseErr := eosruntime.NormalizeTurboQuantPrefixScoreModeForCLI(turboQuantPrefixScoreMode)
@@ -3809,38 +3821,39 @@ func runTrainEmbed(args []string) error {
 		}
 	}
 	runConfig := eosruntime.EmbeddingTrainRunConfig{
-		Epochs:                    epochs,
-		BatchSize:                 batchSize,
-		Shuffle:                   shuffle,
-		Seed:                      seed,
-		EvalEveryEpoch:            evalEvery,
-		EvalEverySteps:            evalEverySteps,
-		EarlyStoppingPatience:     patience,
-		SelectMetric:              selectMetric,
-		MinDelta:                  float32(minDelta),
-		RestoreBest:               restoreBest,
-		LengthBucketBatches:       lengthBucketBatches,
-		LearningRate:              float32(learningRate),
-		ContrastiveLoss:           contrastiveLoss,
-		Temperature:               float32(temperature),
-		GroupedLossWeight:         float32(groupedLossWeight),
-		TeacherLossWeight:         float32(teacherLossWeight),
-		TeacherTemperature:        float32(teacherTemperature),
-		TeacherSourceTemperatures: parsedTeacherSourceTemperatures,
-		TeacherSourceWeights:      parsedTeacherSourceWeights,
-		TeacherScoreNormalization: teacherScoreNormalization,
-		MatryoshkaDims:            parsedMatryoshkaDims,
-		MatryoshkaWeights:         parsedMatryoshkaWeights,
-		TurboQuantPrefixBits:      parsedTurboQuantPrefixBits,
-		TurboQuantPrefixWeight:    float32(turboQuantPrefixWeight),
-		TurboQuantPrefixSeed:      turboQuantPrefixSeed,
-		TurboQuantPrefixScoreMode: parsedTurboQuantPrefixScoreMode,
-		ProgressEverySteps:        progressEvery,
-		EvalOnly:                  evalOnly,
-		PairwiseTrain:             pairwiseTrain,
-		HardNegativeTrain:         hardNegativeTrain,
-		HardNegativesPerQuery:     hardNegativesPerQuery,
-		HardNegativeSourceWeights: parsedSourceWeights,
+		Epochs:                     epochs,
+		BatchSize:                  batchSize,
+		Shuffle:                    shuffle,
+		Seed:                       seed,
+		EvalEveryEpoch:             evalEvery,
+		EvalEverySteps:             evalEverySteps,
+		EarlyStoppingPatience:      patience,
+		SelectMetric:               selectMetric,
+		MinDelta:                   float32(minDelta),
+		RestoreBest:                restoreBest,
+		LengthBucketBatches:        lengthBucketBatches,
+		LearningRate:               float32(learningRate),
+		ContrastiveLoss:            contrastiveLoss,
+		Temperature:                float32(temperature),
+		GroupedLossWeight:          float32(groupedLossWeight),
+		TeacherLossWeight:          float32(teacherLossWeight),
+		TeacherTemperature:         float32(teacherTemperature),
+		TeacherSourceTemperatures:  parsedTeacherSourceTemperatures,
+		TeacherSourceWeights:       parsedTeacherSourceWeights,
+		TeacherScoreNormalization:  teacherScoreNormalization,
+		MatryoshkaDims:             parsedMatryoshkaDims,
+		MatryoshkaWeights:          parsedMatryoshkaWeights,
+		TurboQuantPrefixBits:       parsedTurboQuantPrefixBits,
+		TurboQuantPrefixObjectives: parsedTurboQuantPrefixObjectives,
+		TurboQuantPrefixWeight:     float32(turboQuantPrefixWeight),
+		TurboQuantPrefixSeed:       turboQuantPrefixSeed,
+		TurboQuantPrefixScoreMode:  parsedTurboQuantPrefixScoreMode,
+		ProgressEverySteps:         progressEvery,
+		EvalOnly:                   evalOnly,
+		PairwiseTrain:              pairwiseTrain,
+		HardNegativeTrain:          hardNegativeTrain,
+		HardNegativesPerQuery:      hardNegativesPerQuery,
+		HardNegativeSourceWeights:  parsedSourceWeights,
 	}
 	if progressEvery > 0 {
 		runConfig.Progress = printTrainProgress
@@ -4365,6 +4378,7 @@ func runTrainCorpus(args []string) error {
 	var matryoshkaDims string
 	var matryoshkaWeights string
 	var turboQuantPrefixBits string
+	var turboQuantPrefixObjectives string
 	var turboQuantPrefixWeight float64
 	var turboQuantPrefixSeed int64
 	var turboQuantPrefixScoreMode string
@@ -4398,6 +4412,7 @@ func runTrainCorpus(args []string) error {
 	fs.StringVar(&matryoshkaDims, "matryoshka-dims", "", "comma-separated compact prefix dimensions to train with InfoNCE, for example 64,128")
 	fs.StringVar(&matryoshkaWeights, "matryoshka-weights", "", "optional comma-separated positive weights matching --matryoshka-dims")
 	fs.StringVar(&turboQuantPrefixBits, "turboquant-prefix-bits", "", "comma-separated TurboQuant bit widths for quantized compact-prefix InfoNCE, supported: 2..8")
+	fs.StringVar(&turboQuantPrefixObjectives, "turboquant-prefix-objectives", "", "comma-separated TurboQuant compact-prefix objectives as dim:bit=weight, for example 128:4=0.5")
 	fs.Float64Var(&turboQuantPrefixWeight, "turboquant-prefix-weight", 0, "optional weight for each TurboQuant compact-prefix objective (default 1 when bits are set)")
 	fs.Int64Var(&turboQuantPrefixSeed, "turboquant-prefix-seed", 0, "TurboQuant compact-prefix quantizer seed (default matches multivector retrieval)")
 	fs.StringVar(&turboQuantPrefixScoreMode, "turboquant-prefix-score-mode", "", "TurboQuant compact-prefix score mode: reconstruct_cosine (default) or prepared_ip")
@@ -4446,6 +4461,16 @@ func runTrainCorpus(args []string) error {
 	if err := validateTurboQuantPrefixBitsFlag(parsedTurboQuantPrefixBits); err != nil {
 		return err
 	}
+	parsedTurboQuantPrefixObjectives, parseErr := eosruntime.ParseTurboQuantPrefixObjectives(turboQuantPrefixObjectives)
+	if parseErr != nil {
+		return fmt.Errorf("turboquant-prefix-objectives: %w", parseErr)
+	}
+	if len(parsedTurboQuantPrefixObjectives) > 0 && len(parsedTurboQuantPrefixBits) > 0 {
+		return fmt.Errorf("--turboquant-prefix-objectives is mutually exclusive with --turboquant-prefix-bits")
+	}
+	if len(parsedTurboQuantPrefixObjectives) > 0 && turboQuantPrefixWeight != 0 {
+		return fmt.Errorf("--turboquant-prefix-weight must not be set with --turboquant-prefix-objectives")
+	}
 	parsedTurboQuantPrefixScoreMode := ""
 	if strings.TrimSpace(turboQuantPrefixScoreMode) != "" {
 		mode, parseErr := eosruntime.NormalizeTurboQuantPrefixScoreModeForCLI(turboQuantPrefixScoreMode)
@@ -4457,30 +4482,31 @@ func runTrainCorpus(args []string) error {
 	path := fs.Arg(0)
 	corpusPath := fs.Arg(1)
 	runConfig := eosruntime.EmbeddingTrainRunConfig{
-		Epochs:                    epochs,
-		BatchSize:                 batchSize,
-		Shuffle:                   shuffle,
-		Seed:                      seed,
-		EvalEveryEpoch:            evalEvery,
-		EvalEverySteps:            evalEverySteps,
-		EarlyStoppingPatience:     patience,
-		SelectMetric:              selectMetric,
-		MinDelta:                  float32(minDelta),
-		RestoreBest:               restoreBest,
-		LengthBucketBatches:       lengthBucketBatches,
-		LearningRate:              float32(learningRate),
-		ContrastiveLoss:           contrastiveLoss,
-		Temperature:               float32(temperature),
-		GroupedLossWeight:         float32(groupedLossWeight),
-		TeacherLossWeight:         float32(teacherLossWeight),
-		TeacherTemperature:        float32(teacherTemperature),
-		MatryoshkaDims:            parsedMatryoshkaDims,
-		MatryoshkaWeights:         parsedMatryoshkaWeights,
-		TurboQuantPrefixBits:      parsedTurboQuantPrefixBits,
-		TurboQuantPrefixWeight:    float32(turboQuantPrefixWeight),
-		TurboQuantPrefixSeed:      turboQuantPrefixSeed,
-		TurboQuantPrefixScoreMode: parsedTurboQuantPrefixScoreMode,
-		ProgressEverySteps:        progressEvery,
+		Epochs:                     epochs,
+		BatchSize:                  batchSize,
+		Shuffle:                    shuffle,
+		Seed:                       seed,
+		EvalEveryEpoch:             evalEvery,
+		EvalEverySteps:             evalEverySteps,
+		EarlyStoppingPatience:      patience,
+		SelectMetric:               selectMetric,
+		MinDelta:                   float32(minDelta),
+		RestoreBest:                restoreBest,
+		LengthBucketBatches:        lengthBucketBatches,
+		LearningRate:               float32(learningRate),
+		ContrastiveLoss:            contrastiveLoss,
+		Temperature:                float32(temperature),
+		GroupedLossWeight:          float32(groupedLossWeight),
+		TeacherLossWeight:          float32(teacherLossWeight),
+		TeacherTemperature:         float32(teacherTemperature),
+		MatryoshkaDims:             parsedMatryoshkaDims,
+		MatryoshkaWeights:          parsedMatryoshkaWeights,
+		TurboQuantPrefixBits:       parsedTurboQuantPrefixBits,
+		TurboQuantPrefixObjectives: parsedTurboQuantPrefixObjectives,
+		TurboQuantPrefixWeight:     float32(turboQuantPrefixWeight),
+		TurboQuantPrefixSeed:       turboQuantPrefixSeed,
+		TurboQuantPrefixScoreMode:  parsedTurboQuantPrefixScoreMode,
+		ProgressEverySteps:         progressEvery,
 	}
 	if progressEvery > 0 {
 		runConfig.Progress = printTrainProgress
@@ -4579,38 +4605,39 @@ type trainRunSummaryJSON struct {
 }
 
 type trainRunConfigJSON struct {
-	Epochs                    int                `json:"epochs"`
-	BatchSize                 int                `json:"batch_size"`
-	Shuffle                   bool               `json:"shuffle"`
-	Seed                      int64              `json:"seed"`
-	EvalEveryEpoch            int                `json:"eval_every_epoch"`
-	EvalEverySteps            int                `json:"eval_every_steps"`
-	Patience                  int                `json:"patience"`
-	SelectMetric              string             `json:"select_metric"`
-	MinDelta                  float32            `json:"min_delta"`
-	RestoreBest               bool               `json:"restore_best"`
-	LengthBucketBatches       bool               `json:"length_bucket_batches"`
-	LearningRate              float32            `json:"learning_rate"`
-	ContrastiveLoss           string             `json:"contrastive_loss,omitempty"`
-	Temperature               float32            `json:"temperature"`
-	GroupedLossWeight         float32            `json:"grouped_loss_weight,omitempty"`
-	TeacherLossWeight         float32            `json:"teacher_loss_weight,omitempty"`
-	TeacherTemperature        float32            `json:"teacher_temperature,omitempty"`
-	TeacherSourceTemperatures map[string]float32 `json:"teacher_source_temperatures,omitempty"`
-	TeacherSourceWeights      map[string]float32 `json:"teacher_source_weights,omitempty"`
-	TeacherScoreNormalization string             `json:"teacher_score_normalization,omitempty"`
-	MatryoshkaDims            []int              `json:"matryoshka_dims,omitempty"`
-	MatryoshkaWeights         []float32          `json:"matryoshka_weights,omitempty"`
-	TurboQuantPrefixBits      []int              `json:"turboquant_prefix_bits,omitempty"`
-	TurboQuantPrefixWeight    float32            `json:"turboquant_prefix_weight,omitempty"`
-	TurboQuantPrefixSeed      int64              `json:"turboquant_prefix_seed,omitempty"`
-	TurboQuantPrefixScoreMode string             `json:"turboquant_prefix_score_mode,omitempty"`
-	ProgressEverySteps        int                `json:"progress_every_steps"`
-	EvalOnly                  bool               `json:"eval_only"`
-	PairwiseTrain             bool               `json:"pairwise_train"`
-	HardNegativeTrain         bool               `json:"hard_negative_train"`
-	HardNegativesPerQuery     int                `json:"hard_negatives_per_query"`
-	HardNegativeSourceWeights map[string]int     `json:"hard_negative_source_weights,omitempty"`
+	Epochs                     int                                    `json:"epochs"`
+	BatchSize                  int                                    `json:"batch_size"`
+	Shuffle                    bool                                   `json:"shuffle"`
+	Seed                       int64                                  `json:"seed"`
+	EvalEveryEpoch             int                                    `json:"eval_every_epoch"`
+	EvalEverySteps             int                                    `json:"eval_every_steps"`
+	Patience                   int                                    `json:"patience"`
+	SelectMetric               string                                 `json:"select_metric"`
+	MinDelta                   float32                                `json:"min_delta"`
+	RestoreBest                bool                                   `json:"restore_best"`
+	LengthBucketBatches        bool                                   `json:"length_bucket_batches"`
+	LearningRate               float32                                `json:"learning_rate"`
+	ContrastiveLoss            string                                 `json:"contrastive_loss,omitempty"`
+	Temperature                float32                                `json:"temperature"`
+	GroupedLossWeight          float32                                `json:"grouped_loss_weight,omitempty"`
+	TeacherLossWeight          float32                                `json:"teacher_loss_weight,omitempty"`
+	TeacherTemperature         float32                                `json:"teacher_temperature,omitempty"`
+	TeacherSourceTemperatures  map[string]float32                     `json:"teacher_source_temperatures,omitempty"`
+	TeacherSourceWeights       map[string]float32                     `json:"teacher_source_weights,omitempty"`
+	TeacherScoreNormalization  string                                 `json:"teacher_score_normalization,omitempty"`
+	MatryoshkaDims             []int                                  `json:"matryoshka_dims,omitempty"`
+	MatryoshkaWeights          []float32                              `json:"matryoshka_weights,omitempty"`
+	TurboQuantPrefixBits       []int                                  `json:"turboquant_prefix_bits,omitempty"`
+	TurboQuantPrefixObjectives []eosruntime.TurboQuantPrefixObjective `json:"turboquant_prefix_objectives,omitempty"`
+	TurboQuantPrefixWeight     float32                                `json:"turboquant_prefix_weight,omitempty"`
+	TurboQuantPrefixSeed       int64                                  `json:"turboquant_prefix_seed,omitempty"`
+	TurboQuantPrefixScoreMode  string                                 `json:"turboquant_prefix_score_mode,omitempty"`
+	ProgressEverySteps         int                                    `json:"progress_every_steps"`
+	EvalOnly                   bool                                   `json:"eval_only"`
+	PairwiseTrain              bool                                   `json:"pairwise_train"`
+	HardNegativeTrain          bool                                   `json:"hard_negative_train"`
+	HardNegativesPerQuery      int                                    `json:"hard_negatives_per_query"`
+	HardNegativeSourceWeights  map[string]int                         `json:"hard_negative_source_weights,omitempty"`
 }
 
 type trainBatchMetricsJSON struct {
@@ -4753,38 +4780,39 @@ func trainRunSummaryPayload(summary eosruntime.EmbeddingTrainRunSummary) trainRu
 
 func trainRunConfigPayload(cfg eosruntime.EmbeddingTrainRunConfig) trainRunConfigJSON {
 	return trainRunConfigJSON{
-		Epochs:                    cfg.Epochs,
-		BatchSize:                 cfg.BatchSize,
-		Shuffle:                   cfg.Shuffle,
-		Seed:                      cfg.Seed,
-		EvalEveryEpoch:            cfg.EvalEveryEpoch,
-		EvalEverySteps:            cfg.EvalEverySteps,
-		Patience:                  cfg.EarlyStoppingPatience,
-		SelectMetric:              cfg.SelectMetric,
-		MinDelta:                  cfg.MinDelta,
-		RestoreBest:               cfg.RestoreBest,
-		LengthBucketBatches:       cfg.LengthBucketBatches,
-		LearningRate:              cfg.LearningRate,
-		ContrastiveLoss:           cfg.ContrastiveLoss,
-		Temperature:               cfg.Temperature,
-		GroupedLossWeight:         cfg.GroupedLossWeight,
-		TeacherLossWeight:         cfg.TeacherLossWeight,
-		TeacherTemperature:        cfg.TeacherTemperature,
-		TeacherSourceTemperatures: cfg.TeacherSourceTemperatures,
-		TeacherSourceWeights:      cfg.TeacherSourceWeights,
-		TeacherScoreNormalization: cfg.TeacherScoreNormalization,
-		MatryoshkaDims:            cfg.MatryoshkaDims,
-		MatryoshkaWeights:         cfg.MatryoshkaWeights,
-		TurboQuantPrefixBits:      cfg.TurboQuantPrefixBits,
-		TurboQuantPrefixWeight:    cfg.TurboQuantPrefixWeight,
-		TurboQuantPrefixSeed:      cfg.TurboQuantPrefixSeed,
-		TurboQuantPrefixScoreMode: cfg.TurboQuantPrefixScoreMode,
-		ProgressEverySteps:        cfg.ProgressEverySteps,
-		EvalOnly:                  cfg.EvalOnly,
-		PairwiseTrain:             cfg.PairwiseTrain,
-		HardNegativeTrain:         cfg.HardNegativeTrain,
-		HardNegativesPerQuery:     cfg.HardNegativesPerQuery,
-		HardNegativeSourceWeights: cfg.HardNegativeSourceWeights,
+		Epochs:                     cfg.Epochs,
+		BatchSize:                  cfg.BatchSize,
+		Shuffle:                    cfg.Shuffle,
+		Seed:                       cfg.Seed,
+		EvalEveryEpoch:             cfg.EvalEveryEpoch,
+		EvalEverySteps:             cfg.EvalEverySteps,
+		Patience:                   cfg.EarlyStoppingPatience,
+		SelectMetric:               cfg.SelectMetric,
+		MinDelta:                   cfg.MinDelta,
+		RestoreBest:                cfg.RestoreBest,
+		LengthBucketBatches:        cfg.LengthBucketBatches,
+		LearningRate:               cfg.LearningRate,
+		ContrastiveLoss:            cfg.ContrastiveLoss,
+		Temperature:                cfg.Temperature,
+		GroupedLossWeight:          cfg.GroupedLossWeight,
+		TeacherLossWeight:          cfg.TeacherLossWeight,
+		TeacherTemperature:         cfg.TeacherTemperature,
+		TeacherSourceTemperatures:  cfg.TeacherSourceTemperatures,
+		TeacherSourceWeights:       cfg.TeacherSourceWeights,
+		TeacherScoreNormalization:  cfg.TeacherScoreNormalization,
+		MatryoshkaDims:             cfg.MatryoshkaDims,
+		MatryoshkaWeights:          cfg.MatryoshkaWeights,
+		TurboQuantPrefixBits:       cfg.TurboQuantPrefixBits,
+		TurboQuantPrefixObjectives: cfg.TurboQuantPrefixObjectives,
+		TurboQuantPrefixWeight:     cfg.TurboQuantPrefixWeight,
+		TurboQuantPrefixSeed:       cfg.TurboQuantPrefixSeed,
+		TurboQuantPrefixScoreMode:  cfg.TurboQuantPrefixScoreMode,
+		ProgressEverySteps:         cfg.ProgressEverySteps,
+		EvalOnly:                   cfg.EvalOnly,
+		PairwiseTrain:              cfg.PairwiseTrain,
+		HardNegativeTrain:          cfg.HardNegativeTrain,
+		HardNegativesPerQuery:      cfg.HardNegativesPerQuery,
+		HardNegativeSourceWeights:  cfg.HardNegativeSourceWeights,
 	}
 }
 

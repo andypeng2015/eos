@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	eosartifact "m31labs.dev/eos/artifact/eos"
@@ -25,26 +26,34 @@ type EmbeddingPairExample struct {
 
 // EmbeddingTrainConfig controls the narrow pooled-embedder trainer.
 type EmbeddingTrainConfig struct {
-	LearningRate              float32
-	WeightDecay               float32
-	WeightBits                int
-	Optimizer                 string
-	Beta1                     float32
-	Beta2                     float32
-	Epsilon                   float32
-	ContrastiveLoss           string
-	Temperature               float32
-	GroupedLossWeight         float32
-	TeacherLossWeight         float32
-	TeacherTemperature        float32
-	TeacherSourceTemperatures map[string]float32
-	TeacherSourceWeights      map[string]float32
-	MatryoshkaDims            []int
-	MatryoshkaWeights         []float32
-	TurboQuantPrefixBits      []int
-	TurboQuantPrefixWeight    float32
-	TurboQuantPrefixSeed      int64
-	TurboQuantPrefixScoreMode string
+	LearningRate               float32
+	WeightDecay                float32
+	WeightBits                 int
+	Optimizer                  string
+	Beta1                      float32
+	Beta2                      float32
+	Epsilon                    float32
+	ContrastiveLoss            string
+	Temperature                float32
+	GroupedLossWeight          float32
+	TeacherLossWeight          float32
+	TeacherTemperature         float32
+	TeacherSourceTemperatures  map[string]float32
+	TeacherSourceWeights       map[string]float32
+	MatryoshkaDims             []int
+	MatryoshkaWeights          []float32
+	TurboQuantPrefixBits       []int
+	TurboQuantPrefixObjectives []TurboQuantPrefixObjective
+	TurboQuantPrefixWeight     float32
+	TurboQuantPrefixSeed       int64
+	TurboQuantPrefixScoreMode  string
+}
+
+// TurboQuantPrefixObjective targets one quantized compact-prefix loss.
+type TurboQuantPrefixObjective struct {
+	Dim      int     `json:"dim"`
+	BitWidth int     `json:"bit_width"`
+	Weight   float32 `json:"weight"`
 }
 
 // EmbeddingTrainMetrics summarizes one training/eval batch.
@@ -3285,11 +3294,8 @@ func accumulateMatryoshkaContrastiveGrads(queries, positives []*embeddingEncoded
 }
 
 func accumulateTurboQuantPrefixContrastiveGrads(queries, positives []*embeddingEncodedSequence, cfg EmbeddingTrainConfig, queryGrads, positiveGrads [][]float32) (float32, float32, int) {
-	if len(cfg.MatryoshkaDims) == 0 || len(cfg.TurboQuantPrefixBits) == 0 {
-		return 0, 0, 0
-	}
-	weight := effectiveTurboQuantPrefixWeight(cfg)
-	if weight <= 0 {
+	objectives := turboQuantPrefixObjectivesForConfig(cfg)
+	if len(objectives) == 0 {
 		return 0, 0, 0
 	}
 	seed := effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
@@ -3297,22 +3303,23 @@ func accumulateTurboQuantPrefixContrastiveGrads(queries, positives []*embeddingE
 	totalLoss := float32(0)
 	totalScore := float32(0)
 	pairCount := 0
-	for _, dim := range cfg.MatryoshkaDims {
-		for _, bitWidth := range cfg.TurboQuantPrefixBits {
-			dimQueryGrads := newEmbeddingPooledGradBuffers(queries)
-			dimPositiveGrads := newEmbeddingPooledGradBuffers(positives)
-			var loss, score float32
-			if scoreMode == TurboQuantPrefixScoreModePreparedIP {
-				loss, score = accumulateTurboQuantPreparedIPPrefixInfoNCEContrastiveGrads(queries, positives, dim, bitWidth, seed, cfg.Temperature, dimQueryGrads, dimPositiveGrads)
-			} else {
-				loss, score = accumulateTurboQuantPrefixInfoNCEContrastiveGrads(queries, positives, dim, bitWidth, seed, cfg.Temperature, dimQueryGrads, dimPositiveGrads)
-			}
-			addScaledEmbeddingGradBuffers(queryGrads, dimQueryGrads, weight)
-			addScaledEmbeddingGradBuffers(positiveGrads, dimPositiveGrads, weight)
-			totalLoss += loss * weight
-			totalScore += score
-			pairCount += len(queries) * len(positives)
+	for _, objective := range objectives {
+		if objective.Weight <= 0 {
+			continue
 		}
+		dimQueryGrads := newEmbeddingPooledGradBuffers(queries)
+		dimPositiveGrads := newEmbeddingPooledGradBuffers(positives)
+		var loss, score float32
+		if scoreMode == TurboQuantPrefixScoreModePreparedIP {
+			loss, score = accumulateTurboQuantPreparedIPPrefixInfoNCEContrastiveGrads(queries, positives, objective.Dim, objective.BitWidth, seed, cfg.Temperature, dimQueryGrads, dimPositiveGrads)
+		} else {
+			loss, score = accumulateTurboQuantPrefixInfoNCEContrastiveGrads(queries, positives, objective.Dim, objective.BitWidth, seed, cfg.Temperature, dimQueryGrads, dimPositiveGrads)
+		}
+		addScaledEmbeddingGradBuffers(queryGrads, dimQueryGrads, objective.Weight)
+		addScaledEmbeddingGradBuffers(positiveGrads, dimPositiveGrads, objective.Weight)
+		totalLoss += loss * objective.Weight
+		totalScore += score
+		pairCount += len(queries) * len(positives)
 	}
 	return totalLoss, totalScore, pairCount
 }
@@ -3749,11 +3756,8 @@ func accumulateMatryoshkaHardNegativeGrads(queries, candidates []*embeddingEncod
 }
 
 func accumulateTurboQuantPrefixHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, targetIndexes []int, candidateSpans []embeddingCandidateSpan, cfg EmbeddingTrainConfig, queryGrads, candidateGrads [][]float32) (float32, float32, int) {
-	if len(cfg.MatryoshkaDims) == 0 || len(cfg.TurboQuantPrefixBits) == 0 {
-		return 0, 0, 0
-	}
-	weight := effectiveTurboQuantPrefixWeight(cfg)
-	if weight <= 0 {
+	objectives := turboQuantPrefixObjectivesForConfig(cfg)
+	if len(objectives) == 0 {
 		return 0, 0, 0
 	}
 	seed := effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
@@ -3761,62 +3765,63 @@ func accumulateTurboQuantPrefixHardNegativeGrads(queries, candidates []*embeddin
 	totalLoss := float32(0)
 	totalScore := float32(0)
 	pairCount := 0
-	for _, dim := range cfg.MatryoshkaDims {
-		for _, bitWidth := range cfg.TurboQuantPrefixBits {
-			dimQueryGrads := newEmbeddingPooledGradBuffers(queries)
-			dimCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
-			loss := float32(0)
-			score := float32(0)
-			pairs := 0
-			switch cfg.ContrastiveLoss {
-			case "grouped_infonce":
-				if scoreMode == TurboQuantPrefixScoreModePreparedIP {
-					loss, score = accumulateTurboQuantPreparedIPPrefixGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, dim, bitWidth, seed, cfg.Temperature, dimQueryGrads, dimCandidateGrads)
-				} else {
-					loss, score = accumulateTurboQuantPrefixGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, dim, bitWidth, seed, cfg.Temperature, dimQueryGrads, dimCandidateGrads)
-				}
-				pairs = hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, "grouped_infonce")
-			case "hybrid_infonce":
-				globalQueryGrads := newEmbeddingPooledGradBuffers(queries)
-				globalCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
-				var globalLoss, globalScore float32
-				if scoreMode == TurboQuantPrefixScoreModePreparedIP {
-					globalLoss, globalScore = accumulateTurboQuantPreparedIPPrefixInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, dim, bitWidth, seed, cfg.Temperature, globalQueryGrads, globalCandidateGrads)
-				} else {
-					globalLoss, globalScore = accumulateTurboQuantPrefixInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, dim, bitWidth, seed, cfg.Temperature, globalQueryGrads, globalCandidateGrads)
-				}
-				groupedQueryGrads := newEmbeddingPooledGradBuffers(queries)
-				groupedCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
-				var groupedLoss, groupedScore float32
-				if scoreMode == TurboQuantPrefixScoreModePreparedIP {
-					groupedLoss, groupedScore = accumulateTurboQuantPreparedIPPrefixGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, dim, bitWidth, seed, cfg.Temperature, groupedQueryGrads, groupedCandidateGrads)
-				} else {
-					groupedLoss, groupedScore = accumulateTurboQuantPrefixGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, dim, bitWidth, seed, cfg.Temperature, groupedQueryGrads, groupedCandidateGrads)
-				}
-				groupedWeight := effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
-				globalScale := float32(1) / (1 + groupedWeight)
-				groupedScale := groupedWeight / (1 + groupedWeight)
-				addScaledEmbeddingGradBuffers(dimQueryGrads, globalQueryGrads, globalScale)
-				addScaledEmbeddingGradBuffers(dimCandidateGrads, globalCandidateGrads, globalScale)
-				addScaledEmbeddingGradBuffers(dimQueryGrads, groupedQueryGrads, groupedScale)
-				addScaledEmbeddingGradBuffers(dimCandidateGrads, groupedCandidateGrads, groupedScale)
-				loss = globalLoss*globalScale + groupedLoss*groupedScale
-				score = globalScore + groupedScore
-				pairs = hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, "hybrid_infonce")
-			default:
-				if scoreMode == TurboQuantPrefixScoreModePreparedIP {
-					loss, score = accumulateTurboQuantPreparedIPPrefixInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, dim, bitWidth, seed, cfg.Temperature, dimQueryGrads, dimCandidateGrads)
-				} else {
-					loss, score = accumulateTurboQuantPrefixInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, dim, bitWidth, seed, cfg.Temperature, dimQueryGrads, dimCandidateGrads)
-				}
-				pairs = hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, "infonce")
-			}
-			addScaledEmbeddingGradBuffers(queryGrads, dimQueryGrads, weight)
-			addScaledEmbeddingGradBuffers(candidateGrads, dimCandidateGrads, weight)
-			totalLoss += loss * weight
-			totalScore += score
-			pairCount += pairs
+	for _, objective := range objectives {
+		if objective.Weight <= 0 {
+			continue
 		}
+		dimQueryGrads := newEmbeddingPooledGradBuffers(queries)
+		dimCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
+		loss := float32(0)
+		score := float32(0)
+		pairs := 0
+		switch cfg.ContrastiveLoss {
+		case "grouped_infonce":
+			if scoreMode == TurboQuantPrefixScoreModePreparedIP {
+				loss, score = accumulateTurboQuantPreparedIPPrefixGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, objective.Dim, objective.BitWidth, seed, cfg.Temperature, dimQueryGrads, dimCandidateGrads)
+			} else {
+				loss, score = accumulateTurboQuantPrefixGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, objective.Dim, objective.BitWidth, seed, cfg.Temperature, dimQueryGrads, dimCandidateGrads)
+			}
+			pairs = hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, "grouped_infonce")
+		case "hybrid_infonce":
+			globalQueryGrads := newEmbeddingPooledGradBuffers(queries)
+			globalCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
+			var globalLoss, globalScore float32
+			if scoreMode == TurboQuantPrefixScoreModePreparedIP {
+				globalLoss, globalScore = accumulateTurboQuantPreparedIPPrefixInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, objective.Dim, objective.BitWidth, seed, cfg.Temperature, globalQueryGrads, globalCandidateGrads)
+			} else {
+				globalLoss, globalScore = accumulateTurboQuantPrefixInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, objective.Dim, objective.BitWidth, seed, cfg.Temperature, globalQueryGrads, globalCandidateGrads)
+			}
+			groupedQueryGrads := newEmbeddingPooledGradBuffers(queries)
+			groupedCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
+			var groupedLoss, groupedScore float32
+			if scoreMode == TurboQuantPrefixScoreModePreparedIP {
+				groupedLoss, groupedScore = accumulateTurboQuantPreparedIPPrefixGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, objective.Dim, objective.BitWidth, seed, cfg.Temperature, groupedQueryGrads, groupedCandidateGrads)
+			} else {
+				groupedLoss, groupedScore = accumulateTurboQuantPrefixGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, objective.Dim, objective.BitWidth, seed, cfg.Temperature, groupedQueryGrads, groupedCandidateGrads)
+			}
+			groupedWeight := effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
+			globalScale := float32(1) / (1 + groupedWeight)
+			groupedScale := groupedWeight / (1 + groupedWeight)
+			addScaledEmbeddingGradBuffers(dimQueryGrads, globalQueryGrads, globalScale)
+			addScaledEmbeddingGradBuffers(dimCandidateGrads, globalCandidateGrads, globalScale)
+			addScaledEmbeddingGradBuffers(dimQueryGrads, groupedQueryGrads, groupedScale)
+			addScaledEmbeddingGradBuffers(dimCandidateGrads, groupedCandidateGrads, groupedScale)
+			loss = globalLoss*globalScale + groupedLoss*groupedScale
+			score = globalScore + groupedScore
+			pairs = hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, "hybrid_infonce")
+		default:
+			if scoreMode == TurboQuantPrefixScoreModePreparedIP {
+				loss, score = accumulateTurboQuantPreparedIPPrefixInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, objective.Dim, objective.BitWidth, seed, cfg.Temperature, dimQueryGrads, dimCandidateGrads)
+			} else {
+				loss, score = accumulateTurboQuantPrefixInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, objective.Dim, objective.BitWidth, seed, cfg.Temperature, dimQueryGrads, dimCandidateGrads)
+			}
+			pairs = hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, "infonce")
+		}
+		addScaledEmbeddingGradBuffers(queryGrads, dimQueryGrads, objective.Weight)
+		addScaledEmbeddingGradBuffers(candidateGrads, dimCandidateGrads, objective.Weight)
+		totalLoss += loss * objective.Weight
+		totalScore += score
+		pairCount += pairs
 	}
 	return totalLoss, totalScore, pairCount
 }
@@ -4810,9 +4815,14 @@ func normalizedTrainConfig(cfg EmbeddingTrainConfig, params ...eosartifact.Param
 	if bits, err := normalizeTurboQuantPrefixBits(cfg.TurboQuantPrefixBits); err == nil {
 		cfg.TurboQuantPrefixBits = bits
 	}
-	if len(cfg.TurboQuantPrefixBits) > 0 {
+	if objectives, err := normalizeTurboQuantPrefixObjectives(cfg.TurboQuantPrefixObjectives, cfg.MatryoshkaDims); err == nil {
+		cfg.TurboQuantPrefixObjectives = objectives
+	}
+	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 {
 		if cfg.TurboQuantPrefixWeight == 0 {
-			cfg.TurboQuantPrefixWeight = 1
+			if len(cfg.TurboQuantPrefixBits) > 0 {
+				cfg.TurboQuantPrefixWeight = 1
+			}
 		}
 		cfg.TurboQuantPrefixSeed = effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
 		if mode, err := normalizeTurboQuantPrefixScoreMode(cfg.TurboQuantPrefixScoreMode); err == nil {
@@ -4834,9 +4844,22 @@ func normalizeMatryoshkaTrainConfig(cfg EmbeddingTrainConfig, embeddingDim int) 
 		return cfg, err
 	}
 	cfg.TurboQuantPrefixBits = bits
-	if len(cfg.TurboQuantPrefixBits) > 0 {
+	objectives, err := normalizeTurboQuantPrefixObjectives(cfg.TurboQuantPrefixObjectives, cfg.MatryoshkaDims)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.TurboQuantPrefixObjectives = objectives
+	if len(cfg.TurboQuantPrefixBits) > 0 && len(cfg.TurboQuantPrefixObjectives) > 0 {
+		return cfg, fmt.Errorf("turboquant_prefix_objectives is mutually exclusive with turboquant_prefix_bits")
+	}
+	if len(cfg.TurboQuantPrefixObjectives) > 0 && cfg.TurboQuantPrefixWeight != 0 {
+		return cfg, fmt.Errorf("turboquant_prefix_weight must be zero when turboquant_prefix_objectives is set")
+	}
+	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 {
 		if cfg.TurboQuantPrefixWeight == 0 {
-			cfg.TurboQuantPrefixWeight = 1
+			if len(cfg.TurboQuantPrefixBits) > 0 {
+				cfg.TurboQuantPrefixWeight = 1
+			}
 		}
 		cfg.TurboQuantPrefixSeed = effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
 		mode, err := normalizeTurboQuantPrefixScoreMode(cfg.TurboQuantPrefixScoreMode)
@@ -4916,7 +4939,13 @@ func compactPrefixObjectiveMultiplier(cfg EmbeddingTrainRunConfig) int {
 		return 1
 	}
 	multiplier := 1 + len(cfg.MatryoshkaDims)
-	if len(cfg.TurboQuantPrefixBits) > 0 {
+	if len(cfg.TurboQuantPrefixObjectives) > 0 {
+		for _, objective := range cfg.TurboQuantPrefixObjectives {
+			if objective.Weight > 0 {
+				multiplier++
+			}
+		}
+	} else if len(cfg.TurboQuantPrefixBits) > 0 {
 		multiplier += len(cfg.MatryoshkaDims) * len(cfg.TurboQuantPrefixBits)
 	}
 	return multiplier
@@ -4955,6 +4984,138 @@ func normalizeTurboQuantPrefixBits(bits []int) ([]int, error) {
 	return out, nil
 }
 
+// ParseTurboQuantPrefixObjectives parses CLI/manifest compact-prefix objectives.
+func ParseTurboQuantPrefixObjectives(raw string) ([]TurboQuantPrefixObjective, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	objectives := make([]TurboQuantPrefixObjective, 0, len(parts))
+	seen := map[[2]int]bool{}
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, fmt.Errorf("turboquant_prefix_objectives[%d] is blank", i)
+		}
+		dimBit, weightRaw, ok := strings.Cut(part, "=")
+		if !ok || strings.TrimSpace(dimBit) == "" || strings.TrimSpace(weightRaw) == "" {
+			return nil, fmt.Errorf("turboquant_prefix_objectives[%d] must use dim:bit=weight syntax", i)
+		}
+		dimRaw, bitRaw, ok := strings.Cut(dimBit, ":")
+		if !ok || strings.TrimSpace(dimRaw) == "" || strings.TrimSpace(bitRaw) == "" {
+			return nil, fmt.Errorf("turboquant_prefix_objectives[%d] must use dim:bit=weight syntax", i)
+		}
+		dim, err := strconv.Atoi(strings.TrimSpace(dimRaw))
+		if err != nil {
+			return nil, fmt.Errorf("parse turboquant_prefix_objectives[%d] dim %q: %w", i, strings.TrimSpace(dimRaw), err)
+		}
+		if dim <= 0 {
+			return nil, fmt.Errorf("turboquant_prefix_objectives[%d] dim must be positive", i)
+		}
+		bitWidth, err := strconv.Atoi(strings.TrimSpace(bitRaw))
+		if err != nil {
+			return nil, fmt.Errorf("parse turboquant_prefix_objectives[%d] bit %q: %w", i, strings.TrimSpace(bitRaw), err)
+		}
+		if bitWidth < 2 || bitWidth > 8 {
+			return nil, fmt.Errorf("turboquant_prefix_objectives[%d] bit_width=%d outside supported range 2..8", i, bitWidth)
+		}
+		weight64, err := strconv.ParseFloat(strings.TrimSpace(weightRaw), 32)
+		if err != nil {
+			return nil, fmt.Errorf("parse turboquant_prefix_objectives[%d] weight %q: %w", i, strings.TrimSpace(weightRaw), err)
+		}
+		if weight64 < 0 || math.IsNaN(weight64) || math.IsInf(weight64, 0) {
+			return nil, fmt.Errorf("turboquant_prefix_objectives[%d] weight must be finite and non-negative", i)
+		}
+		key := [2]int{dim, bitWidth}
+		if seen[key] {
+			return nil, fmt.Errorf("duplicate turboquant_prefix_objectives entry for dim=%d bit_width=%d", dim, bitWidth)
+		}
+		seen[key] = true
+		objectives = append(objectives, TurboQuantPrefixObjective{Dim: dim, BitWidth: bitWidth, Weight: float32(weight64)})
+	}
+	return normalizeTurboQuantPrefixObjectiveOrder(objectives), nil
+}
+
+func FormatTurboQuantPrefixObjectives(objectives []TurboQuantPrefixObjective) string {
+	if len(objectives) == 0 {
+		return ""
+	}
+	objectives = normalizeTurboQuantPrefixObjectiveOrder(objectives)
+	parts := make([]string, 0, len(objectives))
+	for _, objective := range objectives {
+		parts = append(parts, strconv.Itoa(objective.Dim)+":"+strconv.Itoa(objective.BitWidth)+"="+strconv.FormatFloat(float64(objective.Weight), 'g', -1, 32))
+	}
+	return strings.Join(parts, ",")
+}
+
+func normalizeTurboQuantPrefixObjectiveOrder(objectives []TurboQuantPrefixObjective) []TurboQuantPrefixObjective {
+	out := append([]TurboQuantPrefixObjective(nil), objectives...)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Dim != out[j].Dim {
+			return out[i].Dim < out[j].Dim
+		}
+		return out[i].BitWidth < out[j].BitWidth
+	})
+	return out
+}
+
+func normalizeTurboQuantPrefixObjectives(objectives []TurboQuantPrefixObjective, matryoshkaDims []int) ([]TurboQuantPrefixObjective, error) {
+	if len(objectives) == 0 {
+		return nil, nil
+	}
+	allowedDims := map[int]bool{}
+	for _, dim := range matryoshkaDims {
+		allowedDims[dim] = true
+	}
+	seen := map[[2]int]bool{}
+	out := make([]TurboQuantPrefixObjective, 0, len(objectives))
+	for i, objective := range objectives {
+		if objective.Dim <= 0 {
+			return nil, fmt.Errorf("turboquant_prefix_objectives[%d] dim must be positive", i)
+		}
+		if objective.Dim < 2 {
+			return nil, fmt.Errorf("turboquant_prefix_objectives[%d] dim=%d must be at least 2", i, objective.Dim)
+		}
+		if !allowedDims[objective.Dim] {
+			return nil, fmt.Errorf("turboquant_prefix_objectives[%d] dim=%d must exist in matryoshka_dims", i, objective.Dim)
+		}
+		if objective.BitWidth < 2 || objective.BitWidth > 8 {
+			return nil, fmt.Errorf("turboquant_prefix_objectives[%d] bit_width=%d outside supported range 2..8", i, objective.BitWidth)
+		}
+		if objective.Weight < 0 || math.IsNaN(float64(objective.Weight)) || math.IsInf(float64(objective.Weight), 0) {
+			return nil, fmt.Errorf("turboquant_prefix_objectives[%d] weight must be finite and non-negative", i)
+		}
+		key := [2]int{objective.Dim, objective.BitWidth}
+		if seen[key] {
+			return nil, fmt.Errorf("duplicate turboquant_prefix_objectives entry for dim=%d bit_width=%d", objective.Dim, objective.BitWidth)
+		}
+		seen[key] = true
+		out = append(out, objective)
+	}
+	return normalizeTurboQuantPrefixObjectiveOrder(out), nil
+}
+
+func turboQuantPrefixObjectivesForConfig(cfg EmbeddingTrainConfig) []TurboQuantPrefixObjective {
+	if len(cfg.TurboQuantPrefixObjectives) > 0 {
+		return append([]TurboQuantPrefixObjective(nil), cfg.TurboQuantPrefixObjectives...)
+	}
+	if len(cfg.MatryoshkaDims) == 0 || len(cfg.TurboQuantPrefixBits) == 0 {
+		return nil
+	}
+	weight := effectiveTurboQuantPrefixWeight(cfg)
+	if weight <= 0 {
+		return nil
+	}
+	objectives := make([]TurboQuantPrefixObjective, 0, len(cfg.MatryoshkaDims)*len(cfg.TurboQuantPrefixBits))
+	for _, dim := range cfg.MatryoshkaDims {
+		for _, bitWidth := range cfg.TurboQuantPrefixBits {
+			objectives = append(objectives, TurboQuantPrefixObjective{Dim: dim, BitWidth: bitWidth, Weight: weight})
+		}
+	}
+	return objectives
+}
+
 func effectiveTurboQuantPrefixWeight(cfg EmbeddingTrainConfig) float32 {
 	if len(cfg.TurboQuantPrefixBits) == 0 {
 		return 0
@@ -4990,6 +5151,15 @@ func NormalizeTurboQuantPrefixScoreModeForCLI(mode string) (string, error) {
 }
 
 func turboQuantPrefixWeightSum(cfg EmbeddingTrainConfig) float32 {
+	if len(cfg.TurboQuantPrefixObjectives) > 0 {
+		sum := float32(0)
+		for _, objective := range cfg.TurboQuantPrefixObjectives {
+			if objective.Weight > 0 {
+				sum += objective.Weight
+			}
+		}
+		return sum
+	}
 	weight := effectiveTurboQuantPrefixWeight(cfg)
 	if weight <= 0 || len(cfg.MatryoshkaDims) == 0 || len(cfg.TurboQuantPrefixBits) == 0 {
 		return 0
@@ -5047,15 +5217,23 @@ func validateTrainConfig(cfg EmbeddingTrainConfig) error {
 			return fmt.Errorf("matryoshka_weights[%d] must be finite and positive", i)
 		}
 	}
-	if len(cfg.TurboQuantPrefixBits) > 0 {
+	if len(cfg.TurboQuantPrefixBits) > 0 && len(cfg.TurboQuantPrefixObjectives) > 0 {
+		return fmt.Errorf("turboquant_prefix_objectives is mutually exclusive with turboquant_prefix_bits")
+	}
+	if len(cfg.TurboQuantPrefixObjectives) > 0 && cfg.TurboQuantPrefixWeight != 0 {
+		return fmt.Errorf("turboquant_prefix_weight must be zero when turboquant_prefix_objectives is set")
+	}
+	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 {
 		if len(cfg.MatryoshkaDims) == 0 {
-			return fmt.Errorf("turboquant_prefix_bits requires matryoshka_dims")
+			return fmt.Errorf("turboquant compact-prefix objectives require matryoshka_dims")
 		}
 		for i, dim := range cfg.MatryoshkaDims {
 			if dim < 2 {
-				return fmt.Errorf("matryoshka_dims[%d]=%d must be at least 2 when turboquant_prefix_bits is enabled", i, dim)
+				return fmt.Errorf("matryoshka_dims[%d]=%d must be at least 2 when turboquant compact-prefix objectives are enabled", i, dim)
 			}
 		}
+	}
+	if len(cfg.TurboQuantPrefixBits) > 0 {
 		for i, bitWidth := range cfg.TurboQuantPrefixBits {
 			if bitWidth < 2 || bitWidth > 8 {
 				return fmt.Errorf("turboquant_prefix_bits[%d]=%d outside supported range 2..8", i, bitWidth)
@@ -5063,6 +5241,14 @@ func validateTrainConfig(cfg EmbeddingTrainConfig) error {
 		}
 		if cfg.TurboQuantPrefixWeight < 0 || math.IsNaN(float64(cfg.TurboQuantPrefixWeight)) || math.IsInf(float64(cfg.TurboQuantPrefixWeight), 0) {
 			return fmt.Errorf("turboquant_prefix_weight must be finite and non-negative")
+		}
+		if _, err := normalizeTurboQuantPrefixScoreMode(cfg.TurboQuantPrefixScoreMode); err != nil {
+			return err
+		}
+	}
+	if len(cfg.TurboQuantPrefixObjectives) > 0 {
+		if _, err := normalizeTurboQuantPrefixObjectives(cfg.TurboQuantPrefixObjectives, cfg.MatryoshkaDims); err != nil {
+			return err
 		}
 		if _, err := normalizeTurboQuantPrefixScoreMode(cfg.TurboQuantPrefixScoreMode); err != nil {
 			return err

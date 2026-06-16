@@ -74,6 +74,25 @@ func TestEstimateContrastiveTrainWorkloadWithTurboQuantPrefixes(t *testing.T) {
 	}
 }
 
+func TestEstimateContrastiveTrainWorkloadWithTurboQuantPrefixObjectives(t *testing.T) {
+	workload := EstimateContrastiveTrainWorkload(512, 128, EmbeddingTrainRunConfig{
+		Epochs:         1,
+		BatchSize:      64,
+		EvalEveryEpoch: 4,
+		MatryoshkaDims: []int{64, 128},
+		TurboQuantPrefixObjectives: []TurboQuantPrefixObjective{
+			{Dim: 128, BitWidth: 4, Weight: 0.5},
+			{Dim: 64, BitWidth: 2, Weight: 0},
+		},
+	})
+	if workload.TrainPairsPerEpoch != 131072 {
+		t.Fatalf("train pairs/epoch = %d, want 131072", workload.TrainPairsPerEpoch)
+	}
+	if workload.PlannedTotalPairs != 147456 {
+		t.Fatalf("planned total pairs = %d, want 147456", workload.PlannedTotalPairs)
+	}
+}
+
 func TestEstimateGroupedHardNegativeTrainWorkload(t *testing.T) {
 	workload := EstimateHardNegativeTrainWorkload(128, 1, 0, EmbeddingTrainRunConfig{
 		Epochs:          1,
@@ -105,6 +124,35 @@ func TestEstimateHybridHardNegativeTrainWorkload(t *testing.T) {
 	}
 	if workload.TrainPairsPerEpoch != 16640 {
 		t.Fatalf("train pairs/epoch = %d, want 16640", workload.TrainPairsPerEpoch)
+	}
+}
+
+func TestEstimateHardNegativeTrainWorkloadWithTurboQuantPrefixObjectives(t *testing.T) {
+	grouped := EstimateHardNegativeTrainWorkload(128, 1, 0, EmbeddingTrainRunConfig{
+		Epochs:          1,
+		BatchSize:       64,
+		ContrastiveLoss: "grouped_infonce",
+		MatryoshkaDims:  []int{64, 128},
+		TurboQuantPrefixObjectives: []TurboQuantPrefixObjective{
+			{Dim: 64, BitWidth: 4, Weight: 0},
+			{Dim: 128, BitWidth: 4, Weight: 0.5},
+		},
+	})
+	if grouped.TrainPairsPerEpoch != 1024 {
+		t.Fatalf("grouped train pairs/epoch = %d, want 1024", grouped.TrainPairsPerEpoch)
+	}
+	hybrid := EstimateHardNegativeTrainWorkload(128, 1, 0, EmbeddingTrainRunConfig{
+		Epochs:          1,
+		BatchSize:       64,
+		ContrastiveLoss: "hybrid_infonce",
+		MatryoshkaDims:  []int{64, 128},
+		TurboQuantPrefixObjectives: []TurboQuantPrefixObjective{
+			{Dim: 64, BitWidth: 4, Weight: 0},
+			{Dim: 128, BitWidth: 4, Weight: 0.5},
+		},
+	})
+	if hybrid.TrainPairsPerEpoch != 66560 {
+		t.Fatalf("hybrid train pairs/epoch = %d, want 66560", hybrid.TrainPairsPerEpoch)
 	}
 }
 
@@ -299,6 +347,92 @@ func TestEmbeddingTrainerFitContrastiveRejectsInvalidTurboQuantPrefixConfig(t *t
 		t.Fatal("expected invalid turboquant prefix score mode error")
 	}
 	for _, tt := range []struct {
+		name string
+		cfg  EmbeddingTrainRunConfig
+	}{
+		{
+			name: "missing dim",
+			cfg: EmbeddingTrainRunConfig{
+				MatryoshkaDims: []int{2},
+				TurboQuantPrefixObjectives: []TurboQuantPrefixObjective{
+					{Dim: 3, BitWidth: 2, Weight: 0.5},
+				},
+			},
+		},
+		{
+			name: "duplicate",
+			cfg: EmbeddingTrainRunConfig{
+				MatryoshkaDims: []int{2},
+				TurboQuantPrefixObjectives: []TurboQuantPrefixObjective{
+					{Dim: 2, BitWidth: 2, Weight: 0.5},
+					{Dim: 2, BitWidth: 2, Weight: 0.25},
+				},
+			},
+		},
+		{
+			name: "invalid bit",
+			cfg: EmbeddingTrainRunConfig{
+				MatryoshkaDims: []int{2},
+				TurboQuantPrefixObjectives: []TurboQuantPrefixObjective{
+					{Dim: 2, BitWidth: 9, Weight: 0.5},
+				},
+			},
+		},
+		{
+			name: "negative weight",
+			cfg: EmbeddingTrainRunConfig{
+				MatryoshkaDims: []int{2},
+				TurboQuantPrefixObjectives: []TurboQuantPrefixObjective{
+					{Dim: 2, BitWidth: 2, Weight: -0.5},
+				},
+			},
+		},
+		{
+			name: "nan weight",
+			cfg: EmbeddingTrainRunConfig{
+				MatryoshkaDims: []int{2},
+				TurboQuantPrefixObjectives: []TurboQuantPrefixObjective{
+					{Dim: 2, BitWidth: 2, Weight: float32(math.NaN())},
+				},
+			},
+		},
+		{
+			name: "inf weight",
+			cfg: EmbeddingTrainRunConfig{
+				MatryoshkaDims: []int{2},
+				TurboQuantPrefixObjectives: []TurboQuantPrefixObjective{
+					{Dim: 2, BitWidth: 2, Weight: float32(math.Inf(1))},
+				},
+			},
+		},
+		{
+			name: "mix bits",
+			cfg: EmbeddingTrainRunConfig{
+				MatryoshkaDims:       []int{2},
+				TurboQuantPrefixBits: []int{2},
+				TurboQuantPrefixObjectives: []TurboQuantPrefixObjective{
+					{Dim: 2, BitWidth: 4, Weight: 0.5},
+				},
+			},
+		},
+		{
+			name: "mix weight",
+			cfg: EmbeddingTrainRunConfig{
+				MatryoshkaDims:         []int{2},
+				TurboQuantPrefixWeight: 0.25,
+				TurboQuantPrefixObjectives: []TurboQuantPrefixObjective{
+					{Dim: 2, BitWidth: 4, Weight: 0.5},
+				},
+			},
+		},
+	} {
+		tt.cfg.Epochs = 1
+		tt.cfg.BatchSize = 2
+		if _, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitContrastive(trainSet, nil, tt.cfg); err == nil {
+			t.Fatalf("%s: expected invalid turboquant prefix objectives error", tt.name)
+		}
+	}
+	for _, tt := range []struct {
 		in   string
 		want string
 	}{
@@ -310,6 +444,30 @@ func TestEmbeddingTrainerFitContrastiveRejectsInvalidTurboQuantPrefixConfig(t *t
 	} {
 		if mode, err := NormalizeTurboQuantPrefixScoreModeForCLI(tt.in); err != nil || mode != tt.want {
 			t.Fatalf("mode %q = %q, err=%v; want %q", tt.in, mode, err, tt.want)
+		}
+	}
+}
+
+func TestParseTurboQuantPrefixObjectives(t *testing.T) {
+	objectives, err := ParseTurboQuantPrefixObjectives("128:4=0.5,64:2=0,64:4=0.25")
+	if err != nil {
+		t.Fatalf("parse objectives: %v", err)
+	}
+	if got, want := FormatTurboQuantPrefixObjectives(objectives), "64:2=0,64:4=0.25,128:4=0.5"; got != want {
+		t.Fatalf("formatted objectives = %q, want %q", got, want)
+	}
+	for _, raw := range []string{
+		"128:4=0.5,",
+		"128:4",
+		"128=0.5",
+		"128:1=0.5",
+		"128:4=-0.5",
+		"128:4=NaN",
+		"128:4=+Inf",
+		"128:4=0.5,128:4=0.25",
+	} {
+		if _, err := ParseTurboQuantPrefixObjectives(raw); err == nil {
+			t.Fatalf("ParseTurboQuantPrefixObjectives(%q) succeeded, want error", raw)
 		}
 	}
 }
@@ -373,6 +531,116 @@ func TestEmbeddingTrainerFitContrastiveTurboQuantPrefixRunsAndTracksWork(t *test
 	}
 	if summary.FinalTrain.Loss <= 0 {
 		t.Fatalf("final train loss = %f, want positive", summary.FinalTrain.Loss)
+	}
+}
+
+func TestEmbeddingTrainerFitContrastiveTurboQuantPrefixObjectivesRunAndTrackWork(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	trainSet := tinyEmbeddingContrastiveDataset()
+	summary, err := trainer.FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:            1,
+		BatchSize:         2,
+		Shuffle:           false,
+		MatryoshkaDims:    []int{2, 3},
+		MatryoshkaWeights: []float32{0.5, 1},
+		TurboQuantPrefixObjectives: []TurboQuantPrefixObjective{
+			{Dim: 2, BitWidth: 4, Weight: 0.25},
+			{Dim: 2, BitWidth: 2, Weight: 0},
+		},
+	})
+	if err != nil {
+		t.Fatalf("fit contrastive turboquant prefix objectives: %v", err)
+	}
+	if got, want := summary.Config.MatryoshkaDims, []int{2}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("normalized matryoshka dims = %v, want %v", got, want)
+	}
+	if got := summary.Config.TurboQuantPrefixObjectives; len(got) != 2 || got[0].Dim != 2 || got[0].BitWidth != 2 || got[0].Weight != 0 || got[1].Dim != 2 || got[1].BitWidth != 4 || got[1].Weight != 0.25 {
+		t.Fatalf("normalized turboquant prefix objectives = %+v", got)
+	}
+	if summary.Config.TurboQuantPrefixWeight != 0 {
+		t.Fatalf("turboquant prefix weight = %f, want 0 in explicit mode", summary.Config.TurboQuantPrefixWeight)
+	}
+	if summary.Config.TurboQuantPrefixSeed != DefaultTurboQuantMultiVectorQuantizerSeed {
+		t.Fatalf("turboquant prefix seed = %d, want default %d", summary.Config.TurboQuantPrefixSeed, DefaultTurboQuantMultiVectorQuantizerSeed)
+	}
+	if summary.FinalTrain.BatchSize != 12 {
+		t.Fatalf("final train batch size = %d, want base+dense-prefix+1 active turboquant prefix pair count 12", summary.FinalTrain.BatchSize)
+	}
+	if summary.Workload.PlannedTrainPairs != 12 || summary.Workload.ActualTrainPairs != 12 {
+		t.Fatalf("train pairs planned/actual = %d/%d, want 12/12", summary.Workload.PlannedTrainPairs, summary.Workload.ActualTrainPairs)
+	}
+}
+
+func TestEmbeddingTrainerFitContrastiveContinuesLegacyTurboQuantWithExplicitObjectives(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	trainSet := tinyEmbeddingContrastiveDataset()
+	_, err := trainer.FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:                 1,
+		BatchSize:              2,
+		Shuffle:                false,
+		MatryoshkaDims:         []int{2},
+		TurboQuantPrefixBits:   []int{2},
+		TurboQuantPrefixWeight: 0.25,
+	})
+	if err != nil {
+		t.Fatalf("initial legacy turboquant prefix fit: %v", err)
+	}
+	summary, err := trainer.FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:         1,
+		BatchSize:      2,
+		Shuffle:        false,
+		MatryoshkaDims: []int{2},
+		TurboQuantPrefixObjectives: []TurboQuantPrefixObjective{
+			{Dim: 2, BitWidth: 4, Weight: 0.5},
+		},
+	})
+	if err != nil {
+		t.Fatalf("continue legacy turboquant with explicit objectives: %v", err)
+	}
+	if len(summary.Config.TurboQuantPrefixBits) != 0 {
+		t.Fatalf("turboquant prefix bits = %v, want cleared", summary.Config.TurboQuantPrefixBits)
+	}
+	if got := summary.Config.TurboQuantPrefixObjectives; len(got) != 1 || got[0].Dim != 2 || got[0].BitWidth != 4 || got[0].Weight != 0.5 {
+		t.Fatalf("turboquant prefix objectives = %+v, want explicit 2:4=0.5", got)
+	}
+	if summary.Config.TurboQuantPrefixWeight != 0 {
+		t.Fatalf("turboquant prefix weight = %f, want 0 in explicit mode", summary.Config.TurboQuantPrefixWeight)
+	}
+}
+
+func TestEmbeddingTrainerFitContrastiveContinuesExplicitObjectivesWithLegacyTurboQuant(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	trainSet := tinyEmbeddingContrastiveDataset()
+	_, err := trainer.FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:         1,
+		BatchSize:      2,
+		Shuffle:        false,
+		MatryoshkaDims: []int{2},
+		TurboQuantPrefixObjectives: []TurboQuantPrefixObjective{
+			{Dim: 2, BitWidth: 4, Weight: 0.5},
+		},
+	})
+	if err != nil {
+		t.Fatalf("initial explicit turboquant prefix fit: %v", err)
+	}
+	summary, err := trainer.FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:               1,
+		BatchSize:            2,
+		Shuffle:              false,
+		MatryoshkaDims:       []int{2},
+		TurboQuantPrefixBits: []int{2},
+	})
+	if err != nil {
+		t.Fatalf("continue explicit objectives with legacy turboquant: %v", err)
+	}
+	if len(summary.Config.TurboQuantPrefixObjectives) != 0 {
+		t.Fatalf("turboquant prefix objectives = %+v, want cleared", summary.Config.TurboQuantPrefixObjectives)
+	}
+	if got := summary.Config.TurboQuantPrefixBits; len(got) != 1 || got[0] != 2 {
+		t.Fatalf("turboquant prefix bits = %v, want [2]", got)
+	}
+	if summary.Config.TurboQuantPrefixWeight != 1 {
+		t.Fatalf("turboquant prefix weight = %f, want legacy default 1", summary.Config.TurboQuantPrefixWeight)
 	}
 }
 

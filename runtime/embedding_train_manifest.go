@@ -126,6 +126,7 @@ func (m EmbeddingTrainManifest) mllValues() map[string]authoredManifestValue {
 		"config.matryoshka_dims":              authoredString(formatMatryoshkaDims(m.Config.MatryoshkaDims)),
 		"config.matryoshka_weights":           authoredString(formatMatryoshkaWeights(m.Config.MatryoshkaWeights)),
 		"config.turboquant_prefix_bits":       authoredString(formatIntList(m.Config.TurboQuantPrefixBits)),
+		"config.turboquant_prefix_objectives": authoredString(FormatTurboQuantPrefixObjectives(m.Config.TurboQuantPrefixObjectives)),
 		"config.turboquant_prefix_weight":     authoredFloat(float64(m.Config.TurboQuantPrefixWeight)),
 		"config.turboquant_prefix_seed":       authoredInt(m.Config.TurboQuantPrefixSeed),
 		"config.turboquant_prefix_score_mode": authoredString(m.Config.TurboQuantPrefixScoreMode),
@@ -234,6 +235,15 @@ func embeddingTrainManifestFromDoc(doc authoredManifestDoc) (EmbeddingTrainManif
 			return EmbeddingTrainManifest{}, err
 		}
 		manifest.Config.TurboQuantPrefixBits = bits
+	}
+	if value, ok, err := doc.string("config.turboquant_prefix_objectives"); err != nil {
+		return EmbeddingTrainManifest{}, err
+	} else if ok {
+		objectives, err := ParseTurboQuantPrefixObjectives(value)
+		if err != nil {
+			return EmbeddingTrainManifest{}, err
+		}
+		manifest.Config.TurboQuantPrefixObjectives = objectives
 	}
 	if value, ok, err := doc.float("config.turboquant_prefix_weight"); err != nil {
 		return EmbeddingTrainManifest{}, err
