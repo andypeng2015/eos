@@ -1,0 +1,422 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+const expectedAssetID = "corkscrewdb-default-embedder"
+const expectedModelName = "eos-embed-v1"
+const expectedArtifactSHA = "601932251333d6bb5279cbe6c042a7b7f188037a47501f3134071e51baa5f2f7"
+const expectedTokenizerSHA = "64cf63223cb3f97125040677a573e6ab6c625cff1f6f338f4e680a4c9f7a42f5"
+const expectedDim = 256
+
+type defaultEmbedderJSON struct {
+	Asset struct {
+		AssetID         string `json:"asset_id"`
+		ModelName       string `json:"model_name"`
+		ArtifactPath    string `json:"artifact_path"`
+		ArtifactSHA256  string `json:"artifact_sha256"`
+		TokenizerSHA256 string `json:"tokenizer_sha256"`
+	} `json:"asset"`
+	Verification struct {
+		OK    bool `json:"ok"`
+		Files []struct {
+			Role           string `json:"role"`
+			SHA256         string `json:"sha256"`
+			ExpectedSHA256 string `json:"expected_sha256"`
+			OK             bool   `json:"ok"`
+		} `json:"files"`
+	} `json:"verification"`
+}
+
+type corkManifest struct {
+	Embedding struct {
+		ID  string `json:"id"`
+		Dim int    `json:"dim"`
+	} `json:"embedding"`
+}
+
+type commandRecord struct {
+	Name    string   `json:"name"`
+	Command []string `json:"command"`
+	Dir     string   `json:"dir"`
+	Log     string   `json:"log"`
+	OK      bool     `json:"ok"`
+}
+
+type corkSmokeRecord struct {
+	Root         string   `json:"root"`
+	DataDir      string   `json:"data_dir"`
+	ManifestPath string   `json:"manifest_path"`
+	Command      []string `json:"command"`
+	Log          string   `json:"log"`
+	EmbeddingID  string   `json:"embedding_id"`
+	EmbeddingDim int      `json:"embedding_dim"`
+	OK           bool     `json:"ok"`
+}
+
+type releaseManifest struct {
+	Schema        string           `json:"schema"`
+	GeneratedAt   string           `json:"generated_at"`
+	RunDir        string           `json:"run_dir"`
+	RepoRoot      string           `json:"repo_root"`
+	ArtifactPath  string           `json:"artifact_path"`
+	Commands      []commandRecord  `json:"commands"`
+	CorkScrewDB   *corkSmokeRecord `json:"corkscrewdb,omitempty"`
+	Checks        []string         `json:"checks"`
+	Caveats       []string         `json:"caveats"`
+}
+
+func usage() {
+	fmt.Println(`Release smoke for the checked-in EOS CorkScrewDB default embedder.
+
+Run:
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_default_embedder_release.fw
+
+Optional CorkScrewDB consuming-db startup smoke:
+  EOS_DEFAULT_EMBEDDER_RELEASE_CORKSCREWDB_ROOT=/home/draco/work/corkscrewdb \
+  ferrous-wheel run scripts/smoke_eos_default_embedder_release.fw
+
+Environment:
+  EOS_REPO_ROOT=/path/to/eos
+  EOS_DEFAULT_EMBEDDER_RELEASE_RUN_ROOT=runs/eos-default-embedder-release-smoke-<timestamp>
+  EOS_DEFAULT_EMBEDDER_RELEASE_CORKSCREWDB_ROOT=/path/to/corkscrewdb
+  EOS_DEFAULT_EMBEDDER_RELEASE_CORKSCREWDB_TIMEOUT_SECONDS=90`)
+}
+
+func getenv(name string, fallback string) string {
+	value := os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findAncestorRoot(start string) string {
+	if start == "" {
+		return ""
+	}
+	dir, err := filepath.Abs(start)
+	if err != nil {
+		return ""
+	}
+	for {
+		if hasRepoRoot(dir) {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); explicit != "" {
+		if root := findAncestorRoot(explicit); root != "" {
+			return root, nil
+		}
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for _, candidate := range []string{
+		os.Getenv("PWD"),
+		os.Getenv("OLDPWD"),
+		cwd,
+	} {
+		if root := findAncestorRoot(candidate); root != "" {
+			return root, nil
+		}
+	}
+	return "", fmt.Errorf("could not find Eos repo root; set EOS_REPO_ROOT")
+}
+
+func runDir(root string) string {
+	if explicit := strings.TrimSpace(os.Getenv("EOS_DEFAULT_EMBEDDER_RELEASE_RUN_ROOT")); explicit != "" {
+		if filepath.IsAbs(explicit) {
+			return explicit
+		}
+		return filepath.Join(root, explicit)
+	}
+	stamp := time.Now().UTC().Format("20060102T150405Z")
+	return filepath.Join(root, "runs", "eos-default-embedder-release-smoke-"+stamp)
+}
+
+func runCapture(dir string, args []string, logPath string) (string, error) {
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	var b strings.Builder
+	b.WriteString("+ ")
+	b.WriteString(strings.Join(args, " "))
+	b.WriteString("\n")
+	b.Write(output)
+	if writeErr := os.WriteFile(logPath, []byte(b.String()), 0o644); writeErr != nil {
+		return string(output), writeErr
+	}
+	if err != nil {
+		return string(output), fmt.Errorf("%s failed: %w; see %s", strings.Join(args, " "), err, logPath)
+	}
+	return string(output), nil
+}
+
+func requireContains(output string, want string, label string) error {
+	if !strings.Contains(output, want) {
+		return fmt.Errorf("%s missing %q", label, want)
+	}
+	return nil
+}
+
+func checkDefaultEmbedderJSON(output string) (string, error) {
+	var report defaultEmbedderJSON
+	if err := json.Unmarshal([]byte(output), &report); err != nil {
+		return "", fmt.Errorf("parse default-embedder JSON: %w", err)
+	}
+	if report.Asset.AssetID != expectedAssetID {
+		return "", fmt.Errorf("asset_id = %q, want %q", report.Asset.AssetID, expectedAssetID)
+	}
+	if report.Asset.ModelName != expectedModelName {
+		return "", fmt.Errorf("model_name = %q, want %q", report.Asset.ModelName, expectedModelName)
+	}
+	if report.Asset.ArtifactSHA256 != expectedArtifactSHA {
+		return "", fmt.Errorf("artifact SHA = %q, want %q", report.Asset.ArtifactSHA256, expectedArtifactSHA)
+	}
+	if report.Asset.TokenizerSHA256 != expectedTokenizerSHA {
+		return "", fmt.Errorf("tokenizer SHA = %q, want %q", report.Asset.TokenizerSHA256, expectedTokenizerSHA)
+	}
+	if !report.Verification.OK {
+		return "", fmt.Errorf("default embedder verification did not report ok")
+	}
+	for _, file := range report.Verification.Files {
+		if !file.OK || file.SHA256 != file.ExpectedSHA256 {
+			return "", fmt.Errorf("%s SHA verification failed: got %q expected %q ok=%v", file.Role, file.SHA256, file.ExpectedSHA256, file.OK)
+		}
+	}
+	return report.Asset.ArtifactPath, nil
+}
+
+func validateCorkScrewDBRoot(root string) error {
+	if !hasRepoRoot(root) {
+		return fmt.Errorf("not a repo root: %s", root)
+	}
+	if _, err := os.Stat(filepath.Join(root, "cmd", "corkscrewdb", "main.go")); err != nil {
+		return fmt.Errorf("missing cmd/corkscrewdb/main.go under %s: %w", root, err)
+	}
+	return nil
+}
+
+func readCorkManifest(path string) (corkManifest, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return corkManifest{}, err
+	}
+	var manifest corkManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return corkManifest{}, err
+	}
+	return manifest, nil
+}
+
+func parseTimeout() time.Duration {
+	value := strings.TrimSpace(os.Getenv("EOS_DEFAULT_EMBEDDER_RELEASE_CORKSCREWDB_TIMEOUT_SECONDS"))
+	if value == "" {
+		return 90 * time.Second
+	}
+	var seconds int
+	if _, err := fmt.Sscanf(value, "%d", &seconds); err != nil || seconds <= 0 {
+		return 90 * time.Second
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func runCorkScrewDBSmoke(corkRoot string, run string) (*corkSmokeRecord, error) {
+	if err := validateCorkScrewDBRoot(corkRoot); err != nil {
+		return nil, err
+	}
+	dataDir := filepath.Join(run, "corkscrewdb-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return nil, err
+	}
+	logPath := filepath.Join(run, "corkscrewdb-startup.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		return nil, err
+	}
+	defer logFile.Close()
+
+	args := []string{"go", "run", "./cmd/corkscrewdb", "-data", dataDir, "-addr", "127.0.0.1:0"}
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = corkRoot
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start CorkScrewDB: %w", err)
+	}
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+	}()
+
+	manifestPath := filepath.Join(dataDir, "manifest.json")
+	deadline := time.Now().Add(parseTimeout())
+	var manifest corkManifest
+	for time.Now().Before(deadline) {
+		if m, err := readCorkManifest(manifestPath); err == nil && m.Embedding.ID != "" {
+			manifest = m
+			break
+		}
+		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+			return nil, fmt.Errorf("CorkScrewDB exited before writing manifest; see %s", logPath)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if manifest.Embedding.ID == "" {
+		return nil, fmt.Errorf("timed out waiting for CorkScrewDB manifest %s; see %s", manifestPath, logPath)
+	}
+	if manifest.Embedding.ID != expectedAssetID {
+		return nil, fmt.Errorf("CorkScrewDB embedded provider id = %q, want %q", manifest.Embedding.ID, expectedAssetID)
+	}
+	if manifest.Embedding.Dim != expectedDim {
+		return nil, fmt.Errorf("CorkScrewDB embedded provider dim = %d, want %d", manifest.Embedding.Dim, expectedDim)
+	}
+	return &corkSmokeRecord{
+		Root:         corkRoot,
+		DataDir:      dataDir,
+		ManifestPath: manifestPath,
+		Command:      args,
+		Log:          logPath,
+		EmbeddingID:  manifest.Embedding.ID,
+		EmbeddingDim: manifest.Embedding.Dim,
+		OK:           true,
+	}, nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+
+	root, err := findRoot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	run := runDir(root)
+	if err := os.MkdirAll(run, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	manifest := releaseManifest{
+		Schema:      "eos.default_embedder_release_smoke.v1",
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		RunDir:      run,
+		RepoRoot:    root,
+		Checks:      []string{},
+		Caveats: []string{
+			"This smoke verifies local release packaging and optional embedded default startup only.",
+			"It does not cover hosted parity, remote mode, federation, HNSW, or model-quality improvement.",
+		},
+	}
+
+	defaultArgs := []string{"go", "run", "./cmd/eos", "default-embedder", "--verify", "--json"}
+	defaultLog := filepath.Join(run, "default-embedder-verify.json")
+	defaultOutput, err := runCapture(root, defaultArgs, defaultLog)
+	manifest.Commands = append(manifest.Commands, commandRecord{Name: "default-embedder-verify", Command: defaultArgs, Dir: root, Log: defaultLog, OK: err == nil})
+	if err != nil {
+		fail(run, manifest, err)
+	}
+	artifactPath, err := checkDefaultEmbedderJSON(defaultOutput)
+	if err != nil {
+		fail(run, manifest, err)
+	}
+	manifest.ArtifactPath = artifactPath
+	manifest.Checks = append(manifest.Checks, "default embedder JSON verified expected asset id and SHA256 hashes")
+
+	inspectArgs := []string{"go", "run", "./cmd/eos", "inspect", "assets/corkscrewdb-default-embedder/corkscrewdb-default-embedder.mll"}
+	inspectLog := filepath.Join(run, "inspect.log")
+	inspectOutput, err := runCapture(root, inspectArgs, inspectLog)
+	manifest.Commands = append(manifest.Commands, commandRecord{Name: "inspect-default-artifact", Command: inspectArgs, Dir: root, Log: inspectLog, OK: err == nil})
+	if err != nil {
+		fail(run, manifest, err)
+	}
+	for _, want := range []string{"module: eos-embed-v1", "embedding model: eos-embed-v1", "package: embedded sealed MLL", "package verify: OK"} {
+		if err := requireContains(inspectOutput, want, "inspect output"); err != nil {
+			fail(run, manifest, err)
+		}
+	}
+	manifest.Checks = append(manifest.Checks, "inspect verified embedded sealed package metadata")
+
+	embedArgs := []string{"go", "run", "./cmd/eos", "embed-text", "assets/corkscrewdb-default-embedder/corkscrewdb-default-embedder.mll", "corkscrew", "local", "default", "embedder", "smoke"}
+	embedLog := filepath.Join(run, "embed-text.log")
+	embedOutput, err := runCapture(root, embedArgs, embedLog)
+	manifest.Commands = append(manifest.Commands, commandRecord{Name: "embed-text-default-artifact", Command: embedArgs, Dir: root, Log: embedLog, OK: err == nil})
+	if err != nil {
+		fail(run, manifest, err)
+	}
+	for _, want := range []string{"loaded embedding \"eos-embed-v1\"", "embedding: f16[256]"} {
+		if err := requireContains(embedOutput, want, "embed-text output"); err != nil {
+			fail(run, manifest, err)
+		}
+	}
+	manifest.Checks = append(manifest.Checks, "embed-text loaded checked-in artifact and produced f16[256]")
+
+	if corkRoot := strings.TrimSpace(os.Getenv("EOS_DEFAULT_EMBEDDER_RELEASE_CORKSCREWDB_ROOT")); corkRoot != "" {
+		record, err := runCorkScrewDBSmoke(corkRoot, run)
+		if err != nil {
+			fail(run, manifest, err)
+		}
+		manifest.CorkScrewDB = record
+		manifest.Checks = append(manifest.Checks, "CorkScrewDB startup without -eos-artifact recorded corkscrewdb-default-embedder dim 256")
+	} else {
+		manifest.Caveats = append(manifest.Caveats, "EOS_DEFAULT_EMBEDDER_RELEASE_CORKSCREWDB_ROOT was not set; skipped consuming-db startup smoke.")
+	}
+
+	if err := writeManifest(run, manifest); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Printf("release smoke passed: %s\n", run)
+	fmt.Printf("manifest: %s\n", filepath.Join(run, "manifest.json"))
+}
+
+func writeManifest(run string, manifest releaseManifest) error {
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(filepath.Join(run, "manifest.json"), data, 0o644)
+}
+
+func fail(run string, manifest releaseManifest, err error) {
+	_ = writeManifest(run, manifest)
+	fmt.Fprintf(os.Stderr, "release smoke failed: %v\n", err)
+	fmt.Fprintf(os.Stderr, "run dir: %s\n", run)
+	os.Exit(1)
+}

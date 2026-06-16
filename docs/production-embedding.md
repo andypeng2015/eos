@@ -169,6 +169,21 @@ go run ./cmd/eos eval-retrieval-turboquant \
   /data/manta/datasets/eos-embed-v1/raw/scifact
 ```
 
+The CorkScrewDB embedded default-provider promotion has been checkpointed in CorkScrewDB commit `d19780622b3e879bedfdc202e84966d6437441d5`. For repeatable release validation from a clean Eos checkout, run:
+
+```bash
+ferrous-wheel run scripts/smoke_eos_default_embedder_release.fw
+```
+
+To include the consuming CorkScrewDB startup check without editing that checkout, pass its root:
+
+```bash
+EOS_DEFAULT_EMBEDDER_RELEASE_CORKSCREWDB_ROOT=/home/draco/work/corkscrewdb \
+ferrous-wheel run scripts/smoke_eos_default_embedder_release.fw
+```
+
+The release smoke verifies the checked-in artifact SHA256 `601932251333d6bb5279cbe6c042a7b7f188037a47501f3134071e51baa5f2f7`, tokenizer SHA256 `64cf63223cb3f97125040677a573e6ab6c625cff1f6f338f4e680a4c9f7a42f5`, package metadata, local `embed-text` load as `f16[256]`, and, when CorkScrewDB is supplied, the temp DB manifest embedding id `corkscrewdb-default-embedder` dim `256`.
+
 The JSON/TSV rows include the dense float32 reference, TurboQuant bit width, nDCG@10/nDCG@100, MRR@10, precision@1/5/10, hit@1/5/10, MAP@10/MAP@100, recall@10/100, quality deltas, vector bytes, rerank storage, rerank sidecar bytes, total vector bytes, compression ratio, total compression ratio, quantization docs/s, direct IP scoring throughput, per-query scoring latency summaries, and optional rerank overfetch/score counts. CorkScrewDB integration is a separate local smoke for this gate; these are the CorkScrewDB-relevant storage and scoring metrics that must stay attached to a promoted default embedder.
 
 Interpret the metric groups separately for promotion. Quality metrics decide whether the candidate ranks relevant documents well enough: nDCG and MAP capture ordering, precision/hit@k capture first-screen success, and recall@100 captures candidate-pool coverage. Compression metrics decide whether q4/q8 are worth the footprint reduction. Throughput metrics are path-specific: sealed Eos evals can include local encoder time, while cached external-vector rows only measure cache load/scoring and do not represent live provider or external model encoding throughput.

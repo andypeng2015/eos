@@ -450,7 +450,7 @@ Do not promote a default CorkScrewDB embedder until all of these are true:
 
 ## Next Actions
 
-1. Run a CorkScrewDB-side startup/load smoke against `assets/corkscrewdb-default-embedder/corkscrewdb-default-embedder.mll` before changing CorkScrewDB's embedded default provider.
+1. For release validation, run `ferrous-wheel run scripts/smoke_eos_default_embedder_release.fw`; set `EOS_DEFAULT_EMBEDDER_RELEASE_CORKSCREWDB_ROOT=/home/draco/work/corkscrewdb` to include the consuming CorkScrewDB startup smoke. This verifies the checked-in asset SHA256 values, sealed package metadata, local `embed-text` load, and CorkScrewDB embedded default manifest `corkscrewdb-default-embedder` dim `256`.
 2. Optionally extend evidence to remote CorkScrewDB mode, HNSW, or federation before making any claims about those surfaces.
 3. Keep the full short-set external matrix current, with Qwen3 FiQA labeled as full exportable-text rather than raw-row-complete or judged-coverage complete.
 4. Continue the next model-improvement lane through agreement-filtered external teacher scores or larger-model bootstrap work.
