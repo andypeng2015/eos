@@ -5,6 +5,7 @@ This plan is scoped to `eos-embed-v1`, the small sealed local default embedder c
 ## Current Dense Candidate
 
 - Artifact: `runs/eos-embed-v1-targeted-v3-release-package-20260616T000000Z/eos-embed-v1.sealed.mll`
+- Durable asset: `assets/corkscrewdb-default-embedder/corkscrewdb-default-embedder.mll`
 - SHA256: `601932251333d6bb5279cbe6c042a7b7f188037a47501f3134071e51baa5f2f7`
 - Training data: `43` targeted rows, no `teacher_scores`; sources were `fiqa:targeted-v3-blocker=15`, `fiqa:targeted-v3-protect=8`, `nfcorpus:targeted-v3-regression=6`, and `nfcorpus:targeted-v3-protect=14`.
 - Release package SHA256: `188265db16992ab24be15e678c5f7e175bebad769e8d844e8b0f50ffc23bd5bf`; tokenizer SHA256: `64cf63223cb3f97125040677a573e6ab6c625cff1f6f338f4e680a4c9f7a42f5`.
@@ -17,7 +18,7 @@ Dense short-set rows:
 | NFCorpus | 0.204117 | 0.242032 | +0.006384 | +0.006475 | +0.000341 | +0.000040 |
 | FiQA | 0.120294 | 0.350444 | +0.002761 | +0.003247 | +0.003840 | +0.001569 |
 
-Treat the EOS-named targeted-v3 release package as the current dense promotion candidate for `eos-embed-v1` on the measured short retrieval set, not as broad robustness or hosted-model parity. The release scoreboard at `runs/eos-embed-v1-targeted-v3-release-package-20260616T000000Z/scoreboard/scoreboard.json` exactly matches the targeted-v3 dense rows above. Package and sealed inspection report `package verify: OK`, the sealed inspect identifies `package: embedded sealed MLL`, and final plus hard eval logs record `optimizer_updates=0`. The legacy source artifact `runs/eos-embed-v1-targeted-neargate-v3-low-lr-restorebest-20260614T000000Z/targeted-v3-lr000002-restorebest-manta/manta-embed-v1.sealed.mll` with SHA256 `ea776e2fca7fdade7ee05396b2ee8980e220899e2515853c83a4bca34cf87242` remains provenance only. The June 10 deephard-full artifact, `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z/manta-embed-v1.sealed.mll` with SHA256 `a7461b47784ea7434cf6048f33f6c281ef19887cfa9d0c699b6f2fba079f2b67`, remains the previous strict sealed anchor and comparison baseline.
+Treat the EOS-named targeted-v3 release package as the current dense promotion candidate for `eos-embed-v1` on the measured short retrieval set, not as broad robustness or hosted-model parity. The durable in-repo asset is `assets/corkscrewdb-default-embedder/corkscrewdb-default-embedder.mll`, with tokenizer compatibility sidecar `assets/corkscrewdb-default-embedder/corkscrewdb-default-embedder.tokenizer.mll`; the ignored `runs/eos-embed-v1-targeted-v3-release-package-20260616T000000Z/` directory remains provenance. The release scoreboard at `runs/eos-embed-v1-targeted-v3-release-package-20260616T000000Z/scoreboard/scoreboard.json` exactly matches the targeted-v3 dense rows above. Package and sealed inspection report `package verify: OK`, the sealed inspect identifies `package: embedded sealed MLL`, and final plus hard eval logs record `optimizer_updates=0`. The legacy source artifact `runs/eos-embed-v1-targeted-neargate-v3-low-lr-restorebest-20260614T000000Z/targeted-v3-lr000002-restorebest-manta/manta-embed-v1.sealed.mll` with SHA256 `ea776e2fca7fdade7ee05396b2ee8980e220899e2515853c83a4bca34cf87242` remains provenance only. The June 10 deephard-full artifact, `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z/manta-embed-v1.sealed.mll` with SHA256 `a7461b47784ea7434cf6048f33f6c281ef19887cfa9d0c699b6f2fba079f2b67`, remains the previous strict sealed anchor and comparison baseline.
 
 ## Scoreboard Promotion Gate
 
@@ -449,7 +450,7 @@ Do not promote a default CorkScrewDB embedder until all of these are true:
 
 ## Next Actions
 
-1. Decide the published release location for the EOS-named package and record how `runs/eos-embed-v1-targeted-v3-release-package-20260616T000000Z/eos-embed-v1.sealed.mll` is distributed from ignored run storage.
+1. Run a CorkScrewDB-side startup/load smoke against `assets/corkscrewdb-default-embedder/corkscrewdb-default-embedder.mll` before changing CorkScrewDB's embedded default provider.
 2. Optionally extend evidence to remote CorkScrewDB mode, HNSW, or federation before making any claims about those surfaces.
 3. Keep the full short-set external matrix current, with Qwen3 FiQA labeled as full exportable-text rather than raw-row-complete or judged-coverage complete.
 4. Continue the next model-improvement lane through agreement-filtered external teacher scores or larger-model bootstrap work.

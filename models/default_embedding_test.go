@@ -255,3 +255,34 @@ func TestInitDefaultEmbeddingPackageHonorsEncoderRepeats(t *testing.T) {
 		t.Fatalf("encoder repeats = %d, want 3", manifest.EncoderRepeats)
 	}
 }
+
+func TestDefaultEmbedderAssetInfoAndVerify(t *testing.T) {
+	info, err := DefaultEmbedderAssetInfo("")
+	if err != nil {
+		t.Fatalf("default embedder asset info: %v", err)
+	}
+	if info.AssetID != DefaultEmbedderAssetID {
+		t.Fatalf("asset id = %q, want %q", info.AssetID, DefaultEmbedderAssetID)
+	}
+	if info.ModelName != DefaultEmbeddingModelName {
+		t.Fatalf("model name = %q, want %q", info.ModelName, DefaultEmbeddingModelName)
+	}
+	if filepath.Base(info.ArtifactPath) != DefaultEmbedderArtifactFilename {
+		t.Fatalf("artifact path = %q", info.ArtifactPath)
+	}
+	if filepath.Base(info.TokenizerPath) != DefaultEmbedderTokenizerFilename {
+		t.Fatalf("tokenizer path = %q", info.TokenizerPath)
+	}
+	report, err := VerifyDefaultEmbedderAsset("")
+	if err != nil {
+		t.Fatalf("verify default embedder asset: %v", err)
+	}
+	if !report.OK || len(report.Files) != 2 {
+		t.Fatalf("unexpected verification report: %+v", report)
+	}
+	for _, check := range report.Files {
+		if !check.OK || check.SHA256 != check.ExpectedSHA256 || check.Bytes <= 0 {
+			t.Fatalf("bad file check: %+v", check)
+		}
+	}
+}

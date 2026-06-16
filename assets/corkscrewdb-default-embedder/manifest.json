@@ -1,0 +1,58 @@
+{
+  "schema": "eos.default_embedder_asset.v1",
+  "asset_id": "corkscrewdb-default-embedder",
+  "model_name": "eos-embed-v1",
+  "artifact": {
+    "filename": "corkscrewdb-default-embedder.mll",
+    "sha256": "601932251333d6bb5279cbe6c042a7b7f188037a47501f3134071e51baa5f2f7",
+    "bytes": 5092026
+  },
+  "tokenizer": {
+    "filename": "corkscrewdb-default-embedder.tokenizer.mll",
+    "sha256": "64cf63223cb3f97125040677a573e6ab6c625cff1f6f338f4e680a4c9f7a42f5",
+    "bytes": 179616,
+    "note": "Compatibility sidecar for the CorkScrewDB external-provider installer contract; the sealed MLL embeds tokenizer data."
+  },
+  "source_release": {
+    "directory": "runs/eos-embed-v1-targeted-v3-release-package-20260616T000000Z",
+    "package": "runs/eos-embed-v1-targeted-v3-release-package-20260616T000000Z/eos-embed-v1.mll",
+    "package_sha256": "188265db16992ab24be15e678c5f7e175bebad769e8d844e8b0f50ffc23bd5bf",
+    "sealed_artifact": "runs/eos-embed-v1-targeted-v3-release-package-20260616T000000Z/eos-embed-v1.sealed.mll",
+    "sealed_sha256": "601932251333d6bb5279cbe6c042a7b7f188037a47501f3134071e51baa5f2f7",
+    "tokenizer": "runs/eos-embed-v1-targeted-v3-release-package-20260616T000000Z/eos-embed-v1.tokenizer.mll",
+    "tokenizer_sha256": "64cf63223cb3f97125040677a573e6ab6c625cff1f6f338f4e680a4c9f7a42f5"
+  },
+  "dense_short_metrics": [
+    {
+      "dataset": "scifact",
+      "ndcg_at_10": 0.5623217863054077,
+      "recall_at_100": 0.7964444444444444
+    },
+    {
+      "dataset": "nfcorpus",
+      "ndcg_at_10": 0.20411693174790607,
+      "recall_at_100": 0.24203209121620065
+    },
+    {
+      "dataset": "fiqa",
+      "ndcg_at_10": 0.12029418319262818,
+      "recall_at_100": 0.35044364072141854
+    }
+  ],
+  "compact_policy": {
+    "profile": "q4/fp16 overfetch250",
+    "baseline": "eos-turboquant-rerank",
+    "method": "turboquant_ip_b4_overfetch250_fp16_rerank",
+    "bits": 4,
+    "rerank_overfetch": 250,
+    "rerank_storage": "fp16",
+    "recall_at_100_tolerance": 0.00025,
+    "strict_zero_regression": false,
+    "note": "Compact RC only under explicit recall@100 tolerance 0.00025; do not claim strict compact zero-regression."
+  },
+  "caveats": [
+    "This asset is the durable Eos-side default embedder package for CorkScrewDB external-provider loading.",
+    "The ignored runs/ release directory remains provenance.",
+    "No CorkScrewDB remote mode, federation, HNSW, native Matryoshka, or hosted-model parity claim is implied."
+  ]
+}

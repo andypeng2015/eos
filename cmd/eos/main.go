@@ -107,6 +107,8 @@ func run(args []string) error {
 		return runArtifact(args[1:])
 	case "embed-text":
 		return runEmbedText(args[1:])
+	case "default-embedder":
+		return runDefaultEmbedder(args[1:])
 	case "export-retrieval-vectors":
 		return runExportRetrievalVectors(args[1:])
 	case "export-timeseries-vectors":
@@ -402,6 +404,67 @@ func runEmbedText(args []string) error {
 	fmt.Printf("tokens: %d\n", len(tokens))
 	fmt.Printf("output: %s\n", displayManifestName(result.OutputName))
 	fmt.Printf("embedding: %s%v\n", result.Embeddings.DType, result.Embeddings.Shape)
+	return nil
+}
+
+func runDefaultEmbedder(args []string) error {
+	fs := flag.NewFlagSet("default-embedder", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	root := fs.String("root", "", "repository root containing assets/corkscrewdb-default-embedder")
+	pathOnly := fs.Bool("path-only", false, "print only the sealed MLL artifact path")
+	verify := fs.Bool("verify", false, "verify artifact and tokenizer SHA256 hashes")
+	jsonOut := fs.Bool("json", false, "write JSON output")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: eos default-embedder [--root dir] [--path-only] [--verify] [--json]")
+	}
+
+	info, err := models.DefaultEmbedderAssetInfo(*root)
+	if err != nil {
+		return err
+	}
+	if *pathOnly && !*jsonOut {
+		fmt.Println(info.ArtifactPath)
+		return nil
+	}
+
+	var verification *models.DefaultEmbedderAssetVerification
+	if *verify {
+		report, err := models.VerifyDefaultEmbedderAsset(*root)
+		verification = &report
+		if err != nil {
+			if *jsonOut {
+				_ = writeJSON(os.Stdout, struct {
+					Asset        models.DefaultEmbedderAsset              `json:"asset"`
+					Verification *models.DefaultEmbedderAssetVerification `json:"verification,omitempty"`
+				}{Asset: info, Verification: verification})
+			}
+			return err
+		}
+	}
+	if *jsonOut {
+		return writeJSON(os.Stdout, struct {
+			Asset        models.DefaultEmbedderAsset              `json:"asset"`
+			Verification *models.DefaultEmbedderAssetVerification `json:"verification,omitempty"`
+		}{Asset: info, Verification: verification})
+	}
+
+	fmt.Printf("asset_id: %s\n", info.AssetID)
+	fmt.Printf("model: %s\n", info.ModelName)
+	fmt.Printf("artifact: %s\n", info.ArtifactPath)
+	fmt.Printf("tokenizer: %s\n", info.TokenizerPath)
+	fmt.Printf("manifest: %s\n", info.ManifestPath)
+	if verification != nil {
+		for _, check := range verification.Files {
+			status := "FAIL"
+			if check.OK {
+				status = "OK"
+			}
+			fmt.Printf("sha256 %s: %s %s\n", check.Role, status, check.SHA256)
+		}
+	}
 	return nil
 }
 
@@ -6140,6 +6203,7 @@ func printUsage() {
 	fmt.Println("  eos inspect <artifact.mll>")
 	fmt.Println("  eos export-mll <artifact.mll> [output.mll]")
 	fmt.Println("  eos embed-text <artifact.mll> <text...>")
+	fmt.Println("  eos default-embedder [--root dir] [--path-only] [--verify] [--json]")
 	fmt.Println("  eos export-retrieval-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
 	fmt.Println("  eos export-timeseries-vectors [flags] <artifact.mll> <series.jsonl> <queries.jsonl> <output-dir>")
 	fmt.Println("  eos export-event-trace-vectors [flags] <artifact.mll> <traces.jsonl> <queries.jsonl> <output-dir>")

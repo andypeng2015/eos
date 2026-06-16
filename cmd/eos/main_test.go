@@ -12,6 +12,7 @@ import (
 
 	eosartifact "m31labs.dev/eos/artifact/eos"
 	"m31labs.dev/eos/compiler"
+	"m31labs.dev/eos/models"
 	eosruntime "m31labs.dev/eos/runtime"
 	mll "m31labs.dev/mll"
 )
@@ -213,6 +214,53 @@ func TestRunDoctorReportsRuntimeFacts(t *testing.T) {
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("doctor output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
+func TestRunDefaultEmbedderPathOnly(t *testing.T) {
+	output := strings.TrimSpace(captureRunOutput(t, []string{"default-embedder", "--path-only"}))
+	if filepath.Base(output) != models.DefaultEmbedderArtifactFilename {
+		t.Fatalf("default embedder path = %q", output)
+	}
+	if !strings.Contains(filepath.ToSlash(output), models.DefaultEmbedderAssetRelativeDir+"/"+models.DefaultEmbedderArtifactFilename) {
+		t.Fatalf("default embedder path does not point at asset dir: %q", output)
+	}
+}
+
+func TestRunDefaultEmbedderVerifyJSON(t *testing.T) {
+	output := captureRunOutput(t, []string{"default-embedder", "--verify", "--json"})
+	var payload struct {
+		Asset struct {
+			AssetID        string `json:"asset_id"`
+			ModelName      string `json:"model_name"`
+			ArtifactPath   string `json:"artifact_path"`
+			ArtifactSHA256 string `json:"artifact_sha256"`
+		} `json:"asset"`
+		Verification struct {
+			OK    bool `json:"ok"`
+			Files []struct {
+				Role   string `json:"role"`
+				SHA256 string `json:"sha256"`
+				OK     bool   `json:"ok"`
+			} `json:"files"`
+		} `json:"verification"`
+	}
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		t.Fatalf("unmarshal default embedder JSON: %v\n%s", err, output)
+	}
+	if payload.Asset.AssetID != models.DefaultEmbedderAssetID || payload.Asset.ModelName != models.DefaultEmbeddingModelName {
+		t.Fatalf("unexpected default embedder identity: %+v", payload.Asset)
+	}
+	if payload.Asset.ArtifactSHA256 != models.DefaultEmbedderArtifactSHA256 {
+		t.Fatalf("artifact sha = %q", payload.Asset.ArtifactSHA256)
+	}
+	if !payload.Verification.OK || len(payload.Verification.Files) != 2 {
+		t.Fatalf("unexpected verification: %+v", payload.Verification)
+	}
+	for _, check := range payload.Verification.Files {
+		if !check.OK || check.SHA256 == "" {
+			t.Fatalf("bad verification check: %+v", check)
 		}
 	}
 }
