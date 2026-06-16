@@ -86,7 +86,8 @@ type manifest struct {
 	PlannerJSONPaths    []string        `json:"planner_json_paths"`
 	Commands            []commandRecord `json:"commands"`
 	Dims                []int           `json:"dims"`
-	BaselineDim         int             `json:"baseline_dim"`
+	BaselineDim         int             `json:"baseline_dim,omitempty"`
+	BaselineDims        []int           `json:"baseline_dims"`
 	Bits                []int           `json:"bits"`
 	VectorsPerObject    []int           `json:"vectors_per_object"`
 	Objects             int             `json:"objects"`
@@ -119,6 +120,7 @@ Environment:
   EOS_MV_BUDGET_SMOKE_RUN_DIR=runs/eos-multivector-budget-frontier-smoke-<timestamp>
   EOS_MV_BUDGET_SMOKE_DIMS=128
   EOS_MV_BUDGET_SMOKE_BASELINE_DIM=3072
+  EOS_MV_BUDGET_SMOKE_BASELINE_DIMS=128,384,768,1024,1536,3072
   EOS_MV_BUDGET_SMOKE_BITS=2,4,8
   EOS_MV_BUDGET_SMOKE_VECTORS_PER_OBJECT=1,16,64,100,128,181,256,341
   EOS_MV_BUDGET_SMOKE_VECTOR_OVERHEAD_BYTES=32
@@ -131,7 +133,11 @@ Environment:
   EOS_MV_BUDGET_SMOKE_MIN_Q8_FIT=64
   EOS_MV_BUDGET_SMOKE_MIN_PACKED_Q2_FIT=341
   EOS_MV_BUDGET_SMOKE_MIN_PACKED_Q4_FIT=180
-  EOS_MV_BUDGET_SMOKE_MIN_PACKED_Q8_FIT=93`)
+  EOS_MV_BUDGET_SMOKE_MIN_PACKED_Q8_FIT=93
+
+If EOS_MV_BUDGET_SMOKE_BASELINE_DIMS is set, it takes precedence over
+EOS_MV_BUDGET_SMOKE_BASELINE_DIM and runs every configured child dimension
+against every configured dense parent baseline dimension.`)
 }
 
 func getenv(name string, fallback string) string {
@@ -217,6 +223,20 @@ func parsePositiveIntList(name string, value string) ([]int, error) {
 		return nil, fmt.Errorf("%s must include at least one positive integer", name)
 	}
 	return values, nil
+}
+
+func parseBaselineDims() ([]int, error) {
+	if value := strings.TrimSpace(os.Getenv("EOS_MV_BUDGET_SMOKE_BASELINE_DIMS")); value != "" {
+		return parsePositiveIntList("EOS_MV_BUDGET_SMOKE_BASELINE_DIMS", value)
+	}
+	baselineDim, err := parseIntEnv("EOS_MV_BUDGET_SMOKE_BASELINE_DIM", 3072)
+	if err != nil {
+		return nil, err
+	}
+	if baselineDim <= 0 {
+		return nil, fmt.Errorf("EOS_MV_BUDGET_SMOKE_BASELINE_DIM must be positive")
+	}
+	return []int{baselineDim}, nil
 }
 
 func shellQuote(value string) string {
@@ -445,7 +465,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	baselineDim, err := parseIntEnv("EOS_MV_BUDGET_SMOKE_BASELINE_DIM", 3072)
+	baselineDims, err := parseBaselineDims()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -518,32 +538,34 @@ func main() {
 	plannerJSONPaths := []string{}
 	rows := []summaryRow{}
 	for _, dim := range dims {
-		jsonPath := filepath.Join(runDir, fmt.Sprintf("planner-dim%d.json", dim))
-		args := []string{
-			"go", "run", "./cmd/eos", "plan-multivector-storage",
-			"--dim", strconv.Itoa(dim),
-			"--baseline-dim", strconv.Itoa(baselineDim),
-			"--bits", intListCSV(bits),
-			"--vectors-per-object", intListCSV(vectorsPerObject),
-			"--vector-overhead-bytes", strconv.FormatInt(vectorOverheadBytes, 10),
-			"--packed-object-overhead-bytes", strconv.FormatInt(packedObjectOverheadBytes, 10),
-			"--objects", strconv.Itoa(objects),
-			"--sidecar-storage", sidecarStorage,
-			"--json", jsonPath,
+		for _, baselineDim := range baselineDims {
+			jsonPath := filepath.Join(runDir, fmt.Sprintf("planner-dim%d-baseline%d.json", dim, baselineDim))
+			args := []string{
+				"go", "run", "./cmd/eos", "plan-multivector-storage",
+				"--dim", strconv.Itoa(dim),
+				"--baseline-dim", strconv.Itoa(baselineDim),
+				"--bits", intListCSV(bits),
+				"--vectors-per-object", intListCSV(vectorsPerObject),
+				"--vector-overhead-bytes", strconv.FormatInt(vectorOverheadBytes, 10),
+				"--packed-object-overhead-bytes", strconv.FormatInt(packedObjectOverheadBytes, 10),
+				"--objects", strconv.Itoa(objects),
+				"--sidecar-storage", sidecarStorage,
+				"--json", jsonPath,
+			}
+			record, err := runCommand(root, logDir, fmt.Sprintf("planner-dim%d-baseline%d", dim, baselineDim), args)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			commands = append(commands, record)
+			plannerJSONPaths = append(plannerJSONPaths, jsonPath)
+			var plan storagePlan
+			if err := readJSON(jsonPath, &plan); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			rows = append(rows, makeSummaryRows(plan, targetChildren)...)
 		}
-		record, err := runCommand(root, logDir, fmt.Sprintf("planner-dim%d", dim), args)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		commands = append(commands, record)
-		plannerJSONPaths = append(plannerJSONPaths, jsonPath)
-		var plan storagePlan
-		if err := readJSON(jsonPath, &plan); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		rows = append(rows, makeSummaryRows(plan, targetChildren)...)
 	}
 
 	for _, gate := range []struct {
@@ -586,7 +608,8 @@ func main() {
 		PlannerJSONPaths:    plannerJSONPaths,
 		Commands:            commands,
 		Dims:                dims,
-		BaselineDim:         baselineDim,
+		BaselineDim:         baselineDims[0],
+		BaselineDims:        baselineDims,
 		Bits:                bits,
 		VectorsPerObject:    vectorsPerObject,
 		Objects:             objects,
