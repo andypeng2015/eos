@@ -280,6 +280,8 @@ Local Eos teachers can bypass the sidecar step with `eos score-teacher-hard-nega
 
 Before spending a training run on a new teacher, run `eos audit-teacher-scores <hard-negatives.jsonl> <summary.json>`. It reports score coverage, positive top-1 rate, mean positive rank, positive-vs-best-negative margin, and teacher-distribution entropy overall and by source, giving a cheap reject path for teachers that misorder positives or produce unusably flat/sharp targets.
 
+For Qwen3/mxbai-style external teachers, follow the audit with `eos filter-teacher-scores <scored-hard-negatives.jsonl> <filtered.jsonl> <summary.json>`. The default filter keeps each hard-negative example but clears `teacher_scores` unless the teacher ranks the labeled positive top-1 with non-negative margin; `--min-margin` can require a larger safety gap, and `--max-normalized-entropy` can reject overly flat distributions. Train guarded candidates from the filtered JSONL so base hard-negative InfoNCE still uses every example while teacher loss applies only where the teacher agrees with the label.
+
 For cached external embedders, `scripts/score_teacher_with_vector_cache.py` bridges BEIR-style `corpus.jsonl`/`queries.jsonl` plus document/query vector JSONL into complete hard-negative `teacher_scores`. The repeatable plumbing smoke is:
 
 ```bash
@@ -373,7 +375,7 @@ Milestones:
 
 Priority order:
 
-1. Implement Lane F so public teachers can write into the same `teacher_scores` path; local source/LR/grouped reshuffling around the deep-mined file is now exhausted for balanced promotion.
+1. Use agreement-filtered Qwen3/mxbai `teacher_scores` for the next guarded candidate; local source/LR/grouped reshuffling around the deep-mined file is now exhausted for balanced promotion.
 2. Add an `embed-m` bootstrap layer before more capacity runs: cache or accelerate the `32768` tokenizer path, then try dimension-compatible weight expansion or staged pretraining before teacher fine-tuning.
 3. Implement Lane H before increasing vector dimension aggressively.
 4. Implement Lane I and Lane J after single-vector dense gains flatten.

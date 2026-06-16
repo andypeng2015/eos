@@ -1991,6 +1991,160 @@ func TestRunAuditTeacherScoresWritesSummary(t *testing.T) {
 	}
 }
 
+func TestRunFilterTeacherScoresClearsUnsafeScores(t *testing.T) {
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "hard-negatives.jsonl")
+	if err := eosruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []eosruntime.EmbeddingTextHardNegativeExample{
+		{Source: "scifact", Query: "q1", Positive: "p1", Negatives: []string{"n1", "n2"}, TeacherScores: []float32{0.9, 0.1, 0.2}},
+		{Source: "fiqa", Query: "q2", Positive: "p2", Negatives: []string{"n3"}, TeacherScores: []float32{0.1, 0.8}},
+		{Source: "fiqa", Query: "q3", Positive: "p3", Negatives: []string{"n4"}},
+	}); err != nil {
+		t.Fatalf("write hard negatives: %v", err)
+	}
+	outputPath := filepath.Join(dir, "filtered.jsonl")
+	summaryPath := filepath.Join(dir, "filter-summary.json")
+
+	output := captureRunOutput(t, []string{
+		"filter-teacher-scores",
+		inputPath,
+		outputPath,
+		summaryPath,
+	})
+	for _, want := range []string{
+		"filtered teacher scores: examples=3 scored=2 missing=1 kept=1 cleared=1 dropped=0",
+		"positive_top1_rate_before=0.500000",
+		"kept_rate=0.500000",
+		"output: " + outputPath,
+		"summary: " + summaryPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("filter-teacher-scores output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	examples, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if len(examples) != 3 {
+		t.Fatalf("examples = %d, want 3", len(examples))
+	}
+	if len(examples[0].TeacherScores) != 3 {
+		t.Fatalf("passing teacher scores = %+v, want preserved", examples[0].TeacherScores)
+	}
+	if len(examples[1].TeacherScores) != 0 {
+		t.Fatalf("failing teacher scores = %+v, want cleared", examples[1].TeacherScores)
+	}
+	if examples[1].Query != "q2" || examples[1].Positive != "p2" || len(examples[1].Negatives) != 1 {
+		t.Fatalf("failing example fields were not preserved: %+v", examples[1])
+	}
+	if len(examples[2].TeacherScores) != 0 {
+		t.Fatalf("missing teacher scores = %+v, want unchanged missing", examples[2].TeacherScores)
+	}
+	var summary teacherScoreFilterSummary
+	data, err := os.ReadFile(summaryPath)
+	if err != nil {
+		t.Fatalf("read summary: %v", err)
+	}
+	if err := json.Unmarshal(data, &summary); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	if summary.Schema != "manta.teacher_score_filter.v1" || summary.Mode != "text" || summary.Examples != 3 || summary.Scored != 2 || summary.Missing != 1 || summary.KeptTeacherScores != 1 || summary.ClearedTeacherScores != 1 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	if summary.Candidates != 7 || math.Abs(summary.PositiveTop1RateBefore-0.5) > 0.000001 || math.Abs(summary.TeacherScoreKeptRate-0.5) > 0.000001 {
+		t.Fatalf("summary rates/counts = %+v", summary)
+	}
+	fiqa := summary.Sources["fiqa"]
+	if fiqa.Examples != 2 || fiqa.Scored != 1 || fiqa.Missing != 1 || fiqa.ClearedTeacherScores != 1 {
+		t.Fatalf("fiqa source summary = %+v", fiqa)
+	}
+}
+
+func TestRunFilterTeacherScoresMinMarginClearsMarginalTop1(t *testing.T) {
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "hard-negatives.jsonl")
+	if err := eosruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []eosruntime.EmbeddingTextHardNegativeExample{
+		{Source: "nfcorpus", Query: "q1", Positive: "p1", Negatives: []string{"n1"}, TeacherScores: []float32{0.51, 0.50}},
+	}); err != nil {
+		t.Fatalf("write hard negatives: %v", err)
+	}
+	outputPath := filepath.Join(dir, "filtered.jsonl")
+	summaryPath := filepath.Join(dir, "filter-summary.json")
+
+	_ = captureRunOutput(t, []string{
+		"filter-teacher-scores",
+		"--min-margin", "0.02",
+		inputPath,
+		outputPath,
+		summaryPath,
+	})
+	examples, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if len(examples) != 1 || len(examples[0].TeacherScores) != 0 {
+		t.Fatalf("examples = %+v, want preserved row with cleared teacher scores", examples)
+	}
+	var summary teacherScoreFilterSummary
+	data, err := os.ReadFile(summaryPath)
+	if err != nil {
+		t.Fatalf("read summary: %v", err)
+	}
+	if err := json.Unmarshal(data, &summary); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	if summary.KeptTeacherScores != 0 || summary.ClearedTeacherScores != 1 || summary.PositiveTop1RateBefore != 1 || summary.PositiveTop1RateAfter != 0 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	if math.Abs(summary.MeanMarginBefore-0.01) > 0.000001 {
+		t.Fatalf("mean margin before = %f, want 0.01", summary.MeanMarginBefore)
+	}
+}
+
+func TestRunFilterTeacherScoresTokenizedMode(t *testing.T) {
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "hard-negatives.tokens.jsonl")
+	if err := eosruntime.WriteEmbeddingHardNegativeExamplesFile(inputPath, []eosruntime.EmbeddingHardNegativeExample{
+		{
+			Source:         "scifact",
+			QueryTokens:    []int32{1},
+			PositiveTokens: []int32{2},
+			NegativeTokens: [][]int32{{3}},
+			TeacherScores:  []float32{0.2, 0.8},
+		},
+	}); err != nil {
+		t.Fatalf("write tokenized hard negatives: %v", err)
+	}
+	outputPath := filepath.Join(dir, "filtered.tokens.jsonl")
+	summaryPath := filepath.Join(dir, "filter-summary.json")
+
+	_ = captureRunOutput(t, []string{
+		"filter-teacher-scores",
+		"--mode", "tokenized",
+		inputPath,
+		outputPath,
+		summaryPath,
+	})
+	examples, err := eosruntime.ReadEmbeddingHardNegativeExamplesFile(outputPath)
+	if err != nil {
+		t.Fatalf("read tokenized output: %v", err)
+	}
+	if len(examples) != 1 || len(examples[0].TeacherScores) != 0 || len(examples[0].NegativeTokens) != 1 {
+		t.Fatalf("tokenized examples = %+v, want preserved row with cleared teacher scores", examples)
+	}
+	var summary teacherScoreFilterSummary
+	data, err := os.ReadFile(summaryPath)
+	if err != nil {
+		t.Fatalf("read summary: %v", err)
+	}
+	if err := json.Unmarshal(data, &summary); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	if summary.Mode != "tokenized" || summary.ClearedTeacherScores != 1 || summary.Sources["scifact"].ClearedTeacherScores != 1 {
+		t.Fatalf("summary = %+v", summary)
+	}
+}
+
 func TestRunPlanSparseAttentionWritesBudgetReport(t *testing.T) {
 	dir := t.TempDir()
 	reportPath := filepath.Join(dir, "sparse-plan.json")

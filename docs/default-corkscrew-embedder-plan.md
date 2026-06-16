@@ -417,7 +417,7 @@ Grow the training/evaluation signal before increasing model size:
 
 - Add scored teacher batches from BGE, Qwen, Jina, Voyage, Cohere, and OpenAI.
 - Keep provider outputs as vector caches or scorer batches, not as provider SDK dependencies inside Eos.
-- Use `EOS_TEACHER_SOURCE_WEIGHTS` with hard-negative teacher distillation when audits show the teacher helps only some sources. Source keys support exact, family, and `*` fallback matching; `0` disables teacher contribution for that source. The next Qwen3 guarded shape can try `EOS_TEACHER_LOSS_WEIGHT=0.10` with `EOS_TEACHER_SOURCE_WEIGHTS=scifact=1,nfcorpus=0,fiqa=0.25`.
+- For Qwen3/mxbai hard-negative distillation, run `eos audit-teacher-scores`, then `eos filter-teacher-scores` before training. The next Qwen3 guarded shape should use agreement-filtered `teacher_scores` so teacher loss applies only where the teacher ranks the labeled positive above the negatives; static source-weight-only shaping already failed to balance SciFact gains against NFCorpus/FiQA regressions.
 - Use hard negatives and retrieval-error mining to target the weakest datasets in the matrix.
 - Try Matryoshka-style dimension slicing before moving to larger embedding dimensions, so CorkScrewDB can trade quality for memory and scoring cost.
 

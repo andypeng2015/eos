@@ -159,6 +159,8 @@ func run(args []string) error {
 		return runScoreTeacherHardNegatives(args[1:])
 	case "audit-teacher-scores":
 		return runAuditTeacherScores(args[1:])
+	case "filter-teacher-scores":
+		return runFilterTeacherScores(args[1:])
 	case "relabel-teacher-negatives":
 		return runRelabelTeacherNegatives(args[1:])
 	case "sample-corpus-negatives":
@@ -1626,6 +1628,65 @@ type teacherScoreAuditSummary struct {
 	Sources map[string]teacherScoreAuditStats `json:"sources,omitempty"`
 }
 
+type teacherScoreFilterConfig struct {
+	RequirePositiveTop1  bool    `json:"require_positive_top1"`
+	MinMargin            float64 `json:"min_margin"`
+	MaxNormalizedEntropy float64 `json:"max_normalized_entropy,omitempty"`
+	Temperature          float64 `json:"temperature"`
+	DropFailingExamples  bool    `json:"drop_failing_examples"`
+}
+
+type teacherScoreFilterSummary struct {
+	Schema                 string                             `json:"schema"`
+	CreatedUTC             string                             `json:"created_utc"`
+	InputJSONL             string                             `json:"input_jsonl"`
+	OutputJSONL            string                             `json:"output_jsonl"`
+	Mode                   string                             `json:"mode"`
+	Config                 teacherScoreFilterConfig           `json:"filter_config"`
+	Examples               int                                `json:"examples"`
+	Scored                 int                                `json:"scored"`
+	Missing                int                                `json:"missing"`
+	KeptTeacherScores      int                                `json:"kept_teacher_scores"`
+	ClearedTeacherScores   int                                `json:"cleared_teacher_scores"`
+	DroppedExamples        int                                `json:"dropped_examples"`
+	Candidates             int                                `json:"candidates"`
+	PositiveTop1RateBefore float64                            `json:"positive_top1_rate_before"`
+	PositiveTop1RateAfter  float64                            `json:"positive_top1_rate_after"`
+	TeacherScoreKeptRate   float64                            `json:"teacher_score_kept_rate"`
+	MeanMarginBefore       float64                            `json:"mean_margin_before"`
+	MeanMarginAfter        float64                            `json:"mean_margin_after"`
+	Sources                map[string]teacherScoreFilterStats `json:"sources,omitempty"`
+}
+
+type teacherScoreFilterStats struct {
+	Examples               int     `json:"examples"`
+	Scored                 int     `json:"scored"`
+	Missing                int     `json:"missing"`
+	KeptTeacherScores      int     `json:"kept_teacher_scores"`
+	ClearedTeacherScores   int     `json:"cleared_teacher_scores"`
+	DroppedExamples        int     `json:"dropped_examples"`
+	Candidates             int     `json:"candidates"`
+	PositiveTop1RateBefore float64 `json:"positive_top1_rate_before"`
+	PositiveTop1RateAfter  float64 `json:"positive_top1_rate_after"`
+	TeacherScoreKeptRate   float64 `json:"teacher_score_kept_rate"`
+	MeanMarginBefore       float64 `json:"mean_margin_before"`
+	MeanMarginAfter        float64 `json:"mean_margin_after"`
+}
+
+type teacherScoreFilterCounters struct {
+	Examples             int
+	Scored               int
+	Missing              int
+	KeptTeacherScores    int
+	ClearedTeacherScores int
+	DroppedExamples      int
+	Candidates           int
+	PositiveTop1Before   int
+	PositiveTop1After    int
+	MarginBeforeSum      float64
+	MarginAfterSum       float64
+}
+
 type teacherScoreAuditStats struct {
 	Examples              int     `json:"examples"`
 	ScoredExamples        int     `json:"scored_examples"`
@@ -2032,6 +2093,127 @@ func runAuditTeacherScores(args []string) error {
 	}
 	fmt.Printf("audited teacher scores: examples=%d scored=%d missing=%d positive_top1_rate=%.6f mean_margin=%.6f mean_normalized_entropy=%.6f\n",
 		summary.Examples, summary.ScoredExamples, summary.MissingExamples, summary.PositiveTop1Rate, summary.PositiveMeanMargin, summary.MeanNormalizedEntropy)
+	fmt.Printf("summary: %s\n", summaryPath)
+	return nil
+}
+
+func runFilterTeacherScores(args []string) error {
+	fs := flag.NewFlagSet("filter-teacher-scores", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	mode := fs.String("mode", "text", "input mode: text or tokenized")
+	requirePositiveTop1 := fs.Bool("require-positive-top1", true, "clear teacher_scores unless the labeled positive is teacher top-1")
+	minMargin := fs.Float64("min-margin", 0, "minimum positive_score-best_negative_score margin required to keep teacher_scores")
+	maxNormalizedEntropy := fs.Float64("max-normalized-entropy", 0, "maximum normalized teacher softmax entropy required to keep teacher_scores; 0 disables")
+	temperature := fs.Float64("temperature", 1, "softmax temperature used for entropy diagnostics")
+	dropFailingExamples := fs.Bool("drop-failing-examples", false, "drop examples with unsafe teacher_scores instead of clearing teacher_scores")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
+		return fmt.Errorf("usage: eos filter-teacher-scores [flags] <scored-hard-negatives.jsonl> <output.jsonl> [summary.json]")
+	}
+	if *temperature <= 0 {
+		return fmt.Errorf("temperature must be positive")
+	}
+	if *maxNormalizedEntropy < 0 {
+		return fmt.Errorf("max-normalized-entropy must be non-negative")
+	}
+	inputPath := fs.Arg(0)
+	outputPath := fs.Arg(1)
+	summaryPath := outputPath + ".teacher-score-filter.json"
+	if fs.NArg() > 2 && fs.Arg(2) != "" {
+		summaryPath = fs.Arg(2)
+	}
+	normalizedMode := strings.ToLower(strings.TrimSpace(*mode))
+	cfg := teacherScoreFilterConfig{
+		RequirePositiveTop1:  *requirePositiveTop1,
+		MinMargin:            *minMargin,
+		MaxNormalizedEntropy: *maxNormalizedEntropy,
+		Temperature:          *temperature,
+		DropFailingExamples:  *dropFailingExamples,
+	}
+	summary := teacherScoreFilterSummary{
+		Schema:      "manta.teacher_score_filter.v1",
+		CreatedUTC:  time.Now().UTC().Format(time.RFC3339),
+		InputJSONL:  inputPath,
+		OutputJSONL: outputPath,
+		Mode:        normalizedMode,
+		Config:      cfg,
+	}
+	total := &teacherScoreFilterCounters{}
+	sourceTotals := map[string]*teacherScoreFilterCounters{}
+	add := func(source string, candidateCount int, scores []float32) (bool, bool) {
+		key := strings.TrimSpace(source)
+		if key == "" {
+			key = "unknown"
+		}
+		sourceTotal := sourceTotals[key]
+		if sourceTotal == nil {
+			sourceTotal = &teacherScoreFilterCounters{}
+			sourceTotals[key] = sourceTotal
+		}
+		keepScores, keepExample := evaluateTeacherScoreFilter(total, candidateCount, scores, cfg)
+		evaluateTeacherScoreFilter(sourceTotal, candidateCount, scores, cfg)
+		return keepScores, keepExample
+	}
+	switch normalizedMode {
+	case "text":
+		examples, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(inputPath)
+		if err != nil {
+			return err
+		}
+		out := make([]eosruntime.EmbeddingTextHardNegativeExample, 0, len(examples))
+		for _, example := range examples {
+			keepScores, keepExample := add(example.Source, 1+len(example.Negatives), example.TeacherScores)
+			if !keepExample {
+				continue
+			}
+			if !keepScores {
+				example.TeacherScores = nil
+			}
+			out = append(out, example)
+		}
+		if err := eosruntime.WriteEmbeddingTextHardNegativeExamplesFile(outputPath, out); err != nil {
+			return err
+		}
+	case "tokenized", "tokens":
+		normalizedMode = "tokenized"
+		summary.Mode = normalizedMode
+		examples, err := eosruntime.ReadEmbeddingHardNegativeExamplesFile(inputPath)
+		if err != nil {
+			return err
+		}
+		out := make([]eosruntime.EmbeddingHardNegativeExample, 0, len(examples))
+		for _, example := range examples {
+			keepScores, keepExample := add(example.Source, 1+len(example.NegativeTokens), example.TeacherScores)
+			if !keepExample {
+				continue
+			}
+			if !keepScores {
+				example.TeacherScores = nil
+			}
+			out = append(out, example)
+		}
+		if err := eosruntime.WriteEmbeddingHardNegativeExamplesFile(outputPath, out); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported mode %q: want text or tokenized", *mode)
+	}
+	summary.applyCounters(*total)
+	if len(sourceTotals) > 0 {
+		summary.Sources = make(map[string]teacherScoreFilterStats, len(sourceTotals))
+		for source, counters := range sourceTotals {
+			summary.Sources[source] = counters.summary()
+		}
+	}
+	if err := writeTeacherScoreFilterSummary(summaryPath, summary); err != nil {
+		return err
+	}
+	fmt.Printf("filtered teacher scores: examples=%d scored=%d missing=%d kept=%d cleared=%d dropped=%d positive_top1_rate_before=%.6f kept_rate=%.6f mean_margin_before=%.6f mean_margin_after=%.6f\n",
+		summary.Examples, summary.Scored, summary.Missing, summary.KeptTeacherScores, summary.ClearedTeacherScores, summary.DroppedExamples,
+		summary.PositiveTop1RateBefore, summary.TeacherScoreKeptRate, summary.MeanMarginBefore, summary.MeanMarginAfter)
+	fmt.Printf("output: %s\n", outputPath)
 	fmt.Printf("summary: %s\n", summaryPath)
 	return nil
 }
@@ -2605,6 +2787,119 @@ func (c teacherScoreAuditCounters) summary() teacherScoreAuditStats {
 	return summary
 }
 
+func evaluateTeacherScoreFilter(c *teacherScoreFilterCounters, candidateCount int, scores []float32, cfg teacherScoreFilterConfig) (keepScores bool, keepExample bool) {
+	c.Examples++
+	if candidateCount < 0 {
+		candidateCount = 0
+	}
+	c.Candidates += candidateCount
+	if len(scores) == 0 {
+		c.Missing++
+		return true, true
+	}
+	c.Scored++
+	metrics := teacherScoreFilterMetricsForScores(scores, cfg.Temperature)
+	if metrics.PositiveTop1 {
+		c.PositiveTop1Before++
+	}
+	c.MarginBeforeSum += metrics.Margin
+	pass := true
+	if cfg.RequirePositiveTop1 && !metrics.PositiveTop1 {
+		pass = false
+	}
+	if metrics.Margin < cfg.MinMargin {
+		pass = false
+	}
+	if cfg.MaxNormalizedEntropy > 0 && metrics.NormalizedEntropy > cfg.MaxNormalizedEntropy {
+		pass = false
+	}
+	if pass {
+		c.KeptTeacherScores++
+		c.PositiveTop1After++
+		c.MarginAfterSum += metrics.Margin
+		return true, true
+	}
+	if cfg.DropFailingExamples {
+		c.DroppedExamples++
+		return false, false
+	}
+	c.ClearedTeacherScores++
+	return false, true
+}
+
+type teacherScoreFilterMetrics struct {
+	PositiveTop1      bool
+	Margin            float64
+	NormalizedEntropy float64
+}
+
+func teacherScoreFilterMetricsForScores(scores []float32, temperature float64) teacherScoreFilterMetrics {
+	if len(scores) == 0 {
+		return teacherScoreFilterMetrics{}
+	}
+	positive := float64(scores[0])
+	bestNegative := math.Inf(-1)
+	positiveTop1 := true
+	for _, raw := range scores[1:] {
+		score := float64(raw)
+		if score > positive {
+			positiveTop1 = false
+		}
+		if score > bestNegative {
+			bestNegative = score
+		}
+	}
+	if math.IsInf(bestNegative, -1) {
+		bestNegative = positive
+	}
+	_, normalizedEntropy := teacherScoreEntropy(scores, temperature)
+	return teacherScoreFilterMetrics{
+		PositiveTop1:      positiveTop1,
+		Margin:            positive - bestNegative,
+		NormalizedEntropy: normalizedEntropy,
+	}
+}
+
+func (c teacherScoreFilterCounters) summary() teacherScoreFilterStats {
+	summary := teacherScoreFilterStats{
+		Examples:             c.Examples,
+		Scored:               c.Scored,
+		Missing:              c.Missing,
+		KeptTeacherScores:    c.KeptTeacherScores,
+		ClearedTeacherScores: c.ClearedTeacherScores,
+		DroppedExamples:      c.DroppedExamples,
+		Candidates:           c.Candidates,
+	}
+	if c.Scored > 0 {
+		inv := 1 / float64(c.Scored)
+		summary.PositiveTop1RateBefore = float64(c.PositiveTop1Before) * inv
+		summary.TeacherScoreKeptRate = float64(c.KeptTeacherScores) * inv
+		summary.MeanMarginBefore = c.MarginBeforeSum * inv
+	}
+	if c.KeptTeacherScores > 0 {
+		inv := 1 / float64(c.KeptTeacherScores)
+		summary.PositiveTop1RateAfter = float64(c.PositiveTop1After) * inv
+		summary.MeanMarginAfter = c.MarginAfterSum * inv
+	}
+	return summary
+}
+
+func (s *teacherScoreFilterSummary) applyCounters(c teacherScoreFilterCounters) {
+	stats := c.summary()
+	s.Examples = stats.Examples
+	s.Scored = stats.Scored
+	s.Missing = stats.Missing
+	s.KeptTeacherScores = stats.KeptTeacherScores
+	s.ClearedTeacherScores = stats.ClearedTeacherScores
+	s.DroppedExamples = stats.DroppedExamples
+	s.Candidates = stats.Candidates
+	s.PositiveTop1RateBefore = stats.PositiveTop1RateBefore
+	s.PositiveTop1RateAfter = stats.PositiveTop1RateAfter
+	s.TeacherScoreKeptRate = stats.TeacherScoreKeptRate
+	s.MeanMarginBefore = stats.MeanMarginBefore
+	s.MeanMarginAfter = stats.MeanMarginAfter
+}
+
 func teacherScoreEntropy(scores []float32, temperature float64) (float64, float64) {
 	if len(scores) == 0 {
 		return 0, 0
@@ -2824,6 +3119,15 @@ func writeTeacherHardNegativeScoreManifest(path string, summary teacherHardNegat
 }
 
 func writeTeacherScoreAuditSummary(path string, summary teacherScoreAuditSummary) error {
+	data, err := json.MarshalIndent(summary, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o644)
+}
+
+func writeTeacherScoreFilterSummary(path string, summary teacherScoreFilterSummary) error {
 	data, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {
 		return err
@@ -5598,6 +5902,7 @@ func printUsage() {
 	fmt.Println("  eos import-teacher-scores [flags] <hard-negatives.jsonl> <scores.jsonl> <output.jsonl>")
 	fmt.Println("  eos score-teacher-hard-negatives [flags] <teacher.mll> <hard-negatives.jsonl> <output.jsonl>")
 	fmt.Println("  eos audit-teacher-scores [flags] <hard-negatives.jsonl> [summary.json]")
+	fmt.Println("  eos filter-teacher-scores [flags] <scored-hard-negatives.jsonl> <output.jsonl> [summary.json]")
 	fmt.Println("  eos relabel-teacher-negatives [flags] <scored-hard-negatives.jsonl> <output.jsonl>")
 	fmt.Println("  eos sample-corpus-negatives [flags] <beir-dataset-dir> <output.jsonl>")
 	fmt.Println("  eos plan-sparse-attention [flags]")
@@ -5642,6 +5947,7 @@ func printUsage() {
 	fmt.Println("import-teacher-scores merges external teacher score JSONL into text hard-negative JSONL and writes a provenance manifest.")
 	fmt.Println("score-teacher-hard-negatives uses a Eos embedding teacher to score existing text hard-negative JSONL into teacher_scores.")
 	fmt.Println("audit-teacher-scores summarizes teacher score coverage, positive rank, margins, and entropy before distillation runs.")
+	fmt.Println("filter-teacher-scores clears unsafe teacher_scores when the teacher does not rank the labeled positive above hard negatives, preserving examples for base hard-negative training.")
 	fmt.Println("relabel-teacher-negatives promotes teacher-confirmed-relevant mined negatives to positive rows, keeps teacher-confirmed-irrelevant candidates as negatives, and drops the ambiguous band.")
 	fmt.Println("sample-corpus-negatives emits random non-qrel corpus documents per query for teacher scoring into a true-negative pool.")
 	fmt.Println("plan-sparse-attention preflights routed sparse attention plus logical TurboQuant K/V memory budgets before GPU runs.")
