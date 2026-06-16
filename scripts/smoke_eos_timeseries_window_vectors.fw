@@ -146,6 +146,7 @@ type manifest struct {
 	RunDir               string       `json:"run_dir"`
 	Artifact             string       `json:"artifact"`
 	Dataset              string       `json:"dataset"`
+	Scenario             string       `json:"scenario"`
 	OutputDim            int          `json:"output_dim"`
 	WindowSize           int          `json:"window_size"`
 	WindowStride         int          `json:"window_stride"`
@@ -182,6 +183,7 @@ Run:
 
 Environment:
   EOS_TS_WINDOW_SMOKE_ARTIFACT=/path/to/manta-embed-v1.sealed.mll
+  EOS_TS_WINDOW_SMOKE_SCENARIO=default # default|contrastive_needle
   EOS_TS_WINDOW_SMOKE_RUN_ROOT=runs
   EOS_TS_WINDOW_SMOKE_RUN_DIR=runs/eos-timeseries-window-vector-smoke-<timestamp>
   EOS_TS_WINDOW_SMOKE_OUTPUT_DIM=128
@@ -330,6 +332,9 @@ type syntheticPattern struct {
 	Values    func(int) []int
 }
 
+const scenarioDefault = "default"
+const scenarioContrastiveNeedle = "contrastive_needle"
+
 func risingValues(length int) []int {
 	values := make([]int, length)
 	for i := range values {
@@ -384,7 +389,10 @@ func waveValues(length int) []int {
 	return values
 }
 
-func syntheticPatterns() []syntheticPattern {
+func syntheticPatterns(scenario string) []syntheticPattern {
+	if scenario == scenarioContrastiveNeedle {
+		return contrastiveNeedlePatterns()
+	}
 	return []syntheticPattern{
 		{Name: "rising", QueryID: "q-rising", BaseID: "series-rising", Label: "rising load", Text: "steady upward sensor ramp with increasing load", QueryText: "find the series with a steady upward increasing ramp", Values: risingValues},
 		{Name: "falling", QueryID: "q-falling", BaseID: "series-falling", Label: "falling load", Text: "steady downward sensor ramp with decreasing load", QueryText: "find the series with a steady downward decreasing ramp", Values: fallingValues},
@@ -392,6 +400,39 @@ func syntheticPatterns() []syntheticPattern {
 		{Name: "valley", QueryID: "q-valley", BaseID: "series-valley", Label: "deep valley", Text: "high signal with a deep central valley event", QueryText: "find the series with a deep central valley event", Values: valleyValues},
 		{Name: "wave", QueryID: "q-wave", BaseID: "series-wave", Label: "oscillating wave", Text: "repeating oscillating wave pattern across the series", QueryText: "find the series with a repeating oscillating wave pattern", Values: waveValues},
 	}
+}
+
+func contrastiveNeedlePatterns() []syntheticPattern {
+	return []syntheticPattern{
+		{Name: "needle_alt_high_low", QueryID: "q-needle-alt-high-low", BaseID: "series-needle-alt-high-low", Label: "localized alternating high low needle", Text: "shared baseline telemetry with one short localized numeric regime", QueryText: "find the parent with local window values 96 8 96 8 alternating high low needle", Values: func(length int) []int { return needleValues(length, 4, []int{96, 8, 96, 8}) }},
+		{Name: "needle_alt_low_high", QueryID: "q-needle-alt-low-high", BaseID: "series-needle-alt-low-high", Label: "localized alternating low high needle", Text: "shared baseline telemetry with one short localized numeric regime", QueryText: "find the parent with local window values 8 96 8 96 alternating low high needle", Values: func(length int) []int { return needleValues(length, 4, []int{8, 96, 8, 96}) }},
+		{Name: "needle_step_up", QueryID: "q-needle-step-up", BaseID: "series-needle-step-up", Label: "localized step up needle", Text: "shared baseline telemetry with one short localized numeric regime", QueryText: "find the parent with local window values 12 25 55 92 sharp upward step needle", Values: func(length int) []int { return needleValues(length, 8, []int{12, 25, 55, 92}) }},
+		{Name: "needle_step_down", QueryID: "q-needle-step-down", BaseID: "series-needle-step-down", Label: "localized step down needle", Text: "shared baseline telemetry with one short localized numeric regime", QueryText: "find the parent with local window values 92 55 25 12 sharp downward step needle", Values: func(length int) []int { return needleValues(length, 8, []int{92, 55, 25, 12}) }},
+		{Name: "needle_plateau", QueryID: "q-needle-plateau", BaseID: "series-needle-plateau", Label: "localized plateau needle", Text: "shared baseline telemetry with one short localized numeric regime", QueryText: "find the parent with local window values 10 88 88 10 high central plateau needle", Values: func(length int) []int { return needleValues(length, 12, []int{10, 88, 88, 10}) }},
+		{Name: "needle_dip", QueryID: "q-needle-dip", BaseID: "series-needle-dip", Label: "localized dip needle", Text: "shared baseline telemetry with one short localized numeric regime", QueryText: "find the parent with local window values 88 10 10 88 low central dip needle", Values: func(length int) []int { return needleValues(length, 12, []int{88, 10, 10, 88}) }},
+	}
+}
+
+func needleValues(length int, start int, signature []int) []int {
+	values := make([]int, length)
+	for i := range values {
+		values[i] = 44 + (i % 3)
+	}
+	if start < 0 {
+		start = 0
+	}
+	if start+len(signature) > length {
+		start = length - len(signature)
+	}
+	if start < 0 {
+		start = 0
+	}
+	for i, value := range signature {
+		if start+i >= 0 && start+i < len(values) {
+			values[start+i] = value
+		}
+	}
+	return values
 }
 
 func variantValues(pattern string, base []int, variant int) []int {
@@ -433,14 +474,49 @@ func variantValues(pattern string, base []int, variant int) []int {
 				values[i] = high
 			}
 		}
+	case "needle_alt_high_low", "needle_alt_low_high", "needle_step_up", "needle_step_down", "needle_plateau", "needle_dip":
+		for i, value := range base {
+			if value >= 80 || value <= 15 {
+				values[i] = value + (variant % 3)
+			} else {
+				values[i] = value + offset
+			}
+		}
 	default:
 		copy(values, base)
 	}
 	return values
 }
 
-func writeSyntheticInputs(seriesPath string, queriesPath string, qrelsPath string, seriesLength int, variants int) error {
-	patterns := syntheticPatterns()
+func normalizeScenario(value string) (string, error) {
+	scenario := strings.ToLower(strings.TrimSpace(value))
+	if scenario == "" {
+		scenario = scenarioDefault
+	}
+	switch scenario {
+	case scenarioDefault, scenarioContrastiveNeedle:
+		return scenario, nil
+	default:
+		return "", fmt.Errorf("EOS_TS_WINDOW_SMOKE_SCENARIO must be %s or %s, got %q", scenarioDefault, scenarioContrastiveNeedle, value)
+	}
+}
+
+func defaultSeriesLengthForScenario(scenario string) int {
+	if scenario == scenarioContrastiveNeedle {
+		return 24
+	}
+	return 12
+}
+
+func defaultVariantsForScenario(scenario string) int {
+	if scenario == scenarioContrastiveNeedle {
+		return 4
+	}
+	return 1
+}
+
+func writeSyntheticInputs(seriesPath string, queriesPath string, qrelsPath string, scenario string, seriesLength int, variants int) error {
+	patterns := syntheticPatterns(scenario)
 	seriesRecords := []syntheticSeries{}
 	for _, pattern := range patterns {
 		baseValues := pattern.Values(seriesLength)
@@ -642,7 +718,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	seriesLength, err := parseIntEnv("EOS_TS_WINDOW_SMOKE_SERIES_LENGTH", 12)
+	scenario, err := normalizeScenario(os.Getenv("EOS_TS_WINDOW_SMOKE_SCENARIO"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	seriesLength, err := parseIntEnv("EOS_TS_WINDOW_SMOKE_SERIES_LENGTH", defaultSeriesLengthForScenario(scenario))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -651,7 +732,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "EOS_TS_WINDOW_SMOKE_SERIES_LENGTH must be a positive integer, got %d\n", seriesLength)
 		os.Exit(1)
 	}
-	seriesVariants, err := parseIntEnv("EOS_TS_WINDOW_SMOKE_SERIES_VARIANTS", 1)
+	seriesVariants, err := parseIntEnv("EOS_TS_WINDOW_SMOKE_SERIES_VARIANTS", defaultVariantsForScenario(scenario))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -704,7 +785,7 @@ func main() {
 	summaryTSV := filepath.Join(runDir, "summary.tsv")
 	manifestJSON := filepath.Join(runDir, "manifest.json")
 
-	if err := writeSyntheticInputs(seriesPath, queriesPath, qrelsPath, seriesLength, seriesVariants); err != nil {
+	if err := writeSyntheticInputs(seriesPath, queriesPath, qrelsPath, scenario, seriesLength, seriesVariants); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -751,7 +832,7 @@ func main() {
 		"--dim", strconv.Itoa(outputDim),
 		"--baseline-dim", strconv.Itoa(baselineDim),
 		"--bits", bits,
-		"--objects", strconv.Itoa(len(syntheticPatterns())*seriesVariants),
+		"--objects", strconv.Itoa(len(syntheticPatterns(scenario))*seriesVariants),
 		"--series-lengths", strconv.Itoa(seriesLength),
 		"--window-size", strconv.Itoa(windowSize),
 		"--window-stride", strconv.Itoa(windowStride),
@@ -795,6 +876,7 @@ func main() {
 		RunDir:          runDir,
 		Artifact:        artifact,
 		Dataset:         dataset,
+		Scenario:        scenario,
 		OutputDim:       outputDim,
 		WindowSize:      windowSize,
 		WindowStride:    windowStride,

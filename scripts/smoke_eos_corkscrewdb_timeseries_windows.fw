@@ -12,6 +12,8 @@ import (
 )
 
 const defaultCorkScrewDBRepo = "/home/draco/work/corkscrewdb"
+const scenarioDefault = "default"
+const scenarioContrastiveNeedle = "contrastive_needle"
 
 type exportManifest struct {
 	Series       int    `json:"series_count"`
@@ -111,6 +113,7 @@ type config struct {
 	RunDir                    string  `json:"run_dir"`
 	Artifact                  string  `json:"artifact"`
 	CorkScrewDBRepo           string  `json:"corkscrewdb_repo"`
+	Scenario                  string  `json:"scenario"`
 	Bits                      string  `json:"bits"`
 	OverfetchChildren         string  `json:"overfetch_children"`
 	OutputDim                 int     `json:"output_dim"`
@@ -215,6 +218,7 @@ Environment:
   EOS_CORKSCREW_TS_WINDOW_RUN_DIR=runs/eos-corkscrewdb-timeseries-window-smoke-<timestamp>
   EOS_CORKSCREW_TS_WINDOW_ARTIFACT=/path/to/manta-embed-v1.sealed.mll
   EOS_CORKSCREW_TS_WINDOW_CORKSCREWDB_REPO=/home/draco/work/corkscrewdb
+  EOS_CORKSCREW_TS_WINDOW_SCENARIO=default # default|contrastive_needle
   EOS_CORKSCREW_TS_WINDOW_BITS=4,8
   EOS_CORKSCREW_TS_WINDOW_OVERFETCH=100
   EOS_CORKSCREW_TS_WINDOW_OUTPUT_DIM=128
@@ -225,7 +229,7 @@ Environment:
   EOS_CORKSCREW_TS_WINDOW_BATCH_SIZE=64
   EOS_CORKSCREW_TS_WINDOW_BASELINE_DIM=3072
   EOS_CORKSCREW_TS_WINDOW_TOP_PARENTS=100
-  EOS_CORKSCREW_TS_WINDOW_LAYOUT=separate_child_vectors # separate_child_vectors|packed_parent_multivectors
+  EOS_CORKSCREW_TS_WINDOW_LAYOUT=separate_child_vectors # single_parent_vectors|separate_child_vectors|packed_parent_multivectors
   EOS_CORKSCREW_SMOKE_PACKED_METADATA_MODE=full # full|minimal|none
   EOS_CORKSCREW_SMOKE_PACKED_CHILD_ID_MODE=source # source|ordinal
   EOS_CORKSCREW_TS_WINDOW_TARGET_CHILDREN=5
@@ -322,6 +326,33 @@ func parseFloatEnv(name string, fallback float64) (float64, error) {
 		return 0, fmt.Errorf("%s must be a float: %w", name, err)
 	}
 	return parsed, nil
+}
+
+func normalizeScenario(value string) (string, error) {
+	scenario := strings.ToLower(strings.TrimSpace(value))
+	if scenario == "" {
+		scenario = scenarioDefault
+	}
+	switch scenario {
+	case scenarioDefault, scenarioContrastiveNeedle:
+		return scenario, nil
+	default:
+		return "", fmt.Errorf("EOS_CORKSCREW_TS_WINDOW_SCENARIO must be %s or %s, got %q", scenarioDefault, scenarioContrastiveNeedle, value)
+	}
+}
+
+func defaultSeriesLengthForScenario(scenario string) int {
+	if scenario == scenarioContrastiveNeedle {
+		return 24
+	}
+	return 12
+}
+
+func defaultVariantsForScenario(scenario string) int {
+	if scenario == scenarioContrastiveNeedle {
+		return 4
+	}
+	return 1
 }
 
 func parsePositiveIntList(name string, value string) ([]int, error) {
@@ -585,7 +616,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	seriesLength, err := parseIntEnv("EOS_CORKSCREW_TS_WINDOW_SERIES_LENGTH", 12)
+	scenario, err := normalizeScenario(os.Getenv("EOS_CORKSCREW_TS_WINDOW_SCENARIO"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	seriesLength, err := parseIntEnv("EOS_CORKSCREW_TS_WINDOW_SERIES_LENGTH", defaultSeriesLengthForScenario(scenario))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -594,7 +630,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "EOS_CORKSCREW_TS_WINDOW_SERIES_LENGTH must be a positive integer, got %d\n", seriesLength)
 		os.Exit(1)
 	}
-	seriesVariants, err := parseIntEnv("EOS_CORKSCREW_TS_WINDOW_SERIES_VARIANTS", 1)
+	seriesVariants, err := parseIntEnv("EOS_CORKSCREW_TS_WINDOW_SERIES_VARIANTS", defaultVariantsForScenario(scenario))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -683,6 +719,7 @@ func main() {
 		RunDir:              runDir,
 		Artifact:            artifact,
 		CorkScrewDBRepo:     corkscrewRepo,
+		Scenario:            scenario,
 		Bits:                bitsValue,
 		OverfetchChildren:   overfetchValue,
 		OutputDim:           outputDim,
@@ -717,6 +754,7 @@ func main() {
 	timeseriesEnv := append(os.Environ(),
 		"EOS_REPO_ROOT="+root,
 		"EOS_TS_WINDOW_SMOKE_RUN_DIR="+timeseriesRunDir,
+		"EOS_TS_WINDOW_SMOKE_SCENARIO="+scenario,
 		"EOS_TS_WINDOW_SMOKE_BITS="+bitsValue,
 		"EOS_TS_WINDOW_SMOKE_OUTPUT_DIM="+strconv.Itoa(outputDim),
 		"EOS_TS_WINDOW_SMOKE_WINDOW_SIZE="+strconv.Itoa(windowSize),
@@ -838,6 +876,7 @@ func main() {
 			"query_vectors": queryVectors,
 			"qrels": qrels,
 			"corkscrewdb_repo": corkscrewRepo,
+			"scenario": scenario,
 			"series_length": strconv.Itoa(seriesLength),
 			"series_variants": strconv.Itoa(seriesVariants),
 			"window_size": strconv.Itoa(windowSize),
@@ -869,7 +908,7 @@ func main() {
 		},
 		Caveats: []string{
 			"Synthetic smoke only: text-rendered numeric windows, not a trained numeric time-series encoder.",
-			"Local CorkScrewDB API smoke only: separate layout uses PutVector/SearchVector child overfetch rollup; packed layout uses PutMultiVector/SearchParentsVector exact flat parent rollup.",
+			"Local CorkScrewDB API smoke only: separate layout uses PutVector/SearchVector child overfetch rollup; packed layout uses PutMultiVector/SearchParentsVector exact flat parent rollup; single-parent layout mean-pools each parent's child windows into one normalized vector.",
 			"Default CorkScrewDB mode is separate child vectors with flat + quantized_only persistence; packed parent multivectors must be requested explicitly.",
 			"DB directory size is measured separately from vector-payload and planner accounting; keep DB directory multiple distinct from vector payload multiple.",
 			"The joined planner output comes from the nested time-series smoke storage-plan.json.",
