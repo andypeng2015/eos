@@ -15,6 +15,7 @@ const defaultCorkScrewDBRepo = "/home/draco/work/corkscrewdb"
 const defaultQuantizerSeed int64 = 5581486560434873699
 const layoutSeparateChildVectors = "separate_child_vectors"
 const layoutPackedParentMultivectors = "packed_parent_multivectors"
+const layoutSingleParentVectors = "single_parent_vectors"
 const packedMetadataFull = "full"
 const packedMetadataMinimal = "minimal"
 const packedMetadataNone = "none"
@@ -153,7 +154,7 @@ Environment:
   EOS_CORKSCREW_SMOKE_BITS=2,4,8
   EOS_CORKSCREW_SMOKE_QUANTIZER_SEED=5581486560434873699
   EOS_CORKSCREW_SMOKE_QUANTIZED_ONLY=1
-  EOS_CORKSCREW_SMOKE_LAYOUT=separate_child_vectors # separate_child_vectors|packed_parent_multivectors
+  EOS_CORKSCREW_SMOKE_LAYOUT=separate_child_vectors # single_parent_vectors|separate_child_vectors|packed_parent_multivectors
   EOS_CORKSCREW_SMOKE_PACKED_METADATA_MODE=full # full|minimal|none
   EOS_CORKSCREW_SMOKE_PACKED_CHILD_ID_MODE=source # source|ordinal
   EOS_CORKSCREW_SMOKE_INDEX_TYPE=flat       # flat|hnsw
@@ -175,10 +176,10 @@ func parseLayout(value string) (string, error) {
 		layout = layoutSeparateChildVectors
 	}
 	switch layout {
-	case layoutSeparateChildVectors, layoutPackedParentMultivectors:
+	case layoutSeparateChildVectors, layoutPackedParentMultivectors, layoutSingleParentVectors:
 		return layout, nil
 	default:
-		return "", fmt.Errorf("EOS_CORKSCREW_SMOKE_LAYOUT must be %s or %s, got %q", layoutSeparateChildVectors, layoutPackedParentMultivectors, value)
+		return "", fmt.Errorf("EOS_CORKSCREW_SMOKE_LAYOUT must be %s, %s, or %s, got %q", layoutSingleParentVectors, layoutSeparateChildVectors, layoutPackedParentMultivectors, value)
 	}
 }
 
@@ -211,6 +212,9 @@ func parsePackedChildIDMode(value string) (string, error) {
 func searchModeForLayout(layout string) (string, bool) {
 	if layout == layoutPackedParentMultivectors {
 		return "search_parents_vector_exact_flat_rollup", true
+	}
+	if layout == layoutSingleParentVectors {
+		return "search_vector_parent_single", true
 	}
 	return "search_vector_child_overfetch_rollup", false
 }
@@ -568,7 +572,7 @@ func main() {
 		os.Exit(1)
 	}
 	var overfetchValues []int
-	if layout == layoutPackedParentMultivectors {
+	if layout == layoutPackedParentMultivectors || layout == layoutSingleParentVectors {
 		overfetchValue = "0"
 		overfetchValues = []int{0}
 	} else {
@@ -782,7 +786,7 @@ func main() {
 			fmt.Sprintf("optional recall@100 floor %.6f; disabled when 0", minRecall),
 		},
 		Caveats: []string{
-			"Local CorkScrewDB API smoke only: separate layout uses PutVector/SearchVector child overfetch rollup; packed layout uses PutMultiVector/SearchParentsVector exact flat parent rollup.",
+			"Local CorkScrewDB API smoke only: separate layout uses PutVector/SearchVector child overfetch rollup; packed layout uses PutMultiVector/SearchParentsVector exact flat parent rollup; single-parent layout mean-pools children into one normalized PutVector per parent and searches parent IDs directly.",
 			"Packed metadata and child-id modes affect only packed_parent_multivectors; separate child-vector layout keeps full per-child metadata and source child IDs.",
 			"HNSW runs use raw vector storage and only the separate child-vector layout; packed parent multivectors require local flat quantized_only persistence.",
 			"Default generated inputs are tiny synthetic text-rendered time-series windows, not a model-quality benchmark.",
@@ -951,7 +955,7 @@ func main() {
 		indexType   = flag.String("index-type", "flat", "CorkScrewDB index type: flat or hnsw")
 		vectorStore = flag.String("vector-storage", "", "CorkScrewDB vector storage: quantized_only or raw")
 		rebuildIdx  = flag.Bool("rebuild-index", false, "rebuild the collection index after inserts")
-		layout      = flag.String("layout", "separate_child_vectors", "storage/search layout: separate_child_vectors or packed_parent_multivectors")
+		layout      = flag.String("layout", "separate_child_vectors", "storage/search layout: single_parent_vectors, separate_child_vectors, or packed_parent_multivectors")
 		packedMeta = flag.String("packed-metadata-mode", "full", "packed parent metadata mode: full, minimal, or none")
 		packedIDs  = flag.String("packed-child-id-mode", "source", "packed child ID mode: source or ordinal")
 	)
@@ -964,8 +968,8 @@ func main() {
 	if *layout == "" {
 		*layout = "separate_child_vectors"
 	}
-	if *layout != "separate_child_vectors" && *layout != "packed_parent_multivectors" {
-		fatalf("--layout must be separate_child_vectors or packed_parent_multivectors, got %q", *layout)
+	if *layout != "separate_child_vectors" && *layout != "packed_parent_multivectors" && *layout != "single_parent_vectors" {
+		fatalf("--layout must be single_parent_vectors, separate_child_vectors, or packed_parent_multivectors, got %q", *layout)
 	}
 	*packedMeta = strings.ToLower(strings.TrimSpace(*packedMeta))
 	if *packedMeta == "" {
@@ -1014,6 +1018,9 @@ func main() {
 		}
 		*overfetch = 0
 	}
+	if *layout == "single_parent_vectors" {
+		*overfetch = 0
+	}
 	if !*reuseDB {
 		if err := os.RemoveAll(*dbPath); err != nil {
 			fatalf("remove db dir: %v", err)
@@ -1057,6 +1064,19 @@ func main() {
 	parentInsertCount := 0
 	if !*reuseDB {
 		switch *layout {
+		case "single_parent_vectors":
+			parentVectors := meanPooledParentVectors(children)
+			for _, parent := range parentVectors {
+				meta := map[string]string{
+					"parent_id": parent.ParentID,
+					"dataset":   *dataset,
+				}
+				if err := coll.PutVector(parent.ParentID, parent.Vector, corkscrewdb.WithMetadata(meta)); err != nil {
+					_ = db.Close()
+					fatalf("put parent vector %q: %v", parent.ParentID, err)
+				}
+				parentInsertCount++
+			}
 		case "packed_parent_multivectors":
 			groups, parentIDs := groupChildrenByParent(children)
 			for _, parentID := range parentIDs {
@@ -1129,6 +1149,14 @@ func main() {
 				fatalf("search parents query %q: %v", query.ID, err)
 			}
 			ranked = parentResultsToScoredDocs(hits)
+		} else if *layout == "single_parent_vectors" {
+			hits, err := coll.SearchVector(query.Vector, *topParents)
+			latencies = append(latencies, time.Since(start))
+			if err != nil {
+				_ = db.Close()
+				fatalf("search parent vectors query %q: %v", query.ID, err)
+			}
+			ranked = searchResultsToScoredDocs(hits)
 		} else {
 			hits, err := coll.SearchVector(query.Vector, *overfetch)
 			latencies = append(latencies, time.Since(start))
@@ -1160,7 +1188,11 @@ func main() {
 	quantizedVectorBytes := int64((dim**bits + 7) / 8)
 	quantizedVectorBytes += int64((dim + 7) / 8)
 	quantizedVectorBytes += 4
-	quantizedChildBytes := quantizedVectorBytes * int64(len(children))
+	insertCount := len(children)
+	if *layout == "single_parent_vectors" {
+		insertCount = parentCount
+	}
+	quantizedChildBytes := quantizedVectorBytes * int64(insertCount)
 	baselineBytes := int64(parentCount * *baselineDim * 4)
 	if baselineBytes <= 0 {
 		fatalf("baseline bytes must be positive")
@@ -1171,12 +1203,15 @@ func main() {
 	if *layout == "packed_parent_multivectors" {
 		searchMode = "search_parents_vector_exact_flat_rollup"
 		parentSearchExact = true
+	} else if *layout == "single_parent_vectors" {
+		searchMode = "search_vector_parent_single"
+		parentSearchExact = true
 	}
 
 	metrics := smokeMetrics{
 		Bits:                         *bits,
 		Dimension:                    dim,
-		InsertCount:                  len(children),
+		InsertCount:                  insertCount,
 		ParentInsertCount:            parentInsertCount,
 		ParentCount:                  parentCount,
 		QueryCount:                   queryCount,
@@ -1367,6 +1402,45 @@ func groupChildrenByParent(children []childVector) (map[string][]childVector, []
 	return groups, parentIDs
 }
 
+func meanPooledParentVectors(children []childVector) []childVector {
+	groups, parentIDs := groupChildrenByParent(children)
+	out := make([]childVector, 0, len(parentIDs))
+	for _, parentID := range parentIDs {
+		group := groups[parentID]
+		if len(group) == 0 {
+			continue
+		}
+		mean := make([]float32, len(group[0].Vector))
+		for _, child := range group {
+			for i, value := range child.Vector {
+				mean[i] += value
+			}
+		}
+		scale := float32(1.0 / float64(len(group)))
+		for i := range mean {
+			mean[i] *= scale
+		}
+		normalizeL2(mean)
+		out = append(out, childVector{ParentID: parentID, ChildID: parentID, Vector: mean})
+	}
+	return out
+}
+
+func normalizeL2(v []float32) {
+	sum := 0.0
+	for _, value := range v {
+		f := float64(value)
+		sum += f * f
+	}
+	if sum == 0 {
+		return
+	}
+	inv := float32(1.0 / math.Sqrt(sum))
+	for i := range v {
+		v[i] *= inv
+	}
+}
+
 func packedParentMetadata(mode string, parentID string, dataset string) map[string]string {
 	switch mode {
 	case "full":
@@ -1442,6 +1516,14 @@ func rollupParents(hits []corkscrewdb.SearchResult, k int) []scoredDoc {
 }
 
 func parentResultsToScoredDocs(hits []corkscrewdb.ParentSearchResult) []scoredDoc {
+	out := make([]scoredDoc, 0, len(hits))
+	for _, hit := range hits {
+		out = append(out, scoredDoc{ID: hit.ID, Score: hit.Score})
+	}
+	return out
+}
+
+func searchResultsToScoredDocs(hits []corkscrewdb.SearchResult) []scoredDoc {
 	out := make([]scoredDoc, 0, len(hits))
 	for _, hit := range hits {
 		out = append(out, scoredDoc{ID: hit.ID, Score: hit.Score})
