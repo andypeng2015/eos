@@ -15,6 +15,11 @@ const defaultCorkScrewDBRepo = "/home/draco/work/corkscrewdb"
 const defaultQuantizerSeed int64 = 5581486560434873699
 const layoutSeparateChildVectors = "separate_child_vectors"
 const layoutPackedParentMultivectors = "packed_parent_multivectors"
+const packedMetadataFull = "full"
+const packedMetadataMinimal = "minimal"
+const packedMetadataNone = "none"
+const packedChildIDSource = "source"
+const packedChildIDOrdinal = "ordinal"
 
 type latencyMetrics struct {
 	P50MS float64 `json:"p50_ms"`
@@ -59,6 +64,8 @@ type bitMetrics struct {
 	Layout                       string         `json:"layout"`
 	SearchMode                   string         `json:"search_mode"`
 	ParentSearchExact            bool           `json:"parent_search_exact"`
+	PackedMetadataMode           string         `json:"packed_metadata_mode"`
+	PackedChildIDMode            string         `json:"packed_child_id_mode"`
 }
 
 type summaryRow struct {
@@ -70,6 +77,8 @@ type summaryRow struct {
 	Layout                       string
 	SearchMode                   string
 	ParentSearchExact            bool
+	PackedMetadataMode           string
+	PackedChildIDMode            string
 	NDCGAt10                     float64
 	RecallAt100                  float64
 	VectorPayloadStorageMultiple float64
@@ -107,6 +116,8 @@ type manifest struct {
 	Layout              string       `json:"layout"`
 	SearchMode          string       `json:"search_mode"`
 	ParentSearchExact   bool         `json:"parent_search_exact"`
+	PackedMetadataMode  string       `json:"packed_metadata_mode"`
+	PackedChildIDMode   string       `json:"packed_child_id_mode"`
 	OverfetchChildren   string       `json:"overfetch_children"`
 	OverfetchValues     []int        `json:"overfetch_values"`
 	TopKParents         int          `json:"top_k_parents"`
@@ -143,6 +154,8 @@ Environment:
   EOS_CORKSCREW_SMOKE_QUANTIZER_SEED=5581486560434873699
   EOS_CORKSCREW_SMOKE_QUANTIZED_ONLY=1
   EOS_CORKSCREW_SMOKE_LAYOUT=separate_child_vectors # separate_child_vectors|packed_parent_multivectors
+  EOS_CORKSCREW_SMOKE_PACKED_METADATA_MODE=full # full|minimal|none
+  EOS_CORKSCREW_SMOKE_PACKED_CHILD_ID_MODE=source # source|ordinal
   EOS_CORKSCREW_SMOKE_INDEX_TYPE=flat       # flat|hnsw
   EOS_CORKSCREW_SMOKE_VECTOR_STORAGE=quantized_only # quantized_only|raw
   EOS_CORKSCREW_SMOKE_REBUILD_INDEX=0       # defaults to 1 for hnsw, 0 for flat
@@ -166,6 +179,32 @@ func parseLayout(value string) (string, error) {
 		return layout, nil
 	default:
 		return "", fmt.Errorf("EOS_CORKSCREW_SMOKE_LAYOUT must be %s or %s, got %q", layoutSeparateChildVectors, layoutPackedParentMultivectors, value)
+	}
+}
+
+func parsePackedMetadataMode(value string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(value))
+	if mode == "" {
+		mode = packedMetadataFull
+	}
+	switch mode {
+	case packedMetadataFull, packedMetadataMinimal, packedMetadataNone:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("EOS_CORKSCREW_SMOKE_PACKED_METADATA_MODE must be %s, %s, or %s, got %q", packedMetadataFull, packedMetadataMinimal, packedMetadataNone, value)
+	}
+}
+
+func parsePackedChildIDMode(value string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(value))
+	if mode == "" {
+		mode = packedChildIDSource
+	}
+	switch mode {
+	case packedChildIDSource, packedChildIDOrdinal:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("EOS_CORKSCREW_SMOKE_PACKED_CHILD_ID_MODE must be %s or %s, got %q", packedChildIDSource, packedChildIDOrdinal, value)
 	}
 }
 
@@ -384,15 +423,17 @@ func readMetrics(path string) (bitMetrics, error) {
 
 func writeSummaryTSV(path string, rows []summaryRow) error {
 	var b strings.Builder
-	b.WriteString("bits\toverfetch_children\tparent_insert_count\tlayout\tsearch_mode\tparent_search_exact\tindex_type\tvector_storage\tndcg_at_10\trecall_at_100\tvector_payload_storage_multiple\tdb_directory_storage_multiple\tquantized_vector_bytes\tquantized_child_bytes\tdb_bytes_after_close\tload_seconds\trebuild_seconds\tsearch_seconds\tp50_ms\tp95_ms\tp99_ms\tmax_ms\n")
+	b.WriteString("bits\toverfetch_children\tparent_insert_count\tlayout\tsearch_mode\tparent_search_exact\tpacked_metadata_mode\tpacked_child_id_mode\tindex_type\tvector_storage\tndcg_at_10\trecall_at_100\tvector_payload_storage_multiple\tdb_directory_storage_multiple\tquantized_vector_bytes\tquantized_child_bytes\tdb_bytes_after_close\tload_seconds\trebuild_seconds\tsearch_seconds\tp50_ms\tp95_ms\tp99_ms\tmax_ms\n")
 	for _, row := range rows {
-		fmt.Fprintf(&b, "%d\t%d\t%d\t%s\t%s\t%t\t%s\t%s\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\n",
+		fmt.Fprintf(&b, "%d\t%d\t%d\t%s\t%s\t%t\t%s\t%s\t%s\t%s\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\n",
 			row.Bits,
 			row.OverfetchChildren,
 			row.ParentInsertCount,
 			row.Layout,
 			row.SearchMode,
 			row.ParentSearchExact,
+			row.PackedMetadataMode,
+			row.PackedChildIDMode,
 			row.IndexType,
 			row.VectorStorage,
 			row.NDCGAt10,
@@ -500,6 +541,16 @@ func main() {
 		os.Exit(1)
 	}
 	layout, err := parseLayout(os.Getenv("EOS_CORKSCREW_SMOKE_LAYOUT"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	packedMetadataMode, err := parsePackedMetadataMode(os.Getenv("EOS_CORKSCREW_SMOKE_PACKED_METADATA_MODE"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	packedChildIDMode, err := parsePackedChildIDMode(os.Getenv("EOS_CORKSCREW_SMOKE_PACKED_CHILD_ID_MODE"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -628,6 +679,8 @@ func main() {
 				"--index-type", indexType,
 				"--vector-storage", vectorStorage,
 				"--layout", layout,
+				"--packed-metadata-mode", packedMetadataMode,
+				"--packed-child-id-mode", packedChildIDMode,
 			}
 			if quantizedOnly {
 				args = append(args, "--quantized-only")
@@ -656,6 +709,8 @@ func main() {
 				Layout:                       metrics.Layout,
 				SearchMode:                   metrics.SearchMode,
 				ParentSearchExact:            metrics.ParentSearchExact,
+				PackedMetadataMode:           metrics.PackedMetadataMode,
+				PackedChildIDMode:            metrics.PackedChildIDMode,
 				NDCGAt10:                     metrics.Quality.NDCGAt10,
 				RecallAt100:                  metrics.Quality.RecallAt100,
 				VectorPayloadStorageMultiple: metrics.VectorPayloadStorageMultiple,
@@ -707,6 +762,8 @@ func main() {
 		Layout:            layout,
 		SearchMode:        searchMode,
 		ParentSearchExact: parentSearchExact,
+		PackedMetadataMode: packedMetadataMode,
+		PackedChildIDMode:  packedChildIDMode,
 		OverfetchChildren: overfetchValue,
 		OverfetchValues:   overfetchValues,
 		TopKParents:       topParents,
@@ -726,6 +783,7 @@ func main() {
 		},
 		Caveats: []string{
 			"Local CorkScrewDB API smoke only: separate layout uses PutVector/SearchVector child overfetch rollup; packed layout uses PutMultiVector/SearchParentsVector exact flat parent rollup.",
+			"Packed metadata and child-id modes affect only packed_parent_multivectors; separate child-vector layout keeps full per-child metadata and source child IDs.",
 			"HNSW runs use raw vector storage and only the separate child-vector layout; packed parent multivectors require local flat quantized_only persistence.",
 			"Default generated inputs are tiny synthetic text-rendered time-series windows, not a model-quality benchmark.",
 			"Storage gates use quantized vector payload accounting by default; DB directory multiples are recorded but not gated because tiny DB overhead dominates.",
@@ -745,10 +803,12 @@ func main() {
 	fmt.Printf("\nsummary_tsv: %s\n", summaryTSV)
 	fmt.Printf("manifest: %s\n", manifestJSON)
 	for _, row := range rows {
-		fmt.Printf("q%d overfetch%d %s %s/%s: ndcg@10=%.6f recall@100=%.6f parent_inserts=%d vector_payload_multiple=%.6fx db_dir_multiple=%.6fx rebuild=%.6fs p95=%.6fms\n",
+		fmt.Printf("q%d overfetch%d %s metadata=%s child_ids=%s %s/%s: ndcg@10=%.6f recall@100=%.6f parent_inserts=%d vector_payload_multiple=%.6fx db_dir_multiple=%.6fx rebuild=%.6fs p95=%.6fms\n",
 			row.Bits,
 			row.OverfetchChildren,
 			row.Layout,
+			row.PackedMetadataMode,
+			row.PackedChildIDMode,
 			row.IndexType,
 			row.VectorStorage,
 			row.NDCGAt10,
@@ -857,6 +917,8 @@ type smokeMetrics struct {
 	Layout                       string         ` + "`json:\"layout\"`" + `
 	SearchMode                   string         ` + "`json:\"search_mode\"`" + `
 	ParentSearchExact            bool           ` + "`json:\"parent_search_exact\"`" + `
+	PackedMetadataMode           string         ` + "`json:\"packed_metadata_mode\"`" + `
+	PackedChildIDMode            string         ` + "`json:\"packed_child_id_mode\"`" + `
 }
 
 type childVector struct {
@@ -890,6 +952,8 @@ func main() {
 		vectorStore = flag.String("vector-storage", "", "CorkScrewDB vector storage: quantized_only or raw")
 		rebuildIdx  = flag.Bool("rebuild-index", false, "rebuild the collection index after inserts")
 		layout      = flag.String("layout", "separate_child_vectors", "storage/search layout: separate_child_vectors or packed_parent_multivectors")
+		packedMeta = flag.String("packed-metadata-mode", "full", "packed parent metadata mode: full, minimal, or none")
+		packedIDs  = flag.String("packed-child-id-mode", "source", "packed child ID mode: source or ordinal")
 	)
 	flag.Parse()
 
@@ -902,6 +966,20 @@ func main() {
 	}
 	if *layout != "separate_child_vectors" && *layout != "packed_parent_multivectors" {
 		fatalf("--layout must be separate_child_vectors or packed_parent_multivectors, got %q", *layout)
+	}
+	*packedMeta = strings.ToLower(strings.TrimSpace(*packedMeta))
+	if *packedMeta == "" {
+		*packedMeta = "full"
+	}
+	if *packedMeta != "full" && *packedMeta != "minimal" && *packedMeta != "none" {
+		fatalf("--packed-metadata-mode must be full, minimal, or none, got %q", *packedMeta)
+	}
+	*packedIDs = strings.ToLower(strings.TrimSpace(*packedIDs))
+	if *packedIDs == "" {
+		*packedIDs = "source"
+	}
+	if *packedIDs != "source" && *packedIDs != "ordinal" {
+		fatalf("--packed-child-id-mode must be source or ordinal, got %q", *packedIDs)
 	}
 	if *layout == "separate_child_vectors" && *overfetch < *topParents {
 		fatalf("--overfetch must be >= --top-parents")
@@ -984,21 +1062,15 @@ func main() {
 			for _, parentID := range parentIDs {
 				group := groups[parentID]
 				entry := corkscrewdb.MultiVectorEntry{
-					Metadata: map[string]string{
-						"parent_id": parentID,
-						"dataset":   *dataset,
-					},
+					Metadata: packedParentMetadata(*packedMeta, parentID, *dataset),
 					Children: make([]corkscrewdb.MultiVectorChild, 0, len(group)),
 				}
-				for _, child := range group {
+				for childIndex, child := range group {
+					ordinal := strconv.Itoa(childIndex)
 					entry.Children = append(entry.Children, corkscrewdb.MultiVectorChild{
-						ID:     child.ChildID,
-						Vector: child.Vector,
-						Metadata: map[string]string{
-							"parent_id": parentID,
-							"child_id":  child.ChildID,
-							"dataset":   *dataset,
-						},
+						ID:       packedChildID(*packedIDs, child.ChildID, ordinal),
+						Vector:   child.Vector,
+						Metadata: packedChildMetadata(*packedMeta, parentID, child.ChildID, ordinal, *dataset),
 					})
 				}
 				if err := coll.PutMultiVector(parentID, entry); err != nil {
@@ -1132,6 +1204,8 @@ func main() {
 		Layout:                       *layout,
 		SearchMode:                   searchMode,
 		ParentSearchExact:            parentSearchExact,
+		PackedMetadataMode:           *packedMeta,
+		PackedChildIDMode:            *packedIDs,
 	}
 	data, err := json.MarshalIndent(metrics, "", "  ")
 	if err != nil {
@@ -1291,6 +1365,44 @@ func groupChildrenByParent(children []childVector) (map[string][]childVector, []
 		})
 	}
 	return groups, parentIDs
+}
+
+func packedParentMetadata(mode string, parentID string, dataset string) map[string]string {
+	switch mode {
+	case "full":
+		return map[string]string{
+			"parent_id": parentID,
+			"dataset":   dataset,
+		}
+	case "minimal":
+		return map[string]string{
+			"parent_id": parentID,
+		}
+	default:
+		return nil
+	}
+}
+
+func packedChildID(mode string, sourceID string, ordinal string) string {
+	if mode == "ordinal" {
+		return ordinal
+	}
+	return sourceID
+}
+
+func packedChildMetadata(mode string, parentID string, childID string, ordinal string, dataset string) map[string]string {
+	switch mode {
+	case "full":
+		return map[string]string{
+			"parent_id": parentID,
+			"child_id":  childID,
+			"dataset":   dataset,
+		}
+	case "minimal":
+		return nil
+	default:
+		return nil
+	}
 }
 
 func rollupParents(hits []corkscrewdb.SearchResult, k int) []scoredDoc {
