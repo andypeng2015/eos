@@ -80,6 +80,7 @@ type planRow struct {
 	SidecarBytesPerVector            int64   `json:"sidecar_bytes_per_vector"`
 	QuantizedVectorBytes             int64   `json:"quantized_vector_bytes"`
 	VectorOverheadBytes              int64   `json:"vector_overhead_bytes"`
+	PackedObjectOverheadBytes        int64   `json:"packed_object_overhead_bytes"`
 	DenseVectorStorageBytes          int64   `json:"dense_vector_storage_bytes"`
 	QuantizedVectorStorageBytes      int64   `json:"quantized_vector_storage_bytes"`
 	TotalQuantizedBytes              int64   `json:"total_quantized_bytes"`
@@ -87,6 +88,10 @@ type planRow struct {
 	VectorsThatFitInOneDenseVector   int64   `json:"vectors_that_fit_in_one_dense_vector"`
 	FitsInOneDenseVectorStorage      bool    `json:"fits_in_one_dense_vector_storage"`
 	StorageMultipleOfDenseParentCost float64 `json:"storage_multiple_of_dense_parent_cost"`
+	PackedQuantizedStorageBytes             int64   `json:"packed_quantized_storage_bytes"`
+	PackedVectorsThatFitInOneDenseVector    int64   `json:"packed_vectors_that_fit_in_one_dense_vector"`
+	PackedFitsInOneDenseVectorStorage       bool    `json:"packed_fits_in_one_dense_vector_storage"`
+	PackedStorageMultipleOfDenseParentCost  float64 `json:"packed_storage_multiple_of_dense_parent_cost"`
 }
 
 type storagePlan struct {
@@ -129,31 +134,32 @@ type commandRecord struct {
 }
 
 type config struct {
-	RunRoot             string  `json:"run_root"`
-	RunDir              string  `json:"run_dir"`
-	CorkScrewDBRepo     string  `json:"corkscrewdb_repo"`
-	DatasetDir          string  `json:"dataset_dir"`
-	Qrels               string  `json:"qrels"`
-	ChildVectors        string  `json:"child_vectors"`
-	QueryVectors        string  `json:"query_vectors"`
-	Bits                string  `json:"bits"`
-	OverfetchChildren   string  `json:"overfetch_children"`
-	BaselineDim         int     `json:"baseline_dim"`
-	TopParents          int     `json:"top_parents"`
-	QuantizedOnly       bool    `json:"quantized_only"`
-	Layout              string  `json:"layout"`
-	PackedMetadataMode  string  `json:"packed_metadata_mode"`
-	PackedChildIDMode   string  `json:"packed_child_id_mode"`
-	TargetChildren      int     `json:"target_children"`
-	VectorOverheadBytes int64   `json:"vector_overhead_bytes"`
-	SidecarStorage      string  `json:"sidecar_storage"`
-	CollectionLabel      string  `json:"collection_label"`
-	DatasetLabel         string  `json:"dataset_label"`
-	MinOverfetchNDCG     float64 `json:"min_overfetch_ndcg_at_10"`
-	MinOverfetchRecall   float64 `json:"min_overfetch_recall_at_100"`
-	MinFullRecall        float64 `json:"min_full_recall_at_100"`
-	MinPlannerFit        int64   `json:"min_planner_fit"`
-	MaxDBDirMultiple     float64 `json:"max_db_directory_storage_multiple"`
+	RunRoot                   string  `json:"run_root"`
+	RunDir                    string  `json:"run_dir"`
+	CorkScrewDBRepo           string  `json:"corkscrewdb_repo"`
+	DatasetDir                string  `json:"dataset_dir"`
+	Qrels                     string  `json:"qrels"`
+	ChildVectors              string  `json:"child_vectors"`
+	QueryVectors              string  `json:"query_vectors"`
+	Bits                      string  `json:"bits"`
+	OverfetchChildren         string  `json:"overfetch_children"`
+	BaselineDim               int     `json:"baseline_dim"`
+	TopParents                int     `json:"top_parents"`
+	QuantizedOnly             bool    `json:"quantized_only"`
+	Layout                    string  `json:"layout"`
+	PackedMetadataMode        string  `json:"packed_metadata_mode"`
+	PackedChildIDMode         string  `json:"packed_child_id_mode"`
+	TargetChildren            int     `json:"target_children"`
+	VectorOverheadBytes       int64   `json:"vector_overhead_bytes"`
+	PackedObjectOverheadBytes int64   `json:"packed_object_overhead_bytes"`
+	SidecarStorage            string  `json:"sidecar_storage"`
+	CollectionLabel           string  `json:"collection_label"`
+	DatasetLabel              string  `json:"dataset_label"`
+	MinOverfetchNDCG          float64 `json:"min_overfetch_ndcg_at_10"`
+	MinOverfetchRecall        float64 `json:"min_overfetch_recall_at_100"`
+	MinFullRecall             float64 `json:"min_full_recall_at_100"`
+	MinPlannerFit             int64   `json:"min_planner_fit"`
+	MaxDBDirMultiple          float64 `json:"max_db_directory_storage_multiple"`
 }
 
 type manifest struct {
@@ -206,6 +212,7 @@ Environment:
   EOS_CORKSCREW_BUDGET_QUALITY_PACKED_CHILD_ID_MODE=source # source|ordinal; falls back to EOS_CORKSCREW_SMOKE_PACKED_CHILD_ID_MODE
   EOS_CORKSCREW_BUDGET_QUALITY_TARGET_CHILDREN=100
   EOS_CORKSCREW_BUDGET_QUALITY_VECTOR_OVERHEAD_BYTES=32
+  EOS_CORKSCREW_BUDGET_QUALITY_PACKED_OBJECT_OVERHEAD_BYTES=32
   EOS_CORKSCREW_BUDGET_QUALITY_SIDECAR_STORAGE=none
   EOS_CORKSCREW_BUDGET_QUALITY_MIN_NDCG_AT_10=0.40
   EOS_CORKSCREW_BUDGET_QUALITY_MIN_RECALL_AT_100=0.72
@@ -456,13 +463,20 @@ func findPlanRow(rows []planRow, bits int, vectorsPerObject int) *planRow {
 	return nil
 }
 
-func maxFitPlanRow(rows []planRow, bits int) *planRow {
+func plannerFitValue(row planRow, layout string) int64 {
+	if layout == "packed_parent_multivectors" {
+		return row.PackedVectorsThatFitInOneDenseVector
+	}
+	return row.VectorsThatFitInOneDenseVector
+}
+
+func maxFitPlanRow(rows []planRow, bits int, layout string) *planRow {
 	var best *planRow
 	for i := range rows {
 		if rows[i].Bits != bits {
 			continue
 		}
-		if best == nil || rows[i].VectorsThatFitInOneDenseVector > best.VectorsThatFitInOneDenseVector {
+		if best == nil || plannerFitValue(rows[i], layout) > plannerFitValue(*best, layout) {
 			best = &rows[i]
 		}
 	}
@@ -472,7 +486,7 @@ func maxFitPlanRow(rows []planRow, bits int) *planRow {
 func makeSummaryRows(metrics []corkMetric, plan storagePlan, targetChildren int) []summaryRow {
 	rows := []summaryRow{}
 	for _, metric := range metrics {
-		fitPlan := maxFitPlanRow(plan.Rows, metric.Bits)
+		fitPlan := maxFitPlanRow(plan.Rows, metric.Bits, metric.Layout)
 		targetPlan := findPlanRow(plan.Rows, metric.Bits, targetChildren)
 		row := summaryRow{
 			Bits:                         metric.Bits,
@@ -497,14 +511,24 @@ func makeSummaryRows(metrics []corkMetric, plan storagePlan, targetChildren int)
 			P95MS:                        metric.SearchLatency.P95MS,
 		}
 		if fitPlan != nil {
-			row.PlannerQuantizedVectorStorageBytes = fitPlan.QuantizedVectorStorageBytes
-			row.PlannerVectorsFitOneDenseVector = fitPlan.VectorsThatFitInOneDenseVector
-			row.TargetChildrenFit = fitPlan.VectorsThatFitInOneDenseVector >= int64(targetChildren)
-			row.HundredVectorCapable = fitPlan.VectorsThatFitInOneDenseVector >= 100
+			if metric.Layout == "packed_parent_multivectors" {
+				row.PlannerQuantizedVectorStorageBytes = fitPlan.PackedQuantizedStorageBytes
+				row.PlannerVectorsFitOneDenseVector = fitPlan.PackedVectorsThatFitInOneDenseVector
+			} else {
+				row.PlannerQuantizedVectorStorageBytes = fitPlan.QuantizedVectorStorageBytes
+				row.PlannerVectorsFitOneDenseVector = fitPlan.VectorsThatFitInOneDenseVector
+			}
+			row.TargetChildrenFit = row.PlannerVectorsFitOneDenseVector >= int64(targetChildren)
+			row.HundredVectorCapable = row.PlannerVectorsFitOneDenseVector >= 100
 		}
 		if targetPlan != nil {
-			row.TargetChildrenFit = targetPlan.FitsInOneDenseVectorStorage
-			row.StorageMultipleAtTargetChildren = targetPlan.StorageMultipleOfDenseParentCost
+			if metric.Layout == "packed_parent_multivectors" {
+				row.TargetChildrenFit = targetPlan.PackedFitsInOneDenseVectorStorage
+				row.StorageMultipleAtTargetChildren = targetPlan.PackedStorageMultipleOfDenseParentCost
+			} else {
+				row.TargetChildrenFit = targetPlan.FitsInOneDenseVectorStorage
+				row.StorageMultipleAtTargetChildren = targetPlan.StorageMultipleOfDenseParentCost
+			}
 		}
 		rows = append(rows, row)
 	}
@@ -717,6 +741,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	packedObjectOverheadBytes, err := parseInt64Env("EOS_CORKSCREW_BUDGET_QUALITY_PACKED_OBJECT_OVERHEAD_BYTES", 32)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	minNDCG, err := parseFloatEnv("EOS_CORKSCREW_BUDGET_QUALITY_MIN_NDCG_AT_10", 0.40)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -751,31 +780,32 @@ func main() {
 	datasetLabel := getenv("EOS_CORKSCREW_BUDGET_QUALITY_DATASET", "scifact-eos-128d-child-cache")
 
 	cfg := config{
-		RunRoot:             runRoot,
-		RunDir:              runDir,
-		CorkScrewDBRepo:     corkscrewRepo,
-		DatasetDir:          datasetDir,
-		Qrels:               qrels,
-		ChildVectors:        childVectors,
-		QueryVectors:        queryVectors,
-		Bits:                bitsValue,
-		OverfetchChildren:   overfetchValue,
-		BaselineDim:         baselineDim,
-		TopParents:          topParents,
-		QuantizedOnly:       quantizedOnly,
-		Layout:              layout,
-		PackedMetadataMode:  packedMetadataMode,
-		PackedChildIDMode:   packedChildIDMode,
-		TargetChildren:      targetChildren,
-		VectorOverheadBytes: vectorOverheadBytes,
-		SidecarStorage:      sidecarStorage,
-		CollectionLabel:      collectionLabel,
-		DatasetLabel:         datasetLabel,
-		MinOverfetchNDCG:     minNDCG,
-		MinOverfetchRecall:   minRecall,
-		MinFullRecall:        minFullRecall,
-		MinPlannerFit:        minPlannerFit,
-		MaxDBDirMultiple:     maxDBDirMultiple,
+		RunRoot:                   runRoot,
+		RunDir:                    runDir,
+		CorkScrewDBRepo:           corkscrewRepo,
+		DatasetDir:                datasetDir,
+		Qrels:                     qrels,
+		ChildVectors:              childVectors,
+		QueryVectors:              queryVectors,
+		Bits:                      bitsValue,
+		OverfetchChildren:         overfetchValue,
+		BaselineDim:               baselineDim,
+		TopParents:                topParents,
+		QuantizedOnly:             quantizedOnly,
+		Layout:                    layout,
+		PackedMetadataMode:        packedMetadataMode,
+		PackedChildIDMode:         packedChildIDMode,
+		TargetChildren:            targetChildren,
+		VectorOverheadBytes:       vectorOverheadBytes,
+		PackedObjectOverheadBytes: packedObjectOverheadBytes,
+		SidecarStorage:            sidecarStorage,
+		CollectionLabel:           collectionLabel,
+		DatasetLabel:              datasetLabel,
+		MinOverfetchNDCG:          minNDCG,
+		MinOverfetchRecall:        minRecall,
+		MinFullRecall:             minFullRecall,
+		MinPlannerFit:             minPlannerFit,
+		MaxDBDirMultiple:          maxDBDirMultiple,
 	}
 
 	corkscrewRunDir := filepath.Join(runDir, "corkscrewdb")
@@ -857,6 +887,7 @@ func main() {
 		"--vectors-per-object", intListCSV(vectorsPerObject),
 		"--objects", strconv.Itoa(parentCount),
 		"--vector-overhead-bytes", strconv.FormatInt(vectorOverheadBytes, 10),
+		"--packed-object-overhead-bytes", strconv.FormatInt(packedObjectOverheadBytes, 10),
 		"--sidecar-storage", sidecarStorage,
 		"--json", plannerJSON,
 	}
@@ -912,7 +943,7 @@ func main() {
 			fmt.Sprintf("q4 bounded evidence row ndcg@10 >= %.6f", minNDCG),
 			fmt.Sprintf("q4 bounded evidence row recall@100 >= %.6f", minRecall),
 			fmt.Sprintf("q4 full/exhaustive overfetch recall@100 >= %.6f when a distinct full row is present", minFullRecall),
-			fmt.Sprintf("q4 planner vectors_that_fit_in_one_dense_vector >= %d", minPlannerFit),
+			fmt.Sprintf("q4 planner fit >= %d child vectors in one dense-vector budget; packed layout uses packed-object planner accounting", minPlannerFit),
 			fmt.Sprintf("q4 target children %d fits in one dense-vector budget", targetChildren),
 			fmt.Sprintf("q4 bounded evidence row DB directory storage multiple <= %.6f when positive", maxDBDirMultiple),
 		},
@@ -921,6 +952,7 @@ func main() {
 			"Packed parent multivector and single-parent modes record the requested wrapper overfetch configuration but validate the exact parent-search evidence row reported by the nested smoke as overfetch_children=0.",
 			"Manifest child_count is the number of non-empty input child-vector JSONL rows; nested single-parent metrics intentionally report insert_count as the stored parent-vector count.",
 			"The Eos 128d SciFact child cache is a compact prefix bridge, not a native Matryoshka artifact.",
+			"Planner summary columns use per-child vector overhead for separate and single-parent layouts, and packed object overhead for packed_parent_multivectors.",
 			"The joined planner overhead is explicit byte accounting; DB directory size is measured separately from the local smoke run.",
 			"Default exhaustive overfetch is the full current child count for this cache; override overfetch when using another cache size.",
 		},
