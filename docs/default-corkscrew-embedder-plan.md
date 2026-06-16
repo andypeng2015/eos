@@ -416,13 +416,13 @@ Do not promote a default CorkScrewDB embedder until all of these are true:
 
 - The sealed `.mll` package verifies by SHA256 and package metadata.
 - The baseline matrix has explicit dense, direct TurboQuant, and TurboQuant rerank rows, with missing external rows still visible as `not_scored`.
-- A CorkScrewDB load/index/search smoke has passed with the candidate vectors; use `scripts/smoke_corkscrewdb_child_vectors.fw` for the local flat API path and override its input-cache env vars for candidate-specific child vectors.
+- A CorkScrewDB load/index/search smoke has passed with the candidate vectors; use `scripts/smoke_corkscrewdb_child_vectors.fw` for the local flat API path and override its input-cache env vars for candidate-specific child vectors. Keep `EOS_CORKSCREW_SMOKE_LAYOUT=separate_child_vectors` for the current child-overfetch baseline, or set `EOS_CORKSCREW_SMOKE_LAYOUT=packed_parent_multivectors` to measure local flat `PutMultiVector` plus exact `SearchParentsVector` packed-parent persistence.
 - q4 and q8 default choices are measured on the same datasets, with quality deltas, vector bytes, compression, docs/s, scores/s, rerank overfetch where applicable, and serving p50/p95/p99/max attached.
 - The docs name the measured default and avoid unsupported standing claims.
 
 ## Next Actions
 
-1. Run `scripts/smoke_corkscrewdb_child_vectors.fw` with candidate child/query/qrels inputs for the compact retrieval profile; keep q4/fp16 rerank quality evidence separate because this API smoke currently exercises direct quantized child-vector search.
+1. Run `scripts/smoke_corkscrewdb_child_vectors.fw` with candidate child/query/qrels inputs for the compact retrieval profile; compare the default `separate_child_vectors` row against `packed_parent_multivectors` when DB directory bytes for packed parent storage matter. Keep q4/fp16 rerank quality evidence separate because this API smoke exercises direct quantized child or exact packed-parent vector search, not sidecar rerank.
 2. Measure p95 serving latency for q4/fp16/overfetch250 and decide whether the q8/fp16/overfetch125 fallback is needed for lower rerank cost.
 3. Keep the full short-set external matrix current, with Qwen3 FiQA labeled as full exportable-text rather than raw-row-complete or judged-coverage complete.
 4. Run a protected teacher/data experiment targeted at the remaining quality gap.

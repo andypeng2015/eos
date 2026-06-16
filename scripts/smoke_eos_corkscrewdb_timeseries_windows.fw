@@ -38,6 +38,7 @@ type corkMetric struct {
 	Bits                         int            `json:"bits"`
 	Dimension                    int            `json:"dimension"`
 	InsertCount                  int            `json:"insert_count"`
+	ParentInsertCount            int            `json:"parent_insert_count"`
 	ParentCount                  int            `json:"parent_count"`
 	QueryCount                   int            `json:"query_count"`
 	RelevantPairs                int            `json:"relevant_pairs"`
@@ -61,6 +62,9 @@ type corkMetric struct {
 	VectorStorage                string         `json:"vector_storage"`
 	RebuildIndex                 bool           `json:"rebuild_index"`
 	RebuildSeconds               float64        `json:"rebuild_seconds"`
+	Layout                       string         `json:"layout"`
+	SearchMode                   string         `json:"search_mode"`
+	ParentSearchExact            bool           `json:"parent_search_exact"`
 }
 
 type corkManifest struct {
@@ -116,6 +120,7 @@ type config struct {
 	DatasetLabel         string  `json:"dataset_label"`
 	IndexType           string  `json:"index_type"`
 	VectorStorage        string  `json:"vector_storage"`
+	Layout               string  `json:"layout"`
 	MinQ4NDCG            float64 `json:"min_q4_ndcg_at_10"`
 	MinQ4Recall          float64 `json:"min_q4_recall_at_100"`
 	MinQ8NDCG            float64 `json:"min_q8_ndcg_at_10"`
@@ -129,8 +134,12 @@ type config struct {
 type summaryRow struct {
 	Bits                               int     `json:"bits"`
 	OverfetchChildren                  int     `json:"overfetch_children"`
+	ParentInsertCount                  int     `json:"parent_insert_count"`
 	IndexType                          string  `json:"index_type"`
 	VectorStorage                      string  `json:"vector_storage"`
+	Layout                             string  `json:"layout"`
+	SearchMode                         string  `json:"search_mode"`
+	ParentSearchExact                  bool    `json:"parent_search_exact"`
 	ParentCount                        int     `json:"parent_count"`
 	ChildWindowCount                   int     `json:"child_window_count"`
 	DerivedWindowsPerParent            int     `json:"derived_windows_per_parent"`
@@ -184,9 +193,10 @@ Run:
   EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_corkscrewdb_timeseries_windows.fw
 
 This wrapper generates synthetic Eos text-rendered time-series window vectors,
-loads the generated child windows into local flat CorkScrewDB with PutVector,
-queries them with SearchVector, and joins API metrics to the time-series storage
-planner output.
+then joins local flat CorkScrewDB API metrics to the time-series storage planner
+output. The default layout writes separate child vectors with PutVector and
+SearchVector; packed mode writes parent multivectors and uses exact
+SearchParentsVector.
 
 Environment:
   EOS_CORKSCREW_TS_WINDOW_RUN_ROOT=runs
@@ -203,6 +213,7 @@ Environment:
   EOS_CORKSCREW_TS_WINDOW_BATCH_SIZE=64
   EOS_CORKSCREW_TS_WINDOW_BASELINE_DIM=3072
   EOS_CORKSCREW_TS_WINDOW_TOP_PARENTS=100
+  EOS_CORKSCREW_TS_WINDOW_LAYOUT=separate_child_vectors # separate_child_vectors|packed_parent_multivectors
   EOS_CORKSCREW_TS_WINDOW_TARGET_CHILDREN=5
   EOS_CORKSCREW_TS_WINDOW_VECTOR_OVERHEAD_BYTES=32
   EOS_CORKSCREW_TS_WINDOW_COLLECTION=eos_timeseries_window_smoke
@@ -394,8 +405,12 @@ func makeSummaryRows(metrics []corkMetric, plan storagePlan, exported exportMani
 		row := summaryRow{
 			Bits:                         metric.Bits,
 			OverfetchChildren:            metric.OverfetchChildren,
+			ParentInsertCount:            metric.ParentInsertCount,
 			IndexType:                    metric.IndexType,
 			VectorStorage:                metric.VectorStorage,
+			Layout:                       metric.Layout,
+			SearchMode:                   metric.SearchMode,
+			ParentSearchExact:            metric.ParentSearchExact,
 			ParentCount:                  exported.Series,
 			ChildWindowCount:             exported.ChildVectors,
 			DerivedWindowsPerParent:      derivedWindowsPerParent,
@@ -425,11 +440,15 @@ func makeSummaryRows(metrics []corkMetric, plan storagePlan, exported exportMani
 
 func writeSummaryTSV(path string, rows []summaryRow) error {
 	var b strings.Builder
-	b.WriteString("bits\toverfetch_children\tindex_type\tvector_storage\tparent_count\tchild_window_count\tderived_windows_per_parent\tquery_count\trelevant_pairs\tndcg_at_10\trecall_at_100\tvector_payload_storage_multiple\tdb_directory_storage_multiple\tdb_bytes_after_close\tquantized_vector_bytes\tquantized_child_bytes\tload_seconds\tsearch_seconds\tp95_ms\tplanner_quantized_vector_storage_bytes\tplanner_vectors_fit_one_dense_vector\tplanner_fit\tplanner_storage_multiple_at_derived_windows\n")
+	b.WriteString("bits\toverfetch_children\tparent_insert_count\tlayout\tsearch_mode\tparent_search_exact\tindex_type\tvector_storage\tparent_count\tchild_window_count\tderived_windows_per_parent\tquery_count\trelevant_pairs\tndcg_at_10\trecall_at_100\tvector_payload_storage_multiple\tdb_directory_storage_multiple\tdb_bytes_after_close\tquantized_vector_bytes\tquantized_child_bytes\tload_seconds\tsearch_seconds\tp95_ms\tplanner_quantized_vector_storage_bytes\tplanner_vectors_fit_one_dense_vector\tplanner_fit\tplanner_storage_multiple_at_derived_windows\n")
 	for _, row := range rows {
-		fmt.Fprintf(&b, "%d\t%d\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%d\t%d\t%t\t%.6f\n",
+		fmt.Fprintf(&b, "%d\t%d\t%d\t%s\t%s\t%t\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%d\t%d\t%t\t%.6f\n",
 			row.Bits,
 			row.OverfetchChildren,
+			row.ParentInsertCount,
+			row.Layout,
+			row.SearchMode,
+			row.ParentSearchExact,
 			row.IndexType,
 			row.VectorStorage,
 			row.ParentCount,
@@ -642,6 +661,7 @@ func main() {
 	artifact := strings.TrimSpace(os.Getenv("EOS_CORKSCREW_TS_WINDOW_ARTIFACT"))
 	indexType := "flat"
 	vectorStorage := "quantized_only"
+	layout := getenv("EOS_CORKSCREW_TS_WINDOW_LAYOUT", "separate_child_vectors")
 	cfg := config{
 		RunRoot:             runRoot,
 		RunDir:              runDir,
@@ -663,6 +683,7 @@ func main() {
 		DatasetLabel:         datasetLabel,
 		IndexType:           indexType,
 		VectorStorage:        vectorStorage,
+		Layout:               layout,
 		MinQ4NDCG:            minQ4NDCG,
 		MinQ4Recall:          minQ4Recall,
 		MinQ8NDCG:            minQ8NDCG,
@@ -740,6 +761,7 @@ func main() {
 		"EOS_CORKSCREW_SMOKE_DATASET="+datasetLabel,
 		"EOS_CORKSCREW_SMOKE_INDEX_TYPE="+indexType,
 		"EOS_CORKSCREW_SMOKE_VECTOR_STORAGE="+vectorStorage,
+		"EOS_CORKSCREW_SMOKE_LAYOUT="+layout,
 		"EOS_CORKSCREW_SMOKE_QUANTIZED_ONLY=1",
 		"EOS_CORKSCREW_SMOKE_REBUILD_INDEX=0",
 		"EOS_CORKSCREW_SMOKE_MIN_NDCG_AT_10=0",
@@ -825,8 +847,8 @@ func main() {
 		},
 		Caveats: []string{
 			"Synthetic smoke only: text-rendered numeric windows, not a trained numeric time-series encoder.",
-			"Local flat CorkScrewDB API smoke only: PutVector/SearchVector, not remote mode, federation, or HNSW.",
-			"Default CorkScrewDB mode is flat + quantized_only to preserve the compact storage lane.",
+			"Local CorkScrewDB API smoke only: separate layout uses PutVector/SearchVector child overfetch rollup; packed layout uses PutMultiVector/SearchParentsVector exact flat parent rollup.",
+			"Default CorkScrewDB mode is separate child vectors with flat + quantized_only persistence; packed parent multivectors must be requested explicitly.",
 			"DB directory size is measured separately from vector-payload and planner accounting; keep DB directory multiple distinct from vector payload multiple.",
 			"The joined planner output comes from the nested time-series smoke storage-plan.json.",
 		},
@@ -851,9 +873,10 @@ func main() {
 		exported.WindowSize,
 		exported.WindowStride)
 	for _, row := range rows {
-		fmt.Printf("q%d overfetch%d %s/%s: ndcg@10=%.6f recall@100=%.6f planner_fit=%d planner_multiple=%.6fx db_dir_multiple=%.6fx vector_payload_multiple=%.6fx p95=%.6fms\n",
+		fmt.Printf("q%d overfetch%d %s %s/%s: ndcg@10=%.6f recall@100=%.6f planner_fit=%d planner_multiple=%.6fx db_dir_multiple=%.6fx vector_payload_multiple=%.6fx p95=%.6fms\n",
 			row.Bits,
 			row.OverfetchChildren,
+			row.Layout,
 			row.IndexType,
 			row.VectorStorage,
 			row.NDCGAt10,
