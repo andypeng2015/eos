@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -200,7 +201,7 @@ Environment:
   EOS_CORKSCREW_BUDGET_QUALITY_BASELINE_DIM=3072
   EOS_CORKSCREW_BUDGET_QUALITY_TOP_PARENTS=100
   EOS_CORKSCREW_BUDGET_QUALITY_QUANTIZED_ONLY=1
-  EOS_CORKSCREW_BUDGET_QUALITY_LAYOUT=separate_child_vectors # separate_child_vectors|packed_parent_multivectors
+  EOS_CORKSCREW_BUDGET_QUALITY_LAYOUT=separate_child_vectors # single_parent_vectors|separate_child_vectors|packed_parent_multivectors
   EOS_CORKSCREW_BUDGET_QUALITY_PACKED_METADATA_MODE=full # full|minimal|none; falls back to EOS_CORKSCREW_SMOKE_PACKED_METADATA_MODE
   EOS_CORKSCREW_BUDGET_QUALITY_PACKED_CHILD_ID_MODE=source # source|ordinal; falls back to EOS_CORKSCREW_SMOKE_PACKED_CHILD_ID_MODE
   EOS_CORKSCREW_BUDGET_QUALITY_TARGET_CHILDREN=100
@@ -371,6 +372,27 @@ func requireRepo(path string, label string) error {
 	return nil
 }
 
+func countJSONLLines(path string) (int, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	count := 0
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) != "" {
+			count++
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func shellQuote(value string) string {
 	if value == "" {
 		return "''"
@@ -524,7 +546,7 @@ func writeSummaryTSV(path string, rows []summaryRow) error {
 }
 
 func effectiveBoundedOverfetch(layout string, overfetchValues []int) int {
-	if layout == "packed_parent_multivectors" {
+	if layout == "packed_parent_multivectors" || layout == "single_parent_vectors" {
 		return 0
 	}
 	if len(overfetchValues) > 0 {
@@ -552,10 +574,10 @@ func checkGates(rows []summaryRow, overfetchValues []int, cfg config) error {
 	if q4Full != nil && q4Full.OverfetchChildren != q4Bounded.OverfetchChildren && q4Full.RecallAt100 < cfg.MinFullRecall {
 		return fmt.Errorf("q4 overfetch%d recall@100 %.6f is below full-overfetch floor %.6f", q4Full.OverfetchChildren, q4Full.RecallAt100, cfg.MinFullRecall)
 	}
-	if q4Bounded.PlannerVectorsFitOneDenseVector < cfg.MinPlannerFit {
+	if cfg.MinPlannerFit > 0 && q4Bounded.PlannerVectorsFitOneDenseVector < cfg.MinPlannerFit {
 		return fmt.Errorf("q4 planner fits %d child vectors in one dense-vector budget, below required %d", q4Bounded.PlannerVectorsFitOneDenseVector, cfg.MinPlannerFit)
 	}
-	if !q4Bounded.TargetChildrenFit {
+	if cfg.MinPlannerFit > 0 && !q4Bounded.TargetChildrenFit {
 		return fmt.Errorf("q4 planner target children %d does not fit in one dense-vector budget", cfg.TargetChildren)
 	}
 	return nil
@@ -812,7 +834,11 @@ func main() {
 
 	childDim := metrics[0].Dimension
 	parentCount := metrics[0].ParentCount
-	childCount := metrics[0].InsertCount
+	childCount, err := countJSONLLines(childVectors)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	if parentCount <= 0 {
 		parentCount = 5183
 	}
@@ -891,8 +917,9 @@ func main() {
 			fmt.Sprintf("q4 bounded evidence row DB directory storage multiple <= %.6f when positive", maxDBDirMultiple),
 		},
 		Caveats: []string{
-			"Local CorkScrewDB API smoke only: separate layout uses PutVector/SearchVector child overfetch rollup; packed layout uses PutMultiVector/SearchParentsVector exact flat parent rollup.",
-			"Packed parent multivector mode records the requested overfetch configuration but validates the exact parent-search evidence row reported as overfetch_children=0.",
+			"Local CorkScrewDB API smoke only: separate layout uses PutVector/SearchVector child overfetch rollup; packed layout uses PutMultiVector/SearchParentsVector exact flat parent rollup; single-parent layout mean-pools children into one normalized PutVector per parent and searches parent IDs directly.",
+			"Packed parent multivector and single-parent modes record the requested wrapper overfetch configuration but validate the exact parent-search evidence row reported by the nested smoke as overfetch_children=0.",
+			"Manifest child_count is the number of non-empty input child-vector JSONL rows; nested single-parent metrics intentionally report insert_count as the stored parent-vector count.",
 			"The Eos 128d SciFact child cache is a compact prefix bridge, not a native Matryoshka artifact.",
 			"The joined planner overhead is explicit byte accounting; DB directory size is measured separately from the local smoke run.",
 			"Default exhaustive overfetch is the full current child count for this cache; override overfetch when using another cache size.",
