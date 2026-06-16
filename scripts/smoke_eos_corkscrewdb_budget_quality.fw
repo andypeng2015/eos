@@ -55,6 +55,8 @@ type corkMetric struct {
 	Layout                       string         `json:"layout"`
 	SearchMode                   string         `json:"search_mode"`
 	ParentSearchExact            bool           `json:"parent_search_exact"`
+	PackedMetadataMode           string         `json:"packed_metadata_mode"`
+	PackedChildIDMode            string         `json:"packed_child_id_mode"`
 }
 
 type corkManifest struct {
@@ -100,6 +102,8 @@ type summaryRow struct {
 	Layout                             string  `json:"layout"`
 	SearchMode                         string  `json:"search_mode"`
 	ParentSearchExact                  bool    `json:"parent_search_exact"`
+	PackedMetadataMode                 string  `json:"packed_metadata_mode"`
+	PackedChildIDMode                  string  `json:"packed_child_id_mode"`
 	NDCGAt10                           float64 `json:"ndcg_at_10"`
 	RecallAt100                        float64 `json:"recall_at_100"`
 	VectorPayloadStorageMultiple       float64 `json:"vector_payload_storage_multiple"`
@@ -137,6 +141,8 @@ type config struct {
 	TopParents          int     `json:"top_parents"`
 	QuantizedOnly       bool    `json:"quantized_only"`
 	Layout              string  `json:"layout"`
+	PackedMetadataMode  string  `json:"packed_metadata_mode"`
+	PackedChildIDMode   string  `json:"packed_child_id_mode"`
 	TargetChildren      int     `json:"target_children"`
 	VectorOverheadBytes int64   `json:"vector_overhead_bytes"`
 	SidecarStorage      string  `json:"sidecar_storage"`
@@ -195,6 +201,8 @@ Environment:
   EOS_CORKSCREW_BUDGET_QUALITY_TOP_PARENTS=100
   EOS_CORKSCREW_BUDGET_QUALITY_QUANTIZED_ONLY=1
   EOS_CORKSCREW_BUDGET_QUALITY_LAYOUT=separate_child_vectors # separate_child_vectors|packed_parent_multivectors
+  EOS_CORKSCREW_BUDGET_QUALITY_PACKED_METADATA_MODE=full # full|minimal|none; falls back to EOS_CORKSCREW_SMOKE_PACKED_METADATA_MODE
+  EOS_CORKSCREW_BUDGET_QUALITY_PACKED_CHILD_ID_MODE=source # source|ordinal; falls back to EOS_CORKSCREW_SMOKE_PACKED_CHILD_ID_MODE
   EOS_CORKSCREW_BUDGET_QUALITY_TARGET_CHILDREN=100
   EOS_CORKSCREW_BUDGET_QUALITY_VECTOR_OVERHEAD_BYTES=32
   EOS_CORKSCREW_BUDGET_QUALITY_SIDECAR_STORAGE=none
@@ -453,6 +461,8 @@ func makeSummaryRows(metrics []corkMetric, plan storagePlan, targetChildren int)
 			Layout:                       metric.Layout,
 			SearchMode:                   metric.SearchMode,
 			ParentSearchExact:            metric.ParentSearchExact,
+			PackedMetadataMode:           metric.PackedMetadataMode,
+			PackedChildIDMode:            metric.PackedChildIDMode,
 			NDCGAt10:                     metric.Quality.NDCGAt10,
 			RecallAt100:                  metric.Quality.RecallAt100,
 			VectorPayloadStorageMultiple: metric.VectorPayloadStorageMultiple,
@@ -481,15 +491,17 @@ func makeSummaryRows(metrics []corkMetric, plan storagePlan, targetChildren int)
 
 func writeSummaryTSV(path string, rows []summaryRow) error {
 	var b strings.Builder
-	b.WriteString("bits\toverfetch_children\tparent_insert_count\tlayout\tsearch_mode\tparent_search_exact\tindex_type\tvector_storage\tndcg_at_10\trecall_at_100\tvector_payload_storage_multiple\tdb_directory_storage_multiple\tdb_bytes_after_close\tquantized_vector_bytes\tquantized_child_bytes\tload_seconds\tsearch_seconds\tp95_ms\tplanner_quantized_vector_storage_bytes\tplanner_vectors_fit_one_dense_vector\ttarget_children_fit\tstorage_multiple_at_target_children\thundred_vector_capable\n")
+	b.WriteString("bits\toverfetch_children\tparent_insert_count\tlayout\tsearch_mode\tparent_search_exact\tpacked_metadata_mode\tpacked_child_id_mode\tindex_type\tvector_storage\tndcg_at_10\trecall_at_100\tvector_payload_storage_multiple\tdb_directory_storage_multiple\tdb_bytes_after_close\tquantized_vector_bytes\tquantized_child_bytes\tload_seconds\tsearch_seconds\tp95_ms\tplanner_quantized_vector_storage_bytes\tplanner_vectors_fit_one_dense_vector\ttarget_children_fit\tstorage_multiple_at_target_children\thundred_vector_capable\n")
 	for _, row := range rows {
-		fmt.Fprintf(&b, "%d\t%d\t%d\t%s\t%s\t%t\t%s\t%s\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%d\t%d\t%t\t%.6f\t%t\n",
+		fmt.Fprintf(&b, "%d\t%d\t%d\t%s\t%s\t%t\t%s\t%s\t%s\t%s\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%d\t%d\t%t\t%.6f\t%t\n",
 			row.Bits,
 			row.OverfetchChildren,
 			row.ParentInsertCount,
 			row.Layout,
 			row.SearchMode,
 			row.ParentSearchExact,
+			row.PackedMetadataMode,
+			row.PackedChildIDMode,
 			row.IndexType,
 			row.VectorStorage,
 			row.NDCGAt10,
@@ -710,6 +722,8 @@ func main() {
 	}
 	quantizedOnly := envBool("EOS_CORKSCREW_BUDGET_QUALITY_QUANTIZED_ONLY", true)
 	layout := getenv("EOS_CORKSCREW_BUDGET_QUALITY_LAYOUT", "separate_child_vectors")
+	packedMetadataMode := getenv("EOS_CORKSCREW_BUDGET_QUALITY_PACKED_METADATA_MODE", getenv("EOS_CORKSCREW_SMOKE_PACKED_METADATA_MODE", "full"))
+	packedChildIDMode := getenv("EOS_CORKSCREW_BUDGET_QUALITY_PACKED_CHILD_ID_MODE", getenv("EOS_CORKSCREW_SMOKE_PACKED_CHILD_ID_MODE", "source"))
 	sidecarStorage := getenv("EOS_CORKSCREW_BUDGET_QUALITY_SIDECAR_STORAGE", "none")
 	collectionLabel := getenv("EOS_CORKSCREW_BUDGET_QUALITY_COLLECTION", "eos_scifact_128d_child_budget_quality")
 	datasetLabel := getenv("EOS_CORKSCREW_BUDGET_QUALITY_DATASET", "scifact-eos-128d-child-cache")
@@ -728,6 +742,8 @@ func main() {
 		TopParents:          topParents,
 		QuantizedOnly:       quantizedOnly,
 		Layout:              layout,
+		PackedMetadataMode:  packedMetadataMode,
+		PackedChildIDMode:   packedChildIDMode,
 		TargetChildren:      targetChildren,
 		VectorOverheadBytes: vectorOverheadBytes,
 		SidecarStorage:      sidecarStorage,
@@ -756,6 +772,8 @@ func main() {
 		"EOS_CORKSCREW_SMOKE_COLLECTION="+collectionLabel,
 		"EOS_CORKSCREW_SMOKE_DATASET="+datasetLabel,
 		"EOS_CORKSCREW_SMOKE_LAYOUT="+layout,
+		"EOS_CORKSCREW_SMOKE_PACKED_METADATA_MODE="+packedMetadataMode,
+		"EOS_CORKSCREW_SMOKE_PACKED_CHILD_ID_MODE="+packedChildIDMode,
 		"EOS_CORKSCREW_SMOKE_MIN_NDCG_AT_10=0",
 		"EOS_CORKSCREW_SMOKE_MIN_RECALL_AT_100=0",
 	)
