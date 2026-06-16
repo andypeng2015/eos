@@ -1919,6 +1919,7 @@ func TestEmbeddingTrainerBatchedForwardKeepsActivationBindingsWhenBatchedBackwar
 }
 
 func TestEmbeddingTrainerBatchedBackwardSkipsSingletonUnboundActivationKernels(t *testing.T) {
+	t.Setenv("EOS_TRAIN_ENABLE_FAST_GELU", "")
 	trainer := newTinyTrainableEncoderEmbeddingTrainer(t, 0.05)
 	if trainer.forwardMatMul != nil {
 		trainer.forwardMatMul.Close()
