@@ -56,7 +56,7 @@ Dense comparison against the June 10 strict anchor and v2 candidate:
 | NFCorpus | 0.204117 | 0.242032 | +0.006384 | +0.006475 | +0.000341 | +0.000040 |
 | FiQA | 0.120294 | 0.350444 | +0.002761 | +0.003247 | +0.003840 | +0.001569 |
 
-Targeted-v3 is a dense candidate only. Its direct TurboQuant q2/q4 drops are too large for default quantized promotion, and direct q8 is closer but still has nDCG drops on all three short-set datasets. Existing q4/fp16 overfetch250 compact-profile evidence remains useful but should be refreshed against targeted-v3 before final default alias promotion.
+Targeted-v3 is the dense release-candidate line. Its direct TurboQuant q2/q4 drops are too large for default quantized promotion, and direct q8 is closer but still has nDCG drops on all three short-set datasets. The q4/fp16 overfetch250 compact profile has now been refreshed against targeted-v3: strict zero-regression still fails on NFCorpus recall@100 by `-0.000236936880015165`, but q4/fp16 overfetch250 is the compact RC under the explicit `recall@100` tolerance `0.00025`; q8/fp16 overfetch125 is the lower-compression fallback (`1.326425x` versus q4 `1.590062x`) with the same miss shape.
 
 Historical rejected probes from the prior sealed-anchor lane:
 
