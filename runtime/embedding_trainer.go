@@ -38,6 +38,8 @@ type EmbeddingTrainConfig struct {
 	TeacherTemperature        float32
 	TeacherSourceTemperatures map[string]float32
 	TeacherSourceWeights      map[string]float32
+	MatryoshkaDims            []int
+	MatryoshkaWeights         []float32
 }
 
 // EmbeddingTrainMetrics summarizes one training/eval batch.
@@ -250,6 +252,10 @@ func NewEmbeddingTrainer(mod *eosartifact.Module, manifest EmbeddingManifest, we
 		return nil, err
 	}
 	cfg = normalizedTrainConfig(cfg, params.token, params.attnQ, params.attnK, params.attnV, params.attnO, params.hidden, params.proj)
+	cfg, err = normalizeMatryoshkaTrainConfig(cfg, tensors.projection.Shape[1])
+	if err != nil {
+		return nil, err
+	}
 	if err := validateTrainConfig(cfg); err != nil {
 		return nil, err
 	}
@@ -1154,7 +1160,9 @@ func (t *EmbeddingTrainer) TrainContrastiveStep(batch []EmbeddingContrastiveExam
 	lossScale := batchScale
 	if embeddingUsesInfoNCELoss(t.config.ContrastiveLoss) {
 		var ok bool
-		totalLoss, totalScore, ok = t.tryInfoNCEContrastiveAccelerator(queries, positives, queryGrads, positiveGrads)
+		if len(t.config.MatryoshkaDims) == 0 {
+			totalLoss, totalScore, ok = t.tryInfoNCEContrastiveAccelerator(queries, positives, queryGrads, positiveGrads)
+		}
 		if !ok {
 			totalLoss, totalScore = accumulateInfoNCEContrastiveGrads(queries, positives, t.config.Temperature, queryGrads, positiveGrads)
 		}
@@ -1162,6 +1170,15 @@ func (t *EmbeddingTrainer) TrainContrastiveStep(batch []EmbeddingContrastiveExam
 		lossScale = batchScale
 	} else {
 		totalLoss, totalScore = accumulatePairMSEContrastiveGrads(queries, positives, queryGrads, positiveGrads)
+	}
+	if prefixLoss, prefixScore, prefixPairs := accumulateMatryoshkaContrastiveGrads(queries, positives, t.config, queryGrads, positiveGrads); prefixPairs > 0 {
+		weightSum := matryoshkaWeightSum(t.config.MatryoshkaWeights)
+		objectiveScale := float32(1) / (1 + weightSum)
+		scaleEmbeddingGradBuffers(queryGrads, objectiveScale)
+		scaleEmbeddingGradBuffers(positiveGrads, objectiveScale)
+		totalLoss = totalLoss*objectiveScale + prefixLoss*objectiveScale
+		totalScore += prefixScore
+		pairCount += prefixPairs
 	}
 
 	if !t.tryBackpropContrastiveBatch(
@@ -1297,7 +1314,11 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 		totalLoss, totalScore = accumulateGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, t.config.Temperature, queryGrads, candidateGrads)
 	} else if t.config.ContrastiveLoss == "hybrid_infonce" {
 		var ok bool
-		globalLoss, globalScore, ok := t.tryInfoNCEHardNegativeAccelerator(queries, candidates, targetIndexes, queryGrads, candidateGrads)
+		globalLoss := float32(0)
+		globalScore := float32(0)
+		if len(t.config.MatryoshkaDims) == 0 {
+			globalLoss, globalScore, ok = t.tryInfoNCEHardNegativeAccelerator(queries, candidates, targetIndexes, queryGrads, candidateGrads)
+		}
 		if !ok {
 			globalLoss, globalScore = accumulateInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, t.config.Temperature, queryGrads, candidateGrads)
 		}
@@ -1315,7 +1336,9 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 		totalScore = globalScore + groupedScore
 	} else {
 		var ok bool
-		totalLoss, totalScore, ok = t.tryInfoNCEHardNegativeAccelerator(queries, candidates, targetIndexes, queryGrads, candidateGrads)
+		if len(t.config.MatryoshkaDims) == 0 {
+			totalLoss, totalScore, ok = t.tryInfoNCEHardNegativeAccelerator(queries, candidates, targetIndexes, queryGrads, candidateGrads)
+		}
 		if !ok {
 			totalLoss, totalScore = accumulateInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, t.config.Temperature, queryGrads, candidateGrads)
 		}
@@ -1343,6 +1366,16 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 			totalScore += teacherScore
 			teacherPairCount = pairs
 		}
+	}
+	pairCount := hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, t.config.ContrastiveLoss) + teacherPairCount
+	if prefixLoss, prefixScore, prefixPairs := accumulateMatryoshkaHardNegativeGrads(queries, candidates, targetIndexes, candidateSpans, t.config, queryGrads, candidateGrads); prefixPairs > 0 {
+		weightSum := matryoshkaWeightSum(t.config.MatryoshkaWeights)
+		objectiveScale := float32(1) / (1 + weightSum)
+		scaleEmbeddingGradBuffers(queryGrads, objectiveScale)
+		scaleEmbeddingGradBuffers(candidateGrads, objectiveScale)
+		totalLoss = totalLoss*objectiveScale + prefixLoss*objectiveScale
+		totalScore += prefixScore
+		pairCount += prefixPairs
 	}
 	if !t.tryBackpropContrastiveBatch(
 		queries,
@@ -1373,7 +1406,6 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 		}
 	}
 
-	pairCount := hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, t.config.ContrastiveLoss) + teacherPairCount
 	batchScale := float32(1) / float32(len(queries))
 	t.step++
 	t.applyOptimizerUpdate(t.tokenParam.Name, t.tokenEmbed, t.tokenMom1, t.tokenMom2, gradToken, batchScale)
@@ -2702,6 +2734,27 @@ func newContrastivePooledMatrix(seqs []*embeddingEncodedSequence) contrastivePoo
 	return matrix
 }
 
+func newContrastivePrefixPooledMatrix(seqs []*embeddingEncodedSequence, dim int) contrastivePooledMatrix {
+	matrix := contrastivePooledMatrix{
+		rows:  len(seqs),
+		norms: make([]float32, len(seqs)),
+	}
+	if len(seqs) == 0 || seqs[0] == nil || dim <= 0 || len(seqs[0].pooled) < dim {
+		return matrix
+	}
+	matrix.width = dim
+	matrix.data = make([]float32, matrix.rows*matrix.width)
+	for row, seq := range seqs {
+		if seq == nil || len(seq.pooled) < matrix.width {
+			continue
+		}
+		values := matrix.row(row)
+		copy(values, seq.pooled[:matrix.width])
+		matrix.norms[row] = vectorNorm(values)
+	}
+	return matrix
+}
+
 func (m contrastivePooledMatrix) row(index int) []float32 {
 	if index < 0 || index >= m.rows || m.width == 0 {
 		return nil
@@ -2950,6 +3003,71 @@ func accumulateInfoNCEContrastiveGrads(queries, positives []*embeddingEncodedSeq
 	return totalLoss, totalScore
 }
 
+func accumulatePrefixInfoNCEContrastiveGrads(queries, positives []*embeddingEncodedSequence, dim int, temperature float32, queryGrads, positiveGrads [][]float32) (float32, float32) {
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	if dim <= 0 {
+		return 0, 0
+	}
+	if temperature <= 0 {
+		temperature = 0.05
+	}
+	queryMatrix := newContrastivePrefixPooledMatrix(queries, dim)
+	positiveMatrix := newContrastivePrefixPooledMatrix(positives, dim)
+	if queryMatrix.width == 0 || positiveMatrix.width != queryMatrix.width {
+		return 0, 0
+	}
+	rowScores := make([]float32, len(positives))
+	rowProbs := make([]float32, len(positives))
+	for i := range queries {
+		query := queryMatrix.row(i)
+		queryNorm := queryMatrix.norms[i]
+		for j := range positives {
+			score := cosineScoreWithNorms(query, positiveMatrix.row(j), queryNorm, positiveMatrix.norms[j])
+			rowScores[j] = score
+			totalScore += score
+		}
+		rowLoss := infoNCERowProbsAndLossInto(rowScores, i, temperature, rowProbs)
+		totalLoss += rowLoss
+		for j, prob := range rowProbs {
+			target := float32(0)
+			if i == j {
+				target = 1
+			}
+			scale := (prob - target) / temperature
+			accumulateCosineGradFromScore(query, positiveMatrix.row(j), queryNorm, positiveMatrix.norms[j], rowScores[j], scale, queryGrads[i], positiveGrads[j])
+		}
+	}
+	return totalLoss, totalScore
+}
+
+func accumulateMatryoshkaContrastiveGrads(queries, positives []*embeddingEncodedSequence, cfg EmbeddingTrainConfig, queryGrads, positiveGrads [][]float32) (float32, float32, int) {
+	if len(cfg.MatryoshkaDims) == 0 {
+		return 0, 0, 0
+	}
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	pairCount := 0
+	for i, dim := range cfg.MatryoshkaDims {
+		weight := float32(1)
+		if i < len(cfg.MatryoshkaWeights) {
+			weight = cfg.MatryoshkaWeights[i]
+		}
+		if weight <= 0 {
+			continue
+		}
+		dimQueryGrads := newEmbeddingPooledGradBuffers(queries)
+		dimPositiveGrads := newEmbeddingPooledGradBuffers(positives)
+		loss, score := accumulatePrefixInfoNCEContrastiveGrads(queries, positives, dim, cfg.Temperature, dimQueryGrads, dimPositiveGrads)
+		addScaledEmbeddingGradBuffers(queryGrads, dimQueryGrads, weight)
+		addScaledEmbeddingGradBuffers(positiveGrads, dimPositiveGrads, weight)
+		totalLoss += loss * weight
+		totalScore += score
+		pairCount += len(queries) * len(positives)
+	}
+	return totalLoss, totalScore, pairCount
+}
+
 func accumulateInfoNCEHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, targetIndexes []int, temperature float32, queryGrads, candidateGrads [][]float32) (float32, float32) {
 	totalLoss := float32(0)
 	totalScore := float32(0)
@@ -2958,6 +3076,48 @@ func accumulateInfoNCEHardNegativeGrads(queries, candidates []*embeddingEncodedS
 	}
 	queryMatrix := newContrastivePooledMatrix(queries)
 	candidateMatrix := newContrastivePooledMatrix(candidates)
+	rowScores := make([]float32, len(candidates))
+	rowProbs := make([]float32, len(candidates))
+	for i := range queries {
+		query := queryMatrix.row(i)
+		queryNorm := queryMatrix.norms[i]
+		for j := range candidates {
+			score := cosineScoreWithNorms(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j])
+			rowScores[j] = score
+			totalScore += score
+		}
+		targetIndex := -1
+		if i < len(targetIndexes) {
+			targetIndex = targetIndexes[i]
+		}
+		rowLoss := infoNCERowProbsAndLossInto(rowScores, targetIndex, temperature, rowProbs)
+		totalLoss += rowLoss
+		for j, prob := range rowProbs {
+			target := float32(0)
+			if j == targetIndex {
+				target = 1
+			}
+			scale := (prob - target) / temperature
+			accumulateCosineGradFromScore(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j], rowScores[j], scale, queryGrads[i], candidateGrads[j])
+		}
+	}
+	return totalLoss, totalScore
+}
+
+func accumulatePrefixInfoNCEHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, targetIndexes []int, dim int, temperature float32, queryGrads, candidateGrads [][]float32) (float32, float32) {
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	if dim <= 0 {
+		return 0, 0
+	}
+	if temperature <= 0 {
+		temperature = 0.05
+	}
+	queryMatrix := newContrastivePrefixPooledMatrix(queries, dim)
+	candidateMatrix := newContrastivePrefixPooledMatrix(candidates, dim)
+	if queryMatrix.width == 0 || candidateMatrix.width != queryMatrix.width {
+		return 0, 0
+	}
 	rowScores := make([]float32, len(candidates))
 	rowProbs := make([]float32, len(candidates))
 	for i := range queries {
@@ -3036,6 +3196,113 @@ func accumulateGroupedInfoNCEHardNegativeGrads(queries, candidates []*embeddingE
 		}
 	}
 	return totalLoss, totalScore
+}
+
+func accumulatePrefixGroupedInfoNCEHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, dim int, temperature float32, queryGrads, candidateGrads [][]float32) (float32, float32) {
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	if dim <= 0 {
+		return 0, 0
+	}
+	if temperature <= 0 {
+		temperature = 0.05
+	}
+	queryMatrix := newContrastivePrefixPooledMatrix(queries, dim)
+	candidateMatrix := newContrastivePrefixPooledMatrix(candidates, dim)
+	if queryMatrix.width == 0 || candidateMatrix.width != queryMatrix.width {
+		return 0, 0
+	}
+	maxCandidates := 0
+	for i := range queries {
+		span := groupedCandidateSpan(candidateSpans, i, len(candidates))
+		if n := span.End - span.Start; n > maxCandidates {
+			maxCandidates = n
+		}
+	}
+	rowScores := make([]float32, maxCandidates)
+	rowProbs := make([]float32, maxCandidates)
+	for i := range queries {
+		span := groupedCandidateSpan(candidateSpans, i, len(candidates))
+		if span.End-span.Start < 2 {
+			continue
+		}
+		query := queryMatrix.row(i)
+		queryNorm := queryMatrix.norms[i]
+		scores := rowScores[:span.End-span.Start]
+		probs := rowProbs[:span.End-span.Start]
+		for j := span.Start; j < span.End; j++ {
+			local := j - span.Start
+			score := cosineScoreWithNorms(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j])
+			scores[local] = score
+			totalScore += score
+		}
+		rowLoss := infoNCERowProbsAndLossInto(scores, 0, temperature, probs)
+		totalLoss += rowLoss
+		for local, prob := range probs {
+			target := float32(0)
+			if local == 0 {
+				target = 1
+			}
+			j := span.Start + local
+			scale := (prob - target) / temperature
+			accumulateCosineGradFromScore(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j], scores[local], scale, queryGrads[i], candidateGrads[j])
+		}
+	}
+	return totalLoss, totalScore
+}
+
+func accumulateMatryoshkaHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, targetIndexes []int, candidateSpans []embeddingCandidateSpan, cfg EmbeddingTrainConfig, queryGrads, candidateGrads [][]float32) (float32, float32, int) {
+	if len(cfg.MatryoshkaDims) == 0 {
+		return 0, 0, 0
+	}
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	pairCount := 0
+	for i, dim := range cfg.MatryoshkaDims {
+		weight := float32(1)
+		if i < len(cfg.MatryoshkaWeights) {
+			weight = cfg.MatryoshkaWeights[i]
+		}
+		if weight <= 0 {
+			continue
+		}
+		dimQueryGrads := newEmbeddingPooledGradBuffers(queries)
+		dimCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
+		loss := float32(0)
+		score := float32(0)
+		pairs := 0
+		switch cfg.ContrastiveLoss {
+		case "grouped_infonce":
+			loss, score = accumulatePrefixGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, dim, cfg.Temperature, dimQueryGrads, dimCandidateGrads)
+			pairs = hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, "grouped_infonce")
+		case "hybrid_infonce":
+			globalQueryGrads := newEmbeddingPooledGradBuffers(queries)
+			globalCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
+			globalLoss, globalScore := accumulatePrefixInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, dim, cfg.Temperature, globalQueryGrads, globalCandidateGrads)
+			groupedQueryGrads := newEmbeddingPooledGradBuffers(queries)
+			groupedCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
+			groupedLoss, groupedScore := accumulatePrefixGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, dim, cfg.Temperature, groupedQueryGrads, groupedCandidateGrads)
+			groupedWeight := effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
+			globalScale := float32(1) / (1 + groupedWeight)
+			groupedScale := groupedWeight / (1 + groupedWeight)
+			addScaledEmbeddingGradBuffers(dimQueryGrads, globalQueryGrads, globalScale)
+			addScaledEmbeddingGradBuffers(dimCandidateGrads, globalCandidateGrads, globalScale)
+			addScaledEmbeddingGradBuffers(dimQueryGrads, groupedQueryGrads, groupedScale)
+			addScaledEmbeddingGradBuffers(dimCandidateGrads, groupedCandidateGrads, groupedScale)
+			loss = globalLoss*globalScale + groupedLoss*groupedScale
+			score = globalScore + groupedScore
+			pairs = hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, "hybrid_infonce")
+		default:
+			loss, score = accumulatePrefixInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, dim, cfg.Temperature, dimQueryGrads, dimCandidateGrads)
+			pairs = hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, "infonce")
+		}
+		addScaledEmbeddingGradBuffers(queryGrads, dimQueryGrads, weight)
+		addScaledEmbeddingGradBuffers(candidateGrads, dimCandidateGrads, weight)
+		totalLoss += loss * weight
+		totalScore += score
+		pairCount += pairs
+	}
+	return totalLoss, totalScore, pairCount
 }
 
 func accumulateTeacherDistributionHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, teacherScores [][]float32, teacherTemperatures []float32, teacherSourceWeights []float32, modelTemperature, teacherTemperature float32, queryGrads, candidateGrads [][]float32) (float32, float32, int) {
@@ -4020,7 +4287,97 @@ func normalizedTrainConfig(cfg EmbeddingTrainConfig, params ...eosartifact.Param
 	cfg.TeacherSourceTemperatures = normalizeHardNegativeTeacherTemperatures(cfg.TeacherSourceTemperatures)
 	cfg.TeacherSourceWeights = normalizeHardNegativeTeacherWeights(cfg.TeacherSourceWeights)
 	cfg.GroupedLossWeight = effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
+	if dims, weights, err := normalizeMatryoshkaDimsAndWeights(cfg.MatryoshkaDims, cfg.MatryoshkaWeights, 0); err == nil {
+		cfg.MatryoshkaDims = dims
+		cfg.MatryoshkaWeights = weights
+	}
 	return cfg
+}
+
+func normalizeMatryoshkaTrainConfig(cfg EmbeddingTrainConfig, embeddingDim int) (EmbeddingTrainConfig, error) {
+	dims, weights, err := normalizeMatryoshkaDimsAndWeights(cfg.MatryoshkaDims, cfg.MatryoshkaWeights, embeddingDim)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.MatryoshkaDims = dims
+	cfg.MatryoshkaWeights = weights
+	return cfg, nil
+}
+
+func normalizeMatryoshkaDimsAndWeights(dims []int, weights []float32, embeddingDim int) ([]int, []float32, error) {
+	if len(dims) == 0 {
+		return nil, nil, nil
+	}
+	if len(weights) != 0 && len(weights) != len(dims) {
+		return nil, nil, fmt.Errorf("matryoshka_weights length %d must match matryoshka_dims length %d", len(weights), len(dims))
+	}
+	type weightedDim struct {
+		dim    int
+		weight float32
+	}
+	items := make([]weightedDim, 0, len(dims))
+	seen := map[int]bool{}
+	for i, dim := range dims {
+		if dim <= 0 {
+			return nil, nil, fmt.Errorf("matryoshka_dims[%d] must be positive", i)
+		}
+		if embeddingDim > 0 && dim > embeddingDim {
+			return nil, nil, fmt.Errorf("matryoshka_dims[%d]=%d exceeds embedding dimension %d", i, dim, embeddingDim)
+		}
+		if embeddingDim > 0 && dim == embeddingDim {
+			continue
+		}
+		if seen[dim] {
+			continue
+		}
+		weight := float32(1)
+		if len(weights) > 0 {
+			weight = weights[i]
+		}
+		if weight <= 0 || math.IsNaN(float64(weight)) || math.IsInf(float64(weight), 0) {
+			return nil, nil, fmt.Errorf("matryoshka_weights[%d] must be finite and positive", i)
+		}
+		seen[dim] = true
+		items = append(items, weightedDim{dim: dim, weight: weight})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].dim < items[j].dim })
+	outDims := make([]int, 0, len(items))
+	outWeights := make([]float32, 0, len(items))
+	for _, item := range items {
+		outDims = append(outDims, item.dim)
+		outWeights = append(outWeights, item.weight)
+	}
+	if len(outDims) == 0 {
+		return nil, nil, nil
+	}
+	return outDims, outWeights, nil
+}
+
+func trainerEmbeddingDim(t *EmbeddingTrainer) int {
+	if t == nil || t.projection == nil || len(t.projection.Shape) != 2 {
+		return 0
+	}
+	return t.projection.Shape[1]
+}
+
+func matryoshkaPairMultiplier(dims []int) int {
+	if len(dims) == 0 {
+		return 1
+	}
+	return 1 + len(dims)
+}
+
+func matryoshkaWeightSum(weights []float32) float32 {
+	if len(weights) == 0 {
+		return 0
+	}
+	sum := float32(0)
+	for _, weight := range weights {
+		if weight > 0 {
+			sum += weight
+		}
+	}
+	return sum
 }
 
 func validateTrainConfig(cfg EmbeddingTrainConfig) error {
@@ -4055,6 +4412,22 @@ func validateTrainConfig(cfg EmbeddingTrainConfig) error {
 		}
 		if weight < 0 || math.IsNaN(float64(weight)) || math.IsInf(float64(weight), 0) {
 			return fmt.Errorf("teacher_source_weights[%s] must be finite and non-negative", source)
+		}
+	}
+	if len(cfg.MatryoshkaWeights) != 0 && len(cfg.MatryoshkaWeights) != len(cfg.MatryoshkaDims) {
+		return fmt.Errorf("matryoshka_weights length %d must match matryoshka_dims length %d", len(cfg.MatryoshkaWeights), len(cfg.MatryoshkaDims))
+	}
+	for i, dim := range cfg.MatryoshkaDims {
+		if dim <= 0 {
+			return fmt.Errorf("matryoshka_dims[%d] must be positive", i)
+		}
+		if i > 0 && dim <= cfg.MatryoshkaDims[i-1] {
+			return fmt.Errorf("matryoshka_dims must be strictly increasing")
+		}
+	}
+	for i, weight := range cfg.MatryoshkaWeights {
+		if weight <= 0 || math.IsNaN(float64(weight)) || math.IsInf(float64(weight), 0) {
+			return fmt.Errorf("matryoshka_weights[%d] must be finite and positive", i)
 		}
 	}
 	return nil

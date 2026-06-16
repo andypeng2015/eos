@@ -38,6 +38,8 @@ type EmbeddingTrainRunConfig struct {
 	TeacherTemperature        float32
 	TeacherSourceTemperatures map[string]float32
 	TeacherSourceWeights      map[string]float32
+	MatryoshkaDims            []int
+	MatryoshkaWeights         []float32
 	TeacherScoreNormalization string
 	ProgressEverySteps        int
 	Progress                  EmbeddingTrainProgressFunc
@@ -859,6 +861,7 @@ func RetargetWorkloadToPairwiseEval(workload EmbeddingTrainWorkload, evalPairs i
 func EstimateContrastiveTrainWorkload(trainExamples, evalExamples int, cfg EmbeddingTrainRunConfig) EmbeddingTrainWorkload {
 	cfg = normalizedTrainRunConfig(cfg)
 	batches, trainPairsPerEpoch := contrastiveBatchWork(trainExamples, cfg.BatchSize)
+	trainPairsPerEpoch *= int64(matryoshkaPairMultiplier(cfg.MatryoshkaDims))
 	evalPairsPerPass := contrastiveEvalPairs(evalExamples)
 	evalPasses := plannedEvalPassCount(evalExamples, cfg.Epochs, cfg.EvalEveryEpoch)
 	if cfg.RestoreBest && evalExamples > 0 {
@@ -897,7 +900,7 @@ func EstimateHardNegativeTrainWorkload(trainExamples, negativesPerExample, evalE
 	if negativesPerExample < 0 {
 		negativesPerExample = 0
 	}
-	batches, trainPairsPerEpoch := hardNegativeBatchWork(trainExamples, cfg.BatchSize, negativesPerExample, cfg.ContrastiveLoss, cfg.TeacherLossWeight)
+	batches, trainPairsPerEpoch := hardNegativeBatchWork(trainExamples, cfg.BatchSize, negativesPerExample, cfg.ContrastiveLoss, cfg.TeacherLossWeight, matryoshkaPairMultiplier(cfg.MatryoshkaDims))
 	evalPasses := plannedEvalPassCount(evalExamples, cfg.Epochs, cfg.EvalEveryEpoch)
 	if cfg.RestoreBest && evalExamples > 0 {
 		evalPasses++
@@ -994,12 +997,15 @@ func contrastiveEvalPairs(total int) int64 {
 	return int64(total) * int64(total)
 }
 
-func hardNegativeBatchWork(total, batchSize, negativesPerExample int, loss string, teacherLossWeight float32) (int, int64) {
+func hardNegativeBatchWork(total, batchSize, negativesPerExample int, loss string, teacherLossWeight float32, matryoshkaMultiplier int) (int, int64) {
 	if total <= 0 || batchSize <= 0 {
 		return 0, 0
 	}
 	if negativesPerExample < 0 {
 		negativesPerExample = 0
+	}
+	if matryoshkaMultiplier <= 0 {
+		matryoshkaMultiplier = 1
 	}
 	var pairs int64
 	batches := 0
@@ -1014,28 +1020,30 @@ func hardNegativeBatchWork(total, batchSize, negativesPerExample int, loss strin
 			break
 		}
 		candidates := int64(n) * candidatesPerExample
+		basePairs := int64(0)
 		if loss == "grouped_infonce" {
 			if candidatesPerExample < 2 {
 				break
 			}
 			batches++
-			pairs += int64(n) * candidatesPerExample
+			basePairs = int64(n) * candidatesPerExample
 		} else if loss == "hybrid_infonce" {
 			if candidates < 2 {
 				break
 			}
 			batches++
-			pairs += int64(n) * candidates
+			basePairs = int64(n) * candidates
 			if candidatesPerExample >= 2 {
-				pairs += int64(n) * candidatesPerExample
+				basePairs += int64(n) * candidatesPerExample
 			}
 		} else {
 			if candidates < 2 {
 				break
 			}
 			batches++
-			pairs += int64(n) * candidates
+			basePairs = int64(n) * candidates
 		}
+		pairs += basePairs * int64(matryoshkaMultiplier)
 		if teacherLossWeight > 0 && candidatesPerExample >= 2 {
 			pairs += int64(n) * candidatesPerExample
 		}
@@ -1616,7 +1624,7 @@ func (t *EmbeddingTrainer) runHardNegativeEpoch(trainSet []EmbeddingHardNegative
 	if len(cfg.HardNegativeSourceWeights) == 0 {
 		order = spreadHardNegativeOrderByQuery(trainSet, order)
 	}
-	totalBatches, plannedEpochPairs := hardNegativeBatchWork(len(order), batchSize, cfg.HardNegativesPerQuery, cfg.ContrastiveLoss, cfg.TeacherLossWeight)
+	totalBatches, plannedEpochPairs := hardNegativeBatchWork(len(order), batchSize, cfg.HardNegativesPerQuery, cfg.ContrastiveLoss, cfg.TeacherLossWeight, matryoshkaPairMultiplier(cfg.MatryoshkaDims))
 	for start := 0; start < len(order); start += batchSize {
 		end := start + batchSize
 		if end > len(order) {
@@ -1838,6 +1846,10 @@ func normalizedTrainRunConfig(cfg EmbeddingTrainRunConfig) EmbeddingTrainRunConf
 	cfg.HardNegativeSourceWeights = normalizeHardNegativeSourceWeights(cfg.HardNegativeSourceWeights)
 	cfg.TeacherSourceTemperatures = normalizeHardNegativeTeacherTemperatures(cfg.TeacherSourceTemperatures)
 	cfg.TeacherSourceWeights = normalizeHardNegativeTeacherWeights(cfg.TeacherSourceWeights)
+	if dims, weights, err := normalizeMatryoshkaDimsAndWeights(cfg.MatryoshkaDims, cfg.MatryoshkaWeights, 0); err == nil {
+		cfg.MatryoshkaDims = dims
+		cfg.MatryoshkaWeights = weights
+	}
 	cfg.TeacherScoreNormalization = normalizeTeacherScoreNormalization(cfg.TeacherScoreNormalization)
 	return cfg
 }
@@ -1880,10 +1892,20 @@ func (t *EmbeddingTrainer) applyTrainRunOverrides(cfg EmbeddingTrainRunConfig) e
 		next.TeacherSourceWeights = normalizeHardNegativeTeacherWeights(cfg.TeacherSourceWeights)
 		changed = true
 	}
+	if len(cfg.MatryoshkaDims) > 0 {
+		next.MatryoshkaDims = append([]int(nil), cfg.MatryoshkaDims...)
+		next.MatryoshkaWeights = append([]float32(nil), cfg.MatryoshkaWeights...)
+		changed = true
+	}
 	if !changed {
 		return nil
 	}
 	next = normalizedTrainConfig(next, t.tokenParam, t.attnQParam, t.attnKParam, t.attnVParam, t.attnOParam, t.hiddenParam, t.projParam)
+	var err error
+	next, err = normalizeMatryoshkaTrainConfig(next, trainerEmbeddingDim(t))
+	if err != nil {
+		return err
+	}
 	if err := validateTrainConfig(next); err != nil {
 		return err
 	}
@@ -1913,9 +1935,14 @@ func (t *EmbeddingTrainer) syncTrainRunObjectiveConfig(cfg EmbeddingTrainRunConf
 	if len(cfg.TeacherSourceWeights) == 0 && len(t.config.TeacherSourceWeights) > 0 {
 		cfg.TeacherSourceWeights = t.config.TeacherSourceWeights
 	}
+	if len(cfg.MatryoshkaDims) == 0 && len(t.config.MatryoshkaDims) > 0 {
+		cfg.MatryoshkaDims = append([]int(nil), t.config.MatryoshkaDims...)
+		cfg.MatryoshkaWeights = append([]float32(nil), t.config.MatryoshkaWeights...)
+	}
 	cfg.GroupedLossWeight = effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
 	cfg.TeacherSourceTemperatures = normalizeHardNegativeTeacherTemperatures(cfg.TeacherSourceTemperatures)
 	cfg.TeacherSourceWeights = normalizeHardNegativeTeacherWeights(cfg.TeacherSourceWeights)
+	cfg.MatryoshkaDims, cfg.MatryoshkaWeights, _ = normalizeMatryoshkaDimsAndWeights(cfg.MatryoshkaDims, cfg.MatryoshkaWeights, trainerEmbeddingDim(t))
 	cfg.TeacherScoreNormalization = normalizeTeacherScoreNormalization(cfg.TeacherScoreNormalization)
 	return cfg
 }

@@ -36,6 +36,24 @@ func TestEstimateContrastiveTrainWorkload(t *testing.T) {
 	}
 }
 
+func TestEstimateContrastiveTrainWorkloadWithMatryoshkaPrefixes(t *testing.T) {
+	workload := EstimateContrastiveTrainWorkload(512, 128, EmbeddingTrainRunConfig{
+		Epochs:         1,
+		BatchSize:      64,
+		EvalEveryEpoch: 4,
+		MatryoshkaDims: []int{64, 128},
+	})
+	if workload.TrainPairsPerEpoch != 98304 {
+		t.Fatalf("train pairs/epoch = %d, want 98304", workload.TrainPairsPerEpoch)
+	}
+	if workload.EvalPairsPerPass != 16384 {
+		t.Fatalf("eval pairs/pass = %d, want unchanged 16384", workload.EvalPairsPerPass)
+	}
+	if workload.PlannedTotalPairs != 114688 {
+		t.Fatalf("planned total pairs = %d, want 114688", workload.PlannedTotalPairs)
+	}
+}
+
 func TestEstimateGroupedHardNegativeTrainWorkload(t *testing.T) {
 	workload := EstimateHardNegativeTrainWorkload(128, 1, 0, EmbeddingTrainRunConfig{
 		Epochs:          1,
@@ -203,6 +221,53 @@ func TestEmbeddingTrainerFitContrastiveImprovesEval(t *testing.T) {
 	}
 	if summary.FinalEval.PairAccuracy < before.PairAccuracy {
 		t.Fatalf("pair accuracy regressed: before=%f after=%f", before.PairAccuracy, summary.FinalEval.PairAccuracy)
+	}
+}
+
+func TestEmbeddingTrainerFitContrastiveRejectsInvalidMatryoshkaConfig(t *testing.T) {
+	trainer := newTinyTrainableEmbeddingTrainer(t, 0.05)
+	trainSet := tinyEmbeddingContrastiveDataset()
+	if _, err := trainer.FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:         1,
+		BatchSize:      2,
+		MatryoshkaDims: []int{3},
+	}); err == nil {
+		t.Fatal("expected matryoshka dim exceeding embedding dimension error")
+	}
+	if _, err := trainer.FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:            1,
+		BatchSize:         2,
+		MatryoshkaDims:    []int{1},
+		MatryoshkaWeights: []float32{1, 0.5},
+	}); err == nil {
+		t.Fatal("expected matryoshka weight length error")
+	}
+}
+
+func TestEmbeddingTrainerFitContrastiveMatryoshkaPrefixRunsAndTracksWork(t *testing.T) {
+	trainer := newTinyTrainableEmbeddingTrainer(t, 0.05)
+	trainSet := tinyEmbeddingContrastiveDataset()
+	summary, err := trainer.FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:            1,
+		BatchSize:         2,
+		Shuffle:           false,
+		MatryoshkaDims:    []int{1, 2},
+		MatryoshkaWeights: []float32{0.5, 1},
+	})
+	if err != nil {
+		t.Fatalf("fit contrastive matryoshka: %v", err)
+	}
+	if got, want := summary.Config.MatryoshkaDims, []int{1}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("normalized matryoshka dims = %v, want %v", got, want)
+	}
+	if summary.FinalTrain.BatchSize != 8 {
+		t.Fatalf("final train batch size = %d, want base+prefix pair count 8", summary.FinalTrain.BatchSize)
+	}
+	if summary.Workload.PlannedTrainPairs != 8 || summary.Workload.ActualTrainPairs != 8 {
+		t.Fatalf("train pairs planned/actual = %d/%d, want 8/8", summary.Workload.PlannedTrainPairs, summary.Workload.ActualTrainPairs)
+	}
+	if summary.FinalTrain.Loss <= 0 {
+		t.Fatalf("final train loss = %f, want positive", summary.FinalTrain.Loss)
 	}
 }
 

@@ -2,6 +2,8 @@ package eosruntime
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	eosartifact "m31labs.dev/eos/artifact/eos"
 )
@@ -121,6 +123,8 @@ func (m EmbeddingTrainManifest) mllValues() map[string]authoredManifestValue {
 		"config.grouped_loss_weight": authoredFloat(float64(m.Config.GroupedLossWeight)),
 		"config.teacher_loss_weight": authoredFloat(float64(m.Config.TeacherLossWeight)),
 		"config.teacher_temperature": authoredFloat(float64(m.Config.TeacherTemperature)),
+		"config.matryoshka_dims":     authoredString(formatMatryoshkaDims(m.Config.MatryoshkaDims)),
+		"config.matryoshka_weights":  authoredString(formatMatryoshkaWeights(m.Config.MatryoshkaWeights)),
 	}
 	for key, value := range m.Embedding.mllValues() {
 		values["embedding."+key] = value
@@ -200,5 +204,87 @@ func embeddingTrainManifestFromDoc(doc authoredManifestDoc) (EmbeddingTrainManif
 	} else if ok {
 		manifest.Config.TeacherTemperature = float32(value)
 	}
+	if value, ok, err := doc.string("config.matryoshka_dims"); err != nil {
+		return EmbeddingTrainManifest{}, err
+	} else if ok {
+		dims, err := parseMatryoshkaDims(value)
+		if err != nil {
+			return EmbeddingTrainManifest{}, err
+		}
+		manifest.Config.MatryoshkaDims = dims
+	}
+	if value, ok, err := doc.string("config.matryoshka_weights"); err != nil {
+		return EmbeddingTrainManifest{}, err
+	} else if ok {
+		weights, err := parseMatryoshkaWeights(value)
+		if err != nil {
+			return EmbeddingTrainManifest{}, err
+		}
+		manifest.Config.MatryoshkaWeights = weights
+	}
 	return manifest, nil
+}
+
+func formatMatryoshkaDims(dims []int) string {
+	if len(dims) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(dims))
+	for _, dim := range dims {
+		parts = append(parts, strconv.Itoa(dim))
+	}
+	return strings.Join(parts, ",")
+}
+
+func formatMatryoshkaWeights(weights []float32) string {
+	if len(weights) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(weights))
+	for _, weight := range weights {
+		parts = append(parts, strconv.FormatFloat(float64(weight), 'g', -1, 32))
+	}
+	return strings.Join(parts, ",")
+}
+
+func parseMatryoshkaDims(raw string) ([]int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	dims := make([]int, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		dim, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, fmt.Errorf("parse matryoshka dim %q: %w", part, err)
+		}
+		dims = append(dims, dim)
+	}
+	return dims, nil
+}
+
+func parseMatryoshkaWeights(raw string) ([]float32, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	weights := make([]float32, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		weight, err := strconv.ParseFloat(part, 32)
+		if err != nil {
+			return nil, fmt.Errorf("parse matryoshka weight %q: %w", part, err)
+		}
+		weights = append(weights, float32(weight))
+	}
+	return weights, nil
 }

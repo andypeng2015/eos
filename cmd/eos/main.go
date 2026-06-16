@@ -3652,6 +3652,8 @@ func runTrainEmbed(args []string) error {
 	var teacherSourceTemperatures string
 	var teacherSourceWeights string
 	var teacherScoreNormalization string
+	var matryoshkaDims string
+	var matryoshkaWeights string
 	var retrievalEvalDir string
 	var retrievalEvalSplit string
 	var retrievalEvalMaxDocs int
@@ -3688,6 +3690,8 @@ func runTrainEmbed(args []string) error {
 	fs.StringVar(&teacherSourceTemperatures, "teacher-source-temperatures", "", "comma-separated source=temperature overrides for teacher distillation, for example scifact=10,nfcorpus:model=1.5")
 	fs.StringVar(&teacherSourceWeights, "teacher-source-weights", "", "comma-separated source=weight overrides for teacher distillation influence, for example scifact=1,nfcorpus=0,fiqa=0.25")
 	fs.StringVar(&teacherScoreNormalization, "teacher-score-normalization", "", "normalize hard-negative teacher_scores before distillation: none, source_zscore, family_zscore, or example_zscore")
+	fs.StringVar(&matryoshkaDims, "matryoshka-dims", "", "comma-separated compact prefix dimensions to train with InfoNCE, for example 64,128")
+	fs.StringVar(&matryoshkaWeights, "matryoshka-weights", "", "optional comma-separated positive weights matching --matryoshka-dims")
 	fs.StringVar(&retrievalEvalDir, "retrieval-eval-dir", "", "BEIR-style dataset dir for per-epoch retrieval nDCG@10 eval with current weights; enables -select-metric retrieval_ndcg")
 	fs.StringVar(&retrievalEvalSplit, "retrieval-eval-split", "test", "qrels split for retrieval eval (test/dev/train)")
 	fs.IntVar(&retrievalEvalMaxDocs, "retrieval-eval-max-docs", 5000, "cap corpus docs embedded per retrieval eval (0 = all); smaller is faster per-epoch")
@@ -3738,6 +3742,14 @@ func runTrainEmbed(args []string) error {
 	parsedTeacherSourceWeights, parseErr := parseNonNegativeFloatMap(teacherSourceWeights)
 	if parseErr != nil {
 		return fmt.Errorf("teacher-source-weights: %w", parseErr)
+	}
+	parsedMatryoshkaDims, parseErr := parsePositiveIntList(matryoshkaDims)
+	if parseErr != nil {
+		return fmt.Errorf("matryoshka-dims: %w", parseErr)
+	}
+	parsedMatryoshkaWeights, parseErr := parsePositiveFloatList(matryoshkaWeights)
+	if parseErr != nil {
+		return fmt.Errorf("matryoshka-weights: %w", parseErr)
 	}
 	if len(parsedSourceWeights) > 0 && !hardNegativeTrain {
 		return fmt.Errorf("--hard-negative-source-weights requires --hard-negative-train")
@@ -3791,6 +3803,8 @@ func runTrainEmbed(args []string) error {
 		TeacherSourceTemperatures: parsedTeacherSourceTemperatures,
 		TeacherSourceWeights:      parsedTeacherSourceWeights,
 		TeacherScoreNormalization: teacherScoreNormalization,
+		MatryoshkaDims:            parsedMatryoshkaDims,
+		MatryoshkaWeights:         parsedMatryoshkaWeights,
 		ProgressEverySteps:        progressEvery,
 		EvalOnly:                  evalOnly,
 		PairwiseTrain:             pairwiseTrain,
@@ -3950,6 +3964,52 @@ func parsePositiveFloatMap(raw string) (map[string]float32, error) {
 			return nil, fmt.Errorf("entry %q must use a positive float value", item)
 		}
 		out[key] = float32(parsed)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+func parsePositiveIntList(raw string) ([]int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	out := []int{}
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		value, err := strconv.Atoi(item)
+		if err != nil || value <= 0 {
+			return nil, fmt.Errorf("entry %q must be a positive integer", item)
+		}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+func parsePositiveFloatList(raw string) ([]float32, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	out := []float32{}
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		value, err := strconv.ParseFloat(item, 32)
+		if err != nil || value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+			return nil, fmt.Errorf("entry %q must be a finite positive float", item)
+		}
+		out = append(out, float32(value))
 	}
 	if len(out) == 0 {
 		return nil, nil
@@ -4263,6 +4323,8 @@ func runTrainCorpus(args []string) error {
 	var groupedLossWeight float64
 	var teacherLossWeight float64
 	var teacherTemperature float64
+	var matryoshkaDims string
+	var matryoshkaWeights string
 	fs.IntVar(&epochs, "epochs", 10, "number of epochs")
 	fs.IntVar(&batchSize, "batch-size", 8, "batch size")
 	fs.BoolVar(&shuffle, "shuffle", true, "shuffle training set each epoch")
@@ -4290,6 +4352,8 @@ func runTrainCorpus(args []string) error {
 	fs.Float64Var(&groupedLossWeight, "grouped-loss-weight", 0, "grouped hard-negative loss weight for hybrid_infonce")
 	fs.Float64Var(&teacherLossWeight, "teacher-loss-weight", 0, "teacher score distillation weight for hard-negative training")
 	fs.Float64Var(&teacherTemperature, "teacher-temperature", 0, "teacher score softmax temperature for hard-negative distillation")
+	fs.StringVar(&matryoshkaDims, "matryoshka-dims", "", "comma-separated compact prefix dimensions to train with InfoNCE, for example 64,128")
+	fs.StringVar(&matryoshkaWeights, "matryoshka-weights", "", "optional comma-separated positive weights matching --matryoshka-dims")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -4317,6 +4381,14 @@ func runTrainCorpus(args []string) error {
 	if evalEverySteps < 0 {
 		return fmt.Errorf("eval-every-steps must be non-negative")
 	}
+	parsedMatryoshkaDims, parseErr := parsePositiveIntList(matryoshkaDims)
+	if parseErr != nil {
+		return fmt.Errorf("matryoshka-dims: %w", parseErr)
+	}
+	parsedMatryoshkaWeights, parseErr := parsePositiveFloatList(matryoshkaWeights)
+	if parseErr != nil {
+		return fmt.Errorf("matryoshka-weights: %w", parseErr)
+	}
 	path := fs.Arg(0)
 	corpusPath := fs.Arg(1)
 	runConfig := eosruntime.EmbeddingTrainRunConfig{
@@ -4337,6 +4409,8 @@ func runTrainCorpus(args []string) error {
 		GroupedLossWeight:     float32(groupedLossWeight),
 		TeacherLossWeight:     float32(teacherLossWeight),
 		TeacherTemperature:    float32(teacherTemperature),
+		MatryoshkaDims:        parsedMatryoshkaDims,
+		MatryoshkaWeights:     parsedMatryoshkaWeights,
 		ProgressEverySteps:    progressEvery,
 	}
 	if progressEvery > 0 {
@@ -4456,6 +4530,8 @@ type trainRunConfigJSON struct {
 	TeacherSourceTemperatures map[string]float32 `json:"teacher_source_temperatures,omitempty"`
 	TeacherSourceWeights      map[string]float32 `json:"teacher_source_weights,omitempty"`
 	TeacherScoreNormalization string             `json:"teacher_score_normalization,omitempty"`
+	MatryoshkaDims            []int              `json:"matryoshka_dims,omitempty"`
+	MatryoshkaWeights         []float32          `json:"matryoshka_weights,omitempty"`
 	ProgressEverySteps        int                `json:"progress_every_steps"`
 	EvalOnly                  bool               `json:"eval_only"`
 	PairwiseTrain             bool               `json:"pairwise_train"`
@@ -4624,6 +4700,8 @@ func trainRunConfigPayload(cfg eosruntime.EmbeddingTrainRunConfig) trainRunConfi
 		TeacherSourceTemperatures: cfg.TeacherSourceTemperatures,
 		TeacherSourceWeights:      cfg.TeacherSourceWeights,
 		TeacherScoreNormalization: cfg.TeacherScoreNormalization,
+		MatryoshkaDims:            cfg.MatryoshkaDims,
+		MatryoshkaWeights:         cfg.MatryoshkaWeights,
 		ProgressEverySteps:        cfg.ProgressEverySteps,
 		EvalOnly:                  cfg.EvalOnly,
 		PairwiseTrain:             cfg.PairwiseTrain,

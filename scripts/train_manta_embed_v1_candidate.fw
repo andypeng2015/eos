@@ -57,6 +57,8 @@ type candidateConfig struct {
 	TeacherSourceTemperatures string
 	TeacherSourceWeights string
 	TeacherScoreNormalization string
+	MatryoshkaDims      string
+	MatryoshkaWeights   string
 	EvalEvery           string
 	EvalEverySteps      string
 	Patience            string
@@ -109,6 +111,8 @@ Common knobs:
   EOS_CONTRASTIVE_LOSS=infonce
   EOS_GROUPED_LOSS_WEIGHT=0.25
   EOS_TEMPERATURE=0.05
+  EOS_MATRYOSHKA_DIMS=64,128
+  EOS_MATRYOSHKA_WEIGHTS=1,1
   EOS_SELECT_METRIC=mrr
   EOS_EVAL_EVERY_STEPS=0
   EOS_RESTORE_BEST=false
@@ -504,6 +508,8 @@ func writeManifest(cfg candidateConfig, status string) error {
     "teacher_source_temperatures": %s,
     "teacher_source_weights": %s,
     "teacher_score_normalization": %s,
+    "matryoshka_dims": %s,
+    "matryoshka_weights": %s,
     "select_metric": %s,
     "quality_target": %s,
     "eval_every": %s,
@@ -564,6 +570,8 @@ func writeManifest(cfg candidateConfig, status string) error {
 		jsonString(cfg.TeacherSourceTemperatures),
 		jsonString(cfg.TeacherSourceWeights),
 		jsonString(cfg.TeacherScoreNormalization),
+		jsonString(cfg.MatryoshkaDims),
+		jsonString(cfg.MatryoshkaWeights),
 		jsonString(cfg.SelectMetric),
 		jsonString(cfg.QualityTarget),
 		cfg.EvalEvery,
@@ -688,6 +696,8 @@ func prepareConfig(root string) (candidateConfig, error) {
 		TeacherSourceTemperatures: getenv("EOS_TEACHER_SOURCE_TEMPERATURES", ""),
 		TeacherSourceWeights: getenv("EOS_TEACHER_SOURCE_WEIGHTS", ""),
 		TeacherScoreNormalization: getenv("EOS_TEACHER_SCORE_NORMALIZATION", ""),
+		MatryoshkaDims:      getenv("EOS_MATRYOSHKA_DIMS", ""),
+		MatryoshkaWeights:   getenv("EOS_MATRYOSHKA_WEIGHTS", ""),
 		EvalEvery:           getenv("EOS_EVAL_EVERY", "1"),
 		EvalEverySteps:      getenv("EOS_EVAL_EVERY_STEPS", "0"),
 		Patience:            getenv("EOS_PATIENCE", "3"),
@@ -841,6 +851,12 @@ func trainCommonArgs(cfg candidateConfig) []string {
 	}
 	if cfg.TeacherScoreNormalization != "" {
 		args = append(args, "--teacher-score-normalization", cfg.TeacherScoreNormalization)
+	}
+	if cfg.MatryoshkaDims != "" {
+		args = append(args, "--matryoshka-dims", cfg.MatryoshkaDims)
+	}
+	if cfg.MatryoshkaWeights != "" {
+		args = append(args, "--matryoshka-weights", cfg.MatryoshkaWeights)
 	}
 	return args
 }
