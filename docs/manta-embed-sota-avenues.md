@@ -35,10 +35,10 @@ runs/manta-embed-v1-teacher-hybrid-w005-tw020-tt150-nf3train-lr10-20260507T05380
 The current dense local candidate is:
 
 ```text
-runs/eos-embed-v1-targeted-neargate-v3-low-lr-restorebest-20260614T000000Z/targeted-v3-lr000002-restorebest-manta/manta-embed-v1.sealed.mll
+runs/eos-embed-v1-targeted-v3-release-package-20260616T000000Z/eos-embed-v1.sealed.mll
 ```
 
-Status: sealed and dense short-set gate verified after the targeted-v3 low-LR restore-best run. The sealed artifact SHA256 is `ea776e2fca7fdade7ee05396b2ee8980e220899e2515853c83a4bca34cf87242`. The training data was deliberately narrow: `43` rows, no `teacher_scores`, with sources `fiqa:targeted-v3-blocker=15`, `fiqa:targeted-v3-protect=8`, `nfcorpus:targeted-v3-regression=6`, and `nfcorpus:targeted-v3-protect=14`.
+Status: EOS-named targeted-v3 release package, sealed and dense short-set gate verified. The release sealed artifact SHA256 is `601932251333d6bb5279cbe6c042a7b7f188037a47501f3134071e51baa5f2f7`; release package SHA256 is `188265db16992ab24be15e678c5f7e175bebad769e8d844e8b0f50ffc23bd5bf`; tokenizer SHA256 is `64cf63223cb3f97125040677a573e6ab6c625cff1f6f338f4e680a4c9f7a42f5`. Package and sealed inspection report `package verify: OK`, sealed inspection reports `package: embedded sealed MLL`, and final plus hard eval logs record `optimizer_updates=0`. The training data was deliberately narrow: `43` rows, no `teacher_scores`, with sources `fiqa:targeted-v3-blocker=15`, `fiqa:targeted-v3-protect=8`, `nfcorpus:targeted-v3-regression=6`, and `nfcorpus:targeted-v3-protect=14`. The legacy source artifact `runs/eos-embed-v1-targeted-neargate-v3-low-lr-restorebest-20260614T000000Z/targeted-v3-lr000002-restorebest-manta/manta-embed-v1.sealed.mll`, SHA256 `ea776e2fca7fdade7ee05396b2ee8980e220899e2515853c83a4bca34cf87242`, remains provenance only.
 
 The previous strict sealed anchor is:
 
@@ -56,7 +56,7 @@ Dense comparison against the June 10 strict anchor and v2 candidate:
 | NFCorpus | 0.204117 | 0.242032 | +0.006384 | +0.006475 | +0.000341 | +0.000040 |
 | FiQA | 0.120294 | 0.350444 | +0.002761 | +0.003247 | +0.003840 | +0.001569 |
 
-Targeted-v3 is the dense release-candidate line. Its direct TurboQuant q2/q4 drops are too large for default quantized promotion, and direct q8 is closer but still has nDCG drops on all three short-set datasets. The q4/fp16 overfetch250 compact profile has now been refreshed against targeted-v3: strict zero-regression still fails on NFCorpus recall@100 by `-0.000236936880015165`, but q4/fp16 overfetch250 is the compact RC under the explicit `recall@100` tolerance `0.00025`; q8/fp16 overfetch125 is the lower-compression fallback (`1.326425x` versus q4 `1.590062x`) with the same miss shape.
+The EOS-named targeted-v3 package is the dense release-candidate line. Its direct TurboQuant q2/q4 drops are too large for default quantized promotion, and direct q8 is closer but still has nDCG drops on all three short-set datasets. The release-artifact q4/fp16 overfetch250 compact profile fails strict zero-regression only on NFCorpus recall@100 by `-0.000236936880015165`; under the explicit `recall@100` tolerance `0.00025`, it passes all selected checks and is the compact RC with total compression `1.590062x`. Full SciFact serving proxy evidence for the same release SHA records q4/fp16/250 at nDCG@10 `0.5623217863`, recall@100 `0.7964444444`, p95 `7.607784ms`, and `414712.08` scores/s. Separate CorkScrewDB local flat packed-parent evidence from fresh release vectors records q4 nDCG@10 `0.451009`, recall@100 `0.771889`, DB multiple `0.020372x`, p95 `10.790243ms`, planner fit `180`, and target fit `true`; q8 remains diagnostic because target fit is `false`.
 
 Historical rejected probes from the prior sealed-anchor lane:
 
