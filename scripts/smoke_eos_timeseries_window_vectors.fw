@@ -148,6 +148,7 @@ type manifest struct {
 	WindowSize       int          `json:"window_size"`
 	WindowStride     int          `json:"window_stride"`
 	SeriesCount      int          `json:"series_count"`
+	SeriesVariants   int          `json:"series_variants"`
 	SeriesLength     int          `json:"series_length"`
 	Bits             string       `json:"bits"`
 	BaselineDim      int          `json:"baseline_dim"`
@@ -182,6 +183,7 @@ Environment:
   EOS_TS_WINDOW_SMOKE_RUN_DIR=runs/eos-timeseries-window-vector-smoke-<timestamp>
   EOS_TS_WINDOW_SMOKE_OUTPUT_DIM=128
   EOS_TS_WINDOW_SMOKE_SERIES_LENGTH=12
+  EOS_TS_WINDOW_SMOKE_SERIES_VARIANTS=1
   EOS_TS_WINDOW_SMOKE_WINDOW_SIZE=4
   EOS_TS_WINDOW_SMOKE_WINDOW_STRIDE=2
   EOS_TS_WINDOW_SMOKE_BATCH_SIZE=64
@@ -314,6 +316,16 @@ type syntheticSeries struct {
 	Values []int  `json:"values"`
 }
 
+type syntheticPattern struct {
+	Name      string
+	QueryID   string
+	BaseID    string
+	Label     string
+	Text      string
+	QueryText string
+	Values    func(int) []int
+}
+
 func risingValues(length int) []int {
 	values := make([]int, length)
 	for i := range values {
@@ -368,13 +380,82 @@ func waveValues(length int) []int {
 	return values
 }
 
-func writeSyntheticInputs(seriesPath string, queriesPath string, qrelsPath string, seriesLength int) error {
-	seriesRecords := []syntheticSeries{
-		{ID: "series-rising", Label: "rising load", Text: "steady upward sensor ramp with increasing load", Values: risingValues(seriesLength)},
-		{ID: "series-falling", Label: "falling load", Text: "steady downward sensor ramp with decreasing load", Values: fallingValues(seriesLength)},
-		{ID: "series-spike", Label: "sharp spike", Text: "mostly calm signal with a sharp central spike event", Values: spikeValues(seriesLength)},
-		{ID: "series-valley", Label: "deep valley", Text: "high signal with a deep central valley event", Values: valleyValues(seriesLength)},
-		{ID: "series-wave", Label: "oscillating wave", Text: "repeating oscillating wave pattern across the series", Values: waveValues(seriesLength)},
+func syntheticPatterns() []syntheticPattern {
+	return []syntheticPattern{
+		{Name: "rising", QueryID: "q-rising", BaseID: "series-rising", Label: "rising load", Text: "steady upward sensor ramp with increasing load", QueryText: "find the series with a steady upward increasing ramp", Values: risingValues},
+		{Name: "falling", QueryID: "q-falling", BaseID: "series-falling", Label: "falling load", Text: "steady downward sensor ramp with decreasing load", QueryText: "find the series with a steady downward decreasing ramp", Values: fallingValues},
+		{Name: "spike", QueryID: "q-spike", BaseID: "series-spike", Label: "sharp spike", Text: "mostly calm signal with a sharp central spike event", QueryText: "find the series with a sharp central spike event", Values: spikeValues},
+		{Name: "valley", QueryID: "q-valley", BaseID: "series-valley", Label: "deep valley", Text: "high signal with a deep central valley event", QueryText: "find the series with a deep central valley event", Values: valleyValues},
+		{Name: "wave", QueryID: "q-wave", BaseID: "series-wave", Label: "oscillating wave", Text: "repeating oscillating wave pattern across the series", QueryText: "find the series with a repeating oscillating wave pattern", Values: waveValues},
+	}
+}
+
+func variantValues(pattern string, base []int, variant int) []int {
+	if variant == 0 {
+		out := make([]int, len(base))
+		copy(out, base)
+		return out
+	}
+	values := make([]int, len(base))
+	offset := variant % 7
+	scale := 1 + (variant % 3)
+	switch pattern {
+	case "rising", "falling":
+		for i, value := range base {
+			values[i] = value*scale + offset
+		}
+	case "spike":
+		for i, value := range base {
+			values[i] = value + offset
+			if value >= 10 {
+				values[i] = value + offset + scale
+			}
+		}
+	case "valley":
+		for i, value := range base {
+			values[i] = value + offset + scale
+			if value <= 3 {
+				values[i] = value + (variant % 2)
+			}
+		}
+	case "wave":
+		phase := variant % 2
+		low := 1 + offset
+		high := 4 + offset + scale
+		for i := range base {
+			if (i+phase)%2 == 0 {
+				values[i] = low
+			} else {
+				values[i] = high
+			}
+		}
+	default:
+		copy(values, base)
+	}
+	return values
+}
+
+func writeSyntheticInputs(seriesPath string, queriesPath string, qrelsPath string, seriesLength int, variants int) error {
+	patterns := syntheticPatterns()
+	seriesRecords := []syntheticSeries{}
+	for _, pattern := range patterns {
+		baseValues := pattern.Values(seriesLength)
+		for variant := 0; variant < variants; variant++ {
+			id := pattern.BaseID
+			label := pattern.Label
+			text := pattern.Text
+			if variants > 1 {
+				id = fmt.Sprintf("%s-v%03d", pattern.BaseID, variant)
+				label = fmt.Sprintf("%s variant %03d", pattern.Label, variant)
+				text = fmt.Sprintf("%s; deterministic %s parent variant %03d with matching pattern semantics", pattern.Text, pattern.Name, variant)
+			}
+			seriesRecords = append(seriesRecords, syntheticSeries{
+				ID:     id,
+				Label:  label,
+				Text:   text,
+				Values: variantValues(pattern.Name, baseValues, variant),
+			})
+		}
 	}
 	series := []string{}
 	for _, record := range seriesRecords {
@@ -384,20 +465,17 @@ func writeSyntheticInputs(seriesPath string, queriesPath string, qrelsPath strin
 		}
 		series = append(series, string(data))
 	}
-	queries := []string{
-		`{"id":"q-rising","text":"find the series with a steady upward increasing ramp"}`,
-		`{"id":"q-falling","text":"find the series with a steady downward decreasing ramp"}`,
-		`{"id":"q-spike","text":"find the series with a sharp central spike event"}`,
-		`{"id":"q-valley","text":"find the series with a deep central valley event"}`,
-		`{"id":"q-wave","text":"find the series with a repeating oscillating wave pattern"}`,
-	}
-	qrels := []string{
-		"query-id\tcorpus-id\tscore",
-		"q-rising\tseries-rising\t1",
-		"q-falling\tseries-falling\t1",
-		"q-spike\tseries-spike\t1",
-		"q-valley\tseries-valley\t1",
-		"q-wave\tseries-wave\t1",
+	queries := []string{}
+	qrels := []string{"query-id\tcorpus-id\tscore"}
+	for _, pattern := range patterns {
+		queries = append(queries, fmt.Sprintf(`{"id":%q,"text":%q}`, pattern.QueryID, pattern.QueryText))
+		for variant := 0; variant < variants; variant++ {
+			id := pattern.BaseID
+			if variants > 1 {
+				id = fmt.Sprintf("%s-v%03d", pattern.BaseID, variant)
+			}
+			qrels = append(qrels, fmt.Sprintf("%s\t%s\t1", pattern.QueryID, id))
+		}
 	}
 	if err := os.WriteFile(seriesPath, []byte(strings.Join(series, "\n")+"\n"), 0o644); err != nil {
 		return err
@@ -569,6 +647,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "EOS_TS_WINDOW_SMOKE_SERIES_LENGTH must be a positive integer, got %d\n", seriesLength)
 		os.Exit(1)
 	}
+	seriesVariants, err := parseIntEnv("EOS_TS_WINDOW_SMOKE_SERIES_VARIANTS", 1)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if seriesVariants <= 0 {
+		fmt.Fprintf(os.Stderr, "EOS_TS_WINDOW_SMOKE_SERIES_VARIANTS must be a positive integer, got %d\n", seriesVariants)
+		os.Exit(1)
+	}
 	baselineDim, err := parseIntEnv("EOS_TS_WINDOW_SMOKE_BASELINE_DIM", 3072)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -608,7 +695,7 @@ func main() {
 	summaryTSV := filepath.Join(runDir, "summary.tsv")
 	manifestJSON := filepath.Join(runDir, "manifest.json")
 
-	if err := writeSyntheticInputs(seriesPath, queriesPath, qrelsPath, seriesLength); err != nil {
+	if err := writeSyntheticInputs(seriesPath, queriesPath, qrelsPath, seriesLength, seriesVariants); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -655,7 +742,7 @@ func main() {
 		"--dim", strconv.Itoa(outputDim),
 		"--baseline-dim", strconv.Itoa(baselineDim),
 		"--bits", bits,
-		"--objects", "5",
+		"--objects", strconv.Itoa(len(syntheticPatterns())*seriesVariants),
 		"--series-lengths", strconv.Itoa(seriesLength),
 		"--window-size", strconv.Itoa(windowSize),
 		"--window-stride", strconv.Itoa(windowStride),
@@ -702,6 +789,7 @@ func main() {
 		WindowSize:      windowSize,
 		WindowStride:    windowStride,
 		SeriesCount:     exported.Series,
+		SeriesVariants:  seriesVariants,
 		SeriesLength:    seriesLength,
 		Bits:            bits,
 		BaselineDim:     baselineDim,

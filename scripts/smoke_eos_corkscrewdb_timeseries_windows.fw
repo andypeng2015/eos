@@ -106,6 +106,7 @@ type config struct {
 	WindowSize          int     `json:"window_size"`
 	WindowStride        int     `json:"window_stride"`
 	SeriesLength        int     `json:"series_length"`
+	SeriesVariants      int     `json:"series_variants"`
 	BatchSize           string  `json:"batch_size"`
 	BaselineDim         int     `json:"baseline_dim"`
 	TopParents          int     `json:"top_parents"`
@@ -133,6 +134,8 @@ type summaryRow struct {
 	ParentCount                        int     `json:"parent_count"`
 	ChildWindowCount                   int     `json:"child_window_count"`
 	DerivedWindowsPerParent            int     `json:"derived_windows_per_parent"`
+	QueryCount                         int     `json:"query_count"`
+	RelevantPairs                      int     `json:"relevant_pairs"`
 	NDCGAt10                           float64 `json:"ndcg_at_10"`
 	RecallAt100                        float64 `json:"recall_at_100"`
 	VectorPayloadStorageMultiple       float64 `json:"vector_payload_storage_multiple"`
@@ -194,6 +197,7 @@ Environment:
   EOS_CORKSCREW_TS_WINDOW_OVERFETCH=100
   EOS_CORKSCREW_TS_WINDOW_OUTPUT_DIM=128
   EOS_CORKSCREW_TS_WINDOW_SERIES_LENGTH=12
+  EOS_CORKSCREW_TS_WINDOW_SERIES_VARIANTS=1
   EOS_CORKSCREW_TS_WINDOW_WINDOW_SIZE=4
   EOS_CORKSCREW_TS_WINDOW_WINDOW_STRIDE=2
   EOS_CORKSCREW_TS_WINDOW_BATCH_SIZE=64
@@ -395,6 +399,8 @@ func makeSummaryRows(metrics []corkMetric, plan storagePlan, exported exportMani
 			ParentCount:                  exported.Series,
 			ChildWindowCount:             exported.ChildVectors,
 			DerivedWindowsPerParent:      derivedWindowsPerParent,
+			QueryCount:                   metric.QueryCount,
+			RelevantPairs:                metric.RelevantPairs,
 			NDCGAt10:                     metric.Quality.NDCGAt10,
 			RecallAt100:                  metric.Quality.RecallAt100,
 			VectorPayloadStorageMultiple: metric.VectorPayloadStorageMultiple,
@@ -419,9 +425,9 @@ func makeSummaryRows(metrics []corkMetric, plan storagePlan, exported exportMani
 
 func writeSummaryTSV(path string, rows []summaryRow) error {
 	var b strings.Builder
-	b.WriteString("bits\toverfetch_children\tindex_type\tvector_storage\tparent_count\tchild_window_count\tderived_windows_per_parent\tndcg_at_10\trecall_at_100\tvector_payload_storage_multiple\tdb_directory_storage_multiple\tdb_bytes_after_close\tquantized_vector_bytes\tquantized_child_bytes\tload_seconds\tsearch_seconds\tp95_ms\tplanner_quantized_vector_storage_bytes\tplanner_vectors_fit_one_dense_vector\tplanner_fit\tplanner_storage_multiple_at_derived_windows\n")
+	b.WriteString("bits\toverfetch_children\tindex_type\tvector_storage\tparent_count\tchild_window_count\tderived_windows_per_parent\tquery_count\trelevant_pairs\tndcg_at_10\trecall_at_100\tvector_payload_storage_multiple\tdb_directory_storage_multiple\tdb_bytes_after_close\tquantized_vector_bytes\tquantized_child_bytes\tload_seconds\tsearch_seconds\tp95_ms\tplanner_quantized_vector_storage_bytes\tplanner_vectors_fit_one_dense_vector\tplanner_fit\tplanner_storage_multiple_at_derived_windows\n")
 	for _, row := range rows {
-		fmt.Fprintf(&b, "%d\t%d\t%s\t%s\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%d\t%d\t%t\t%.6f\n",
+		fmt.Fprintf(&b, "%d\t%d\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%.6f\t%.6f\t%.6f\t%d\t%d\t%t\t%.6f\n",
 			row.Bits,
 			row.OverfetchChildren,
 			row.IndexType,
@@ -429,6 +435,8 @@ func writeSummaryTSV(path string, rows []summaryRow) error {
 			row.ParentCount,
 			row.ChildWindowCount,
 			row.DerivedWindowsPerParent,
+			row.QueryCount,
+			row.RelevantPairs,
 			row.NDCGAt10,
 			row.RecallAt100,
 			row.VectorPayloadStorageMultiple,
@@ -558,6 +566,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "EOS_CORKSCREW_TS_WINDOW_SERIES_LENGTH must be a positive integer, got %d\n", seriesLength)
 		os.Exit(1)
 	}
+	seriesVariants, err := parseIntEnv("EOS_CORKSCREW_TS_WINDOW_SERIES_VARIANTS", 1)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if seriesVariants <= 0 {
+		fmt.Fprintf(os.Stderr, "EOS_CORKSCREW_TS_WINDOW_SERIES_VARIANTS must be a positive integer, got %d\n", seriesVariants)
+		os.Exit(1)
+	}
 	batchSize := getenv("EOS_CORKSCREW_TS_WINDOW_BATCH_SIZE", "64")
 	baselineDim, err := parseIntEnv("EOS_CORKSCREW_TS_WINDOW_BASELINE_DIM", 3072)
 	if err != nil {
@@ -636,6 +653,7 @@ func main() {
 		WindowSize:          windowSize,
 		WindowStride:        windowStride,
 		SeriesLength:        seriesLength,
+		SeriesVariants:      seriesVariants,
 		BatchSize:           batchSize,
 		BaselineDim:         baselineDim,
 		TopParents:          topParents,
@@ -664,6 +682,7 @@ func main() {
 		"EOS_TS_WINDOW_SMOKE_WINDOW_SIZE="+strconv.Itoa(windowSize),
 		"EOS_TS_WINDOW_SMOKE_WINDOW_STRIDE="+strconv.Itoa(windowStride),
 		"EOS_TS_WINDOW_SMOKE_SERIES_LENGTH="+strconv.Itoa(seriesLength),
+		"EOS_TS_WINDOW_SMOKE_SERIES_VARIANTS="+strconv.Itoa(seriesVariants),
 		"EOS_TS_WINDOW_SMOKE_BATCH_SIZE="+batchSize,
 		"EOS_TS_WINDOW_SMOKE_BASELINE_DIM="+strconv.Itoa(baselineDim),
 		"EOS_TS_WINDOW_SMOKE_VECTOR_OVERHEAD_BYTES="+strconv.FormatInt(vectorOverheadBytes, 10),
@@ -776,6 +795,7 @@ func main() {
 			"qrels": qrels,
 			"corkscrewdb_repo": corkscrewRepo,
 			"series_length": strconv.Itoa(seriesLength),
+			"series_variants": strconv.Itoa(seriesVariants),
 			"window_size": strconv.Itoa(windowSize),
 			"window_stride": strconv.Itoa(windowStride),
 			"output_dim": strconv.Itoa(outputDim),
