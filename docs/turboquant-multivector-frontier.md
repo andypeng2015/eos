@@ -24,6 +24,7 @@ This is a default-embedder product lane for CorkScrewDB: Eos can emit compact ch
 | Eos 128d SciFact child cache | Cache-only quality plus planner | q4 quality drop is about `-0.002630` nDCG@10 and `-0.001667` recall@100, while overhead-aware per-child accounting fits `123` q4 children per `3072d` dense budget. | Prefix-truncated cache; no CorkScrewDB API or DB-size measurement. |
 | Packed q4 SciFact local DB | Local flat CorkScrewDB API | q4 packed parent DB multiple `0.025970x`, p95 `9.505725ms`, nDCG@10 `0.407586`, recall@100 `0.741889`. | Local flat exact parent search only; not remote, HNSW, or federation. |
 | Scaled packed time-series smoke | Local flat CorkScrewDB API | `100` parents and `10,000` child windows, packed minimal DB bytes `1,037,918`, DB multiple `0.844660x`, p95 `5.916649ms`, recall@100 `1.000000`. | Synthetic text-rendered windows; not production time-series quality or a trained numeric encoder. |
+| Packed q4 event trace smoke | Local flat CorkScrewDB API | `5` parent traces and `900` child event vectors, q4 packed parent DB bytes `94,030`, DB directory multiple `1.530436x`, nDCG@10/recall@100 `1.000000`/`1.000000`, p95 `0.652489ms`, packed/separate DB byte ratio `0.359266x`. | Synthetic text-rendered event traces; local flat API only, not production incident retrieval, remote, HNSW, or federation. |
 
 ## Novel Usage Buckets
 
