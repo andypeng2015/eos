@@ -85,6 +85,7 @@ type planRow struct {
 	DerivedWindowCount                    int     `json:"derived_window_count"`
 	QuantizedVectorBytes                  int64   `json:"quantized_vector_bytes"`
 	VectorOverheadBytes                   int64   `json:"vector_overhead_bytes"`
+	PackedObjectOverheadBytes             int64   `json:"packed_object_overhead_bytes"`
 	QuantizedVectorStorageBytes           int64   `json:"quantized_vector_storage_bytes"`
 	VectorsThatFitInOneDenseVector        int64   `json:"vectors_that_fit_in_one_dense_vector"`
 	FitsInOneDenseVectorStorage           bool    `json:"fits_in_one_dense_vector_storage"`
@@ -106,37 +107,38 @@ type commandRecord struct {
 }
 
 type config struct {
-	RunRoot             string  `json:"run_root"`
-	RunDir              string  `json:"run_dir"`
-	Artifact            string  `json:"artifact"`
-	CorkScrewDBRepo     string  `json:"corkscrewdb_repo"`
-	Bits                string  `json:"bits"`
-	OverfetchChildren   string  `json:"overfetch_children"`
-	OutputDim           int     `json:"output_dim"`
-	WindowSize          int     `json:"window_size"`
-	WindowStride        int     `json:"window_stride"`
-	SeriesLength        int     `json:"series_length"`
-	SeriesVariants      int     `json:"series_variants"`
-	BatchSize           string  `json:"batch_size"`
-	BaselineDim         int     `json:"baseline_dim"`
-	TopParents          int     `json:"top_parents"`
-	TargetChildren      int     `json:"target_children"`
-	VectorOverheadBytes int64   `json:"vector_overhead_bytes"`
-	CollectionLabel      string  `json:"collection_label"`
-	DatasetLabel         string  `json:"dataset_label"`
-	IndexType           string  `json:"index_type"`
-	VectorStorage        string  `json:"vector_storage"`
-	Layout               string  `json:"layout"`
-	PackedMetadataMode   string  `json:"packed_metadata_mode"`
-	PackedChildIDMode    string  `json:"packed_child_id_mode"`
-	MinQ4NDCG            float64 `json:"min_q4_ndcg_at_10"`
-	MinQ4Recall          float64 `json:"min_q4_recall_at_100"`
-	MinQ8NDCG            float64 `json:"min_q8_ndcg_at_10"`
-	MinQ8Recall          float64 `json:"min_q8_recall_at_100"`
-	MinPlannerFit        int64   `json:"min_planner_fit"`
-	MaxVectorPayloadMult float64 `json:"max_vector_payload_storage_multiple"`
-	MaxDBDirMultiple     float64 `json:"max_db_directory_storage_multiple"`
-	MaxP95MS             float64 `json:"max_p95_ms"`
+	RunRoot                   string  `json:"run_root"`
+	RunDir                    string  `json:"run_dir"`
+	Artifact                  string  `json:"artifact"`
+	CorkScrewDBRepo           string  `json:"corkscrewdb_repo"`
+	Bits                      string  `json:"bits"`
+	OverfetchChildren         string  `json:"overfetch_children"`
+	OutputDim                 int     `json:"output_dim"`
+	WindowSize                int     `json:"window_size"`
+	WindowStride              int     `json:"window_stride"`
+	SeriesLength              int     `json:"series_length"`
+	SeriesVariants            int     `json:"series_variants"`
+	BatchSize                 string  `json:"batch_size"`
+	BaselineDim               int     `json:"baseline_dim"`
+	TopParents                int     `json:"top_parents"`
+	TargetChildren            int     `json:"target_children"`
+	VectorOverheadBytes       int64   `json:"vector_overhead_bytes"`
+	PackedObjectOverheadBytes int64   `json:"packed_object_overhead_bytes"`
+	CollectionLabel            string  `json:"collection_label"`
+	DatasetLabel               string  `json:"dataset_label"`
+	IndexType                  string  `json:"index_type"`
+	VectorStorage              string  `json:"vector_storage"`
+	Layout                     string  `json:"layout"`
+	PackedMetadataMode         string  `json:"packed_metadata_mode"`
+	PackedChildIDMode          string  `json:"packed_child_id_mode"`
+	MinQ4NDCG                  float64 `json:"min_q4_ndcg_at_10"`
+	MinQ4Recall                float64 `json:"min_q4_recall_at_100"`
+	MinQ8NDCG                  float64 `json:"min_q8_ndcg_at_10"`
+	MinQ8Recall                float64 `json:"min_q8_recall_at_100"`
+	MinPlannerFit              int64   `json:"min_planner_fit"`
+	MaxVectorPayloadMult       float64 `json:"max_vector_payload_storage_multiple"`
+	MaxDBDirMultiple           float64 `json:"max_db_directory_storage_multiple"`
+	MaxP95MS                   float64 `json:"max_p95_ms"`
 }
 
 type summaryRow struct {
@@ -228,6 +230,7 @@ Environment:
   EOS_CORKSCREW_SMOKE_PACKED_CHILD_ID_MODE=source # source|ordinal
   EOS_CORKSCREW_TS_WINDOW_TARGET_CHILDREN=5
   EOS_CORKSCREW_TS_WINDOW_VECTOR_OVERHEAD_BYTES=32
+  EOS_CORKSCREW_TS_WINDOW_PACKED_OBJECT_OVERHEAD_BYTES=32
   EOS_CORKSCREW_TS_WINDOW_COLLECTION=eos_timeseries_window_smoke
   EOS_CORKSCREW_TS_WINDOW_DATASET=synthetic-timeseries-windows
   EOS_CORKSCREW_TS_WINDOW_MIN_Q4_NDCG_AT_10=0
@@ -621,6 +624,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	packedObjectOverheadBytes, err := parseInt64Env("EOS_CORKSCREW_TS_WINDOW_PACKED_OBJECT_OVERHEAD_BYTES", 32)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	minQ4NDCG, err := parseFloatEnv("EOS_CORKSCREW_TS_WINDOW_MIN_Q4_NDCG_AT_10", 0)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -686,7 +694,8 @@ func main() {
 		BaselineDim:         baselineDim,
 		TopParents:          topParents,
 		TargetChildren:      targetChildren,
-		VectorOverheadBytes: vectorOverheadBytes,
+		VectorOverheadBytes:       vectorOverheadBytes,
+		PackedObjectOverheadBytes: packedObjectOverheadBytes,
 		CollectionLabel:      collectionLabel,
 		DatasetLabel:         datasetLabel,
 		IndexType:           indexType,
@@ -717,6 +726,7 @@ func main() {
 		"EOS_TS_WINDOW_SMOKE_BATCH_SIZE="+batchSize,
 		"EOS_TS_WINDOW_SMOKE_BASELINE_DIM="+strconv.Itoa(baselineDim),
 		"EOS_TS_WINDOW_SMOKE_VECTOR_OVERHEAD_BYTES="+strconv.FormatInt(vectorOverheadBytes, 10),
+		"EOS_TS_WINDOW_SMOKE_PACKED_OBJECT_OVERHEAD_BYTES="+strconv.FormatInt(packedObjectOverheadBytes, 10),
 	)
 	if artifact != "" {
 		timeseriesEnv = append(timeseriesEnv, "EOS_TS_WINDOW_SMOKE_ARTIFACT="+artifact)

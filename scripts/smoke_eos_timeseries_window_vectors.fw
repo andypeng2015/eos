@@ -107,8 +107,10 @@ type planRow struct {
 	QuantizedPayloadBytes            int64   `json:"quantized_payload_bytes"`
 	QuantizedVectorBytes             int64   `json:"quantized_vector_bytes"`
 	VectorOverheadBytes              int64   `json:"vector_overhead_bytes"`
+	PackedObjectOverheadBytes        int64   `json:"packed_object_overhead_bytes"`
 	DenseVectorStorageBytes          int64   `json:"dense_vector_storage_bytes"`
 	QuantizedVectorStorageBytes      int64   `json:"quantized_vector_storage_bytes"`
+	PackedQuantizedStorageBytes      int64   `json:"packed_quantized_storage_bytes"`
 	TotalQuantizedBytes              int64   `json:"total_quantized_bytes"`
 	TotalCompressionRatio            float64 `json:"total_compression_ratio"`
 	VectorsThatFitInOneDenseVector   int64   `json:"vectors_that_fit_in_one_dense_vector"`
@@ -139,36 +141,37 @@ type summaryRow struct {
 }
 
 type manifest struct {
-	Schema           string       `json:"schema"`
-	GeneratedAt      string       `json:"generated_at"`
-	RunDir           string       `json:"run_dir"`
-	Artifact         string       `json:"artifact"`
-	Dataset          string       `json:"dataset"`
-	OutputDim        int          `json:"output_dim"`
-	WindowSize       int          `json:"window_size"`
-	WindowStride     int          `json:"window_stride"`
-	SeriesCount      int          `json:"series_count"`
-	SeriesVariants   int          `json:"series_variants"`
-	SeriesLength     int          `json:"series_length"`
-	Bits             string       `json:"bits"`
-	BaselineDim      int          `json:"baseline_dim"`
-	VectorOverhead   int64        `json:"vector_overhead_bytes"`
-	SeriesPath       string       `json:"series_path"`
-	QueriesPath      string       `json:"queries_path"`
-	QrelsPath        string       `json:"qrels_path"`
-	ExportDir        string       `json:"export_dir"`
-	ExportManifest   string       `json:"export_manifest"`
-	MetricsJSON      string       `json:"metrics_json"`
-	MetricsTSV       string       `json:"metrics_tsv"`
-	StoragePlanJSON  string       `json:"storage_plan_json"`
-	SummaryTSV       string       `json:"summary_tsv"`
-	ExportCommand    []string     `json:"export_command"`
-	EvalCommand      []string     `json:"eval_command"`
-	PlannerCommand   []string     `json:"planner_command"`
-	Rows             []summaryRow `json:"rows"`
-	Caveats          []string     `json:"caveats"`
-	QualityGate      string       `json:"quality_gate"`
-	StorageGate      string       `json:"storage_gate"`
+	Schema               string       `json:"schema"`
+	GeneratedAt          string       `json:"generated_at"`
+	RunDir               string       `json:"run_dir"`
+	Artifact             string       `json:"artifact"`
+	Dataset              string       `json:"dataset"`
+	OutputDim            int          `json:"output_dim"`
+	WindowSize           int          `json:"window_size"`
+	WindowStride         int          `json:"window_stride"`
+	SeriesCount          int          `json:"series_count"`
+	SeriesVariants       int          `json:"series_variants"`
+	SeriesLength         int          `json:"series_length"`
+	Bits                 string       `json:"bits"`
+	BaselineDim          int          `json:"baseline_dim"`
+	VectorOverhead       int64        `json:"vector_overhead_bytes"`
+	PackedObjectOverhead int64        `json:"packed_object_overhead_bytes"`
+	SeriesPath           string       `json:"series_path"`
+	QueriesPath          string       `json:"queries_path"`
+	QrelsPath            string       `json:"qrels_path"`
+	ExportDir            string       `json:"export_dir"`
+	ExportManifest       string       `json:"export_manifest"`
+	MetricsJSON          string       `json:"metrics_json"`
+	MetricsTSV           string       `json:"metrics_tsv"`
+	StoragePlanJSON      string       `json:"storage_plan_json"`
+	SummaryTSV           string       `json:"summary_tsv"`
+	ExportCommand        []string     `json:"export_command"`
+	EvalCommand          []string     `json:"eval_command"`
+	PlannerCommand       []string     `json:"planner_command"`
+	Rows                 []summaryRow `json:"rows"`
+	Caveats              []string     `json:"caveats"`
+	QualityGate          string       `json:"quality_gate"`
+	StorageGate          string       `json:"storage_gate"`
 }
 
 func usage() {
@@ -190,6 +193,7 @@ Environment:
   EOS_TS_WINDOW_SMOKE_BITS=2,4,8
   EOS_TS_WINDOW_SMOKE_BASELINE_DIM=3072
   EOS_TS_WINDOW_SMOKE_VECTOR_OVERHEAD_BYTES=32
+  EOS_TS_WINDOW_SMOKE_PACKED_OBJECT_OVERHEAD_BYTES=32
   EOS_TS_WINDOW_SMOKE_DISABLE_QUALITY_GATE=0
   EOS_TS_WINDOW_SMOKE_Q8_MAX_NDCG_DROP=0.000001
   EOS_TS_WINDOW_SMOKE_Q8_MAX_RECALL_DROP=0.000001
@@ -666,6 +670,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	packedObjectOverhead, err := parseInt64Env("EOS_TS_WINDOW_SMOKE_PACKED_OBJECT_OVERHEAD_BYTES", 32)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	maxNDCGDrop, err := parseFloatEnv("EOS_TS_WINDOW_SMOKE_Q8_MAX_NDCG_DROP", 0.000001)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -747,6 +756,7 @@ func main() {
 		"--window-size", strconv.Itoa(windowSize),
 		"--window-stride", strconv.Itoa(windowStride),
 		"--vector-overhead-bytes", strconv.FormatInt(vectorOverhead, 10),
+		"--packed-object-overhead-bytes", strconv.FormatInt(packedObjectOverhead, 10),
 		"--json", storagePlanJSON,
 	}
 	if err := runCommand(root, filepath.Join(runDir, "logs"), "plan-multivector-storage", plannerArgs); err != nil {
@@ -793,7 +803,8 @@ func main() {
 		SeriesLength:    seriesLength,
 		Bits:            bits,
 		BaselineDim:     baselineDim,
-		VectorOverhead:  vectorOverhead,
+		VectorOverhead:       vectorOverhead,
+		PackedObjectOverhead: packedObjectOverhead,
 		SeriesPath:      seriesPath,
 		QueriesPath:     queriesPath,
 		QrelsPath:       qrelsPath,
@@ -810,7 +821,7 @@ func main() {
 		Caveats: []string{
 			"Synthetic smoke only: text-rendered numeric windows, not a trained numeric time-series encoder.",
 			"Cache-only evaluator: this does not load/index/query CorkScrewDB.",
-			"Planner overhead is configurable and defaults to 32 bytes per stored vector/index entry.",
+			"Planner overhead defaults to 32 bytes per stored vector/index entry and 32 bytes per packed parent object.",
 		},
 		QualityGate: fmt.Sprintf("q8 must be within ndcg@10 %.6f and recall@100 %.6f of dense when q8 is present unless EOS_TS_WINDOW_SMOKE_DISABLE_QUALITY_GATE=1", maxNDCGDrop, maxRecallDrop),
 		StorageGate: fmt.Sprintf("q8 eval storage multiple must be <= %.6f when q8 is present and threshold is positive", maxQ8Storage),
