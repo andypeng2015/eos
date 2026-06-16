@@ -3657,6 +3657,7 @@ func runTrainEmbed(args []string) error {
 	var turboQuantPrefixBits string
 	var turboQuantPrefixWeight float64
 	var turboQuantPrefixSeed int64
+	var turboQuantPrefixScoreMode string
 	var retrievalEvalDir string
 	var retrievalEvalSplit string
 	var retrievalEvalMaxDocs int
@@ -3698,6 +3699,7 @@ func runTrainEmbed(args []string) error {
 	fs.StringVar(&turboQuantPrefixBits, "turboquant-prefix-bits", "", "comma-separated TurboQuant bit widths for quantized compact-prefix InfoNCE, supported: 2..8")
 	fs.Float64Var(&turboQuantPrefixWeight, "turboquant-prefix-weight", 0, "optional weight for each TurboQuant compact-prefix objective (default 1 when bits are set)")
 	fs.Int64Var(&turboQuantPrefixSeed, "turboquant-prefix-seed", 0, "TurboQuant compact-prefix quantizer seed (default matches multivector retrieval)")
+	fs.StringVar(&turboQuantPrefixScoreMode, "turboquant-prefix-score-mode", "", "TurboQuant compact-prefix score mode: reconstruct_cosine (default) or prepared_ip")
 	fs.StringVar(&retrievalEvalDir, "retrieval-eval-dir", "", "BEIR-style dataset dir for per-epoch retrieval nDCG@10 eval with current weights; enables -select-metric retrieval_ndcg")
 	fs.StringVar(&retrievalEvalSplit, "retrieval-eval-split", "test", "qrels split for retrieval eval (test/dev/train)")
 	fs.IntVar(&retrievalEvalMaxDocs, "retrieval-eval-max-docs", 5000, "cap corpus docs embedded per retrieval eval (0 = all); smaller is faster per-epoch")
@@ -3767,6 +3769,14 @@ func runTrainEmbed(args []string) error {
 	if err := validateTurboQuantPrefixBitsFlag(parsedTurboQuantPrefixBits); err != nil {
 		return err
 	}
+	parsedTurboQuantPrefixScoreMode := ""
+	if strings.TrimSpace(turboQuantPrefixScoreMode) != "" {
+		mode, parseErr := eosruntime.NormalizeTurboQuantPrefixScoreModeForCLI(turboQuantPrefixScoreMode)
+		if parseErr != nil {
+			return parseErr
+		}
+		parsedTurboQuantPrefixScoreMode = mode
+	}
 	if len(parsedSourceWeights) > 0 && !hardNegativeTrain {
 		return fmt.Errorf("--hard-negative-source-weights requires --hard-negative-train")
 	}
@@ -3824,6 +3834,7 @@ func runTrainEmbed(args []string) error {
 		TurboQuantPrefixBits:      parsedTurboQuantPrefixBits,
 		TurboQuantPrefixWeight:    float32(turboQuantPrefixWeight),
 		TurboQuantPrefixSeed:      turboQuantPrefixSeed,
+		TurboQuantPrefixScoreMode: parsedTurboQuantPrefixScoreMode,
 		ProgressEverySteps:        progressEvery,
 		EvalOnly:                  evalOnly,
 		PairwiseTrain:             pairwiseTrain,
@@ -4356,6 +4367,7 @@ func runTrainCorpus(args []string) error {
 	var turboQuantPrefixBits string
 	var turboQuantPrefixWeight float64
 	var turboQuantPrefixSeed int64
+	var turboQuantPrefixScoreMode string
 	fs.IntVar(&epochs, "epochs", 10, "number of epochs")
 	fs.IntVar(&batchSize, "batch-size", 8, "batch size")
 	fs.BoolVar(&shuffle, "shuffle", true, "shuffle training set each epoch")
@@ -4388,6 +4400,7 @@ func runTrainCorpus(args []string) error {
 	fs.StringVar(&turboQuantPrefixBits, "turboquant-prefix-bits", "", "comma-separated TurboQuant bit widths for quantized compact-prefix InfoNCE, supported: 2..8")
 	fs.Float64Var(&turboQuantPrefixWeight, "turboquant-prefix-weight", 0, "optional weight for each TurboQuant compact-prefix objective (default 1 when bits are set)")
 	fs.Int64Var(&turboQuantPrefixSeed, "turboquant-prefix-seed", 0, "TurboQuant compact-prefix quantizer seed (default matches multivector retrieval)")
+	fs.StringVar(&turboQuantPrefixScoreMode, "turboquant-prefix-score-mode", "", "TurboQuant compact-prefix score mode: reconstruct_cosine (default) or prepared_ip")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -4433,32 +4446,41 @@ func runTrainCorpus(args []string) error {
 	if err := validateTurboQuantPrefixBitsFlag(parsedTurboQuantPrefixBits); err != nil {
 		return err
 	}
+	parsedTurboQuantPrefixScoreMode := ""
+	if strings.TrimSpace(turboQuantPrefixScoreMode) != "" {
+		mode, parseErr := eosruntime.NormalizeTurboQuantPrefixScoreModeForCLI(turboQuantPrefixScoreMode)
+		if parseErr != nil {
+			return parseErr
+		}
+		parsedTurboQuantPrefixScoreMode = mode
+	}
 	path := fs.Arg(0)
 	corpusPath := fs.Arg(1)
 	runConfig := eosruntime.EmbeddingTrainRunConfig{
-		Epochs:                 epochs,
-		BatchSize:              batchSize,
-		Shuffle:                shuffle,
-		Seed:                   seed,
-		EvalEveryEpoch:         evalEvery,
-		EvalEverySteps:         evalEverySteps,
-		EarlyStoppingPatience:  patience,
-		SelectMetric:           selectMetric,
-		MinDelta:               float32(minDelta),
-		RestoreBest:            restoreBest,
-		LengthBucketBatches:    lengthBucketBatches,
-		LearningRate:           float32(learningRate),
-		ContrastiveLoss:        contrastiveLoss,
-		Temperature:            float32(temperature),
-		GroupedLossWeight:      float32(groupedLossWeight),
-		TeacherLossWeight:      float32(teacherLossWeight),
-		TeacherTemperature:     float32(teacherTemperature),
-		MatryoshkaDims:         parsedMatryoshkaDims,
-		MatryoshkaWeights:      parsedMatryoshkaWeights,
-		TurboQuantPrefixBits:   parsedTurboQuantPrefixBits,
-		TurboQuantPrefixWeight: float32(turboQuantPrefixWeight),
-		TurboQuantPrefixSeed:   turboQuantPrefixSeed,
-		ProgressEverySteps:     progressEvery,
+		Epochs:                    epochs,
+		BatchSize:                 batchSize,
+		Shuffle:                   shuffle,
+		Seed:                      seed,
+		EvalEveryEpoch:            evalEvery,
+		EvalEverySteps:            evalEverySteps,
+		EarlyStoppingPatience:     patience,
+		SelectMetric:              selectMetric,
+		MinDelta:                  float32(minDelta),
+		RestoreBest:               restoreBest,
+		LengthBucketBatches:       lengthBucketBatches,
+		LearningRate:              float32(learningRate),
+		ContrastiveLoss:           contrastiveLoss,
+		Temperature:               float32(temperature),
+		GroupedLossWeight:         float32(groupedLossWeight),
+		TeacherLossWeight:         float32(teacherLossWeight),
+		TeacherTemperature:        float32(teacherTemperature),
+		MatryoshkaDims:            parsedMatryoshkaDims,
+		MatryoshkaWeights:         parsedMatryoshkaWeights,
+		TurboQuantPrefixBits:      parsedTurboQuantPrefixBits,
+		TurboQuantPrefixWeight:    float32(turboQuantPrefixWeight),
+		TurboQuantPrefixSeed:      turboQuantPrefixSeed,
+		TurboQuantPrefixScoreMode: parsedTurboQuantPrefixScoreMode,
+		ProgressEverySteps:        progressEvery,
 	}
 	if progressEvery > 0 {
 		runConfig.Progress = printTrainProgress
@@ -4582,6 +4604,7 @@ type trainRunConfigJSON struct {
 	TurboQuantPrefixBits      []int              `json:"turboquant_prefix_bits,omitempty"`
 	TurboQuantPrefixWeight    float32            `json:"turboquant_prefix_weight,omitempty"`
 	TurboQuantPrefixSeed      int64              `json:"turboquant_prefix_seed,omitempty"`
+	TurboQuantPrefixScoreMode string             `json:"turboquant_prefix_score_mode,omitempty"`
 	ProgressEverySteps        int                `json:"progress_every_steps"`
 	EvalOnly                  bool               `json:"eval_only"`
 	PairwiseTrain             bool               `json:"pairwise_train"`
@@ -4755,6 +4778,7 @@ func trainRunConfigPayload(cfg eosruntime.EmbeddingTrainRunConfig) trainRunConfi
 		TurboQuantPrefixBits:      cfg.TurboQuantPrefixBits,
 		TurboQuantPrefixWeight:    cfg.TurboQuantPrefixWeight,
 		TurboQuantPrefixSeed:      cfg.TurboQuantPrefixSeed,
+		TurboQuantPrefixScoreMode: cfg.TurboQuantPrefixScoreMode,
 		ProgressEverySteps:        cfg.ProgressEverySteps,
 		EvalOnly:                  cfg.EvalOnly,
 		PairwiseTrain:             cfg.PairwiseTrain,

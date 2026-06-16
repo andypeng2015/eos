@@ -110,24 +110,25 @@ func (m EmbeddingTrainManifest) nameOrDefault() string {
 
 func (m EmbeddingTrainManifest) mllValues() map[string]authoredManifestValue {
 	values := map[string]authoredManifestValue{
-		"name":                            authoredString(m.Name),
-		"config.optimizer":                authoredString(m.Config.Optimizer),
-		"config.weight_bits":              authoredInt(int64(m.Config.WeightBits)),
-		"config.learning_rate":            authoredFloat(float64(m.Config.LearningRate)),
-		"config.weight_decay":             authoredFloat(float64(m.Config.WeightDecay)),
-		"config.beta1":                    authoredFloat(float64(m.Config.Beta1)),
-		"config.beta2":                    authoredFloat(float64(m.Config.Beta2)),
-		"config.epsilon":                  authoredFloat(float64(m.Config.Epsilon)),
-		"config.contrastive_loss":         authoredString(m.Config.ContrastiveLoss),
-		"config.temperature":              authoredFloat(float64(m.Config.Temperature)),
-		"config.grouped_loss_weight":      authoredFloat(float64(m.Config.GroupedLossWeight)),
-		"config.teacher_loss_weight":      authoredFloat(float64(m.Config.TeacherLossWeight)),
-		"config.teacher_temperature":      authoredFloat(float64(m.Config.TeacherTemperature)),
-		"config.matryoshka_dims":          authoredString(formatMatryoshkaDims(m.Config.MatryoshkaDims)),
-		"config.matryoshka_weights":       authoredString(formatMatryoshkaWeights(m.Config.MatryoshkaWeights)),
-		"config.turboquant_prefix_bits":   authoredString(formatIntList(m.Config.TurboQuantPrefixBits)),
-		"config.turboquant_prefix_weight": authoredFloat(float64(m.Config.TurboQuantPrefixWeight)),
-		"config.turboquant_prefix_seed":   authoredInt(m.Config.TurboQuantPrefixSeed),
+		"name":                                authoredString(m.Name),
+		"config.optimizer":                    authoredString(m.Config.Optimizer),
+		"config.weight_bits":                  authoredInt(int64(m.Config.WeightBits)),
+		"config.learning_rate":                authoredFloat(float64(m.Config.LearningRate)),
+		"config.weight_decay":                 authoredFloat(float64(m.Config.WeightDecay)),
+		"config.beta1":                        authoredFloat(float64(m.Config.Beta1)),
+		"config.beta2":                        authoredFloat(float64(m.Config.Beta2)),
+		"config.epsilon":                      authoredFloat(float64(m.Config.Epsilon)),
+		"config.contrastive_loss":             authoredString(m.Config.ContrastiveLoss),
+		"config.temperature":                  authoredFloat(float64(m.Config.Temperature)),
+		"config.grouped_loss_weight":          authoredFloat(float64(m.Config.GroupedLossWeight)),
+		"config.teacher_loss_weight":          authoredFloat(float64(m.Config.TeacherLossWeight)),
+		"config.teacher_temperature":          authoredFloat(float64(m.Config.TeacherTemperature)),
+		"config.matryoshka_dims":              authoredString(formatMatryoshkaDims(m.Config.MatryoshkaDims)),
+		"config.matryoshka_weights":           authoredString(formatMatryoshkaWeights(m.Config.MatryoshkaWeights)),
+		"config.turboquant_prefix_bits":       authoredString(formatIntList(m.Config.TurboQuantPrefixBits)),
+		"config.turboquant_prefix_weight":     authoredFloat(float64(m.Config.TurboQuantPrefixWeight)),
+		"config.turboquant_prefix_seed":       authoredInt(m.Config.TurboQuantPrefixSeed),
+		"config.turboquant_prefix_score_mode": authoredString(m.Config.TurboQuantPrefixScoreMode),
 	}
 	for key, value := range m.Embedding.mllValues() {
 		values["embedding."+key] = value
@@ -243,6 +244,15 @@ func embeddingTrainManifestFromDoc(doc authoredManifestDoc) (EmbeddingTrainManif
 		return EmbeddingTrainManifest{}, err
 	} else if ok {
 		manifest.Config.TurboQuantPrefixSeed = value
+	}
+	if value, ok, err := doc.string("config.turboquant_prefix_score_mode"); err != nil {
+		return EmbeddingTrainManifest{}, err
+	} else if ok {
+		mode, err := normalizeTurboQuantPrefixScoreMode(value)
+		if err != nil {
+			return EmbeddingTrainManifest{}, err
+		}
+		manifest.Config.TurboQuantPrefixScoreMode = mode
 	}
 	return manifest, nil
 }

@@ -2508,6 +2508,31 @@ func TestRunTrainEmbedFitsContrastivePackage(t *testing.T) {
 	}
 }
 
+func TestRunTrainEmbedAcceptsPreparedTurboQuantPrefixScoreMode(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	trainPath := filepath.Join(t.TempDir(), "train.jsonl")
+	examples := []eosruntime.EmbeddingContrastiveExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
+	}
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
+		t.Fatalf("write train dataset: %v", err)
+	}
+	if err := run([]string{"train-embed", "--epochs", "1", "--batch-size", "2", "--contrastive-loss", "infonce", "--matryoshka-dims", "2", "--turboquant-prefix-bits", "2", "--turboquant-prefix-score-mode", "prepared-ip", path, trainPath}); err != nil {
+		t.Fatalf("run train-embed prepared turboquant prefix: %v", err)
+	}
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(eosruntime.DefaultEmbeddingCheckpointPath(path))
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if checkpoint.Config.TurboQuantPrefixScoreMode != eosruntime.TurboQuantPrefixScoreModePreparedIP {
+		t.Fatalf("turboquant prefix score mode = %q, want %q", checkpoint.Config.TurboQuantPrefixScoreMode, eosruntime.TurboQuantPrefixScoreModePreparedIP)
+	}
+}
+
 func TestRunTrainEmbedRejectsInvalidTurboQuantPrefixBits(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
@@ -2526,6 +2551,38 @@ func TestRunTrainEmbedRejectsInvalidTurboQuantPrefixBits(t *testing.T) {
 		t.Fatal("expected invalid turboquant prefix bits error")
 	}
 	if !strings.Contains(err.Error(), "turboquant-prefix-bits") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunTrainEmbedRejectsInvalidTurboQuantPrefixScoreMode(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	trainPath := filepath.Join(t.TempDir(), "train.jsonl")
+	examples := []eosruntime.EmbeddingContrastiveExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
+	}
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
+		t.Fatalf("write train dataset: %v", err)
+	}
+	err := run([]string{"train-embed", "--epochs", "1", "--batch-size", "2", "--contrastive-loss", "infonce", "--matryoshka-dims", "2", "--turboquant-prefix-bits", "2", "--turboquant-prefix-score-mode", "bogus", path, trainPath})
+	if err == nil {
+		t.Fatal("expected invalid turboquant prefix score mode error")
+	}
+	if !strings.Contains(err.Error(), "turboquant_prefix_score_mode") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunTrainCorpusRejectsInvalidTurboQuantPrefixScoreMode(t *testing.T) {
+	err := run([]string{"train-corpus", "--matryoshka-dims", "2", "--turboquant-prefix-bits", "2", "--turboquant-prefix-score-mode", "bogus", filepath.Join(t.TempDir(), "artifact.mll"), filepath.Join(t.TempDir(), "corpus.txt")})
+	if err == nil {
+		t.Fatal("expected invalid turboquant prefix score mode error")
+	}
+	if !strings.Contains(err.Error(), "turboquant_prefix_score_mode") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

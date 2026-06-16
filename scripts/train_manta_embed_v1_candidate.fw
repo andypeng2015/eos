@@ -62,6 +62,7 @@ type candidateConfig struct {
 	TurboQuantPrefixBits string
 	TurboQuantPrefixWeight string
 	TurboQuantPrefixSeed string
+	TurboQuantPrefixScoreMode string
 	EvalEvery           string
 	EvalEverySteps      string
 	Patience            string
@@ -516,6 +517,7 @@ func writeManifest(cfg candidateConfig, status string) error {
     "turboquant_prefix_bits": %s,
     "turboquant_prefix_weight": %s,
     "turboquant_prefix_seed": %s,
+    "turboquant_prefix_score_mode": %s,
     "select_metric": %s,
     "quality_target": %s,
     "eval_every": %s,
@@ -581,6 +583,7 @@ func writeManifest(cfg candidateConfig, status string) error {
 		jsonString(cfg.TurboQuantPrefixBits),
 		jsonString(cfg.TurboQuantPrefixWeight),
 		jsonString(cfg.TurboQuantPrefixSeed),
+		jsonString(cfg.TurboQuantPrefixScoreMode),
 		jsonString(cfg.SelectMetric),
 		jsonString(cfg.QualityTarget),
 		cfg.EvalEvery,
@@ -710,6 +713,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		TurboQuantPrefixBits: getenv("EOS_TURBOQUANT_PREFIX_BITS", ""),
 		TurboQuantPrefixWeight: getenv("EOS_TURBOQUANT_PREFIX_WEIGHT", ""),
 		TurboQuantPrefixSeed: getenv("EOS_TURBOQUANT_PREFIX_SEED", ""),
+		TurboQuantPrefixScoreMode: getenv("EOS_TURBOQUANT_PREFIX_SCORE_MODE", ""),
 		EvalEvery:           getenv("EOS_EVAL_EVERY", "1"),
 		EvalEverySteps:      getenv("EOS_EVAL_EVERY_STEPS", "0"),
 		Patience:            getenv("EOS_PATIENCE", "3"),
@@ -878,6 +882,9 @@ func trainCommonArgs(cfg candidateConfig) []string {
 	}
 	if cfg.TurboQuantPrefixSeed != "" {
 		args = append(args, "--turboquant-prefix-seed", cfg.TurboQuantPrefixSeed)
+	}
+	if cfg.TurboQuantPrefixScoreMode != "" {
+		args = append(args, "--turboquant-prefix-score-mode", cfg.TurboQuantPrefixScoreMode)
 	}
 	return args
 }

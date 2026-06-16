@@ -44,6 +44,7 @@ type EmbeddingTrainConfig struct {
 	TurboQuantPrefixBits      []int
 	TurboQuantPrefixWeight    float32
 	TurboQuantPrefixSeed      int64
+	TurboQuantPrefixScoreMode string
 }
 
 // EmbeddingTrainMetrics summarizes one training/eval batch.
@@ -2721,6 +2722,11 @@ type contrastivePooledMatrix struct {
 	norms []float32
 }
 
+const (
+	TurboQuantPrefixScoreModeReconstructCosine = "reconstruct_cosine"
+	TurboQuantPrefixScoreModePreparedIP        = "prepared_ip"
+)
+
 func newContrastivePooledMatrix(seqs []*embeddingEncodedSequence) contrastivePooledMatrix {
 	matrix := contrastivePooledMatrix{
 		rows:  len(seqs),
@@ -2747,7 +2753,7 @@ func newContrastivePrefixPooledMatrix(seqs []*embeddingEncodedSequence, dim int)
 		rows:  len(seqs),
 		norms: make([]float32, len(seqs)),
 	}
-	if len(seqs) == 0 || seqs[0] == nil || dim <= 0 || len(seqs[0].pooled) < dim {
+	if len(seqs) == 0 || dim <= 0 {
 		return matrix
 	}
 	matrix.width = dim
@@ -2768,7 +2774,7 @@ func newTurboQuantDequantizedPrefixPooledMatrix(seqs []*embeddingEncodedSequence
 		rows:  len(seqs),
 		norms: make([]float32, len(seqs)),
 	}
-	if len(seqs) == 0 || seqs[0] == nil || dim <= 0 || len(seqs[0].pooled) < dim {
+	if len(seqs) == 0 || dim <= 0 {
 		return matrix
 	}
 	matrix.width = dim
@@ -2784,6 +2790,107 @@ func newTurboQuantDequantizedPrefixPooledMatrix(seqs []*embeddingEncodedSequence
 		matrix.norms[row] = vectorNorm(values)
 	}
 	return matrix
+}
+
+type turboQuantPreparedPrefixMatrix struct {
+	rows        int
+	width       int
+	raw         []float32
+	normalized  []float32
+	rawNorms    []float32
+	quantized   []turboquant.IPQuantized
+	dequantized []float32
+	prepared    []turboquant.PreparedQuery
+}
+
+func newTurboQuantPreparedPrefixMatrix(seqs []*embeddingEncodedSequence, dim, bitWidth int, seed int64, prepareQueries bool) turboQuantPreparedPrefixMatrix {
+	matrix := turboQuantPreparedPrefixMatrix{
+		rows:     len(seqs),
+		rawNorms: make([]float32, len(seqs)),
+	}
+	if len(seqs) == 0 || dim <= 0 {
+		return matrix
+	}
+	matrix.width = dim
+	matrix.raw = make([]float32, matrix.rows*matrix.width)
+	matrix.normalized = make([]float32, matrix.rows*matrix.width)
+	q := turboquant.NewIPWithSeed(dim, bitWidth, seed)
+	if prepareQueries {
+		matrix.prepared = make([]turboquant.PreparedQuery, matrix.rows)
+	} else {
+		matrix.quantized = make([]turboquant.IPQuantized, matrix.rows)
+		matrix.dequantized = make([]float32, matrix.rows*matrix.width)
+	}
+	for row, seq := range seqs {
+		normalized := matrix.normalizedRow(row)
+		if seq != nil && len(seq.pooled) >= matrix.width {
+			raw := matrix.rawRow(row)
+			copy(raw, seq.pooled[:matrix.width])
+			norm := vectorNorm(raw)
+			matrix.rawNorms[row] = norm
+			if norm > 0 {
+				inv := 1 / norm
+				for i, v := range raw {
+					normalized[i] = v * inv
+				}
+			}
+		}
+		// Even nil, short, or zero-norm rows need valid TurboQuant objects because
+		// later scoring loops index every row position.
+		if prepareQueries {
+			matrix.prepared[row] = q.PrepareQuery(normalized)
+		} else {
+			qx := q.Quantize(normalized)
+			matrix.quantized[row] = qx
+			copy(matrix.dequantizedRow(row), q.Dequantize(qx))
+		}
+	}
+	return matrix
+}
+
+func (m turboQuantPreparedPrefixMatrix) rawRow(index int) []float32 {
+	if index < 0 || index >= m.rows || m.width == 0 {
+		return nil
+	}
+	base := index * m.width
+	return m.raw[base : base+m.width]
+}
+
+func (m turboQuantPreparedPrefixMatrix) normalizedRow(index int) []float32 {
+	if index < 0 || index >= m.rows || m.width == 0 {
+		return nil
+	}
+	base := index * m.width
+	return m.normalized[base : base+m.width]
+}
+
+func (m turboQuantPreparedPrefixMatrix) dequantizedRow(index int) []float32 {
+	if index < 0 || index >= m.rows || m.width == 0 {
+		return nil
+	}
+	base := index * m.width
+	return m.dequantized[base : base+m.width]
+}
+
+func turboQuantPreparedPrefixScore(q *turboquant.IPQuantizer, normalizedCandidate, normalizedQuery []float32) float32 {
+	if q == nil || len(normalizedCandidate) != q.Dim() || len(normalizedQuery) != q.Dim() {
+		return 0
+	}
+	return q.InnerProductPrepared(q.Quantize(normalizedCandidate), q.PrepareQuery(normalizedQuery))
+}
+
+func accumulateNormalizedPrefixSTEGrad(raw, normalized []float32, rawNorm float32, upstream []float32, scale float32, grad []float32) {
+	if len(raw) != len(normalized) || len(raw) != len(upstream) || len(grad) < len(raw) || rawNorm == 0 || scale == 0 {
+		return
+	}
+	dot := float32(0)
+	for i := range raw {
+		dot += normalized[i] * upstream[i]
+	}
+	invNorm := 1 / rawNorm
+	for i := range raw {
+		grad[i] += scale * (upstream[i] - normalized[i]*dot) * invNorm
+	}
 }
 
 func (m contrastivePooledMatrix) row(index int) []float32 {
@@ -3110,6 +3217,46 @@ func accumulateTurboQuantPrefixInfoNCEContrastiveGrads(queries, positives []*emb
 	return totalLoss, totalScore
 }
 
+func accumulateTurboQuantPreparedIPPrefixInfoNCEContrastiveGrads(queries, positives []*embeddingEncodedSequence, dim, bitWidth int, seed int64, temperature float32, queryGrads, positiveGrads [][]float32) (float32, float32) {
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	if dim <= 0 {
+		return 0, 0
+	}
+	if temperature <= 0 {
+		temperature = 0.05
+	}
+	queryMatrix := newTurboQuantPreparedPrefixMatrix(queries, dim, bitWidth, seed, true)
+	positiveMatrix := newTurboQuantPreparedPrefixMatrix(positives, dim, bitWidth, seed, false)
+	if queryMatrix.width == 0 || positiveMatrix.width != queryMatrix.width {
+		return 0, 0
+	}
+	q := turboquant.NewIPWithSeed(dim, bitWidth, seed)
+	rowScores := make([]float32, len(positives))
+	rowProbs := make([]float32, len(positives))
+	for i := range queries {
+		for j := range positives {
+			score := q.InnerProductPrepared(positiveMatrix.quantized[j], queryMatrix.prepared[i])
+			rowScores[j] = score
+			totalScore += score
+		}
+		rowLoss := infoNCERowProbsAndLossInto(rowScores, i, temperature, rowProbs)
+		totalLoss += rowLoss
+		queryRaw := queryMatrix.rawRow(i)
+		queryNormalized := queryMatrix.normalizedRow(i)
+		for j, prob := range rowProbs {
+			target := float32(0)
+			if i == j {
+				target = 1
+			}
+			scale := (prob - target) / temperature
+			accumulateNormalizedPrefixSTEGrad(queryRaw, queryNormalized, queryMatrix.rawNorms[i], positiveMatrix.dequantizedRow(j), scale, queryGrads[i])
+			accumulateNormalizedPrefixSTEGrad(positiveMatrix.rawRow(j), positiveMatrix.normalizedRow(j), positiveMatrix.rawNorms[j], queryNormalized, scale, positiveGrads[j])
+		}
+	}
+	return totalLoss, totalScore
+}
+
 func accumulateMatryoshkaContrastiveGrads(queries, positives []*embeddingEncodedSequence, cfg EmbeddingTrainConfig, queryGrads, positiveGrads [][]float32) (float32, float32, int) {
 	if len(cfg.MatryoshkaDims) == 0 {
 		return 0, 0, 0
@@ -3146,6 +3293,7 @@ func accumulateTurboQuantPrefixContrastiveGrads(queries, positives []*embeddingE
 		return 0, 0, 0
 	}
 	seed := effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
+	scoreMode, _ := normalizeTurboQuantPrefixScoreMode(cfg.TurboQuantPrefixScoreMode)
 	totalLoss := float32(0)
 	totalScore := float32(0)
 	pairCount := 0
@@ -3153,7 +3301,12 @@ func accumulateTurboQuantPrefixContrastiveGrads(queries, positives []*embeddingE
 		for _, bitWidth := range cfg.TurboQuantPrefixBits {
 			dimQueryGrads := newEmbeddingPooledGradBuffers(queries)
 			dimPositiveGrads := newEmbeddingPooledGradBuffers(positives)
-			loss, score := accumulateTurboQuantPrefixInfoNCEContrastiveGrads(queries, positives, dim, bitWidth, seed, cfg.Temperature, dimQueryGrads, dimPositiveGrads)
+			var loss, score float32
+			if scoreMode == TurboQuantPrefixScoreModePreparedIP {
+				loss, score = accumulateTurboQuantPreparedIPPrefixInfoNCEContrastiveGrads(queries, positives, dim, bitWidth, seed, cfg.Temperature, dimQueryGrads, dimPositiveGrads)
+			} else {
+				loss, score = accumulateTurboQuantPrefixInfoNCEContrastiveGrads(queries, positives, dim, bitWidth, seed, cfg.Temperature, dimQueryGrads, dimPositiveGrads)
+			}
 			addScaledEmbeddingGradBuffers(queryGrads, dimQueryGrads, weight)
 			addScaledEmbeddingGradBuffers(positiveGrads, dimPositiveGrads, weight)
 			totalLoss += loss * weight
@@ -3279,6 +3432,50 @@ func accumulateTurboQuantPrefixInfoNCEHardNegativeGrads(queries, candidates []*e
 			}
 			scale := (prob - target) / temperature
 			accumulateCosineGradFromScore(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j], rowScores[j], scale, queryGrads[i], candidateGrads[j])
+		}
+	}
+	return totalLoss, totalScore
+}
+
+func accumulateTurboQuantPreparedIPPrefixInfoNCEHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, targetIndexes []int, dim, bitWidth int, seed int64, temperature float32, queryGrads, candidateGrads [][]float32) (float32, float32) {
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	if dim <= 0 {
+		return 0, 0
+	}
+	if temperature <= 0 {
+		temperature = 0.05
+	}
+	queryMatrix := newTurboQuantPreparedPrefixMatrix(queries, dim, bitWidth, seed, true)
+	candidateMatrix := newTurboQuantPreparedPrefixMatrix(candidates, dim, bitWidth, seed, false)
+	if queryMatrix.width == 0 || candidateMatrix.width != queryMatrix.width {
+		return 0, 0
+	}
+	q := turboquant.NewIPWithSeed(dim, bitWidth, seed)
+	rowScores := make([]float32, len(candidates))
+	rowProbs := make([]float32, len(candidates))
+	for i := range queries {
+		for j := range candidates {
+			score := q.InnerProductPrepared(candidateMatrix.quantized[j], queryMatrix.prepared[i])
+			rowScores[j] = score
+			totalScore += score
+		}
+		targetIndex := -1
+		if i < len(targetIndexes) {
+			targetIndex = targetIndexes[i]
+		}
+		rowLoss := infoNCERowProbsAndLossInto(rowScores, targetIndex, temperature, rowProbs)
+		totalLoss += rowLoss
+		queryRaw := queryMatrix.rawRow(i)
+		queryNormalized := queryMatrix.normalizedRow(i)
+		for j, prob := range rowProbs {
+			target := float32(0)
+			if j == targetIndex {
+				target = 1
+			}
+			scale := (prob - target) / temperature
+			accumulateNormalizedPrefixSTEGrad(queryRaw, queryNormalized, queryMatrix.rawNorms[i], candidateMatrix.dequantizedRow(j), scale, queryGrads[i])
+			accumulateNormalizedPrefixSTEGrad(candidateMatrix.rawRow(j), candidateMatrix.normalizedRow(j), candidateMatrix.rawNorms[j], queryNormalized, scale, candidateGrads[j])
 		}
 	}
 	return totalLoss, totalScore
@@ -3442,6 +3639,61 @@ func accumulateTurboQuantPrefixGroupedInfoNCEHardNegativeGrads(queries, candidat
 	return totalLoss, totalScore
 }
 
+func accumulateTurboQuantPreparedIPPrefixGroupedInfoNCEHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, dim, bitWidth int, seed int64, temperature float32, queryGrads, candidateGrads [][]float32) (float32, float32) {
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	if dim <= 0 {
+		return 0, 0
+	}
+	if temperature <= 0 {
+		temperature = 0.05
+	}
+	queryMatrix := newTurboQuantPreparedPrefixMatrix(queries, dim, bitWidth, seed, true)
+	candidateMatrix := newTurboQuantPreparedPrefixMatrix(candidates, dim, bitWidth, seed, false)
+	if queryMatrix.width == 0 || candidateMatrix.width != queryMatrix.width {
+		return 0, 0
+	}
+	q := turboquant.NewIPWithSeed(dim, bitWidth, seed)
+	maxCandidates := 0
+	for i := range queries {
+		span := groupedCandidateSpan(candidateSpans, i, len(candidates))
+		if n := span.End - span.Start; n > maxCandidates {
+			maxCandidates = n
+		}
+	}
+	rowScores := make([]float32, maxCandidates)
+	rowProbs := make([]float32, maxCandidates)
+	for i := range queries {
+		span := groupedCandidateSpan(candidateSpans, i, len(candidates))
+		if span.End-span.Start < 2 {
+			continue
+		}
+		scores := rowScores[:span.End-span.Start]
+		probs := rowProbs[:span.End-span.Start]
+		for j := span.Start; j < span.End; j++ {
+			local := j - span.Start
+			score := q.InnerProductPrepared(candidateMatrix.quantized[j], queryMatrix.prepared[i])
+			scores[local] = score
+			totalScore += score
+		}
+		rowLoss := infoNCERowProbsAndLossInto(scores, 0, temperature, probs)
+		totalLoss += rowLoss
+		queryRaw := queryMatrix.rawRow(i)
+		queryNormalized := queryMatrix.normalizedRow(i)
+		for local, prob := range probs {
+			target := float32(0)
+			if local == 0 {
+				target = 1
+			}
+			j := span.Start + local
+			scale := (prob - target) / temperature
+			accumulateNormalizedPrefixSTEGrad(queryRaw, queryNormalized, queryMatrix.rawNorms[i], candidateMatrix.dequantizedRow(j), scale, queryGrads[i])
+			accumulateNormalizedPrefixSTEGrad(candidateMatrix.rawRow(j), candidateMatrix.normalizedRow(j), candidateMatrix.rawNorms[j], queryNormalized, scale, candidateGrads[j])
+		}
+	}
+	return totalLoss, totalScore
+}
+
 func accumulateMatryoshkaHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, targetIndexes []int, candidateSpans []embeddingCandidateSpan, cfg EmbeddingTrainConfig, queryGrads, candidateGrads [][]float32) (float32, float32, int) {
 	if len(cfg.MatryoshkaDims) == 0 {
 		return 0, 0, 0
@@ -3505,6 +3757,7 @@ func accumulateTurboQuantPrefixHardNegativeGrads(queries, candidates []*embeddin
 		return 0, 0, 0
 	}
 	seed := effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
+	scoreMode, _ := normalizeTurboQuantPrefixScoreMode(cfg.TurboQuantPrefixScoreMode)
 	totalLoss := float32(0)
 	totalScore := float32(0)
 	pairCount := 0
@@ -3517,15 +3770,29 @@ func accumulateTurboQuantPrefixHardNegativeGrads(queries, candidates []*embeddin
 			pairs := 0
 			switch cfg.ContrastiveLoss {
 			case "grouped_infonce":
-				loss, score = accumulateTurboQuantPrefixGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, dim, bitWidth, seed, cfg.Temperature, dimQueryGrads, dimCandidateGrads)
+				if scoreMode == TurboQuantPrefixScoreModePreparedIP {
+					loss, score = accumulateTurboQuantPreparedIPPrefixGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, dim, bitWidth, seed, cfg.Temperature, dimQueryGrads, dimCandidateGrads)
+				} else {
+					loss, score = accumulateTurboQuantPrefixGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, dim, bitWidth, seed, cfg.Temperature, dimQueryGrads, dimCandidateGrads)
+				}
 				pairs = hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, "grouped_infonce")
 			case "hybrid_infonce":
 				globalQueryGrads := newEmbeddingPooledGradBuffers(queries)
 				globalCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
-				globalLoss, globalScore := accumulateTurboQuantPrefixInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, dim, bitWidth, seed, cfg.Temperature, globalQueryGrads, globalCandidateGrads)
+				var globalLoss, globalScore float32
+				if scoreMode == TurboQuantPrefixScoreModePreparedIP {
+					globalLoss, globalScore = accumulateTurboQuantPreparedIPPrefixInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, dim, bitWidth, seed, cfg.Temperature, globalQueryGrads, globalCandidateGrads)
+				} else {
+					globalLoss, globalScore = accumulateTurboQuantPrefixInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, dim, bitWidth, seed, cfg.Temperature, globalQueryGrads, globalCandidateGrads)
+				}
 				groupedQueryGrads := newEmbeddingPooledGradBuffers(queries)
 				groupedCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
-				groupedLoss, groupedScore := accumulateTurboQuantPrefixGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, dim, bitWidth, seed, cfg.Temperature, groupedQueryGrads, groupedCandidateGrads)
+				var groupedLoss, groupedScore float32
+				if scoreMode == TurboQuantPrefixScoreModePreparedIP {
+					groupedLoss, groupedScore = accumulateTurboQuantPreparedIPPrefixGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, dim, bitWidth, seed, cfg.Temperature, groupedQueryGrads, groupedCandidateGrads)
+				} else {
+					groupedLoss, groupedScore = accumulateTurboQuantPrefixGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, dim, bitWidth, seed, cfg.Temperature, groupedQueryGrads, groupedCandidateGrads)
+				}
 				groupedWeight := effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
 				globalScale := float32(1) / (1 + groupedWeight)
 				groupedScale := groupedWeight / (1 + groupedWeight)
@@ -3537,7 +3804,11 @@ func accumulateTurboQuantPrefixHardNegativeGrads(queries, candidates []*embeddin
 				score = globalScore + groupedScore
 				pairs = hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, "hybrid_infonce")
 			default:
-				loss, score = accumulateTurboQuantPrefixInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, dim, bitWidth, seed, cfg.Temperature, dimQueryGrads, dimCandidateGrads)
+				if scoreMode == TurboQuantPrefixScoreModePreparedIP {
+					loss, score = accumulateTurboQuantPreparedIPPrefixInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, dim, bitWidth, seed, cfg.Temperature, dimQueryGrads, dimCandidateGrads)
+				} else {
+					loss, score = accumulateTurboQuantPrefixInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, dim, bitWidth, seed, cfg.Temperature, dimQueryGrads, dimCandidateGrads)
+				}
 				pairs = hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, "infonce")
 			}
 			addScaledEmbeddingGradBuffers(queryGrads, dimQueryGrads, weight)
@@ -4544,6 +4815,9 @@ func normalizedTrainConfig(cfg EmbeddingTrainConfig, params ...eosartifact.Param
 			cfg.TurboQuantPrefixWeight = 1
 		}
 		cfg.TurboQuantPrefixSeed = effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
+		if mode, err := normalizeTurboQuantPrefixScoreMode(cfg.TurboQuantPrefixScoreMode); err == nil {
+			cfg.TurboQuantPrefixScoreMode = mode
+		}
 	}
 	return cfg
 }
@@ -4565,6 +4839,11 @@ func normalizeMatryoshkaTrainConfig(cfg EmbeddingTrainConfig, embeddingDim int) 
 			cfg.TurboQuantPrefixWeight = 1
 		}
 		cfg.TurboQuantPrefixSeed = effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
+		mode, err := normalizeTurboQuantPrefixScoreMode(cfg.TurboQuantPrefixScoreMode)
+		if err != nil {
+			return cfg, err
+		}
+		cfg.TurboQuantPrefixScoreMode = mode
 	}
 	return cfg, nil
 }
@@ -4693,6 +4972,23 @@ func effectiveTurboQuantPrefixSeed(seed int64) int64 {
 	return seed
 }
 
+func normalizeTurboQuantPrefixScoreMode(mode string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(strings.ReplaceAll(mode, "-", "_"))) {
+	case "":
+		return TurboQuantPrefixScoreModeReconstructCosine, nil
+	case TurboQuantPrefixScoreModeReconstructCosine:
+		return TurboQuantPrefixScoreModeReconstructCosine, nil
+	case TurboQuantPrefixScoreModePreparedIP:
+		return TurboQuantPrefixScoreModePreparedIP, nil
+	default:
+		return "", fmt.Errorf("unsupported turboquant_prefix_score_mode %q (supported: %s, %s; CLI accepts prepared-ip)", mode, TurboQuantPrefixScoreModeReconstructCosine, TurboQuantPrefixScoreModePreparedIP)
+	}
+}
+
+func NormalizeTurboQuantPrefixScoreModeForCLI(mode string) (string, error) {
+	return normalizeTurboQuantPrefixScoreMode(mode)
+}
+
 func turboQuantPrefixWeightSum(cfg EmbeddingTrainConfig) float32 {
 	weight := effectiveTurboQuantPrefixWeight(cfg)
 	if weight <= 0 || len(cfg.MatryoshkaDims) == 0 || len(cfg.TurboQuantPrefixBits) == 0 {
@@ -4767,6 +5063,9 @@ func validateTrainConfig(cfg EmbeddingTrainConfig) error {
 		}
 		if cfg.TurboQuantPrefixWeight < 0 || math.IsNaN(float64(cfg.TurboQuantPrefixWeight)) || math.IsInf(float64(cfg.TurboQuantPrefixWeight), 0) {
 			return fmt.Errorf("turboquant_prefix_weight must be finite and non-negative")
+		}
+		if _, err := normalizeTurboQuantPrefixScoreMode(cfg.TurboQuantPrefixScoreMode); err != nil {
+			return err
 		}
 	}
 	return nil

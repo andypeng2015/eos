@@ -43,6 +43,7 @@ type EmbeddingTrainRunConfig struct {
 	TurboQuantPrefixBits      []int
 	TurboQuantPrefixWeight    float32
 	TurboQuantPrefixSeed      int64
+	TurboQuantPrefixScoreMode string
 	TeacherScoreNormalization string
 	ProgressEverySteps        int
 	Progress                  EmbeddingTrainProgressFunc
@@ -1862,6 +1863,9 @@ func normalizedTrainRunConfig(cfg EmbeddingTrainRunConfig) EmbeddingTrainRunConf
 			cfg.TurboQuantPrefixWeight = 1
 		}
 		cfg.TurboQuantPrefixSeed = effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
+		if mode, err := normalizeTurboQuantPrefixScoreMode(cfg.TurboQuantPrefixScoreMode); err == nil {
+			cfg.TurboQuantPrefixScoreMode = mode
+		}
 	}
 	cfg.TeacherScoreNormalization = normalizeTeacherScoreNormalization(cfg.TeacherScoreNormalization)
 	return cfg
@@ -1914,6 +1918,7 @@ func (t *EmbeddingTrainer) applyTrainRunOverrides(cfg EmbeddingTrainRunConfig) e
 		next.TurboQuantPrefixBits = append([]int(nil), cfg.TurboQuantPrefixBits...)
 		next.TurboQuantPrefixWeight = cfg.TurboQuantPrefixWeight
 		next.TurboQuantPrefixSeed = cfg.TurboQuantPrefixSeed
+		next.TurboQuantPrefixScoreMode = cfg.TurboQuantPrefixScoreMode
 		changed = true
 	}
 	if !changed {
@@ -1962,6 +1967,7 @@ func (t *EmbeddingTrainer) syncTrainRunObjectiveConfig(cfg EmbeddingTrainRunConf
 		cfg.TurboQuantPrefixBits = append([]int(nil), t.config.TurboQuantPrefixBits...)
 		cfg.TurboQuantPrefixWeight = t.config.TurboQuantPrefixWeight
 		cfg.TurboQuantPrefixSeed = t.config.TurboQuantPrefixSeed
+		cfg.TurboQuantPrefixScoreMode = t.config.TurboQuantPrefixScoreMode
 	}
 	cfg.GroupedLossWeight = effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
 	cfg.TeacherSourceTemperatures = normalizeHardNegativeTeacherTemperatures(cfg.TeacherSourceTemperatures)
@@ -1973,6 +1979,9 @@ func (t *EmbeddingTrainer) syncTrainRunObjectiveConfig(cfg EmbeddingTrainRunConf
 			cfg.TurboQuantPrefixWeight = 1
 		}
 		cfg.TurboQuantPrefixSeed = effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
+		if mode, err := normalizeTurboQuantPrefixScoreMode(cfg.TurboQuantPrefixScoreMode); err == nil {
+			cfg.TurboQuantPrefixScoreMode = mode
+		}
 	}
 	cfg.TeacherScoreNormalization = normalizeTeacherScoreNormalization(cfg.TeacherScoreNormalization)
 	return cfg

@@ -20,19 +20,20 @@ func TestEmbeddingTrainManifestRoundTrip(t *testing.T) {
 		Name:      "tiny_train_embed_q8",
 		Embedding: tinyMaskedEmbeddingManifest(),
 		Config: EmbeddingTrainConfig{
-			LearningRate:           0.05,
-			WeightBits:             8,
-			Optimizer:              "adamw",
-			Beta1:                  0.9,
-			Beta2:                  0.999,
-			Epsilon:                1e-8,
-			ContrastiveLoss:        "infonce",
-			Temperature:            0.05,
-			MatryoshkaDims:         []int{64, 128},
-			MatryoshkaWeights:      []float32{0.5, 1},
-			TurboQuantPrefixBits:   []int{2, 4},
-			TurboQuantPrefixWeight: 0.25,
-			TurboQuantPrefixSeed:   DefaultTurboQuantMultiVectorQuantizerSeed,
+			LearningRate:              0.05,
+			WeightBits:                8,
+			Optimizer:                 "adamw",
+			Beta1:                     0.9,
+			Beta2:                     0.999,
+			Epsilon:                   1e-8,
+			ContrastiveLoss:           "infonce",
+			Temperature:               0.05,
+			MatryoshkaDims:            []int{64, 128},
+			MatryoshkaWeights:         []float32{0.5, 1},
+			TurboQuantPrefixBits:      []int{2, 4},
+			TurboQuantPrefixWeight:    0.25,
+			TurboQuantPrefixSeed:      DefaultTurboQuantMultiVectorQuantizerSeed,
+			TurboQuantPrefixScoreMode: TurboQuantPrefixScoreModePreparedIP,
 		},
 	}
 	if err := want.WriteFile(path); err != nil {
@@ -53,6 +54,9 @@ func TestEmbeddingTrainManifestRoundTrip(t *testing.T) {
 	}
 	if got.Config.TurboQuantPrefixSeed != DefaultTurboQuantMultiVectorQuantizerSeed {
 		t.Fatalf("turboquant prefix seed = %d, want %d", got.Config.TurboQuantPrefixSeed, DefaultTurboQuantMultiVectorQuantizerSeed)
+	}
+	if got.Config.TurboQuantPrefixScoreMode != TurboQuantPrefixScoreModePreparedIP {
+		t.Fatalf("turboquant prefix score mode = %q, want %q", got.Config.TurboQuantPrefixScoreMode, TurboQuantPrefixScoreModePreparedIP)
 	}
 }
 

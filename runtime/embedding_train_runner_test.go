@@ -8,6 +8,7 @@ import (
 	eosartifact "m31labs.dev/eos/artifact/eos"
 	"m31labs.dev/eos/compiler"
 	"m31labs.dev/eos/runtime/backend"
+	"m31labs.dev/turboquant"
 )
 
 func TestEstimateContrastiveTrainWorkload(t *testing.T) {
@@ -288,6 +289,29 @@ func TestEmbeddingTrainerFitContrastiveRejectsInvalidTurboQuantPrefixConfig(t *t
 	}); err == nil {
 		t.Fatal("expected turboquant prefix dims to require dim >= 2")
 	}
+	if _, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:                    1,
+		BatchSize:                 2,
+		MatryoshkaDims:            []int{2},
+		TurboQuantPrefixBits:      []int{2},
+		TurboQuantPrefixScoreMode: "bogus",
+	}); err == nil {
+		t.Fatal("expected invalid turboquant prefix score mode error")
+	}
+	for _, tt := range []struct {
+		in   string
+		want string
+	}{
+		{"", TurboQuantPrefixScoreModeReconstructCosine},
+		{"reconstruct_cosine", TurboQuantPrefixScoreModeReconstructCosine},
+		{"reconstruct-cosine", TurboQuantPrefixScoreModeReconstructCosine},
+		{"prepared_ip", TurboQuantPrefixScoreModePreparedIP},
+		{"prepared-ip", TurboQuantPrefixScoreModePreparedIP},
+	} {
+		if mode, err := NormalizeTurboQuantPrefixScoreModeForCLI(tt.in); err != nil || mode != tt.want {
+			t.Fatalf("mode %q = %q, err=%v; want %q", tt.in, mode, err, tt.want)
+		}
+	}
 }
 
 func TestEmbeddingTrainerFitContrastiveMatryoshkaPrefixRunsAndTracksWork(t *testing.T) {
@@ -352,6 +376,108 @@ func TestEmbeddingTrainerFitContrastiveTurboQuantPrefixRunsAndTracksWork(t *test
 	}
 }
 
+func TestTurboQuantPreparedIPPrefixScoreMatchesQuantizer(t *testing.T) {
+	q := turboquant.NewIPWithSeed(4, 3, DefaultTurboQuantMultiVectorQuantizerSeed)
+	rawCandidate := []float32{2, -1, 0.5, 1.5}
+	rawQuery := []float32{-0.25, 1.25, 0.75, 0.5}
+	candidate := normalizedCopy(rawCandidate)
+	query := normalizedCopy(rawQuery)
+
+	got := turboQuantPreparedPrefixScore(q, candidate, query)
+	want := q.InnerProductPrepared(q.Quantize(candidate), q.PrepareQuery(query))
+	if math.Abs(float64(got-want)) > 1e-6 {
+		t.Fatalf("prepared score = %.9f, want %.9f", got, want)
+	}
+}
+
+func TestTurboQuantPreparedPrefixMatrixBuildsValidZeroRows(t *testing.T) {
+	seqs := []*embeddingEncodedSequence{
+		nil,
+		{pooled: []float32{0, 0, 0}},
+		nil,
+		{pooled: []float32{1}},
+	}
+	queryMatrix := newTurboQuantPreparedPrefixMatrix(seqs, 3, 2, DefaultTurboQuantMultiVectorQuantizerSeed, true)
+	candidateMatrix := newTurboQuantPreparedPrefixMatrix(seqs, 3, 2, DefaultTurboQuantMultiVectorQuantizerSeed, false)
+	if queryMatrix.width != 3 || candidateMatrix.width != 3 {
+		t.Fatalf("matrix widths = query:%d candidate:%d, want 3", queryMatrix.width, candidateMatrix.width)
+	}
+	q := turboquant.NewIPWithSeed(3, 2, DefaultTurboQuantMultiVectorQuantizerSeed)
+	for i := range seqs {
+		score := q.InnerProductPrepared(candidateMatrix.quantized[i], queryMatrix.prepared[i])
+		if !finite32(score) {
+			t.Fatalf("row %d prepared score must be finite, got %f", i, score)
+		}
+		if queryMatrix.rawNorms[i] != 0 || candidateMatrix.rawNorms[i] != 0 {
+			t.Fatalf("row %d raw norms = query:%f candidate:%f, want zero", i, queryMatrix.rawNorms[i], candidateMatrix.rawNorms[i])
+		}
+	}
+}
+
+func TestEmbeddingTrainerFitContrastiveTurboQuantPreparedIPPrefixRunsAndTracksWork(t *testing.T) {
+	trainSet := tinyEmbeddingContrastiveDataset()
+	base := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	baseSummary, err := base.FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:                 1,
+		BatchSize:              2,
+		Shuffle:                false,
+		MatryoshkaDims:         []int{2, 3},
+		MatryoshkaWeights:      []float32{0.5, 1},
+		TurboQuantPrefixBits:   []int{4, 2},
+		TurboQuantPrefixWeight: 0.25,
+	})
+	if err != nil {
+		t.Fatalf("fit contrastive default turboquant prefix: %v", err)
+	}
+
+	prepared := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	preparedSummary, err := prepared.FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:                    1,
+		BatchSize:                 2,
+		Shuffle:                   false,
+		MatryoshkaDims:            []int{2, 3},
+		MatryoshkaWeights:         []float32{0.5, 1},
+		TurboQuantPrefixBits:      []int{4, 2},
+		TurboQuantPrefixWeight:    0.25,
+		TurboQuantPrefixScoreMode: "prepared-ip",
+	})
+	if err != nil {
+		t.Fatalf("fit contrastive prepared-ip turboquant prefix: %v", err)
+	}
+	if preparedSummary.Config.TurboQuantPrefixScoreMode != TurboQuantPrefixScoreModePreparedIP {
+		t.Fatalf("score mode = %q, want %q", preparedSummary.Config.TurboQuantPrefixScoreMode, TurboQuantPrefixScoreModePreparedIP)
+	}
+	if preparedSummary.Workload.PlannedTrainPairs != baseSummary.Workload.PlannedTrainPairs || preparedSummary.Workload.ActualTrainPairs != baseSummary.Workload.ActualTrainPairs {
+		t.Fatalf("prepared-ip workload planned/actual = %d/%d, want %d/%d", preparedSummary.Workload.PlannedTrainPairs, preparedSummary.Workload.ActualTrainPairs, baseSummary.Workload.PlannedTrainPairs, baseSummary.Workload.ActualTrainPairs)
+	}
+	if preparedSummary.FinalTrain.BatchSize != baseSummary.FinalTrain.BatchSize {
+		t.Fatalf("prepared-ip batch size = %d, want %d", preparedSummary.FinalTrain.BatchSize, baseSummary.FinalTrain.BatchSize)
+	}
+}
+
+func TestTurboQuantPreparedIPPrefixGradientsAreFiniteAndTangent(t *testing.T) {
+	queries := []*embeddingEncodedSequence{
+		{pooled: []float32{1, 2, -1}},
+		{pooled: []float32{-1, 0.5, 2}},
+	}
+	positives := []*embeddingEncodedSequence{
+		{pooled: []float32{0.5, -1, 2}},
+		{pooled: []float32{2, 1, -0.5}},
+	}
+	queryGrads := newEmbeddingPooledGradBuffers(queries)
+	positiveGrads := newEmbeddingPooledGradBuffers(positives)
+	loss, score := accumulateTurboQuantPreparedIPPrefixInfoNCEContrastiveGrads(queries, positives, 3, 2, DefaultTurboQuantMultiVectorQuantizerSeed, 0.05, queryGrads, positiveGrads)
+	if !finite32(loss) || !finite32(score) {
+		t.Fatalf("loss/score must be finite: loss=%f score=%f", loss, score)
+	}
+	for i, grad := range queryGrads {
+		assertFiniteAndTangent(t, "query", i, queries[i].pooled[:3], grad[:3])
+	}
+	for i, grad := range positiveGrads {
+		assertFiniteAndTangent(t, "positive", i, positives[i].pooled[:3], grad[:3])
+	}
+}
+
 func TestEmbeddingTrainerTurboQuantPrefixDisablesContrastiveAccelerator(t *testing.T) {
 	batch := tinyEmbeddingContrastiveDataset()
 	accelerated := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
@@ -381,6 +507,44 @@ func TestEmbeddingTrainerTurboQuantPrefixDisablesContrastiveAccelerator(t *testi
 	}
 	if hostAccel.squareCalls != 0 || hostAccel.rectCalls != 0 {
 		t.Fatalf("accelerator calls square=%d rect=%d, want host path when turboquant prefix objective is enabled", hostAccel.squareCalls, hostAccel.rectCalls)
+	}
+}
+
+func normalizedCopy(values []float32) []float32 {
+	out := append([]float32(nil), values...)
+	norm := vectorNorm(out)
+	if norm == 0 {
+		return out
+	}
+	inv := 1 / norm
+	for i := range out {
+		out[i] *= inv
+	}
+	return out
+}
+
+func finite32(v float32) bool {
+	return !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0)
+}
+
+func assertFiniteAndTangent(t *testing.T, label string, index int, raw, grad []float32) {
+	t.Helper()
+	if len(raw) != len(grad) {
+		t.Fatalf("%s[%d] len raw=%d grad=%d", label, index, len(raw), len(grad))
+	}
+	dot := float32(0)
+	norm := float32(0)
+	gradNorm := float32(0)
+	for i := range raw {
+		if !finite32(grad[i]) {
+			t.Fatalf("%s[%d] grad[%d]=%f, want finite", label, index, i, grad[i])
+		}
+		dot += raw[i] * grad[i]
+		norm += raw[i] * raw[i]
+		gradNorm += grad[i] * grad[i]
+	}
+	if norm > 0 && gradNorm > 0 && math.Abs(float64(dot)) > 1e-4 {
+		t.Fatalf("%s[%d] raw dot grad = %.9f, want tangent", label, index, dot)
 	}
 }
 
