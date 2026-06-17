@@ -1859,7 +1859,7 @@ func normalizedTrainRunConfig(cfg EmbeddingTrainRunConfig) EmbeddingTrainRunConf
 	if bits, err := normalizeTurboQuantPrefixBits(cfg.TurboQuantPrefixBits); err == nil {
 		cfg.TurboQuantPrefixBits = bits
 	}
-	if objectives, err := normalizeTurboQuantPrefixObjectives(cfg.TurboQuantPrefixObjectives, cfg.MatryoshkaDims); err == nil {
+	if objectives, err := normalizeTurboQuantPrefixObjectives(cfg.TurboQuantPrefixObjectives, cfg.MatryoshkaDims, 0); err == nil {
 		cfg.TurboQuantPrefixObjectives = objectives
 	}
 	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 {
@@ -1995,7 +1995,7 @@ func (t *EmbeddingTrainer) syncTrainRunObjectiveConfig(cfg EmbeddingTrainRunConf
 	cfg.TeacherSourceWeights = normalizeHardNegativeTeacherWeights(cfg.TeacherSourceWeights)
 	cfg.MatryoshkaDims, cfg.MatryoshkaWeights, _ = normalizeMatryoshkaDimsAndWeights(cfg.MatryoshkaDims, cfg.MatryoshkaWeights, trainerEmbeddingDim(t))
 	cfg.TurboQuantPrefixBits, _ = normalizeTurboQuantPrefixBits(cfg.TurboQuantPrefixBits)
-	cfg.TurboQuantPrefixObjectives, _ = normalizeTurboQuantPrefixObjectives(cfg.TurboQuantPrefixObjectives, cfg.MatryoshkaDims)
+	cfg.TurboQuantPrefixObjectives, _ = normalizeTurboQuantPrefixObjectives(cfg.TurboQuantPrefixObjectives, cfg.MatryoshkaDims, trainerEmbeddingDim(t))
 	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 {
 		if cfg.TurboQuantPrefixWeight == 0 {
 			if len(cfg.TurboQuantPrefixBits) > 0 {

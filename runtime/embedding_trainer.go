@@ -4815,7 +4815,7 @@ func normalizedTrainConfig(cfg EmbeddingTrainConfig, params ...eosartifact.Param
 	if bits, err := normalizeTurboQuantPrefixBits(cfg.TurboQuantPrefixBits); err == nil {
 		cfg.TurboQuantPrefixBits = bits
 	}
-	if objectives, err := normalizeTurboQuantPrefixObjectives(cfg.TurboQuantPrefixObjectives, cfg.MatryoshkaDims); err == nil {
+	if objectives, err := normalizeTurboQuantPrefixObjectives(cfg.TurboQuantPrefixObjectives, cfg.MatryoshkaDims, 0); err == nil {
 		cfg.TurboQuantPrefixObjectives = objectives
 	}
 	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 {
@@ -4844,7 +4844,7 @@ func normalizeMatryoshkaTrainConfig(cfg EmbeddingTrainConfig, embeddingDim int) 
 		return cfg, err
 	}
 	cfg.TurboQuantPrefixBits = bits
-	objectives, err := normalizeTurboQuantPrefixObjectives(cfg.TurboQuantPrefixObjectives, cfg.MatryoshkaDims)
+	objectives, err := normalizeTurboQuantPrefixObjectives(cfg.TurboQuantPrefixObjectives, cfg.MatryoshkaDims, embeddingDim)
 	if err != nil {
 		return cfg, err
 	}
@@ -4935,9 +4935,6 @@ func matryoshkaPairMultiplier(dims []int) int {
 }
 
 func compactPrefixObjectiveMultiplier(cfg EmbeddingTrainRunConfig) int {
-	if len(cfg.MatryoshkaDims) == 0 {
-		return 1
-	}
 	multiplier := 1 + len(cfg.MatryoshkaDims)
 	if len(cfg.TurboQuantPrefixObjectives) > 0 {
 		for _, objective := range cfg.TurboQuantPrefixObjectives {
@@ -5060,13 +5057,16 @@ func normalizeTurboQuantPrefixObjectiveOrder(objectives []TurboQuantPrefixObject
 	return out
 }
 
-func normalizeTurboQuantPrefixObjectives(objectives []TurboQuantPrefixObjective, matryoshkaDims []int) ([]TurboQuantPrefixObjective, error) {
+func normalizeTurboQuantPrefixObjectives(objectives []TurboQuantPrefixObjective, matryoshkaDims []int, embeddingDim int) ([]TurboQuantPrefixObjective, error) {
 	if len(objectives) == 0 {
 		return nil, nil
 	}
 	allowedDims := map[int]bool{}
 	for _, dim := range matryoshkaDims {
 		allowedDims[dim] = true
+	}
+	if embeddingDim > 0 {
+		allowedDims[embeddingDim] = true
 	}
 	seen := map[[2]int]bool{}
 	out := make([]TurboQuantPrefixObjective, 0, len(objectives))
@@ -5077,7 +5077,7 @@ func normalizeTurboQuantPrefixObjectives(objectives []TurboQuantPrefixObjective,
 		if objective.Dim < 2 {
 			return nil, fmt.Errorf("turboquant_prefix_objectives[%d] dim=%d must be at least 2", i, objective.Dim)
 		}
-		if !allowedDims[objective.Dim] {
+		if len(allowedDims) > 0 && !allowedDims[objective.Dim] {
 			return nil, fmt.Errorf("turboquant_prefix_objectives[%d] dim=%d must exist in matryoshka_dims", i, objective.Dim)
 		}
 		if objective.BitWidth < 2 || objective.BitWidth > 8 {
@@ -5223,7 +5223,7 @@ func validateTrainConfig(cfg EmbeddingTrainConfig) error {
 	if len(cfg.TurboQuantPrefixObjectives) > 0 && cfg.TurboQuantPrefixWeight != 0 {
 		return fmt.Errorf("turboquant_prefix_weight must be zero when turboquant_prefix_objectives is set")
 	}
-	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 {
+	if len(cfg.TurboQuantPrefixBits) > 0 {
 		if len(cfg.MatryoshkaDims) == 0 {
 			return fmt.Errorf("turboquant compact-prefix objectives require matryoshka_dims")
 		}
@@ -5247,7 +5247,7 @@ func validateTrainConfig(cfg EmbeddingTrainConfig) error {
 		}
 	}
 	if len(cfg.TurboQuantPrefixObjectives) > 0 {
-		if _, err := normalizeTurboQuantPrefixObjectives(cfg.TurboQuantPrefixObjectives, cfg.MatryoshkaDims); err != nil {
+		if _, err := normalizeTurboQuantPrefixObjectives(cfg.TurboQuantPrefixObjectives, cfg.MatryoshkaDims, 0); err != nil {
 			return err
 		}
 		if _, err := normalizeTurboQuantPrefixScoreMode(cfg.TurboQuantPrefixScoreMode); err != nil {

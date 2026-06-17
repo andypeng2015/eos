@@ -355,7 +355,7 @@ func TestEmbeddingTrainerFitContrastiveRejectsInvalidTurboQuantPrefixConfig(t *t
 			cfg: EmbeddingTrainRunConfig{
 				MatryoshkaDims: []int{2},
 				TurboQuantPrefixObjectives: []TurboQuantPrefixObjective{
-					{Dim: 3, BitWidth: 2, Weight: 0.5},
+					{Dim: 4, BitWidth: 2, Weight: 0.5},
 				},
 			},
 		},
@@ -568,6 +568,36 @@ func TestEmbeddingTrainerFitContrastiveTurboQuantPrefixObjectivesRunAndTrackWork
 	}
 	if summary.Workload.PlannedTrainPairs != 12 || summary.Workload.ActualTrainPairs != 12 {
 		t.Fatalf("train pairs planned/actual = %d/%d, want 12/12", summary.Workload.PlannedTrainPairs, summary.Workload.ActualTrainPairs)
+	}
+}
+
+func TestEmbeddingTrainerFitContrastiveTurboQuantPrefixObjectiveAllowsBaseDim(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	trainSet := tinyEmbeddingContrastiveDataset()
+	summary, err := trainer.FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:         1,
+		BatchSize:      2,
+		Shuffle:        false,
+		MatryoshkaDims: []int{3},
+		TurboQuantPrefixObjectives: []TurboQuantPrefixObjective{
+			{Dim: 3, BitWidth: 2, Weight: 0.25},
+		},
+		TurboQuantPrefixScoreMode: TurboQuantPrefixScoreModePreparedIP,
+	})
+	if err != nil {
+		t.Fatalf("fit contrastive base-dim turboquant prefix objective: %v", err)
+	}
+	if len(summary.Config.MatryoshkaDims) != 0 {
+		t.Fatalf("normalized matryoshka dims = %v, want base dim omitted", summary.Config.MatryoshkaDims)
+	}
+	if got := summary.Config.TurboQuantPrefixObjectives; len(got) != 1 || got[0].Dim != 3 || got[0].BitWidth != 2 || got[0].Weight != 0.25 {
+		t.Fatalf("normalized turboquant prefix objectives = %+v", got)
+	}
+	if summary.FinalTrain.BatchSize != 8 {
+		t.Fatalf("final train batch size = %d, want base+base-dim turboquant prefix pair count 8", summary.FinalTrain.BatchSize)
+	}
+	if summary.Workload.PlannedTrainPairs != 8 || summary.Workload.ActualTrainPairs != 8 {
+		t.Fatalf("train pairs planned/actual = %d/%d, want 8/8", summary.Workload.PlannedTrainPairs, summary.Workload.ActualTrainPairs)
 	}
 }
 
