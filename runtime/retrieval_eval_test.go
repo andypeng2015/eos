@@ -369,6 +369,9 @@ func TestEvaluateTurboQuantVectorRetrievalReportsFP16RerankRows(t *testing.T) {
 	if rerank.TotalVectorBytes != rerank.VectorBytes+wantSidecarBytes {
 		t.Fatalf("fp16 rerank total bytes = %d, want %d", rerank.TotalVectorBytes, rerank.VectorBytes+wantSidecarBytes)
 	}
+	if rerank.RerankSidecarBytes == rerank.DenseVectorBytes {
+		t.Fatalf("fp16 rerank sidecar unexpectedly matches dense f32 sidecar bytes: %+v", rerank)
+	}
 	if rerank.TotalCompression >= rerank.CompressionRatio || rerank.TotalCompression >= 2 {
 		t.Fatalf("fp16 total compression = %.6f quant compression = %.6f", rerank.TotalCompression, rerank.CompressionRatio)
 	}
@@ -380,6 +383,53 @@ func TestEvaluateTurboQuantVectorRetrievalReportsFP16RerankRows(t *testing.T) {
 	}
 	if rerank.Quality.NDCGAt10 < 0.99 || rerank.Quality.RecallAt100 != 1 {
 		t.Fatalf("fp16 rerank quality = %+v, want near-perfect", rerank.Quality)
+	}
+}
+
+func TestTurboQuantFP16RerankRescueLeavesIncompleteWindowUnchanged(t *testing.T) {
+	fp16Ranked, compactScores, compactRanks := turboQuantRescueFixture(119)
+	got := applyTurboQuantFP16RerankRescue(fp16Ranked, compactScores, compactRanks)
+	if len(got) != len(fp16Ranked) {
+		t.Fatalf("rescued length = %d, want %d", len(got), len(fp16Ranked))
+	}
+	for i := range fp16Ranked {
+		if got[i].ID != fp16Ranked[i].ID {
+			t.Fatalf("rescued rank %d = %q, want unchanged %q", i+1, got[i].ID, fp16Ranked[i].ID)
+		}
+	}
+}
+
+func TestTurboQuantFP16RerankRescuePromotesStrongCompactBoundaryCandidate(t *testing.T) {
+	fp16Ranked, compactScores, compactRanks := turboQuantRescueFixture(121)
+	compactScores["d120"] = 10_000
+	compactRanks["d120"] = 1
+
+	got := applyTurboQuantFP16RerankRescue(fp16Ranked, compactScores, compactRanks)
+	top100 := map[string]bool{}
+	for _, doc := range got[:100] {
+		top100[doc.ID] = true
+	}
+	if !top100["d120"] {
+		t.Fatalf("d120 was not rescued into top100")
+	}
+	if top100["d100"] {
+		t.Fatalf("d100 remained in top100 after higher-priority d120 rescue")
+	}
+	if got[99].ID != "d120" {
+		t.Fatalf("rescued rank 100 = %q, want d120", got[99].ID)
+	}
+}
+
+func TestTurboQuantFP16RerankRescueCompactTieBreakMatchesSimulation(t *testing.T) {
+	fp16Ranked, compactScores, compactRanks := turboQuantRescueFixture(121)
+	compactScores["d110"] = 10_000
+	compactScores["d111"] = 10_000
+	compactRanks["d110"] = 7
+	compactRanks["d111"] = 7
+
+	got := applyTurboQuantFP16RerankRescue(fp16Ranked, compactScores, compactRanks)
+	if got[99].ID != "d111" {
+		t.Fatalf("rescued compact/doc tie rank 100 = %q, want d111", got[99].ID)
 	}
 }
 
@@ -432,6 +482,19 @@ func TestEvaluateTurboQuantVectorRetrievalWritesCompactPerQueryJSONL(t *testing.
 	if len(rerank.TopK) == 0 || rerank.TopK[0].DenseRank == nil || rerank.TopK[0].CompactRank == nil || rerank.TopK[0].DenseScore == nil || rerank.TopK[0].CompactScore == nil {
 		t.Fatalf("rerank top doc missing dense/compact evidence: %+v", rerank.TopK)
 	}
+}
+
+func turboQuantRescueFixture(n int) ([]retrievalScoredDoc, map[string]float32, map[string]int) {
+	fp16Ranked := make([]retrievalScoredDoc, n)
+	compactScores := make(map[string]float32, n)
+	compactRanks := make(map[string]int, n)
+	for i := range fp16Ranked {
+		id := fmt.Sprintf("d%03d", i+1)
+		fp16Ranked[i] = retrievalScoredDoc{ID: id, Score: float32(n - i)}
+		compactScores[id] = float32(n - i)
+		compactRanks[id] = i + 1
+	}
+	return fp16Ranked, compactScores, compactRanks
 }
 
 func TestMineCompactTextHardNegativesWritesManifestAndGuardsTestSplit(t *testing.T) {

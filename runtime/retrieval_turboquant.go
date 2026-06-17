@@ -24,6 +24,15 @@ const (
 	TurboQuantRerankStorageFP16               = "fp16"
 )
 
+const (
+	turboQuantFP16RerankRescueTopK        = 100
+	turboQuantFP16RerankRescueBitWidth    = 4
+	turboQuantFP16RerankRescueOverfetch   = 200
+	turboQuantFP16RerankRescueWindowLo    = 100
+	turboQuantFP16RerankRescueWindowHi    = 120
+	turboQuantFP16RerankRescuePromoteDocs = 5
+)
+
 func turboQuantRetrievalMethodName(bitWidth, overfetch int, rerankStorage string) string {
 	if overfetch <= 0 {
 		return fmt.Sprintf("turboquant_ip_b%d", bitWidth)
@@ -463,7 +472,7 @@ func evaluateTurboQuantRetrievalBits(ctx context.Context, dim, bitWidth, topK in
 			rerankQuality, evaluatedQueries, _, skippedRelevantDocs, skippedNoRelevant, rerankScores, rerankLatency = computeTurboQuantReconstructRerankRetrievalQuality(ctx, q, queries, qdocs, qrels, topK, overfetch)
 			method = fmt.Sprintf("turboquant_ip_b%d_overfetch%d_reconstruct_rerank", bitWidth, overfetch)
 		case TurboQuantRerankStorageFP16:
-			rerankQuality, evaluatedQueries, _, skippedRelevantDocs, skippedNoRelevant, rerankScores, rerankLatency = computeTurboQuantFP16RerankRetrievalQuality(ctx, q, queries, docs, qdocs, qrels, topK, overfetch)
+			rerankQuality, evaluatedQueries, _, skippedRelevantDocs, skippedNoRelevant, rerankScores, rerankLatency = computeTurboQuantFP16RerankRetrievalQuality(ctx, q, bitWidth, queries, docs, qdocs, qrels, topK, overfetch)
 			method = fmt.Sprintf("turboquant_ip_b%d_overfetch%d_fp16_rerank", bitWidth, overfetch)
 			rerankSidecarBytes = int64(len(docs) * dim * 2)
 		default:
@@ -628,7 +637,11 @@ func writeTurboQuantRetrievalPerQueryRows(ctx context.Context, datasetName, path
 				reranked = topTurboQuantReconstructRerankScores(q, query.Vector, candidates, quantizedByID, finalTopK)
 				method = turboQuantRetrievalMethodName(bitWidth, overfetch, rerankStorage)
 			case TurboQuantRerankStorageFP16:
-				reranked = topFP16RerankScores(query.Vector, candidates, halfByID, finalTopK)
+				if shouldApplyTurboQuantFP16RerankRescue(bitWidth, finalTopK, overfetch, len(candidates)) {
+					reranked = topFP16RerankRescueScores(query.Vector, candidates, halfByID, finalTopK)
+				} else {
+					reranked = topFP16RerankScores(query.Vector, candidates, halfByID, finalTopK)
+				}
 				method = turboQuantRetrievalMethodName(bitWidth, overfetch, rerankStorage)
 			default:
 				return fmt.Errorf("unsupported TurboQuant rerank storage %q", rerankStorage)
@@ -894,7 +907,7 @@ func computeTurboQuantReconstructRerankRetrievalQuality(ctx context.Context, q *
 	return totals, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, rerankScores, summarizeRetrievalEvalLatencies(latencies)
 }
 
-func computeTurboQuantFP16RerankRetrievalQuality(ctx context.Context, q *turboquant.IPQuantizer, queries []retrievalVectorRecord, denseDocs []retrievalVectorRecord, qdocs []turboQuantRetrievalDoc, qrels retrievalQrels, topK, overfetchK int) (RetrievalEvalQualityMetrics, int, int, int, int, int64, RetrievalEvalLatencyMetrics) {
+func computeTurboQuantFP16RerankRetrievalQuality(ctx context.Context, q *turboquant.IPQuantizer, bitWidth int, queries []retrievalVectorRecord, denseDocs []retrievalVectorRecord, qdocs []turboQuantRetrievalDoc, qrels retrievalQrels, topK, overfetchK int) (RetrievalEvalQualityMetrics, int, int, int, int, int64, RetrievalEvalLatencyMetrics) {
 	docIDSet := make(map[string]bool, len(denseDocs))
 	halfByID := make(map[string][]uint16, len(denseDocs))
 	for _, doc := range denseDocs {
@@ -938,7 +951,12 @@ func computeTurboQuantFP16RerankRetrievalQuality(ctx context.Context, q *turboqu
 		queryStart := time.Now()
 		prepared := q.PrepareQuery(query.Vector)
 		candidates := topTurboQuantRetrievalScores(q, prepared, qdocs, overfetchK)
-		reranked := topFP16RerankScores(query.Vector, candidates, halfByID, topK)
+		var reranked []retrievalScoredDoc
+		if shouldApplyTurboQuantFP16RerankRescue(bitWidth, topK, overfetchK, len(candidates)) {
+			reranked = topFP16RerankRescueScores(query.Vector, candidates, halfByID, topK)
+		} else {
+			reranked = topFP16RerankScores(query.Vector, candidates, halfByID, topK)
+		}
 		latencies = append(latencies, time.Since(queryStart))
 		rerankScores += int64(len(candidates))
 		evaluatedQueries++
@@ -1048,6 +1066,134 @@ func topFP16RerankScores(query []float32, candidates []retrievalScoredDoc, docs 
 	scores := []retrievalScoredDoc(h)
 	slicesSortRetrievalScores(scores)
 	return scores
+}
+
+func shouldApplyTurboQuantFP16RerankRescue(bitWidth, topK, overfetchK, candidateCount int) bool {
+	return bitWidth == turboQuantFP16RerankRescueBitWidth &&
+		topK == turboQuantFP16RerankRescueTopK &&
+		overfetchK == turboQuantFP16RerankRescueOverfetch &&
+		candidateCount >= turboQuantFP16RerankRescueWindowHi
+}
+
+func topFP16RerankRescueScores(query []float32, candidates []retrievalScoredDoc, docs map[string][]uint16, topK int) []retrievalScoredDoc {
+	if topK <= 0 || topK > len(candidates) {
+		topK = len(candidates)
+	}
+	compactRanks := retrievalRankMap(candidates)
+	compactScores := make(map[string]float32, len(candidates))
+	ranked := make([]retrievalScoredDoc, 0, len(candidates))
+	for _, candidate := range candidates {
+		vec, ok := docs[candidate.ID]
+		if !ok {
+			continue
+		}
+		var scoreValue float32
+		for i, half := range vec {
+			scoreValue += query[i] * halfToFloat32(half)
+		}
+		compactScores[candidate.ID] = candidate.Score
+		ranked = append(ranked, retrievalScoredDoc{ID: candidate.ID, Score: scoreValue})
+	}
+	sortTurboQuantFP16RankedScores(ranked, compactRanks)
+	ranked = applyTurboQuantFP16RerankRescue(ranked, compactScores, compactRanks)
+	if topK > len(ranked) {
+		topK = len(ranked)
+	}
+	return append([]retrievalScoredDoc(nil), ranked[:topK]...)
+}
+
+func sortTurboQuantFP16RankedScores(scores []retrievalScoredDoc, compactRanks map[string]int) {
+	sort.Slice(scores, func(i, j int) bool {
+		if scores[i].Score > scores[j].Score {
+			return true
+		}
+		if scores[i].Score < scores[j].Score {
+			return false
+		}
+		leftRank := compactRanks[scores[i].ID]
+		if leftRank == 0 {
+			leftRank = maxIntValue()
+		}
+		rightRank := compactRanks[scores[j].ID]
+		if rightRank == 0 {
+			rightRank = maxIntValue()
+		}
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		return scores[i].ID > scores[j].ID
+	})
+}
+
+func applyTurboQuantFP16RerankRescue(fp16Ranked []retrievalScoredDoc, compactScores map[string]float32, compactRanks map[string]int) []retrievalScoredDoc {
+	if len(fp16Ranked) < turboQuantFP16RerankRescueWindowHi || len(fp16Ranked) <= turboQuantFP16RerankRescueTopK {
+		return fp16Ranked
+	}
+	top := fp16Ranked[:turboQuantFP16RerankRescueTopK]
+	rescuePool := make([]retrievalScoredDoc, 0, turboQuantFP16RerankRescueWindowHi-turboQuantFP16RerankRescueWindowLo+1)
+	for i, doc := range fp16Ranked {
+		rank := i + 1
+		if rank >= turboQuantFP16RerankRescueWindowLo && rank <= turboQuantFP16RerankRescueWindowHi {
+			rescuePool = append(rescuePool, doc)
+		}
+	}
+	sort.Slice(rescuePool, func(i, j int) bool {
+		leftScore := compactScores[rescuePool[i].ID]
+		rightScore := compactScores[rescuePool[j].ID]
+		if leftScore > rightScore {
+			return true
+		}
+		if leftScore < rightScore {
+			return false
+		}
+		leftRank := compactRanks[rescuePool[i].ID]
+		if leftRank == 0 {
+			leftRank = maxIntValue()
+		}
+		rightRank := compactRanks[rescuePool[j].ID]
+		if rightRank == 0 {
+			rightRank = maxIntValue()
+		}
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		return rescuePool[i].ID > rescuePool[j].ID
+	})
+	if len(rescuePool) > turboQuantFP16RerankRescuePromoteDocs {
+		rescuePool = rescuePool[:turboQuantFP16RerankRescuePromoteDocs]
+	}
+	promotedIDs := make(map[string]bool, len(rescuePool))
+	for _, doc := range rescuePool {
+		promotedIDs[doc.ID] = true
+	}
+	out := make([]retrievalScoredDoc, 0, len(fp16Ranked))
+	seen := make(map[string]bool, len(fp16Ranked))
+	for _, doc := range top {
+		if promotedIDs[doc.ID] {
+			continue
+		}
+		out = append(out, doc)
+		seen[doc.ID] = true
+	}
+	for _, doc := range rescuePool {
+		if seen[doc.ID] {
+			continue
+		}
+		out = append(out, doc)
+		seen[doc.ID] = true
+	}
+	for _, doc := range fp16Ranked {
+		if seen[doc.ID] {
+			continue
+		}
+		out = append(out, doc)
+		seen[doc.ID] = true
+	}
+	return out
+}
+
+func maxIntValue() int {
+	return int(^uint(0) >> 1)
 }
 
 func topTurboQuantReconstructRerankScores(q *turboquant.IPQuantizer, query []float32, candidates []retrievalScoredDoc, docs map[string]turboquant.IPQuantized, topK int) []retrievalScoredDoc {
