@@ -2512,6 +2512,158 @@ func TestRunGateScoreboardPassesTurboQuantStorageMetrics(t *testing.T) {
 	}
 }
 
+func TestRunGateScoreboardPassesTurboQuantCrossMethodAnchorSelection(t *testing.T) {
+	dir := t.TempDir()
+	currentPath := filepath.Join(dir, "current.scoreboard.json")
+	anchorPath := filepath.Join(dir, "anchor.scoreboard.json")
+	currentMethod := "turboquant_ip_b4_overfetch200_fp16_rerank"
+	anchorMethod := "turboquant_ip_b4_overfetch250_fp16_rerank"
+	writeScoreboardForTest(t, currentPath, []retrievalScoreboardRow{
+		{
+			Category:              "short_retrieval",
+			Dataset:               "scifact",
+			Baseline:              "eos-turboquant-rerank",
+			Method:                currentMethod,
+			Bits:                  4,
+			RerankStorage:         "fp16",
+			NDCGAt10:              0.487,
+			RecallAt100:           0.776,
+			TotalCompressionRatio: 2.652,
+		},
+		{
+			Category:              "short_retrieval",
+			Dataset:               "nfcorpus",
+			Baseline:              "eos-turboquant-rerank",
+			Method:                currentMethod,
+			Bits:                  4,
+			RerankStorage:         "fp16",
+			NDCGAt10:              0.357,
+			RecallAt100:           0.282,
+			TotalCompressionRatio: 2.638,
+		},
+		{
+			Category:              "short_retrieval",
+			Dataset:               "fiqa",
+			Baseline:              "eos-turboquant-rerank",
+			Method:                currentMethod,
+			Bits:                  4,
+			RerankStorage:         "fp16",
+			NDCGAt10:              0.308,
+			RecallAt100:           0.553,
+			TotalCompressionRatio: 2.649,
+		},
+	})
+	writeScoreboardForTest(t, anchorPath, []retrievalScoreboardRow{
+		{
+			Category:              "short_retrieval",
+			Dataset:               "scifact",
+			Baseline:              "eos-turboquant-rerank",
+			Method:                anchorMethod,
+			Bits:                  4,
+			RerankStorage:         "fp16",
+			NDCGAt10:              0.486,
+			RecallAt100:           0.775,
+			TotalCompressionRatio: 2.652,
+		},
+		{
+			Category:              "short_retrieval",
+			Dataset:               "nfcorpus",
+			Baseline:              "eos-turboquant-rerank",
+			Method:                anchorMethod,
+			Bits:                  4,
+			RerankStorage:         "fp16",
+			NDCGAt10:              0.357,
+			RecallAt100:           0.282,
+			TotalCompressionRatio: 2.638,
+		},
+		{
+			Category:              "short_retrieval",
+			Dataset:               "fiqa",
+			Baseline:              "eos-turboquant-rerank",
+			Method:                anchorMethod,
+			Bits:                  4,
+			RerankStorage:         "fp16",
+			NDCGAt10:              0.307,
+			RecallAt100:           0.552,
+			TotalCompressionRatio: 2.649,
+		},
+	})
+
+	output := captureRunOutput(t, []string{
+		"gate-scoreboard",
+		"--baseline", "eos-turboquant-rerank",
+		"--method", currentMethod,
+		"--anchor-method", anchorMethod,
+		"--bits", "4",
+		"--datasets", "scifact,nfcorpus,fiqa",
+		"--metrics", "ndcg_at_10,recall_at_100,total_compression_ratio",
+		currentPath,
+		anchorPath,
+	})
+	for _, want := range []string{
+		"current selection: category=short_retrieval baseline=eos-turboquant-rerank method=turboquant_ip_b4_overfetch200_fp16_rerank bits=4",
+		"anchor selection: category=short_retrieval baseline=eos-turboquant-rerank method=turboquant_ip_b4_overfetch250_fp16_rerank bits=4",
+		"PASS dataset=fiqa metric=recall_at_100 current=0.553000 anchor=0.552000 delta=+0.001000",
+		"scoreboard gate: PASS checks=9",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("scoreboard cross-method output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
+func TestRunGateScoreboardReportsMissingCrossMethodAnchorSelection(t *testing.T) {
+	dir := t.TempDir()
+	currentPath := filepath.Join(dir, "current.scoreboard.json")
+	anchorPath := filepath.Join(dir, "anchor.scoreboard.json")
+	currentMethod := "turboquant_ip_b4_overfetch200_fp16_rerank"
+	anchorMethod := "turboquant_ip_b4_overfetch250_fp16_rerank"
+	writeScoreboardForTest(t, currentPath, []retrievalScoreboardRow{
+		{
+			Category:    "short_retrieval",
+			Dataset:     "scifact",
+			Baseline:    "eos-turboquant-rerank",
+			Method:      currentMethod,
+			Bits:        4,
+			NDCGAt10:    0.487,
+			RecallAt100: 0.776,
+		},
+	})
+	writeScoreboardForTest(t, anchorPath, []retrievalScoreboardRow{
+		{
+			Category:    "short_retrieval",
+			Dataset:     "scifact",
+			Baseline:    "eos-turboquant-rerank",
+			Method:      anchorMethod,
+			Bits:        4,
+			NDCGAt10:    0.486,
+			RecallAt100: 0.775,
+		},
+	})
+
+	output, err := captureRunOutputAndError(t, []string{
+		"gate-scoreboard",
+		"--baseline", "eos-turboquant-rerank",
+		"--method", currentMethod,
+		"--bits", "4",
+		"--datasets", "scifact",
+		currentPath,
+		anchorPath,
+	})
+	if err == nil {
+		t.Fatalf("expected missing anchor row failure\noutput:\n%s", output)
+	}
+	for _, want := range []string{
+		"anchor scoreboard row selection failed",
+		"scoreboard row missing",
+		"method=turboquant_ip_b4_overfetch200_fp16_rerank",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("missing anchor error does not contain %q: %v\noutput:\n%s", want, err, output)
+		}
+	}
+}
+
 func TestRunGateScoreboardFailsPerDatasetMissEvenWhenMacroWins(t *testing.T) {
 	dir := t.TempDir()
 	currentPath := filepath.Join(dir, "current.scoreboard.json")

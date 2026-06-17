@@ -5677,6 +5677,10 @@ func runGateScoreboard(args []string) error {
 	rowBaseline := fs.String("baseline", "eos", "scoreboard row baseline label to compare")
 	method := fs.String("method", "", "optional scoreboard row method filter")
 	bits := fs.Int("bits", -1, "optional scoreboard row bit-width filter")
+	anchorCategory := fs.String("anchor-category", "", "optional anchor scoreboard category override; default uses --category")
+	anchorBaseline := fs.String("anchor-baseline", "", "optional anchor scoreboard baseline override; default uses --baseline")
+	anchorMethod := fs.String("anchor-method", "", "optional anchor scoreboard method override; default uses --method")
+	anchorBits := fs.Int("anchor-bits", -2, "optional anchor scoreboard bit-width override; -2 uses --bits, -1 disables anchor bit filtering")
 	datasetsText := fs.String("datasets", "", "comma-separated datasets that must all pass")
 	metricsText := fs.String("metrics", "ndcg_at_10,recall_at_100", "comma-separated metrics that must all pass")
 	tolerance := fs.Float64("tolerance", 0, "allowed current metric drop below anchor")
@@ -5684,13 +5688,16 @@ func runGateScoreboard(args []string) error {
 		return err
 	}
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: eos gate-scoreboard [--category short_retrieval] [--baseline eos] --datasets scifact,nfcorpus,fiqa [--metrics ndcg_at_10,recall_at_100] [--tolerance 0] <current.scoreboard.json> <anchor.scoreboard.json>")
+		return fmt.Errorf("usage: eos gate-scoreboard [--category short_retrieval] [--baseline eos] [--method label] [--bits n] [--anchor-method label] [--anchor-bits n] --datasets scifact,nfcorpus,fiqa [--metrics ndcg_at_10,recall_at_100] [--tolerance 0] <current.scoreboard.json> <anchor.scoreboard.json>")
 	}
 	if *tolerance < 0 {
 		return fmt.Errorf("tolerance must be non-negative")
 	}
 	if *bits < -1 {
 		return fmt.Errorf("bits must be non-negative when set")
+	}
+	if *anchorBits < -2 {
+		return fmt.Errorf("anchor-bits must be -2, -1, or non-negative")
 	}
 	datasets := splitCommaList(*datasetsText)
 	if len(datasets) == 0 {
@@ -5715,25 +5722,39 @@ func runGateScoreboard(args []string) error {
 	if err != nil {
 		return err
 	}
-	selection := scoreboardGateSelection{
+	currentSelection := scoreboardGateSelection{
 		Category: strings.TrimSpace(*category),
 		Baseline: strings.TrimSpace(*rowBaseline),
 		Method:   strings.TrimSpace(*method),
 		Bits:     *bits,
 	}
-	if selection.Category == "" || selection.Baseline == "" {
+	anchorSelection := currentSelection
+	if override := strings.TrimSpace(*anchorCategory); override != "" {
+		anchorSelection.Category = override
+	}
+	if override := strings.TrimSpace(*anchorBaseline); override != "" {
+		anchorSelection.Baseline = override
+	}
+	if override := strings.TrimSpace(*anchorMethod); override != "" {
+		anchorSelection.Method = override
+	}
+	if *anchorBits != -2 {
+		anchorSelection.Bits = *anchorBits
+	}
+	if currentSelection.Category == "" || currentSelection.Baseline == "" {
 		return fmt.Errorf("category and baseline must be non-empty")
+	}
+	if anchorSelection.Category == "" || anchorSelection.Baseline == "" {
+		return fmt.Errorf("anchor category and baseline must be non-empty")
 	}
 	fmt.Printf("current: %s\n", currentPath)
 	fmt.Printf("anchor: %s\n", anchorPath)
-	fmt.Printf("selection: category=%s baseline=%s", selection.Category, selection.Baseline)
-	if selection.Method != "" {
-		fmt.Printf(" method=%s", selection.Method)
+	if currentSelection == anchorSelection {
+		fmt.Printf("selection: %s\n", formatScoreboardGateSelection(currentSelection))
+	} else {
+		fmt.Printf("current selection: %s\n", formatScoreboardGateSelection(currentSelection))
+		fmt.Printf("anchor selection: %s\n", formatScoreboardGateSelection(anchorSelection))
 	}
-	if selection.Bits >= 0 {
-		fmt.Printf(" bits=%d", selection.Bits)
-	}
-	fmt.Printf("\n")
 	fmt.Printf("datasets: %s\n", strings.Join(datasets, ","))
 	fmt.Printf("metrics: %s tolerance=%.6g\n", strings.Join(metrics, ","), *tolerance)
 
@@ -5742,13 +5763,13 @@ func runGateScoreboard(args []string) error {
 	macroCurrent := make(map[string]float64, len(metrics))
 	macroAnchor := make(map[string]float64, len(metrics))
 	for _, dataset := range datasets {
-		currentRow, err := selectRetrievalScoreboardRow(current.Rows, selection, dataset, currentPath)
+		currentRow, err := selectRetrievalScoreboardRow(current.Rows, currentSelection, dataset, currentPath)
 		if err != nil {
-			return err
+			return fmt.Errorf("current scoreboard row selection failed: %w", err)
 		}
-		anchorRow, err := selectRetrievalScoreboardRow(anchor.Rows, selection, dataset, anchorPath)
+		anchorRow, err := selectRetrievalScoreboardRow(anchor.Rows, anchorSelection, dataset, anchorPath)
 		if err != nil {
-			return err
+			return fmt.Errorf("anchor scoreboard row selection failed: %w", err)
 		}
 		for _, metric := range metrics {
 			currentValue, _ := scoreboardRetrievalMetricValue(currentRow, metric)
@@ -5778,6 +5799,18 @@ func runGateScoreboard(args []string) error {
 	}
 	fmt.Printf("scoreboard gate: PASS checks=%d\n", checked)
 	return nil
+}
+
+func formatScoreboardGateSelection(selection scoreboardGateSelection) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "category=%s baseline=%s", selection.Category, selection.Baseline)
+	if selection.Method != "" {
+		fmt.Fprintf(&b, " method=%s", selection.Method)
+	}
+	if selection.Bits >= 0 {
+		fmt.Fprintf(&b, " bits=%d", selection.Bits)
+	}
+	return b.String()
 }
 
 func splitCommaList(text string) []string {
