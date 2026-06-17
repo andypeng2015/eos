@@ -58,6 +58,35 @@
     "strict_current_compact_non_regression": true,
     "note": "q4/fp16/rerank-overfetch=200 is the lowest checked-in-asset profile that clears predecessor q4/fp16/250 quality across SciFact, NFCorpus, and FiQA by explicit comparison. q4/175 failed direct post-promotion FiQA recall, and q4/150 was not selected because later paired evidence showed recall instability."
   },
+  "corkscrewdb_api_evidence": {
+    "status": "current_nf005_local_flat_smoke",
+    "report": ".tiller/scratch/codex/eos-nf005-current-default-corkscrewdb-api-smoke-v1-report.md",
+    "run_dir": "runs/eos-nf005-current-default-corkscrewdb-budget-quality-packed-q4q8-20260617T142823Z/",
+    "vector_cache": "runs/eos-vector-caches/eos-nf005-current-default-scifact-child-w128-o32-128d/",
+    "layout": "packed_parent_multivectors",
+    "metadata": "none",
+    "child_ids": "ordinal",
+    "api_scope": "local_flat_only",
+    "q4_release_gate": {
+      "ndcg_at_10": 0.451122,
+      "recall_at_100": 0.755222,
+      "db_dir_multiple": 0.020372,
+      "vector_payload_multiple": 0.013312,
+      "p95_ms": 142.971679,
+      "planner_fit": 180,
+      "target_child_fit": true,
+      "target_storage_multiple": 0.554545
+    },
+    "q8_diagnostic": {
+      "ndcg_at_10": 0.472867,
+      "recall_at_100": 0.780222,
+      "db_dir_multiple": 0.032901,
+      "p95_ms": 22.988553,
+      "planner_fit": 93,
+      "target_child_fit": false
+    },
+    "caveat": "Local flat CorkScrewDB API only; q8 is diagnostic because target_child_fit is false; q4 p95 latency is run evidence, not a service SLO."
+  },
   "caveats": [
     "This asset is the durable Eos-side default embedder package for CorkScrewDB external-provider loading.",
     "The ignored runs/ release directory remains provenance.",
