@@ -48,15 +48,15 @@
     }
   ],
   "compact_policy": {
-    "profile": "q4/fp16/rerank-overfetch=175",
+    "profile": "q4/fp16/rerank-overfetch=200",
     "baseline": "eos-turboquant-rerank",
-    "method": "turboquant_ip_b4_overfetch175_fp16_rerank",
+    "method": "turboquant_ip_b4_overfetch200_fp16_rerank",
     "bits": 4,
-    "rerank_overfetch": 175,
+    "rerank_overfetch": 200,
     "rerank_storage": "fp16",
     "total_compression_ratio": 1.5900621118,
     "strict_current_compact_non_regression": true,
-    "note": "q4/fp16/rerank-overfetch=175 cleared selected quality across SciFact, NFCorpus, and FiQA and repeated paired full-SciFact quality/performance versus the predecessor q4/fp16/250 profile. q4/150 was not selected because later paired evidence showed recall instability."
+    "note": "q4/fp16/rerank-overfetch=200 is the lowest checked-in-asset profile that clears predecessor q4/fp16/250 quality across SciFact, NFCorpus, and FiQA by explicit comparison. q4/175 failed direct post-promotion FiQA recall, and q4/150 was not selected because later paired evidence showed recall instability."
   },
   "caveats": [
     "This asset is the durable Eos-side default embedder package for CorkScrewDB external-provider loading.",

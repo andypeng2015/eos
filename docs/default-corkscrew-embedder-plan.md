@@ -34,7 +34,7 @@ go run ./cmd/eos gate-scoreboard \
   runs/<accepted-dense-scoreboard>/scoreboard.json
 ```
 
-Use `--tolerance` only for an explicitly accepted numeric rounding margin. For TurboQuant rows, add the matching `--baseline`, `--method`, and `--bits` filters so the command compares one unambiguous row per dataset in both scoreboards. The current promoted compact policy is `q4/fp16/rerank-overfetch=175`, method `turboquant_ip_b4_overfetch175_fp16_rerank`, bits `4`, fp16 rerank storage, total compression `1.5900621118x`. It cleared selected quality across SciFact, NFCorpus, and FiQA, and repeated paired full-SciFact evidence versus previous q4/fp16/250 recorded nDCG delta `+0.0022161292`, recall delta `0`, p95 `-11.49%`, and scores/s `+7.10%`. The q4/150 row was lower cost in a sweep but was not selected because later paired evidence showed recall instability.
+Use `--tolerance` only for an explicitly accepted numeric rounding margin. For TurboQuant rows, add the matching `--baseline`, `--method`, and `--bits` filters so the command compares one unambiguous row per dataset in both scoreboards. The current promoted compact policy is `q4/fp16/rerank-overfetch=200`, method `turboquant_ip_b4_overfetch200_fp16_rerank`, bits `4`, fp16 rerank storage, total compression `1.5900621118x`. It is selected because direct checked-in-asset evidence showed `q4/fp16/rerank-overfetch=175` failing FiQA recall versus the predecessor q4/fp16/250 profile, while q4/200 is the lowest recovery-sweep profile that clears predecessor q4/fp16/250 quality across SciFact, NFCorpus, and FiQA by explicit comparison. The q4/150 row was lower cost in an earlier sweep but was not selected because later paired evidence showed recall instability.
 `--baseline eos` falls back to legacy `manta` rows when exact `eos` rows are absent, so the gate can compare new scoreboards with the current legacy-named anchor without rewriting provenance.
 
 Hybrid retrieval rows are eligible only as calibrated retrieval-surface evidence. Run `scripts/calibrate_eos_embed_hybrid_retrieval.fw` first, select method/alpha/RRF settings on the configured dev split, and apply the selected setting unchanged to test. The calibration summary must include dense and BM25 sanity rows plus the protection gate deltas against dense `ndcg_at_10` and `recall_at_100`; use that selected setting in any later `eos-hybrid` scoreboard row. Hybrid per-query rows expose optional dense/BM25 component ranks plus raw and normalized component scores for fused candidates, so routing experiments should prefer those diagnostics over query-ID allowlists. `--dense-protect-top-k N` is the narrow product guard for preserving dense winners without query-ID special cases; report it separately from the selected fusion setting. Do not treat a passing hybrid calibration as a dense model promotion.
@@ -153,14 +153,14 @@ EOS_SCOREBOARD_RETRIEVAL_ROOT=datasets/eos-embed-v1 \
 EOS_SCOREBOARD_RETRIEVAL_DATASETS=scifact,nfcorpus,fiqa \
 EOS_SCOREBOARD_TURBOQUANT=1 \
 EOS_SCOREBOARD_TURBOQUANT_BITS=4 \
-EOS_SCOREBOARD_TURBOQUANT_RERANK_OVERFETCH=175 \
+EOS_SCOREBOARD_TURBOQUANT_RERANK_OVERFETCH=200 \
 EOS_SCOREBOARD_TURBOQUANT_RERANK_STORAGE=fp16 \
 EOS_SCOREBOARD_TURBOQUANT_BASELINE=eos-turboquant \
 EOS_SCOREBOARD_TURBOQUANT_RERANK_BASELINE=eos-turboquant-rerank \
 ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
 ```
 
-This produces direct `eos-turboquant` rows and fp16 sidecar rerank `eos-turboquant-rerank` rows from one `eval-retrieval-turboquant` metrics file. Use `--baseline eos-turboquant --method turboquant_ip_b4 --bits 4` to inspect direct q4, but do not treat direct q4 or direct q8 as default-promotion candidates. Gate the promoted compact profile with `--baseline eos-turboquant-rerank --method turboquant_ip_b4_overfetch175_fp16_rerank --bits 4 --metrics ndcg_at_10,recall_at_100,total_compression_ratio`.
+This produces direct `eos-turboquant` rows and fp16 sidecar rerank `eos-turboquant-rerank` rows from one `eval-retrieval-turboquant` metrics file. Use `--baseline eos-turboquant --method turboquant_ip_b4 --bits 4` to inspect direct q4, but do not treat direct q4 or direct q8 as default-promotion candidates. Gate the promoted compact profile with `--baseline eos-turboquant-rerank --method turboquant_ip_b4_overfetch200_fp16_rerank --bits 4 --metrics ndcg_at_10,recall_at_100,total_compression_ratio`.
 
 When the default embedder needs to feed the vector-cache evaluators instead of live `eval-retrieval`, use the Go-native exporter. It loads packaged or sealed Eos embedding artifacts through the runtime tokenizer/batch path and writes the same JSONL shape as external caches:
 
@@ -210,7 +210,7 @@ EOS_REPO_ROOT=$PWD \
 ferrous-wheel run scripts/smoke_eos_default_embedder_serving.fw
 ```
 
-The smoke selects `turboquant_ip_b4_overfetch175_fp16_rerank` as the promoted compact profile, writes a summary TSV and manifest under `runs/eos-default-embedder-serving-smoke-<timestamp>/`, and can gate total compression plus optional p95 latency. This is CorkScrewDB-relevant TurboQuant serving proxy evidence only, not a CorkScrewDB API load/index/search smoke. The repeated paired full-SciFact release evidence for candidate SHA `8074d2fce1842e232df2b4172d40463d82b57848c719b2d76fdd68aca682ac70` measured q4/fp16/175 at nDCG@10 `0.5645379155`, recall@100 `0.7964444444`, total compression `1.5900621118x`, mean p95 `7.438366 ms`, and mean `388069.84` scores/s versus previous q4/fp16/250 at nDCG@10 `0.5623217863`, recall@100 `0.7964444444`, mean p95 `8.403535 ms`, and mean `362353.59` scores/s. Use the local flat CorkScrewDB API smoke when the actual `PutVector`/`SearchVector` integration path needs to pass:
+The smoke selects `turboquant_ip_b4_overfetch200_fp16_rerank` as the promoted compact profile, writes a summary TSV and manifest under `runs/eos-default-embedder-serving-smoke-<timestamp>/`, and can gate total compression plus optional p95 latency. This is CorkScrewDB-relevant TurboQuant serving proxy evidence only, not a CorkScrewDB API load/index/search smoke. The direct checked-in-asset recovery sweep for candidate SHA `8074d2fce1842e232df2b4172d40463d82b57848c719b2d76fdd68aca682ac70` measured q4/fp16/200 versus previous q4/fp16/250 as: SciFact nDCG delta `+0.002216`, recall delta `0`; NFCorpus nDCG delta `+0.001402`, recall delta `+0.000168`; FiQA nDCG delta `+0.000815`, recall delta `+0.001337`; total compression `1.5900621118x`. Use the local flat CorkScrewDB API smoke when the actual `PutVector`/`SearchVector` integration path needs to pass:
 
 ```bash
 EOS_REPO_ROOT=$PWD \
@@ -219,7 +219,7 @@ ferrous-wheel run scripts/smoke_corkscrewdb_child_vectors.fw
 
 That smoke defaults to a tiny synthetic time-series child-vector cache, can consume externally prepared child/query/qrels paths with `EOS_CORKSCREW_SMOKE_CHILD_VECTORS`, `EOS_CORKSCREW_SMOKE_QUERY_VECTORS`, and `EOS_CORKSCREW_SMOKE_QRELS`, and requires a local CorkScrewDB checkout rather than silently pulling a network dependency. `EOS_CORKSCREW_SMOKE_OVERFETCH` accepts comma-separated values such as `100,12468`; the harness loads one DB per bit width and reuses it across overfetch values so serving recall/latency sweeps avoid repeated insert cost. Use exhaustive/full child overfetch when comparing against offline cache-evaluator parity, with the expectation that latency rises. Treat it as local flat CorkScrewDB load/index/search/storage accounting evidence, not remote/federation/HNSW evidence or a model-quality benchmark.
 
-Current release-artifact local Eos TurboQuant result: q4/fp16 sidecar rerank at overfetch175 is the promoted compact policy for the nf005 default. It cleared selected quality across SciFact, NFCorpus, and FiQA in the cross-dataset sweep, and the repeated paired full-SciFact benchmark against previous q4/fp16/250 cleared strict current-compact non-regression on the measured selected rows. q4/150 was lower cost in the sweep but was not selected because later paired evidence showed recall instability.
+Current release-artifact local Eos TurboQuant result: q4/fp16 sidecar rerank at overfetch200 is the promoted compact policy for the nf005 default. q4/175 failed the direct checked-in short-set gate on FiQA recall (`0.349080` versus predecessor `0.350444`), while q4/200 clears predecessor q4/fp16/250 quality across SciFact, NFCorpus, and FiQA by explicit comparison. q4/150 was lower cost in an earlier sweep but was not selected because later paired evidence showed recall instability.
 
 ## Multi-Vector Storage Planning
 

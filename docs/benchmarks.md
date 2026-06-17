@@ -145,14 +145,14 @@ Append local sealed Eos TurboQuant rows in the same scoreboard:
 ```bash
 EOS_SCOREBOARD_TURBOQUANT=1 \
 EOS_SCOREBOARD_TURBOQUANT_BITS=4 \
-EOS_SCOREBOARD_TURBOQUANT_RERANK_OVERFETCH=175 \
+EOS_SCOREBOARD_TURBOQUANT_RERANK_OVERFETCH=200 \
 EOS_SCOREBOARD_TURBOQUANT_RERANK_STORAGE=fp16 \
 EOS_SCOREBOARD_TURBOQUANT_BASELINE=eos-turboquant \
 EOS_SCOREBOARD_TURBOQUANT_RERANK_BASELINE=eos-turboquant-rerank \
 ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
 ```
 
-The direct and rerank rows share the same metrics JSON but use separate scoreboard baselines. Gate the promoted compact reranked profile with `--baseline eos-turboquant-rerank --method turboquant_ip_b4_overfetch175_fp16_rerank --bits 4 --metrics ndcg_at_10,recall_at_100,total_compression_ratio`. Direct q4 and direct q8 are useful diagnostics, but they are not default-promotion candidates; the promoted q4 profile is two-stage q4 retrieval plus fp16 sidecar rerank.
+The direct and rerank rows share the same metrics JSON but use separate scoreboard baselines. Gate the promoted compact reranked profile with `--baseline eos-turboquant-rerank --method turboquant_ip_b4_overfetch200_fp16_rerank --bits 4 --metrics ndcg_at_10,recall_at_100,total_compression_ratio`. Direct q4 and direct q8 are useful diagnostics, but they are not default-promotion candidates; the promoted q4 profile is two-stage q4 retrieval plus fp16 sidecar rerank.
 
 Qwen3 is now locally consolidated for SciFact and NFCorpus only. Its useful compact external row is direct q8 at about `3.98x` vector compression, with SciFact q8 nDCG@10 `0.704128` and NFCorpus q8 nDCG@10 `0.368763`. mxbai remains stronger than Qwen3 in the existing local SciFact/NFCorpus evidence. Qwen3 FiQA is still subset-only, so do not use it for full short-set claims until the cache is repaired.
 
@@ -181,7 +181,7 @@ EOS_REPO_ROOT=$PWD \
 ferrous-wheel run scripts/smoke_eos_default_embedder_serving.fw
 ```
 
-It selects q4/fp16/rerank-overfetch=175 and writes `summary.tsv` plus `manifest.json` under `runs/eos-default-embedder-serving-smoke-<timestamp>/`. This is not an actual CorkScrewDB API smoke; it is the in-repo TurboQuant serving proxy. For the nf005 release artifact, q4/fp16/175 cleared selected cross-dataset quality and repeated paired full-SciFact quality/performance against previous q4/fp16/250: nDCG delta `+0.0022161292`, recall delta `0`, mean p95 `7.438366 ms` versus `8.403535 ms` (`-11.49%`), mean scores/s `388069.84` versus `362353.59` (`+7.10%`), total compression `1.5900621118x`. Treat these rows as serving proxy evidence tied to release sealed SHA256 `8074d2fce1842e232df2b4172d40463d82b57848c719b2d76fdd68aca682ac70`, not CorkScrewDB API smoke. q4/150 was not selected because later paired evidence showed recall instability.
+It selects q4/fp16/rerank-overfetch=200 and writes `summary.tsv` plus `manifest.json` under `runs/eos-default-embedder-serving-smoke-<timestamp>/`. This is not an actual CorkScrewDB API smoke; it is the in-repo TurboQuant serving proxy. For the nf005 release artifact, q4/fp16/175 failed direct checked-in FiQA recall against predecessor q4/fp16/250 (`0.349080` versus `0.350444`). q4/fp16/200 is the corrected promoted policy and the lowest checked-in-asset recovery-sweep profile that clears predecessor quality across SciFact, NFCorpus, and FiQA: SciFact nDCG delta `+0.002216`, recall delta `0`; NFCorpus nDCG delta `+0.001402`, recall delta `+0.000168`; FiQA nDCG delta `+0.000815`, recall delta `+0.001337`; total compression `1.5900621118x`. Treat these rows as serving proxy evidence tied to release sealed SHA256 `8074d2fce1842e232df2b4172d40463d82b57848c719b2d76fdd68aca682ac70`, not CorkScrewDB API smoke. q4/150 was not selected because later paired evidence showed recall instability.
 
 For the local flat CorkScrewDB child-vector API path, run:
 
@@ -277,7 +277,7 @@ Corrected q2-341 packed-parent frontier evidence is now a unified API run rather
 
 These scaled time-series rows are synthetic text-rendered smoke evidence: they improve DB overhead measurement by scaling parent objects and show a local flat packed-parent storage win, but they are not production quality, remote/federation/HNSW evidence, or a trained numeric time-series encoder claim. Keep the DB directory max disabled unless a fresh run establishes a stable machine-local threshold.
 
-Current measured release-artifact compact-profile result: q4/fp16 sidecar rerank at overfetch175 is the promoted nf005 compact policy. It preserves selected quality across SciFact, NFCorpus, and FiQA and clears repeated paired full-SciFact quality/performance against previous q4/fp16/250 with total compression `1.5900621118x`. Do not generalize this result to direct q4, remote CorkScrewDB, HNSW, federation, or hosted-model parity.
+Current measured release-artifact compact-profile result: q4/fp16 sidecar rerank at overfetch200 is the promoted nf005 compact policy. It is selected because q4/175 failed direct checked-in FiQA recall, while q4/200 preserves selected quality across SciFact, NFCorpus, and FiQA against previous q4/fp16/250 with total compression `1.5900621118x`. Do not generalize this result to direct q4, remote CorkScrewDB, HNSW, federation, or hosted-model parity.
 
 Current dense local candidate:
 

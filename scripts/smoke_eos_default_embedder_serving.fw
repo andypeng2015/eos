@@ -13,11 +13,11 @@ import (
 )
 
 const defaultSelectedBits = 4
-const defaultSelectedOverfetch = 175
+const defaultSelectedOverfetch = 200
 const defaultFallbackBits = 8
 const defaultFallbackOverfetch = 125
 const defaultRerankStorage = "fp16"
-const defaultSelectedMethod = "turboquant_ip_b4_overfetch175_fp16_rerank"
+const defaultSelectedMethod = "turboquant_ip_b4_overfetch200_fp16_rerank"
 const defaultFallbackMethod = "turboquant_ip_b8_overfetch125_fp16_rerank"
 
 type compactProfile struct {
@@ -83,7 +83,7 @@ type manifest struct {
 	FallbackProfile string `json:"fallback_profile"`
 	SelectedCompactProfile *summaryRow `json:"selected_compact_profile"`
 	FallbackCompactProfile *summaryRow `json:"fallback_compact_profile"`
-	Selected *summaryRow `json:"selected_q4_overfetch175_fp16"`
+	Selected *summaryRow `json:"selected_q4_overfetch200_fp16"`
 	Fallback *summaryRow `json:"fallback_q8_overfetch125_fp16"`
 }
 
@@ -107,12 +107,12 @@ Environment:
   EOS_SERVE_SMOKE_MAX_DOCS=300      # set 0 for full corpus
   EOS_SERVE_SMOKE_MAX_QUERIES=20    # set 0 for full query set
   EOS_SERVE_SMOKE_SELECTED_BITS=4
-  EOS_SERVE_SMOKE_SELECTED_OVERFETCH=175
+  EOS_SERVE_SMOKE_SELECTED_OVERFETCH=200
   EOS_SERVE_SMOKE_FALLBACK_BITS=8
   EOS_SERVE_SMOKE_FALLBACK_OVERFETCH=125
   EOS_SERVE_SMOKE_RERANK_STORAGE=fp16
   EOS_SERVE_SMOKE_BITS=4,8          # optional explicit eval bits
-  EOS_SERVE_SMOKE_RERANK_OVERFETCH=125,175 # optional explicit eval overfetches
+  EOS_SERVE_SMOKE_RERANK_OVERFETCH=125,200 # optional explicit eval overfetches
   EOS_SERVE_SMOKE_MIN_TOTAL_COMPRESSION=1.0
   EOS_SERVE_SMOKE_MAX_P95_MS=0      # set nonzero to gate selected/fallback p95`)
 }
