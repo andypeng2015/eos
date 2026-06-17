@@ -2843,6 +2843,83 @@ func TestRunTrainEmbedFitsContrastivePackage(t *testing.T) {
 	}
 }
 
+func TestRunTrainEmbedExplicitZeroTeacherLossOverridesCheckpoint(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", "--teacher-loss-weight", "0.1", "--teacher-temperature", "2", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	checkpointPath := eosruntime.DefaultEmbeddingCheckpointPath(path)
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(checkpointPath)
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	checkpoint.Config.TeacherSourceWeights = map[string]float32{"fiqa": 0.25, "nfcorpus": 0.05, "scifact": 1}
+	if err := checkpoint.WriteFile(checkpointPath); err != nil {
+		t.Fatalf("write checkpoint: %v", err)
+	}
+	mod, err := eosartifact.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read artifact: %v", err)
+	}
+	packageManifest, err := eosruntime.BuildPackageManifest(eosruntime.PackageTraining, mod, map[string]string{
+		"artifact":           path,
+		"embedding_manifest": eosruntime.DefaultEmbeddingManifestPath(path),
+		"weights":            eosruntime.DefaultWeightFilePath(path),
+		"memory_plan":        eosruntime.DefaultMemoryPlanPath(path),
+		"train_manifest":     eosruntime.DefaultEmbeddingTrainManifestPath(path),
+		"checkpoint":         checkpointPath,
+		"train_profile":      eosruntime.DefaultEmbeddingTrainProfilePath(path),
+	})
+	if err != nil {
+		t.Fatalf("build package manifest: %v", err)
+	}
+	if err := packageManifest.WriteFile(eosruntime.DefaultPackageManifestPath(path)); err != nil {
+		t.Fatalf("write package manifest: %v", err)
+	}
+
+	dir := t.TempDir()
+	trainPath := filepath.Join(dir, "hard-train.jsonl")
+	metricsPath := filepath.Join(dir, "train.metrics.json")
+	examples := []eosruntime.EmbeddingHardNegativeExample{
+		{QueryTokens: []int32{1}, PositiveTokens: []int32{1}, NegativeTokens: [][]int32{{2}}, QueryMask: []int32{1}, PositiveMask: []int32{1}, NegativeMasks: [][]int32{{1}}, Source: "fiqa"},
+		{QueryTokens: []int32{2}, PositiveTokens: []int32{2}, NegativeTokens: [][]int32{{1}}, QueryMask: []int32{1}, PositiveMask: []int32{1}, NegativeMasks: [][]int32{{1}}, Source: "scifact"},
+	}
+	if err := eosruntime.WriteEmbeddingHardNegativeExamplesFile(trainPath, examples); err != nil {
+		t.Fatalf("write hard-negative train dataset: %v", err)
+	}
+
+	if err := run([]string{"train-embed", "--hard-negative-train", "--hard-negatives-per-query", "1", "--epochs", "1", "--batch-size", "2", "--teacher-loss-weight", "0", "--metrics-json", metricsPath, path, trainPath}); err != nil {
+		t.Fatalf("run train-embed: %v", err)
+	}
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	var metrics trainMetricsJSON
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		t.Fatalf("unmarshal metrics: %v", err)
+	}
+	if metrics.Config.TeacherLossWeight != 0 {
+		t.Fatalf("metrics teacher loss weight = %f, want explicit zero", metrics.Config.TeacherLossWeight)
+	}
+	if len(metrics.Config.TeacherSourceWeights) != 0 {
+		t.Fatalf("metrics teacher source weights = %v, want cleared when teacher loss is disabled", metrics.Config.TeacherSourceWeights)
+	}
+	if metrics.Workload.TrainPairsPerEpoch != 8 {
+		t.Fatalf("metrics train pairs/epoch = %d, want 8 without inherited teacher pairs", metrics.Workload.TrainPairsPerEpoch)
+	}
+	checkpoint, err = eosruntime.ReadEmbeddingTrainCheckpointFile(checkpointPath)
+	if err != nil {
+		t.Fatalf("read trained checkpoint: %v", err)
+	}
+	if checkpoint.Config.TeacherLossWeight != 0 {
+		t.Fatalf("checkpoint teacher loss weight = %f, want explicit zero", checkpoint.Config.TeacherLossWeight)
+	}
+	if len(checkpoint.Config.TeacherSourceWeights) != 0 {
+		t.Fatalf("checkpoint teacher source weights = %v, want cleared when teacher loss is disabled", checkpoint.Config.TeacherSourceWeights)
+	}
+}
+
 func TestRunTrainEmbedAcceptsPreparedTurboQuantPrefixScoreMode(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {

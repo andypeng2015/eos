@@ -1125,6 +1125,44 @@ func TestEmbeddingTrainerFitHardNegativesTracksPairwiseEval(t *testing.T) {
 	}
 }
 
+func TestEmbeddingTrainerFitHardNegativesExplicitZeroTeacherLossOverridesCheckpoint(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.005)
+	trainer.config.TeacherLossWeight = 0.1
+	trainer.config.TeacherTemperature = 2
+	trainer.config.TeacherSourceWeights = map[string]float32{"fiqa": 0.25, "nfcorpus": 0.05, "scifact": 1}
+
+	summary, err := trainer.FitHardNegatives(tinyEmbeddingHardNegativeDataset(), nil, EmbeddingTrainRunConfig{
+		Epochs:                1,
+		BatchSize:             2,
+		RestoreBest:           true,
+		HardNegativeTrain:     true,
+		HardNegativesPerQuery: 1,
+		TeacherLossWeight:     0,
+		TeacherLossWeightSet:  true,
+	})
+	if err != nil {
+		t.Fatalf("fit hard negatives: %v", err)
+	}
+	if summary.Config.TeacherLossWeight != 0 {
+		t.Fatalf("summary teacher loss weight = %f, want explicit zero", summary.Config.TeacherLossWeight)
+	}
+	if len(summary.Config.TeacherSourceWeights) != 0 {
+		t.Fatalf("summary teacher source weights = %v, want cleared when teacher loss is disabled", summary.Config.TeacherSourceWeights)
+	}
+	if trainer.config.TeacherLossWeight != 0 {
+		t.Fatalf("trainer teacher loss weight = %f, want explicit zero", trainer.config.TeacherLossWeight)
+	}
+	if len(trainer.config.TeacherSourceWeights) != 0 {
+		t.Fatalf("trainer teacher source weights = %v, want cleared when teacher loss is disabled", trainer.config.TeacherSourceWeights)
+	}
+	if summary.Workload.TrainPairsPerEpoch != 8 {
+		t.Fatalf("train pairs/epoch = %d, want 8 without inherited teacher pairs", summary.Workload.TrainPairsPerEpoch)
+	}
+	if summary.FinalTrain.BatchSize != 8 {
+		t.Fatalf("final train batch size = %d, want 8 without inherited teacher pairs", summary.FinalTrain.BatchSize)
+	}
+}
+
 func TestEmbeddingTrainerFitContrastiveFFNImprovesEval(t *testing.T) {
 	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
 	trainSet := tinyEmbeddingContrastiveDataset()

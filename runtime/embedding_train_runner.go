@@ -35,6 +35,7 @@ type EmbeddingTrainRunConfig struct {
 	Temperature                float32
 	GroupedLossWeight          float32
 	TeacherLossWeight          float32
+	TeacherLossWeightSet       bool
 	TeacherTemperature         float32
 	TeacherSourceTemperatures  map[string]float32
 	TeacherSourceWeights       map[string]float32
@@ -1899,7 +1900,16 @@ func (t *EmbeddingTrainer) applyTrainRunOverrides(cfg EmbeddingTrainRunConfig) e
 		next.GroupedLossWeight = cfg.GroupedLossWeight
 		changed = true
 	}
-	if cfg.TeacherLossWeight > 0 {
+	if cfg.TeacherLossWeightSet {
+		next.TeacherLossWeight = cfg.TeacherLossWeight
+		if cfg.TeacherLossWeight == 0 && len(cfg.TeacherSourceTemperatures) == 0 {
+			next.TeacherSourceTemperatures = nil
+		}
+		if cfg.TeacherLossWeight == 0 && len(cfg.TeacherSourceWeights) == 0 {
+			next.TeacherSourceWeights = nil
+		}
+		changed = true
+	} else if cfg.TeacherLossWeight > 0 {
 		next.TeacherLossWeight = cfg.TeacherLossWeight
 		changed = true
 	}
@@ -1962,16 +1972,16 @@ func (t *EmbeddingTrainer) syncTrainRunObjectiveConfig(cfg EmbeddingTrainRunConf
 	if cfg.GroupedLossWeight == 0 {
 		cfg.GroupedLossWeight = t.config.GroupedLossWeight
 	}
-	if cfg.TeacherLossWeight == 0 {
+	if cfg.TeacherLossWeight == 0 && !cfg.TeacherLossWeightSet {
 		cfg.TeacherLossWeight = t.config.TeacherLossWeight
 	}
 	if cfg.TeacherTemperature == 0 {
 		cfg.TeacherTemperature = t.config.TeacherTemperature
 	}
-	if len(cfg.TeacherSourceTemperatures) == 0 && len(t.config.TeacherSourceTemperatures) > 0 {
+	if len(cfg.TeacherSourceTemperatures) == 0 && len(t.config.TeacherSourceTemperatures) > 0 && !(cfg.TeacherLossWeightSet && cfg.TeacherLossWeight == 0) {
 		cfg.TeacherSourceTemperatures = t.config.TeacherSourceTemperatures
 	}
-	if len(cfg.TeacherSourceWeights) == 0 && len(t.config.TeacherSourceWeights) > 0 {
+	if len(cfg.TeacherSourceWeights) == 0 && len(t.config.TeacherSourceWeights) > 0 && !(cfg.TeacherLossWeightSet && cfg.TeacherLossWeight == 0) {
 		cfg.TeacherSourceWeights = t.config.TeacherSourceWeights
 	}
 	if len(cfg.MatryoshkaDims) == 0 && len(t.config.MatryoshkaDims) > 0 {

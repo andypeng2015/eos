@@ -3873,6 +3873,7 @@ func runTrainEmbed(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	teacherLossWeightSet := flagWasProvided(fs, "teacher-loss-weight")
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
 		return fmt.Errorf("usage: eos train-embed [flags] <artifact.mll> <train.jsonl> [eval.jsonl]\n       eos train-embed --eval-only [flags] <artifact.mll> <eval.jsonl>")
 	}
@@ -3999,6 +4000,7 @@ func runTrainEmbed(args []string) error {
 		Temperature:                float32(temperature),
 		GroupedLossWeight:          float32(groupedLossWeight),
 		TeacherLossWeight:          float32(teacherLossWeight),
+		TeacherLossWeightSet:       teacherLossWeightSet,
 		TeacherTemperature:         float32(teacherTemperature),
 		TeacherSourceTemperatures:  parsedTeacherSourceTemperatures,
 		TeacherSourceWeights:       parsedTeacherSourceWeights,
@@ -4206,6 +4208,16 @@ func validateTurboQuantPrefixBitsFlag(bits []int) error {
 		}
 	}
 	return nil
+}
+
+func flagWasProvided(fs *flag.FlagSet, name string) bool {
+	provided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			provided = true
+		}
+	})
+	return provided
 }
 
 func parsePositiveFloatList(raw string) ([]float32, error) {
@@ -4581,6 +4593,7 @@ func runTrainCorpus(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	teacherLossWeightSet := flagWasProvided(fs, "teacher-loss-weight")
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
 		return fmt.Errorf("usage: eos train-corpus [flags] <artifact.mll> <corpus.txt>")
 	}
@@ -4660,6 +4673,7 @@ func runTrainCorpus(args []string) error {
 		Temperature:                float32(temperature),
 		GroupedLossWeight:          float32(groupedLossWeight),
 		TeacherLossWeight:          float32(teacherLossWeight),
+		TeacherLossWeightSet:       teacherLossWeightSet,
 		TeacherTemperature:         float32(teacherTemperature),
 		MatryoshkaDims:             parsedMatryoshkaDims,
 		MatryoshkaWeights:          parsedMatryoshkaWeights,
