@@ -1,23 +1,44 @@
 package eosruntime
 
 import (
+	"bufio"
 	"container/heap"
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
+	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"m31labs.dev/turboquant"
 )
 
 const TurboQuantRetrievalEvalMetricsSchema = "manta.embedding_turboquant_retrieval_metrics.v1"
+const TurboQuantRetrievalPerQuerySchema = "manta.embedding_turboquant_retrieval_per_query.v1"
 
 const (
 	TurboQuantRerankStorageDense              = "dense"
 	TurboQuantRerankStorageCompactReconstruct = "compact-reconstruct"
 	TurboQuantRerankStorageFP16               = "fp16"
 )
+
+func turboQuantRetrievalMethodName(bitWidth, overfetch int, rerankStorage string) string {
+	if overfetch <= 0 {
+		return fmt.Sprintf("turboquant_ip_b%d", bitWidth)
+	}
+	switch rerankStorage {
+	case TurboQuantRerankStorageDense:
+		return fmt.Sprintf("turboquant_ip_b%d_overfetch%d_dense_rerank", bitWidth, overfetch)
+	case TurboQuantRerankStorageCompactReconstruct:
+		return fmt.Sprintf("turboquant_ip_b%d_overfetch%d_reconstruct_rerank", bitWidth, overfetch)
+	case TurboQuantRerankStorageFP16:
+		return fmt.Sprintf("turboquant_ip_b%d_overfetch%d_fp16_rerank", bitWidth, overfetch)
+	default:
+		return fmt.Sprintf("turboquant_ip_b%d_overfetch%d_%s_rerank", bitWidth, overfetch, strings.ReplaceAll(rerankStorage, "-", "_"))
+	}
+}
 
 // TurboQuantRetrievalEvalMetrics compares dense retrieval with TurboQuant
 // inner-product scoring over the same embedded BEIR-style corpus.
@@ -41,6 +62,7 @@ type TurboQuantRetrievalEvalConfigMetrics struct {
 	Bits            []int  `json:"bits"`
 	RerankOverfetch []int  `json:"rerank_overfetch,omitempty"`
 	RerankStorage   string `json:"rerank_storage,omitempty"`
+	QuantizerSeed   int64  `json:"quantizer_seed"`
 }
 
 type TurboQuantDenseRetrievalMetrics struct {
@@ -84,6 +106,22 @@ type RetrievalEvalLatencyMetrics struct {
 	P95MS  float64 `json:"p95_ms"`
 	P99MS  float64 `json:"p99_ms"`
 	MaxMS  float64 `json:"max_ms"`
+}
+
+type TurboQuantRetrievalPerQueryRow struct {
+	Schema            string                        `json:"schema"`
+	Dataset           string                        `json:"dataset"`
+	QueryID           string                        `json:"query_id"`
+	Method            string                        `json:"method"`
+	Bits              int                           `json:"bits"`
+	RerankOverfetch   int                           `json:"rerank_overfetch,omitempty"`
+	RerankStorage     string                        `json:"rerank_storage,omitempty"`
+	ScoringSurface    string                        `json:"scoring_surface"`
+	QuantizerSeed     int64                         `json:"quantizer_seed,omitempty"`
+	RelevantCount     int                           `json:"relevant_count"`
+	FirstRelevantRank int                           `json:"first_relevant_rank"`
+	Quality           RetrievalEvalQualityMetrics   `json:"quality"`
+	TopK              []RetrievalEvalPerQueryTopDoc `json:"top_k"`
 }
 
 // EvaluateTurboQuantRetrieval embeds a BEIR-style split once, then evaluates
@@ -274,6 +312,9 @@ func evaluateTurboQuantVectorRetrievalWithRerankStorage(ctx context.Context, cfg
 	if err != nil {
 		return TurboQuantRetrievalEvalMetrics{}, err
 	}
+	if cfg.QuantizerSeed == 0 {
+		cfg.QuantizerSeed = DefaultTurboQuantMultiVectorQuantizerSeed
+	}
 	if len(docs) == 0 {
 		return TurboQuantRetrievalEvalMetrics{}, fmt.Errorf("corpus vectors are empty")
 	}
@@ -321,6 +362,7 @@ func evaluateTurboQuantVectorRetrievalWithRerankStorage(ctx context.Context, cfg
 			Bits:            append([]int(nil), bits...),
 			RerankOverfetch: append([]int(nil), rerankOverfetch...),
 			RerankStorage:   rerankStorageMetricsValue(rerankOverfetch, rerankStorage),
+			QuantizerSeed:   cfg.QuantizerSeed,
 		},
 		Dense: TurboQuantDenseRetrievalMetrics{
 			Quality:         denseQuality,
@@ -331,12 +373,17 @@ func evaluateTurboQuantVectorRetrievalWithRerankStorage(ctx context.Context, cfg
 		},
 		Rows: make([]TurboQuantRetrievalBitMetrics, 0, len(bits)),
 	}
+	if cfg.PerQueryJSONLPath != "" {
+		if err := os.Remove(cfg.PerQueryJSONLPath); err != nil && !os.IsNotExist(err) {
+			return TurboQuantRetrievalEvalMetrics{}, fmt.Errorf("reset TurboQuant per-query JSONL: %w", err)
+		}
+	}
 
 	for _, bitWidth := range bits {
 		if err := ctx.Err(); err != nil {
 			return TurboQuantRetrievalEvalMetrics{}, err
 		}
-		rows, err := evaluateTurboQuantRetrievalBits(ctx, dim, bitWidth, cfg.TopK, rerankOverfetch, rerankStorage, docs, queries, qrels, denseQuality, denseVectorBytes, scoredPairs)
+		rows, err := evaluateTurboQuantRetrievalBits(ctx, dim, bitWidth, cfg.TopK, cfg.QuantizerSeed, rerankOverfetch, rerankStorage, docs, queries, qrels, denseQuality, denseVectorBytes, scoredPairs, cfg.DatasetName, cfg.PerQueryJSONLPath)
 		if err != nil {
 			return TurboQuantRetrievalEvalMetrics{}, err
 		}
@@ -349,8 +396,8 @@ func evaluateTurboQuantVectorRetrievalWithRerankStorage(ctx context.Context, cfg
 	return out, nil
 }
 
-func evaluateTurboQuantRetrievalBits(ctx context.Context, dim, bitWidth, topK int, rerankOverfetch []int, rerankStorage string, docs, queries []retrievalVectorRecord, qrels retrievalQrels, denseQuality RetrievalEvalQualityMetrics, denseVectorBytes, scoredPairs int64) ([]TurboQuantRetrievalBitMetrics, error) {
-	q := turboquant.NewIP(dim, bitWidth)
+func evaluateTurboQuantRetrievalBits(ctx context.Context, dim, bitWidth, topK int, quantizerSeed int64, rerankOverfetch []int, rerankStorage string, docs, queries []retrievalVectorRecord, qrels retrievalQrels, denseQuality RetrievalEvalQualityMetrics, denseVectorBytes, scoredPairs int64, datasetName, perQueryJSONLPath string) ([]TurboQuantRetrievalBitMetrics, error) {
+	q := turboquant.NewIPWithSeed(dim, bitWidth, quantizerSeed)
 	quantizeStart := time.Now()
 	qdocs := make([]turboQuantRetrievalDoc, len(docs))
 	var quantizedBytes int64
@@ -363,6 +410,9 @@ func evaluateTurboQuantRetrievalBits(ctx context.Context, dim, bitWidth, topK in
 		quantizedBytes += int64(len(qx.MSE) + len(qx.Signs) + 4) // ResNorm is a float32 sidecar.
 	}
 	quantizeDuration := time.Since(quantizeStart)
+	if err := writeTurboQuantRetrievalPerQueryRows(ctx, datasetName, perQueryJSONLPath, q, bitWidth, topK, quantizerSeed, rerankOverfetch, rerankStorage, docs, queries, qdocs, qrels); err != nil {
+		return nil, err
+	}
 
 	scoreStart := time.Now()
 	quality, evaluatedQueries, _, skippedRelevantDocs, skippedNoRelevant, queryLatency := computeTurboQuantRetrievalQuality(ctx, q, queries, qdocs, qrels, topK)
@@ -455,6 +505,209 @@ func evaluateTurboQuantRetrievalBits(ctx context.Context, dim, bitWidth, topK in
 type turboQuantRetrievalDoc struct {
 	ID     string
 	Vector turboquant.IPQuantized
+}
+
+type turboQuantPerQueryWriter struct {
+	file   *os.File
+	writer *bufio.Writer
+	closed bool
+}
+
+func newTurboQuantPerQueryWriter(path string) (*turboQuantPerQueryWriter, error) {
+	if path == "" {
+		return &turboQuantPerQueryWriter{}, nil
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("create TurboQuant per-query JSONL: %w", err)
+	}
+	return &turboQuantPerQueryWriter{file: file, writer: bufio.NewWriter(file)}, nil
+}
+
+func (w *turboQuantPerQueryWriter) Write(row TurboQuantRetrievalPerQueryRow) error {
+	if w == nil || w.writer == nil {
+		return nil
+	}
+	data, err := json.Marshal(row)
+	if err != nil {
+		return err
+	}
+	if _, err := w.writer.Write(data); err != nil {
+		return fmt.Errorf("write TurboQuant per-query JSONL: %w", err)
+	}
+	if err := w.writer.WriteByte('\n'); err != nil {
+		return fmt.Errorf("write TurboQuant per-query JSONL: %w", err)
+	}
+	return nil
+}
+
+func (w *turboQuantPerQueryWriter) Close() error {
+	if w == nil || w.closed {
+		return nil
+	}
+	w.closed = true
+	var flushErr error
+	if w.writer != nil {
+		flushErr = w.writer.Flush()
+	}
+	var closeErr error
+	if w.file != nil {
+		closeErr = w.file.Close()
+	}
+	if flushErr != nil {
+		return fmt.Errorf("flush TurboQuant per-query JSONL: %w", flushErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close TurboQuant per-query JSONL: %w", closeErr)
+	}
+	return nil
+}
+
+func writeTurboQuantRetrievalPerQueryRows(ctx context.Context, datasetName, path string, q *turboquant.IPQuantizer, bitWidth, topK int, quantizerSeed int64, rerankOverfetch []int, rerankStorage string, denseDocs []retrievalVectorRecord, queries []retrievalVectorRecord, qdocs []turboQuantRetrievalDoc, qrels retrievalQrels) error {
+	writer, err := newTurboQuantPerQueryWriter(path)
+	if err != nil {
+		return err
+	}
+	defer writer.Close()
+	if path == "" {
+		return nil
+	}
+	finalTopK := topK
+	if finalTopK < 100 {
+		finalTopK = 100
+	}
+	docIDSet := make(map[string]bool, len(denseDocs))
+	denseByID := make(map[string][]float32, len(denseDocs))
+	halfByID := make(map[string][]uint16, len(denseDocs))
+	quantizedByID := make(map[string]turboquant.IPQuantized, len(qdocs))
+	for _, doc := range denseDocs {
+		docIDSet[doc.ID] = true
+		denseByID[doc.ID] = doc.Vector
+		halfVec := make([]uint16, len(doc.Vector))
+		for i, value := range doc.Vector {
+			halfVec[i] = float32ToHalf(value)
+		}
+		halfByID[doc.ID] = halfVec
+	}
+	for _, doc := range qdocs {
+		quantizedByID[doc.ID] = doc.Vector
+	}
+	for _, query := range queries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		filteredRels := filteredRetrievalRels(qrels[query.ID], docIDSet)
+		if len(filteredRels) == 0 {
+			continue
+		}
+		prepared := q.PrepareQuery(query.Vector)
+		denseScores := topRetrievalScores(query.Vector, denseDocs, finalTopK)
+		denseRanks := retrievalRankMap(denseScores)
+		denseScoresByID := retrievalScoreMap(denseScores)
+		directScores := topTurboQuantRetrievalScores(q, prepared, qdocs, finalTopK)
+		directMethod := fmt.Sprintf("turboquant_ip_b%d", bitWidth)
+		directRanks := retrievalRankMap(directScores)
+		directScoreByID := retrievalScoreMap(directScores)
+		if err := writer.Write(buildTurboQuantPerQueryRow(datasetName, query.ID, directMethod, bitWidth, 0, "", "turboquant_ip_prepared", quantizerSeed, directScores, filteredRels, denseRanks, denseScoresByID, directRanks, directScoreByID)); err != nil {
+			return err
+		}
+		for _, overfetch := range rerankOverfetch {
+			if overfetch <= finalTopK || overfetch > len(denseDocs) {
+				continue
+			}
+			candidates := topTurboQuantRetrievalScores(q, prepared, qdocs, overfetch)
+			compactRanks := retrievalRankMap(candidates)
+			compactScores := retrievalScoreMap(candidates)
+			var reranked []retrievalScoredDoc
+			var method string
+			switch rerankStorage {
+			case TurboQuantRerankStorageDense:
+				reranked = topDenseRerankScores(query.Vector, candidates, denseByID, finalTopK)
+				method = turboQuantRetrievalMethodName(bitWidth, overfetch, rerankStorage)
+			case TurboQuantRerankStorageCompactReconstruct:
+				reranked = topTurboQuantReconstructRerankScores(q, query.Vector, candidates, quantizedByID, finalTopK)
+				method = turboQuantRetrievalMethodName(bitWidth, overfetch, rerankStorage)
+			case TurboQuantRerankStorageFP16:
+				reranked = topFP16RerankScores(query.Vector, candidates, halfByID, finalTopK)
+				method = turboQuantRetrievalMethodName(bitWidth, overfetch, rerankStorage)
+			default:
+				return fmt.Errorf("unsupported TurboQuant rerank storage %q", rerankStorage)
+			}
+			if err := writer.Write(buildTurboQuantPerQueryRow(datasetName, query.ID, method, bitWidth, overfetch, rerankStorage, "turboquant_ip_prepared_overfetch_rerank", quantizerSeed, reranked, filteredRels, denseRanks, denseScoresByID, compactRanks, compactScores)); err != nil {
+				return err
+			}
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func filteredRetrievalRels(rels map[string]float64, docIDSet map[string]bool) map[string]float64 {
+	filtered := make(map[string]float64, len(rels))
+	for docID, rel := range rels {
+		if docIDSet[docID] {
+			filtered[docID] = rel
+		}
+	}
+	return filtered
+}
+
+func buildTurboQuantPerQueryRow(datasetName, queryID, method string, bitWidth, overfetch int, rerankStorage, surface string, quantizerSeed int64, scores []retrievalScoredDoc, rels map[string]float64, denseRanks map[string]int, denseScores map[string]float64, compactRanks map[string]int, compactScores map[string]float64) TurboQuantRetrievalPerQueryRow {
+	row := TurboQuantRetrievalPerQueryRow{
+		Schema:            TurboQuantRetrievalPerQuerySchema,
+		Dataset:           datasetName,
+		QueryID:           queryID,
+		Method:            method,
+		Bits:              bitWidth,
+		RerankOverfetch:   overfetch,
+		RerankStorage:     rerankStorage,
+		ScoringSurface:    surface,
+		QuantizerSeed:     quantizerSeed,
+		RelevantCount:     len(rels),
+		FirstRelevantRank: firstRelevantRank(scores, rels),
+		Quality:           retrievalQualityForQuery(scores, rels),
+		TopK:              make([]RetrievalEvalPerQueryTopDoc, 0, len(scores)),
+	}
+	for i, score := range scores {
+		doc := RetrievalEvalPerQueryTopDoc{
+			Rank:      i + 1,
+			DocID:     score.ID,
+			Score:     score.Score,
+			Relevance: rels[score.ID],
+		}
+		if rank := denseRanks[score.ID]; rank > 0 {
+			doc.DenseRank = &rank
+		}
+		if denseScore, ok := denseScores[score.ID]; ok {
+			doc.DenseScore = &denseScore
+		}
+		if rank := compactRanks[score.ID]; rank > 0 {
+			doc.CompactRank = &rank
+		}
+		if compactScore, ok := compactScores[score.ID]; ok {
+			doc.CompactScore = &compactScore
+		}
+		row.TopK = append(row.TopK, doc)
+	}
+	return row
+}
+
+func retrievalRankMap(scores []retrievalScoredDoc) map[string]int {
+	out := make(map[string]int, len(scores))
+	for i, score := range scores {
+		out[score.ID] = i + 1
+	}
+	return out
+}
+
+func retrievalScoreMap(scores []retrievalScoredDoc) map[string]float64 {
+	out := make(map[string]float64, len(scores))
+	for _, score := range scores {
+		out[score.ID] = float64(score.Score)
+	}
+	return out
 }
 
 func computeDenseRetrievalQualityWithLatency(queries, docs []retrievalVectorRecord, qrels retrievalQrels, topK int) (RetrievalEvalQualityMetrics, int, int, int, int, RetrievalEvalLatencyMetrics) {

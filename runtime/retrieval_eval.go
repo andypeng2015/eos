@@ -145,6 +145,8 @@ type RetrievalEvalPerQueryTopDoc struct {
 	DenseRank            *int     `json:"dense_rank,omitempty"`
 	BM25Rank             *int     `json:"bm25_rank,omitempty"`
 	DenseScore           *float64 `json:"dense_score,omitempty"`
+	CompactRank          *int     `json:"compact_rank,omitempty"`
+	CompactScore         *float64 `json:"compact_score,omitempty"`
 	BM25Score            *float64 `json:"bm25_score,omitempty"`
 	DenseNormalizedScore *float64 `json:"dense_normalized_score,omitempty"`
 	BM25NormalizedScore  *float64 `json:"bm25_normalized_score,omitempty"`

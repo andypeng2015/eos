@@ -383,6 +383,416 @@ func TestEvaluateTurboQuantVectorRetrievalReportsFP16RerankRows(t *testing.T) {
 	}
 }
 
+func TestEvaluateTurboQuantVectorRetrievalWritesCompactPerQueryJSONL(t *testing.T) {
+	docs := make([]retrievalVectorRecord, 120)
+	for i := range docs {
+		vec := []float32{0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08}
+		vec[i%len(vec)] += float32(i) * 0.0001
+		if i == 0 {
+			vec = []float32{1, 0, 0, 0, 0, 0, 0, 0}
+		}
+		docs[i] = retrievalVectorRecord{ID: fmt.Sprintf("d%d", i+1), Vector: normalizeRetrievalVector(vec)}
+	}
+	queries := []retrievalVectorRecord{{ID: "q1", Vector: normalizeRetrievalVector([]float32{1, 0, 0, 0, 0, 0, 0, 0})}}
+	qrels := retrievalQrels{"q1": {"d1": 1}}
+	perQueryPath := filepath.Join(t.TempDir(), "compact.per-query.jsonl")
+
+	_, err := evaluateTurboQuantVectorRetrievalWithRerankStorage(context.Background(), RetrievalEvalConfig{
+		DatasetName:       "tiny-compact",
+		TopK:              100,
+		PerQueryJSONLPath: perQueryPath,
+	}, []int{8}, []int{110}, TurboQuantRerankStorageFP16, docs, queries, qrels)
+	if err != nil {
+		t.Fatalf("evaluate turboquant retrieval with per-query: %v", err)
+	}
+	data, err := os.ReadFile(perQueryPath)
+	if err != nil {
+		t.Fatalf("read per-query: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("per-query lines = %d, want direct and rerank rows\n%s", len(lines), data)
+	}
+	var direct, rerank TurboQuantRetrievalPerQueryRow
+	if err := json.Unmarshal([]byte(lines[0]), &direct); err != nil {
+		t.Fatalf("decode direct row: %v", err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &rerank); err != nil {
+		t.Fatalf("decode rerank row: %v", err)
+	}
+	if direct.Schema != TurboQuantRetrievalPerQuerySchema || direct.Method != "turboquant_ip_b8" || direct.Bits != 8 {
+		t.Fatalf("direct row = %+v", direct)
+	}
+	if direct.QuantizerSeed != DefaultTurboQuantMultiVectorQuantizerSeed || rerank.QuantizerSeed != DefaultTurboQuantMultiVectorQuantizerSeed {
+		t.Fatalf("per-query seeds = direct:%d rerank:%d", direct.QuantizerSeed, rerank.QuantizerSeed)
+	}
+	if rerank.Method != "turboquant_ip_b8_overfetch110_fp16_rerank" || rerank.RerankOverfetch != 110 || rerank.RerankStorage != TurboQuantRerankStorageFP16 {
+		t.Fatalf("rerank row = %+v", rerank)
+	}
+	if len(rerank.TopK) == 0 || rerank.TopK[0].DenseRank == nil || rerank.TopK[0].CompactRank == nil || rerank.TopK[0].DenseScore == nil || rerank.TopK[0].CompactScore == nil {
+		t.Fatalf("rerank top doc missing dense/compact evidence: %+v", rerank.TopK)
+	}
+}
+
+func TestMineCompactTextHardNegativesWritesManifestAndGuardsTestSplit(t *testing.T) {
+	dir := t.TempDir()
+	datasetDir := filepath.Join(dir, "tiny")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	corpusPath := filepath.Join(datasetDir, "corpus.jsonl")
+	queriesPath := filepath.Join(datasetDir, "queries.jsonl")
+	qrelsPath := filepath.Join(datasetDir, "qrels", "test.tsv")
+	if err := os.WriteFile(corpusPath, []byte(
+		`{"_id":"d1","title":"positive","text":"alpha positive document"}`+"\n"+
+			`{"_id":"d2","title":"negative","text":"alpha hard negative"}`+"\n"+
+			`{"_id":"d3","title":"negative","text":"alpha boundary negative"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(queriesPath, []byte(`{"_id":"q1","text":"alpha query"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(qrelsPath, []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	perQueryPath := filepath.Join(dir, "compact.per-query.jsonl")
+	row := TurboQuantRetrievalPerQueryRow{
+		Schema:          TurboQuantRetrievalPerQuerySchema,
+		Dataset:         "tiny",
+		QueryID:         "q1",
+		Method:          "turboquant_ip_b4_overfetch200_fp16_rerank",
+		Bits:            4,
+		RerankOverfetch: 200,
+		RerankStorage:   TurboQuantRerankStorageFP16,
+		QuantizerSeed:   DefaultTurboQuantMultiVectorQuantizerSeed,
+		TopK: []RetrievalEvalPerQueryTopDoc{
+			{Rank: 1, DocID: "d2", Score: 0.9, Relevance: 0},
+			{Rank: 2, DocID: "d1", Score: 0.8, Relevance: 1},
+			{Rank: 3, DocID: "d3", Score: 0.7, Relevance: 0},
+		},
+	}
+	data, _ := json.Marshal(row)
+	if err := os.WriteFile(perQueryPath, append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("write per-query: %v", err)
+	}
+	blockedOutput := filepath.Join(dir, "blocked.jsonl")
+	_, err := MineCompactTextHardNegatives(context.Background(), CompactHardNegativeMiningConfig{
+		DatasetName:       "tiny",
+		Split:             "test",
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         qrelsPath,
+		PerQueryJSONLPath: perQueryPath,
+		OutputPath:        blockedOutput,
+		BitWidth:          4,
+		Overfetch:         200,
+		RerankStorage:     TurboQuantRerankStorageFP16,
+		TrainSelection:    true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing to mine train-selection rows from test split") {
+		t.Fatalf("expected test split guard error, got %v", err)
+	}
+	_, err = MineCompactTextHardNegatives(context.Background(), CompactHardNegativeMiningConfig{
+		DatasetName:       "tiny",
+		Split:             "test",
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         qrelsPath,
+		PerQueryJSONLPath: perQueryPath,
+		OutputPath:        blockedOutput,
+		BitWidth:          4,
+		Overfetch:         200,
+		RerankStorage:     TurboQuantRerankStorageFP16,
+		TrainSelection:    true,
+		AllowTestSmoke:    true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing to mine train-selection rows from test split") {
+		t.Fatalf("allow-test-smoke must not bypass train-selection guard, got %v", err)
+	}
+	outputPath := filepath.Join(dir, "hard-negatives.jsonl")
+	manifestPath := filepath.Join(dir, "manifest.json")
+	manifest, err := MineCompactTextHardNegatives(context.Background(), CompactHardNegativeMiningConfig{
+		DatasetName:       "tiny",
+		Split:             "test",
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         qrelsPath,
+		PerQueryJSONLPath: perQueryPath,
+		OutputPath:        outputPath,
+		ManifestPath:      manifestPath,
+		BitWidth:          4,
+		Overfetch:         200,
+		RerankStorage:     TurboQuantRerankStorageFP16,
+		TrainSelection:    false,
+		NegativesPerRow:   2,
+	})
+	if err != nil {
+		t.Fatalf("mine compact hard negatives: %v", err)
+	}
+	if manifest.TrainAllowed || manifest.LeakGuardStatus != "validation_smoke_no_train_test_split" || manifest.RowsEmitted != 1 || manifest.Negatives != 2 {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+	if manifest.PerQuerySHA256 == "" || manifest.HardNegativesSHA256 == "" || manifest.ReasonCounts["top10_competitor"] != 1 {
+		t.Fatalf("manifest hashes/reasons = %+v", manifest)
+	}
+	examples, err := ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
+	if err != nil {
+		t.Fatalf("read mined hard negatives: %v", err)
+	}
+	if len(examples) != 1 || examples[0].Source == "" || len(examples[0].Negatives) != 2 {
+		t.Fatalf("examples = %+v", examples)
+	}
+}
+
+func TestMineCompactTextHardNegativesFiltersQrelsPositiveNegatives(t *testing.T) {
+	dir, corpusPath, queriesPath, qrelsPath := writeCompactMiningDataset(t,
+		[]string{
+			`{"_id":"d1","title":"positive one","text":"alpha first positive"}`,
+			`{"_id":"d2","title":"positive two","text":"alpha stale row positive"}`,
+			`{"_id":"d3","title":"negative","text":"alpha true negative"}`,
+		},
+		"query-id\tcorpus-id\tscore\nq1\td1\t1\nq1\td2\t1\n",
+	)
+	perQueryPath := writeCompactMiningRows(t, dir, TurboQuantRetrievalPerQueryRow{
+		Schema:          TurboQuantRetrievalPerQuerySchema,
+		Dataset:         "tiny",
+		QueryID:         "q1",
+		Method:          "turboquant_ip_b4_overfetch200_fp16_rerank",
+		Bits:            4,
+		RerankOverfetch: 200,
+		RerankStorage:   TurboQuantRerankStorageFP16,
+		QuantizerSeed:   DefaultTurboQuantMultiVectorQuantizerSeed,
+		TopK: []RetrievalEvalPerQueryTopDoc{
+			{Rank: 1, DocID: "d2", Score: 0.95, Relevance: 0},
+			{Rank: 2, DocID: "d3", Score: 0.90, Relevance: 0},
+		},
+	})
+	outputPath := filepath.Join(dir, "hard-negatives.jsonl")
+	manifest, err := MineCompactTextHardNegatives(context.Background(), CompactHardNegativeMiningConfig{
+		DatasetName:       "tiny",
+		Split:             "train",
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         qrelsPath,
+		PerQueryJSONLPath: perQueryPath,
+		OutputPath:        outputPath,
+		BitWidth:          4,
+		Overfetch:         200,
+		RerankStorage:     TurboQuantRerankStorageFP16,
+		NegativesPerRow:   2,
+		MaxExamples:       1,
+	})
+	if err != nil {
+		t.Fatalf("mine compact hard negatives: %v", err)
+	}
+	if manifest.QrelsRelevanceMismatches != 1 || manifest.Negatives != 1 {
+		t.Fatalf("manifest mismatch/negative counts = %+v", manifest)
+	}
+	examples, err := ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
+	if err != nil {
+		t.Fatalf("read mined hard negatives: %v", err)
+	}
+	if len(examples) != 1 || len(examples[0].Negatives) != 1 || !strings.Contains(examples[0].Negatives[0], "true negative") {
+		t.Fatalf("qrels-positive doc leaked or expected negative missing: %+v", examples)
+	}
+	if strings.Contains(strings.Join(examples[0].Negatives, "\n"), "stale row positive") {
+		t.Fatalf("qrels-positive document emitted as negative: %+v", examples[0].Negatives)
+	}
+}
+
+func TestMineCompactTextHardNegativesQuantizerSeedDefaultAndMismatch(t *testing.T) {
+	dir, corpusPath, queriesPath, qrelsPath := writeCompactMiningDataset(t,
+		[]string{
+			`{"_id":"d1","title":"positive","text":"alpha positive"}`,
+			`{"_id":"d2","title":"negative","text":"alpha negative"}`,
+		},
+		"query-id\tcorpus-id\tscore\nq1\td1\t1\n",
+	)
+	row := TurboQuantRetrievalPerQueryRow{
+		Schema:          TurboQuantRetrievalPerQuerySchema,
+		Dataset:         "tiny",
+		QueryID:         "q1",
+		Method:          "turboquant_ip_b4_overfetch200_fp16_rerank",
+		Bits:            4,
+		RerankOverfetch: 200,
+		RerankStorage:   TurboQuantRerankStorageFP16,
+		QuantizerSeed:   DefaultTurboQuantMultiVectorQuantizerSeed + 1,
+		TopK: []RetrievalEvalPerQueryTopDoc{
+			{Rank: 1, DocID: "d2", Score: 0.9, Relevance: 0},
+		},
+	}
+	mismatchPath := writeCompactMiningRows(t, dir, row)
+	_, err := MineCompactTextHardNegatives(context.Background(), CompactHardNegativeMiningConfig{
+		DatasetName:       "tiny",
+		Split:             "train",
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         qrelsPath,
+		PerQueryJSONLPath: mismatchPath,
+		OutputPath:        filepath.Join(dir, "mismatch.jsonl"),
+		BitWidth:          4,
+		Overfetch:         200,
+		RerankStorage:     TurboQuantRerankStorageFP16,
+	})
+	if err == nil || !strings.Contains(err.Error(), "quantizer seed mismatch") {
+		t.Fatalf("expected quantizer seed mismatch, got %v", err)
+	}
+
+	row.QuantizerSeed = DefaultTurboQuantMultiVectorQuantizerSeed
+	matchPath := writeCompactMiningRows(t, dir, row)
+	manifest, err := MineCompactTextHardNegatives(context.Background(), CompactHardNegativeMiningConfig{
+		DatasetName:       "tiny",
+		Split:             "train",
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         qrelsPath,
+		PerQueryJSONLPath: matchPath,
+		OutputPath:        filepath.Join(dir, "matched.jsonl"),
+		BitWidth:          4,
+		Overfetch:         200,
+		RerankStorage:     TurboQuantRerankStorageFP16,
+	})
+	if err != nil {
+		t.Fatalf("mine with default seed: %v", err)
+	}
+	if manifest.QuantizerSeed != DefaultTurboQuantMultiVectorQuantizerSeed {
+		t.Fatalf("manifest quantizer seed = %d, want default %d", manifest.QuantizerSeed, DefaultTurboQuantMultiVectorQuantizerSeed)
+	}
+}
+
+func TestMineCompactTextHardNegativesDerivesCompactReconstructMethod(t *testing.T) {
+	dir, corpusPath, queriesPath, qrelsPath := writeCompactMiningDataset(t,
+		[]string{
+			`{"_id":"d1","title":"positive","text":"alpha positive"}`,
+			`{"_id":"d2","title":"negative","text":"alpha negative"}`,
+		},
+		"query-id\tcorpus-id\tscore\nq1\td1\t1\n",
+	)
+	perQueryPath := writeCompactMiningRows(t, dir, TurboQuantRetrievalPerQueryRow{
+		Schema:          TurboQuantRetrievalPerQuerySchema,
+		Dataset:         "tiny",
+		QueryID:         "q1",
+		Method:          "turboquant_ip_b4_overfetch200_reconstruct_rerank",
+		Bits:            4,
+		RerankOverfetch: 200,
+		RerankStorage:   TurboQuantRerankStorageCompactReconstruct,
+		QuantizerSeed:   DefaultTurboQuantMultiVectorQuantizerSeed,
+		TopK: []RetrievalEvalPerQueryTopDoc{
+			{Rank: 1, DocID: "d2", Score: 0.9, Relevance: 0},
+		},
+	})
+	manifest, err := MineCompactTextHardNegatives(context.Background(), CompactHardNegativeMiningConfig{
+		DatasetName:       "tiny",
+		Split:             "train",
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         qrelsPath,
+		PerQueryJSONLPath: perQueryPath,
+		OutputPath:        filepath.Join(dir, "hard-negatives.jsonl"),
+		BitWidth:          4,
+		Overfetch:         200,
+		RerankStorage:     TurboQuantRerankStorageCompactReconstruct,
+	})
+	if err != nil {
+		t.Fatalf("mine compact reconstruct defaults: %v", err)
+	}
+	if manifest.Method != "turboquant_ip_b4_overfetch200_reconstruct_rerank" || manifest.RowsMatched != 1 {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+}
+
+func TestMineCompactTextHardNegativesMaxDocsPreservesQrelsPositive(t *testing.T) {
+	dir, corpusPath, queriesPath, qrelsPath := writeCompactMiningDataset(t,
+		[]string{
+			`{"_id":"d1","title":"negative","text":"alpha early negative"}`,
+			`{"_id":"d2","title":"filler","text":"alpha early filler"}`,
+			`{"_id":"d3","title":"filler","text":"alpha later filler"}`,
+			`{"_id":"d4","title":"positive","text":"alpha late positive"}`,
+		},
+		"query-id\tcorpus-id\tscore\nq1\td4\t1\n",
+	)
+	perQueryPath := writeCompactMiningRows(t, dir, TurboQuantRetrievalPerQueryRow{
+		Schema:          TurboQuantRetrievalPerQuerySchema,
+		Dataset:         "tiny",
+		QueryID:         "q1",
+		Method:          "turboquant_ip_b4_overfetch200_fp16_rerank",
+		Bits:            4,
+		RerankOverfetch: 200,
+		RerankStorage:   TurboQuantRerankStorageFP16,
+		QuantizerSeed:   DefaultTurboQuantMultiVectorQuantizerSeed,
+		TopK: []RetrievalEvalPerQueryTopDoc{
+			{Rank: 1, DocID: "d1", Score: 0.9, Relevance: 0},
+		},
+	})
+	outputPath := filepath.Join(dir, "hard-negatives.jsonl")
+	manifest, err := MineCompactTextHardNegatives(context.Background(), CompactHardNegativeMiningConfig{
+		DatasetName:       "tiny",
+		Split:             "train",
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         qrelsPath,
+		PerQueryJSONLPath: perQueryPath,
+		OutputPath:        outputPath,
+		BitWidth:          4,
+		Overfetch:         200,
+		RerankStorage:     TurboQuantRerankStorageFP16,
+		MaxDocs:           2,
+	})
+	if err != nil {
+		t.Fatalf("mine with capped corpus: %v", err)
+	}
+	if manifest.RowsEmitted != 1 || manifest.SkippedNoPositive != 0 {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+	examples, err := ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
+	if err != nil {
+		t.Fatalf("read mined hard negatives: %v", err)
+	}
+	if len(examples) != 1 || !strings.Contains(examples[0].Positive, "late positive") {
+		t.Fatalf("positive beyond cap was not preserved: %+v", examples)
+	}
+}
+
+func writeCompactMiningDataset(t *testing.T, corpusLines []string, qrels string) (dir, corpusPath, queriesPath, qrelsPath string) {
+	t.Helper()
+	dir = t.TempDir()
+	datasetDir := filepath.Join(dir, "tiny")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	corpusPath = filepath.Join(datasetDir, "corpus.jsonl")
+	queriesPath = filepath.Join(datasetDir, "queries.jsonl")
+	qrelsPath = filepath.Join(datasetDir, "qrels", "train.tsv")
+	if err := os.WriteFile(corpusPath, []byte(strings.Join(corpusLines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(queriesPath, []byte(`{"_id":"q1","text":"alpha query"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(qrelsPath, []byte(qrels), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	return dir, corpusPath, queriesPath, qrelsPath
+}
+
+func writeCompactMiningRows(t *testing.T, dir string, rows ...TurboQuantRetrievalPerQueryRow) string {
+	t.Helper()
+	path := filepath.Join(dir, fmt.Sprintf("compact-%d.per-query.jsonl", time.Now().UnixNano()))
+	var b strings.Builder
+	for _, row := range rows {
+		data, err := json.Marshal(row)
+		if err != nil {
+			t.Fatalf("marshal per-query row: %v", err)
+		}
+		b.Write(data)
+		b.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatalf("write per-query: %v", err)
+	}
+	return path
+}
+
 func TestPercentileDurationUsesConservativeNearestRankForSmallSamples(t *testing.T) {
 	durations := []time.Duration{
 		1 * time.Millisecond,

@@ -218,6 +218,85 @@ func TestRunDoctorReportsRuntimeFacts(t *testing.T) {
 	}
 }
 
+func TestRunMineRetrievalCompactHardNegativesRequiresNoTrainTestSmoke(t *testing.T) {
+	dir := t.TempDir()
+	datasetDir := filepath.Join(dir, "tiny")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "corpus.jsonl"), []byte(
+		`{"_id":"d1","title":"positive","text":"alpha positive"}`+"\n"+
+			`{"_id":"d2","title":"negative","text":"alpha negative"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "queries.jsonl"), []byte(`{"_id":"q1","text":"alpha query"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "qrels", "test.tsv"), []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	row := eosruntime.TurboQuantRetrievalPerQueryRow{
+		Schema:          eosruntime.TurboQuantRetrievalPerQuerySchema,
+		Dataset:         "tiny",
+		QueryID:         "q1",
+		Method:          "turboquant_ip_b4_overfetch200_fp16_rerank",
+		Bits:            4,
+		RerankOverfetch: 200,
+		RerankStorage:   eosruntime.TurboQuantRerankStorageFP16,
+		QuantizerSeed:   eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed,
+		TopK: []eosruntime.RetrievalEvalPerQueryTopDoc{
+			{Rank: 1, DocID: "d2", Score: 0.9, Relevance: 0},
+		},
+	}
+	data, err := json.Marshal(row)
+	if err != nil {
+		t.Fatalf("marshal per-query row: %v", err)
+	}
+	perQueryPath := filepath.Join(dir, "compact.per-query.jsonl")
+	if err := os.WriteFile(perQueryPath, append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("write per-query row: %v", err)
+	}
+
+	blockedOutput := filepath.Join(dir, "blocked.jsonl")
+	err = run([]string{
+		"mine-retrieval-compact-hard-negatives",
+		"--split", "test",
+		"--allow-test-smoke",
+		"--per-query-jsonl", perQueryPath,
+		"--overfetch", "200",
+		datasetDir,
+		blockedOutput,
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing to mine train-selection rows from test split") {
+		t.Fatalf("allow-test-smoke bypassed test train-selection guard, err=%v", err)
+	}
+
+	outputPath := filepath.Join(dir, "hard-negatives.jsonl")
+	manifestPath := filepath.Join(dir, "manifest.json")
+	captureRunOutput(t, []string{
+		"mine-retrieval-compact-hard-negatives",
+		"--split", "test",
+		"--allow-test-smoke",
+		"--train-selection=false",
+		"--per-query-jsonl", perQueryPath,
+		"--manifest-json", manifestPath,
+		"--overfetch", "200",
+		datasetDir,
+		outputPath,
+	})
+	manifestData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var manifest eosruntime.CompactHardNegativeMiningManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		t.Fatalf("unmarshal manifest: %v\n%s", err, manifestData)
+	}
+	if manifest.TrainSelection || manifest.TrainAllowed || manifest.LeakGuardStatus != "validation_smoke_no_train_test_split" {
+		t.Fatalf("manifest guard state = %+v", manifest)
+	}
+}
+
 func TestRunDefaultEmbedderPathOnly(t *testing.T) {
 	output := strings.TrimSpace(captureRunOutput(t, []string{"default-embedder", "--path-only"}))
 	if filepath.Base(output) != models.DefaultEmbedderArtifactFilename {

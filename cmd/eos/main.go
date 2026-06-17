@@ -135,6 +135,8 @@ func run(args []string) error {
 		return runMineRetrievalHardNegatives(args[1:])
 	case "mine-retrieval-model-hard-negatives":
 		return runMineRetrievalModelHardNegatives(args[1:])
+	case "mine-retrieval-compact-hard-negatives":
+		return runMineRetrievalCompactHardNegatives(args[1:])
 	case "demo":
 		return runDemo(args[1:])
 	case "inspect":
@@ -1015,10 +1017,12 @@ func runEvalRetrievalTurboQuant(args []string) error {
 	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks")
 	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
 	bitsRaw := fs.String("bits", "2,4,8", "comma-separated TurboQuant IP bit widths; supported: 2..8")
+	quantizerSeed := fs.Int64("quantizer-seed", eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed, "TurboQuant IP quantizer seed for deterministic rows")
 	rerankOverfetchRaw := fs.String("rerank-overfetch", "", "optional comma-separated TurboQuant candidate depths to rerank, e.g. 200,500")
 	rerankStorage := fs.String("rerank-storage", eosruntime.TurboQuantRerankStorageDense, "rerank storage for --rerank-overfetch: dense, compact-reconstruct, or fp16")
 	metricsPath := fs.String("metrics-json", "", "write TurboQuant retrieval metrics JSON")
 	metricsTSVPath := fs.String("metrics-tsv", "", "write compact dense/quantized metrics TSV")
+	perQueryPath := fs.String("per-query-jsonl", "", "write one compact TurboQuant retrieval diagnostics JSONL row per evaluated query and method")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1049,15 +1053,17 @@ func runEvalRetrievalTurboQuant(args []string) error {
 		return err
 	}
 	metrics, err := eosruntime.EvaluateTurboQuantRetrievalWithRerankStorage(context.Background(), model, eosruntime.RetrievalEvalConfig{
-		DatasetName:  *datasetName,
-		ArtifactPath: artifactPath,
-		CorpusPath:   corpusPath,
-		QueriesPath:  queriesPath,
-		QrelsPath:    *qrelsPath,
-		BatchSize:    *batchSize,
-		TopK:         *topK,
-		MaxDocs:      *maxDocs,
-		MaxQueries:   *maxQueries,
+		DatasetName:       *datasetName,
+		ArtifactPath:      artifactPath,
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         *qrelsPath,
+		BatchSize:         *batchSize,
+		TopK:              *topK,
+		MaxDocs:           *maxDocs,
+		MaxQueries:        *maxQueries,
+		PerQueryJSONLPath: *perQueryPath,
+		QuantizerSeed:     *quantizerSeed,
 	}, bits, rerankOverfetch, *rerankStorage)
 	if err != nil {
 		return err
@@ -1105,6 +1111,9 @@ func runEvalRetrievalTurboQuant(args []string) error {
 	}
 	if *metricsTSVPath != "" {
 		fmt.Printf("metrics_tsv: %s\n", *metricsTSVPath)
+	}
+	if *perQueryPath != "" {
+		fmt.Printf("per_query: %s\n", *perQueryPath)
 	}
 	return nil
 }
@@ -1671,6 +1680,92 @@ func runMineRetrievalModelHardNegatives(args []string) error {
 	fmt.Printf("skipped: queries_without_text=%d positives_without_text=%d queries_without_negatives=%d\n",
 		summary.SkippedQueriesNoText, summary.SkippedPositiveDocs, summary.SkippedQueriesNoNegative)
 	fmt.Printf("output: %s\n", outputPath)
+	return nil
+}
+
+func runMineRetrievalCompactHardNegatives(args []string) error {
+	fs := flag.NewFlagSet("mine-retrieval-compact-hard-negatives", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	datasetName := fs.String("dataset", "", "dataset name for status output")
+	split := fs.String("split", "train", "qrels split under <dataset-dir>/qrels")
+	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path")
+	perQueryPath := fs.String("per-query-jsonl", "", "compact per-query diagnostics JSONL from eval-retrieval-turboquant")
+	manifestPath := fs.String("manifest-json", "", "write compact hard-negative mining manifest JSON")
+	method := fs.String("method", "", "compact diagnostics method to mine, default derives from bits/overfetch/rerank-storage")
+	bits := fs.Int("bits", 4, "TurboQuant bit width to mine")
+	overfetch := fs.Int("overfetch", 0, "TurboQuant overfetch depth for rerank rows")
+	rerankStorage := fs.String("rerank-storage", eosruntime.TurboQuantRerankStorageFP16, "rerank storage for rerank rows")
+	quantizerSeed := fs.Int64("quantizer-seed", eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed, "TurboQuant quantizer seed recorded in manifest")
+	artifactSHA := fs.String("artifact-sha256", "", "optional source artifact SHA256 for manifest provenance")
+	negatives := fs.Int("negatives", 4, "compact hard negatives per emitted row")
+	maxExamples := fs.Int("max-examples", 0, "limit mined hard-negative examples")
+	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks")
+	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
+	trainSelection := fs.Bool("train-selection", true, "allow rows to be used for training selection when split is non-test")
+	allowTestSmoke := fs.Bool("allow-test-smoke", false, "permit test split only as no-train validation smoke")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
+		return fmt.Errorf("usage: eos mine-retrieval-compact-hard-negatives [flags] <beir-dataset-dir> <output.jsonl>")
+	}
+	if *perQueryPath == "" {
+		return fmt.Errorf("per-query-jsonl is required")
+	}
+	if *bits <= 0 {
+		return fmt.Errorf("bits must be positive")
+	}
+	if *overfetch < 0 {
+		return fmt.Errorf("overfetch must be non-negative")
+	}
+	if *negatives <= 0 {
+		return fmt.Errorf("negatives must be positive")
+	}
+	if *maxExamples < 0 {
+		return fmt.Errorf("max-examples must be non-negative")
+	}
+	datasetDir := fs.Arg(0)
+	outputPath := fs.Arg(1)
+	corpusPath, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
+	if *qrelsPath == "" {
+		*qrelsPath = defaultQrelsPath
+	}
+	if *datasetName == "" {
+		*datasetName = filepath.Base(datasetDir)
+	}
+	manifest, err := eosruntime.MineCompactTextHardNegatives(context.Background(), eosruntime.CompactHardNegativeMiningConfig{
+		DatasetName:       *datasetName,
+		Split:             *split,
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         *qrelsPath,
+		PerQueryJSONLPath: *perQueryPath,
+		OutputPath:        outputPath,
+		ManifestPath:      *manifestPath,
+		Method:            *method,
+		BitWidth:          *bits,
+		Overfetch:         *overfetch,
+		RerankStorage:     *rerankStorage,
+		QuantizerSeed:     *quantizerSeed,
+		TrainSelection:    *trainSelection,
+		AllowTestSmoke:    *allowTestSmoke,
+		NegativesPerRow:   *negatives,
+		MaxExamples:       *maxExamples,
+		MaxDocs:           *maxDocs,
+		MaxQueries:        *maxQueries,
+		ArtifactSHA256:    *artifactSHA,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("mined compact retrieval hard negatives: dataset=%s split=%s method=%s examples=%d positives=%d negatives=%d train_allowed=%t\n",
+		manifest.Dataset, manifest.Split, manifest.Method, manifest.RowsEmitted, manifest.PositivePairs, manifest.Negatives, manifest.TrainAllowed)
+	fmt.Printf("leak_guard: %s\n", manifest.LeakGuardStatus)
+	fmt.Printf("rows: read=%d matched=%d emitted=%d\n", manifest.RowsRead, manifest.RowsMatched, manifest.RowsEmitted)
+	fmt.Printf("output: %s\n", outputPath)
+	if *manifestPath != "" {
+		fmt.Printf("manifest: %s\n", *manifestPath)
+	}
 	return nil
 }
 
@@ -6250,6 +6345,7 @@ func printUsage() {
 	fmt.Println("  eos eval-retrieval-bm25 [flags] <beir-dataset-dir>")
 	fmt.Println("  eos mine-retrieval-hard-negatives [flags] <beir-dataset-dir> <output.jsonl>")
 	fmt.Println("  eos mine-retrieval-model-hard-negatives [flags] <artifact.mll> <beir-dataset-dir> <output.jsonl>")
+	fmt.Println("  eos mine-retrieval-compact-hard-negatives [flags] --per-query-jsonl diagnostics.jsonl <beir-dataset-dir> <output.jsonl>")
 	fmt.Println("  eos export-teacher-score-requests [flags] <hard-negatives.jsonl> <requests.jsonl>")
 	fmt.Println("  eos import-teacher-scores [flags] <hard-negatives.jsonl> <scores.jsonl> <output.jsonl>")
 	fmt.Println("  eos score-teacher-hard-negatives [flags] <teacher.mll> <hard-negatives.jsonl> <output.jsonl>")
@@ -6296,6 +6392,7 @@ func printUsage() {
 	fmt.Println("eval-retrieval-bm25 scores the same BEIR files with an in-repo BM25 lexical baseline.")
 	fmt.Println("mine-retrieval-hard-negatives creates text hard-negative training JSONL from BEIR qrels using the BM25 baseline.")
 	fmt.Println("mine-retrieval-model-hard-negatives creates text hard-negative training JSONL from BEIR qrels using a Eos embedding model's own misses.")
+	fmt.Println("mine-retrieval-compact-hard-negatives creates text hard-negative JSONL from compact TurboQuant per-query diagnostics and rejects test-split train selection by default.")
 	fmt.Println("export-teacher-score-requests writes per-candidate JSONL rows for external teachers to score before import-teacher-scores.")
 	fmt.Println("import-teacher-scores merges external teacher score JSONL into text hard-negative JSONL and writes a provenance manifest.")
 	fmt.Println("score-teacher-hard-negatives uses a Eos embedding teacher to score existing text hard-negative JSONL into teacher_scores.")
