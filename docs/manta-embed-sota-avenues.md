@@ -35,10 +35,10 @@ runs/manta-embed-v1-teacher-hybrid-w005-tw020-tt150-nf3train-lr10-20260507T05380
 The current dense local candidate is:
 
 ```text
-runs/eos-embed-v1-targeted-v3-release-package-20260616T000000Z/eos-embed-v1.sealed.mll
+runs/current-release-qwen3-nf005-continuation-20260616T224102Z/candidate/eos-embed-v1.sealed.mll
 ```
 
-Status: EOS-named targeted-v3 release package, sealed and dense short-set gate verified. The release sealed artifact SHA256 is `601932251333d6bb5279cbe6c042a7b7f188037a47501f3134071e51baa5f2f7`; release package SHA256 is `188265db16992ab24be15e678c5f7e175bebad769e8d844e8b0f50ffc23bd5bf`; tokenizer SHA256 is `64cf63223cb3f97125040677a573e6ab6c625cff1f6f338f4e680a4c9f7a42f5`. Package and sealed inspection report `package verify: OK`, sealed inspection reports `package: embedded sealed MLL`, and final plus hard eval logs record `optimizer_updates=0`. The training data was deliberately narrow: `43` rows, no `teacher_scores`, with sources `fiqa:targeted-v3-blocker=15`, `fiqa:targeted-v3-protect=8`, `nfcorpus:targeted-v3-regression=6`, and `nfcorpus:targeted-v3-protect=14`. The legacy source artifact `runs/eos-embed-v1-targeted-neargate-v3-low-lr-restorebest-20260614T000000Z/targeted-v3-lr000002-restorebest-manta/manta-embed-v1.sealed.mll`, SHA256 `ea776e2fca7fdade7ee05396b2ee8980e220899e2515853c83a4bca34cf87242`, remains provenance only.
+Status: nf005 Qwen3-continuation release package, sealed and dense short-set gate verified against the previous targeted-v3 default. The release sealed artifact SHA256 is `8074d2fce1842e232df2b4172d40463d82b57848c719b2d76fdd68aca682ac70`; release package SHA256 is `188265db16992ab24be15e678c5f7e175bebad769e8d844e8b0f50ffc23bd5bf`; tokenizer SHA256 is `64cf63223cb3f97125040677a573e6ab6c625cff1f6f338f4e680a4c9f7a42f5`. Package and sealed inspection report `package verify: OK`, sealed inspection reports `package: embedded sealed MLL`, and final plus hard eval logs record `optimizer_updates=0`. The training data was `qwen3.filtered.hard-negatives.jsonl` with teacher source weights `scifact=1,nfcorpus=0.05,fiqa=0.25`, LR `0.000002`, and quality target `pairwise`. The predecessor targeted-v3 package at `runs/eos-embed-v1-targeted-v3-release-package-20260616T000000Z/` remains comparison provenance. The legacy source artifact `runs/eos-embed-v1-targeted-neargate-v3-low-lr-restorebest-20260614T000000Z/targeted-v3-lr000002-restorebest-manta/manta-embed-v1.sealed.mll`, SHA256 `ea776e2fca7fdade7ee05396b2ee8980e220899e2515853c83a4bca34cf87242`, remains provenance only.
 
 The previous strict sealed anchor is:
 
@@ -48,15 +48,15 @@ runs/manta-embed-v1-deephard-full-ft-20260610T0000Z/manta-embed-v1.sealed.mll
 
 That June 10 deephard-full artifact is sealed, inspected, and full-scoreboard verified. Its SHA256 is `a7461b47784ea7434cf6048f33f6c281ef19887cfa9d0c699b6f2fba079f2b67`; the sealed scoreboard is under `runs/manta-embed-v1-deephard-full-ft-20260610T0000Z-sealed-scoreboard/`, and the sealed-vs-train-package comparison recorded zero nonzero quality or count deltas.
 
-Dense comparison against the June 10 strict anchor and v2 candidate:
+Dense comparison against the previous targeted-v3 default:
 
-| Dataset | targeted-v3 nDCG@10 | targeted-v3 recall@100 | Delta vs June 10 nDCG@10 | Delta vs June 10 recall@100 | Delta vs v2 nDCG@10 | Delta vs v2 recall@100 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| SciFact | 0.562322 | 0.796444 | +0.079915 | +0.020667 | +0.007146 | +0.000000 |
-| NFCorpus | 0.204117 | 0.242032 | +0.006384 | +0.006475 | +0.000341 | +0.000040 |
-| FiQA | 0.120294 | 0.350444 | +0.002761 | +0.003247 | +0.003840 | +0.001569 |
+| Dataset | nf005 nDCG@10 | nf005 recall@100 | Delta vs targeted-v3 nDCG@10 | Delta vs targeted-v3 recall@100 |
+| --- | ---: | ---: | ---: | ---: |
+| SciFact | 0.5645379155 | 0.7964444444 | +0.0022161292 | +0.0000000000 |
+| NFCorpus | 0.205358 | 0.242048 | +0.001241 | +0.000016 |
+| FiQA | 0.121109 | 0.351678 | +0.000815 | +0.001235 |
 
-The EOS-named targeted-v3 package is the dense release-candidate line. Its direct TurboQuant q2/q4 drops are too large for default quantized promotion, and direct q8 is closer but still has nDCG drops on all three short-set datasets. The release-artifact q4/fp16 overfetch250 compact profile fails strict zero-regression only on NFCorpus recall@100 by `-0.000236936880015165`; under the explicit `recall@100` tolerance `0.00025`, it passes all selected checks and is the compact RC with total compression `1.590062x`. Full SciFact serving proxy evidence for the same release SHA records q4/fp16/250 at nDCG@10 `0.5623217863`, recall@100 `0.7964444444`, p95 `7.607784ms`, and `414712.08` scores/s. Separate CorkScrewDB local flat packed-parent evidence from fresh release vectors records q4 nDCG@10 `0.451009`, recall@100 `0.771889`, DB multiple `0.020372x`, p95 `10.790243ms`, planner fit `180`, and target fit `true`; q8 remains diagnostic because target fit is `false`.
+The nf005 package is the dense release-candidate line. Its promoted compact policy is q4/fp16/rerank-overfetch=175, method `turboquant_ip_b4_overfetch175_fp16_rerank`, total compression `1.5900621118x`. It cleared selected compact quality across SciFact, NFCorpus, and FiQA, and repeated paired full-SciFact evidence versus previous q4/fp16/250 recorded nDCG delta `+0.0022161292`, recall delta `0`, p95 `-11.49%`, and scores/s `+7.10%`. q4/150 was not selected because later paired evidence showed recall instability. Separate CorkScrewDB local flat packed-parent evidence remains targeted-v3-era child-vector evidence, not proof of remote mode, federation, HNSW, q4/fp16 alias promotion, or hosted-model parity.
 
 Historical rejected probes from the prior sealed-anchor lane:
 
@@ -186,9 +186,10 @@ Status:
 | half-frontier triple-SciFact guard `embed-m` | 0.366213 | 0.152950 | 0.040485 | 0.186549 | 0.333135 | current local dense `embed-m` frontier; passes previous-best macro and SciFact floor |
 | half-frontier compact q8/fp16 overfetch-200 | 0.366273 | 0.152950 | 0.040485 | 0.186569 | 0.333135 | selected compact profile for this artifact only; `1.324138x` total compression |
 | June 10 strict anchor | 0.482406 | 0.197733 | 0.117533 | 0.265891 | 0.452844 | previous strict dense anchor |
-| targeted-v3 dense candidate | 0.562322 | 0.204117 | 0.120294 | 0.295578 | 0.462973 | current dense candidate |
+| targeted-v3 dense candidate | 0.562322 | 0.204117 | 0.120294 | 0.295578 | 0.462973 | previous default |
+| nf005 dense candidate | 0.564538 | 0.205358 | 0.121109 | 0.297002 | 0.463390 | current promoted default |
 
-The half-frontier triple-SciFact guard run is `runs/eos-embed-m-half-frontier-triple-scifact-guard-20260615T000000Z/stage-c-half-frontier-triple-scifact-guard-lr25e-7-hn3-b16/`, sealed SHA256 `58b5b80a71520342062c6e6b7062b35ff95a425cccf9a683d23608192e2ac876`. It starts from the balanced Stage B baseline and trains one LR `0.0000025`, HN3, no-teacher continuation on `240` rows: `48` FiQA dev-frontier rows, `48` NFCorpus dev-frontier rows, and `144` SciFact protective replay rows. It passes the dense local `embed-m` gate against prior best macro nDCG `0.186423` and SciFact floor `0.365459`, but remains far below the targeted-v3 dense candidate macro nDCG `0.295578`.
+The half-frontier triple-SciFact guard run is `runs/eos-embed-m-half-frontier-triple-scifact-guard-20260615T000000Z/stage-c-half-frontier-triple-scifact-guard-lr25e-7-hn3-b16/`, sealed SHA256 `58b5b80a71520342062c6e6b7062b35ff95a425cccf9a683d23608192e2ac876`. It starts from the balanced Stage B baseline and trains one LR `0.0000025`, HN3, no-teacher continuation on `240` rows: `48` FiQA dev-frontier rows, `48` NFCorpus dev-frontier rows, and `144` SciFact protective replay rows. It passes the dense local `embed-m` gate against prior best macro nDCG `0.186423` and SciFact floor `0.365459`, but remains far below the nf005 dense candidate macro nDCG `0.297002`.
 
 The selected compact profile for this exact artifact is q8/fp16 rerank overfetch-200, method `turboquant_ip_b8_overfetch200_fp16_rerank`, with total compression `1.324138x`. q4/fp16 overfetch `300`, `400`, and `500` preserved nDCG but missed FiQA recall by `-0.000257`, so q4 is not selected for this `embed-m` artifact despite better compression `1.586777x`.
 

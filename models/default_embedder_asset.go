@@ -17,7 +17,7 @@ const (
 	DefaultEmbedderTokenizerFilename = "corkscrewdb-default-embedder.tokenizer.mll"
 	DefaultEmbedderManifestFilename  = "manifest.json"
 
-	DefaultEmbedderArtifactSHA256       = "601932251333d6bb5279cbe6c042a7b7f188037a47501f3134071e51baa5f2f7"
+	DefaultEmbedderArtifactSHA256       = "8074d2fce1842e232df2b4172d40463d82b57848c719b2d76fdd68aca682ac70"
 	DefaultEmbedderTokenizerSHA256      = "64cf63223cb3f97125040677a573e6ab6c625cff1f6f338f4e680a4c9f7a42f5"
 	DefaultEmbedderReleasePackageSHA256 = "188265db16992ab24be15e678c5f7e175bebad769e8d844e8b0f50ffc23bd5bf"
 )
@@ -75,8 +75,8 @@ func DefaultEmbedderAssetInfo(root string) (DefaultEmbedderAsset, error) {
 		ArtifactSHA256:          DefaultEmbedderArtifactSHA256,
 		TokenizerSHA256:         DefaultEmbedderTokenizerSHA256,
 		ReleasePackageSHA256:    DefaultEmbedderReleasePackageSHA256,
-		CompactRecallTolerance:  "0.00025",
-		CompactStrictRegression: false,
+		CompactRecallTolerance:  "0",
+		CompactStrictRegression: true,
 	}, nil
 }
 
