@@ -66,6 +66,17 @@ type chunkRow struct {
 	TF     map[string]int
 }
 
+type chunkCorpusRow struct {
+	ID         string `json:"_id"`
+	ParentID   string `json:"parent_id"`
+	Title      string `json:"title"`
+	Text       string `json:"text"`
+	ChunkIndex int    `json:"chunk_index"`
+	StartWord  int    `json:"start_word"`
+	EndWord    int    `json:"end_word"`
+	Words      int    `json:"words"`
+}
+
 type scoredChunk struct {
 	Chunk chunkRow
 	Score float64
@@ -86,6 +97,7 @@ type splitCounts struct {
 
 type outputHashes struct {
 	Corpus        string `json:"corpus_jsonl"`
+	Chunks        string `json:"chunks_jsonl"`
 	Queries       string `json:"queries_jsonl"`
 	TrainQrels    string `json:"qrels_train_tsv"`
 	DevQrels      string `json:"qrels_dev_tsv"`
@@ -265,6 +277,37 @@ func writeJSONL(path string, rows []hardNegativeRow) error {
 	return nil
 }
 
+func writeChunkCorpus(path string, corpus []corpusRow, chunks []chunkRow) error {
+	titles := map[string]string{}
+	for _, doc := range corpus {
+		titles[doc.ID] = doc.Title
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	w := bufio.NewWriter(f)
+	defer w.Flush()
+	enc := json.NewEncoder(w)
+	for _, chunk := range chunks {
+		row := chunkCorpusRow{
+			ID:         chunk.ID,
+			ParentID:   chunk.DocID,
+			Title:      titles[chunk.DocID],
+			Text:       chunk.Text,
+			ChunkIndex: chunk.Index,
+			StartWord:  chunk.Start,
+			EndWord:    chunk.End,
+			Words:      chunk.Words,
+		}
+		if err := enc.Encode(row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func writeQrels(path string, rows []qrelRow) error {
 	var b strings.Builder
 	b.WriteString("query-id\tcorpus-id\tscore\n")
@@ -431,7 +474,7 @@ func chunkDocument(doc corpusRow, chunkWords int, overlap int, minWords int) []c
 		text := strings.Join(words[start:end], " ")
 		tokens := tokenize(text)
 		chunk := chunkRow{
-			ID:     fmt.Sprintf("%s#chunk-%04d", doc.ID, len(chunks)+1),
+			ID:     fmt.Sprintf("%s#chunk-%04d", doc.ID, len(chunks)),
 			DocID:  doc.ID,
 			Index:  len(chunks),
 			Start:  start,
@@ -720,6 +763,7 @@ func main() {
 		os.Exit(1)
 	}
 	outCorpus := filepath.Join(outDir, "corpus.jsonl")
+	outChunks := filepath.Join(outDir, "chunks.jsonl")
 	outQueries := filepath.Join(outDir, "queries.jsonl")
 	outTrainQrels := filepath.Join(outDir, "qrels", "train.tsv")
 	outDevQrels := filepath.Join(outDir, "qrels", "dev.tsv")
@@ -731,6 +775,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := copyFile(queriesPath, outQueries); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	if err := writeChunkCorpus(outChunks, corpus, allChunks); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
@@ -752,6 +800,7 @@ func main() {
 	}
 	hashes := outputHashes{}
 	hashes.Corpus, _ = sha256File(outCorpus)
+	hashes.Chunks, _ = sha256File(outChunks)
 	hashes.Queries, _ = sha256File(outQueries)
 	hashes.TrainQrels, _ = sha256File(outTrainQrels)
 	hashes.DevQrels, _ = sha256File(outDevQrels)
@@ -789,6 +838,7 @@ func main() {
 		},
 		Outputs: map[string]string{
 			"corpus_jsonl": outCorpus,
+			"chunks_jsonl": outChunks,
 			"queries_jsonl": outQueries,
 			"qrels_train_tsv": outTrainQrels,
 			"qrels_dev_tsv": outDevQrels,
