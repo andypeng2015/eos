@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,6 +15,10 @@ import (
 )
 
 const SparseTokenPoolRetrievalVectorExportManifestSchema = "manta.experimental_sparse_token_pool_retrieval_vector_export.v1"
+const (
+	SparseTokenPoolAttentionModeTurboQuantSparse = "turboquant_sparse"
+	SparseTokenPoolAttentionModeDense            = "dense"
+)
 
 // SparseTokenPoolRetrievalVectorExportConfig describes an experimental BEIR
 // vector-cache export that pools token embeddings through routed TurboQuant
@@ -42,6 +47,7 @@ type SparseTokenPoolRetrievalVectorExportConfig struct {
 	Bits                  int
 	Seed                  int64
 	MaxTokens             int
+	AttentionMode         string
 }
 
 // SparseTokenPoolRetrievalVectorExportSummary is the manifest written beside
@@ -80,6 +86,8 @@ type SparseTokenPoolRetrievalVectorExportSummary struct {
 	RouteTopBlocks          int       `json:"route_top_blocks,omitempty"`
 	Bits                    int       `json:"bits"`
 	QuantizerSeed           int64     `json:"quantizer_seed"`
+	AttentionMode           string    `json:"attention_mode"`
+	TurboQuantKVApplied     bool      `json:"turboquant_kv_applied"`
 	DenseKVMaterialized     bool      `json:"dense_kv_materialized"`
 	KVDecode                string    `json:"kv_decode"`
 	AttentionWeightsApplied bool      `json:"attention_weights_applied"`
@@ -248,8 +256,10 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 		RouteTopBlocks:          cfg.RouteTopBlocks,
 		Bits:                    cfg.Bits,
 		QuantizerSeed:           cfg.Seed,
+		AttentionMode:           cfg.AttentionMode,
+		TurboQuantKVApplied:     cfg.AttentionMode == SparseTokenPoolAttentionModeTurboQuantSparse,
 		DenseKVMaterialized:     true,
-		KVDecode:                "host_reference_decode",
+		KVDecode:                encoder.kvDecode(),
 		AttentionWeightsApplied: encoder.attentionWeightsOK,
 		AttentionOutputApplied:  encoder.attentionOutputOK,
 		HiddenProjectionApplied: encoder.hiddenProjectionOK,
@@ -313,6 +323,9 @@ func normalizeSparseTokenPoolExportConfig(cfg SparseTokenPoolRetrievalVectorExpo
 	if cfg.Seed == 0 {
 		cfg.Seed = 0x4d697261
 	}
+	if cfg.AttentionMode == "" {
+		cfg.AttentionMode = SparseTokenPoolAttentionModeTurboQuantSparse
+	}
 	return cfg
 }
 
@@ -333,6 +346,11 @@ func validateSparseTokenPoolExportConfig(cfg SparseTokenPoolRetrievalVectorExpor
 	}
 	if cfg.TopK < 0 || cfg.RouteBlockSize < 0 || cfg.RouteTopBlocks < 0 || cfg.MaxTokens < 0 {
 		return fmt.Errorf("top-k, route-block-size, route-top-blocks, and max-tokens must be non-negative")
+	}
+	switch cfg.AttentionMode {
+	case SparseTokenPoolAttentionModeTurboQuantSparse, SparseTokenPoolAttentionModeDense:
+	default:
+		return fmt.Errorf("attention-mode must be %q or %q, got %q", SparseTokenPoolAttentionModeTurboQuantSparse, SparseTokenPoolAttentionModeDense, cfg.AttentionMode)
 	}
 	return nil
 }
@@ -522,6 +540,9 @@ func (e *sparseTokenPoolEncoder) embedText(text string) ([]float32, error) {
 	if e.fullEncoderOK {
 		return e.embedTextFullEncoder(tokens, mask)
 	}
+	if e.cfg.AttentionMode == SparseTokenPoolAttentionModeDense {
+		return nil, fmt.Errorf("attention-mode %q requires full manifest encoder weights; missing/invalid weights: %v", e.cfg.AttentionMode, e.skippedWeights)
+	}
 	hidden := e.gatherTokenRows(tokens)
 	dim := e.tokenEmbedding.Shape[1]
 	queryRow := meanRows(hidden, len(tokens), dim)
@@ -590,22 +611,11 @@ func (e *sparseTokenPoolEncoder) embedTextFullEncoder(tokens []int32, mask []int
 		q := matmulRowsRight(current, seqLen, dim, e.attentionQuery)
 		k := matmulRowsRight(current, seqLen, dim, e.attentionKey)
 		v := matmulRowsRight(current, seqLen, dim, e.attentionValue)
-		keyCoords, keyNorms, err := backend.TurboQuantEncodeReference(attentionRowsToNCHW(k, seqLen, dim), attrs)
+		attendedRows, err := e.attendRows(q, k, v, seqLen, dim, attrs)
 		if err != nil {
-			return nil, fmt.Errorf("encode key rows: %w", err)
+			return nil, err
 		}
-		valueCoords, valueNorms, err := backend.TurboQuantEncodeReference(attentionRowsToNCHW(v, seqLen, dim), attrs)
-		if err != nil {
-			return nil, fmt.Errorf("encode value rows: %w", err)
-		}
-		attended, err := backend.TurboSparseAttentionReference(backend.NewTensorF16([]int{seqLen, dim}, q), keyCoords, keyNorms, valueCoords, valueNorms, attrs)
-		if err != nil {
-			return nil, fmt.Errorf("turbo sparse attention: %w", err)
-		}
-		if len(attended.Shape) != 2 || attended.Shape[0] != seqLen || attended.Shape[1] != dim || len(attended.F32) < seqLen*dim {
-			return nil, fmt.Errorf("unexpected sparse attention output shape %v", attended.Shape)
-		}
-		attnOutput := matmulRowsRight(attended.F32[:seqLen*dim], seqLen, dim, e.attentionOutput)
+		attnOutput := matmulRowsRight(attendedRows, seqLen, dim, e.attentionOutput)
 		hidden := attnOutput
 		if e.manifest.AttentionResidual {
 			hidden = addRows(hidden, current)
@@ -661,6 +671,66 @@ func (e *sparseTokenPoolEncoder) sparseAttentionAttrs() map[string]string {
 	return attrs
 }
 
+func (e *sparseTokenPoolEncoder) attendRows(q, k, v []float32, seqLen, dim int, attrs map[string]string) ([]float32, error) {
+	switch e.cfg.AttentionMode {
+	case SparseTokenPoolAttentionModeDense:
+		return denseSoftmaxAttentionRows(q, k, v, seqLen, dim), nil
+	case SparseTokenPoolAttentionModeTurboQuantSparse:
+		keyCoords, keyNorms, err := backend.TurboQuantEncodeReference(attentionRowsToNCHW(k, seqLen, dim), attrs)
+		if err != nil {
+			return nil, fmt.Errorf("encode key rows: %w", err)
+		}
+		valueCoords, valueNorms, err := backend.TurboQuantEncodeReference(attentionRowsToNCHW(v, seqLen, dim), attrs)
+		if err != nil {
+			return nil, fmt.Errorf("encode value rows: %w", err)
+		}
+		attended, err := backend.TurboSparseAttentionReference(backend.NewTensorF16([]int{seqLen, dim}, q), keyCoords, keyNorms, valueCoords, valueNorms, attrs)
+		if err != nil {
+			return nil, fmt.Errorf("turbo sparse attention: %w", err)
+		}
+		if len(attended.Shape) != 2 || attended.Shape[0] != seqLen || attended.Shape[1] != dim || len(attended.F32) < seqLen*dim {
+			return nil, fmt.Errorf("unexpected sparse attention output shape %v", attended.Shape)
+		}
+		return append([]float32(nil), attended.F32[:seqLen*dim]...), nil
+	default:
+		return nil, fmt.Errorf("unsupported attention mode %q", e.cfg.AttentionMode)
+	}
+}
+
+func denseSoftmaxAttentionRows(q, k, v []float32, seqLen, dim int) []float32 {
+	out := make([]float32, seqLen*dim)
+	scores := make([]float32, seqLen)
+	for row := 0; row < seqLen; row++ {
+		maxScore := float32(math.Inf(-1))
+		for col := 0; col < seqLen; col++ {
+			score := float32(0)
+			for d := 0; d < dim; d++ {
+				score += q[row*dim+d] * k[col*dim+d]
+			}
+			scores[col] = score
+			if score > maxScore {
+				maxScore = score
+			}
+		}
+		sum := float32(0)
+		for col := 0; col < seqLen; col++ {
+			prob := float32(math.Exp(float64(scores[col] - maxScore)))
+			scores[col] = prob
+			sum += prob
+		}
+		if sum == 0 {
+			continue
+		}
+		for col := 0; col < seqLen; col++ {
+			prob := scores[col] / sum
+			for d := 0; d < dim; d++ {
+				out[row*dim+d] += prob * v[col*dim+d]
+			}
+		}
+	}
+	return out
+}
+
 func (e *sparseTokenPoolEncoder) encoderRepeatsApplied() int {
 	if e.fullEncoderOK {
 		return e.manifest.EncoderRepeats
@@ -670,13 +740,24 @@ func (e *sparseTokenPoolEncoder) encoderRepeatsApplied() int {
 
 func (e *sparseTokenPoolEncoder) caveats() []string {
 	caveats := []string{
-		"TurboSparseAttentionReference decodes quantized K/V on host in this prototype",
 		"quality_claim=false; score generated caches before comparing and do not promote as a trained sparse encoder",
+	}
+	if e.cfg.AttentionMode == SparseTokenPoolAttentionModeDense {
+		caveats = append([]string{"dense attention diagnostic mode uses exact host softmax over materialized K/V and bypasses TurboQuant K/V encode/decode"}, caveats...)
+	} else {
+		caveats = append([]string{"TurboSparseAttentionReference decodes quantized K/V on host in this prototype"}, caveats...)
 	}
 	if !e.fullEncoderOK {
 		caveats = append([]string{"experimental_sparse_token_pool used legacy fallback path because full encoder weights were unavailable"}, caveats...)
 	}
 	return caveats
+}
+
+func (e *sparseTokenPoolEncoder) kvDecode() string {
+	if e.cfg.AttentionMode == SparseTokenPoolAttentionModeDense {
+		return "not_applicable_dense_attention"
+	}
+	return "host_reference_decode"
 }
 
 func meanRows(rows []float32, count, dim int) []float32 {

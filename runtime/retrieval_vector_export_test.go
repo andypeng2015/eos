@@ -187,6 +187,9 @@ func TestSparseTokenPoolRetrievalVectorExportWritesPrototypeManifest(t *testing.
 	if !summary.DenseKVMaterialized || summary.KVDecode != "host_reference_decode" || summary.Bits != 2 || summary.QuantizerSeed != 17 || summary.TopK != 1 {
 		t.Fatalf("summary sparse metadata = %+v", summary)
 	}
+	if summary.AttentionMode != SparseTokenPoolAttentionModeTurboQuantSparse || !summary.TurboQuantKVApplied {
+		t.Fatalf("summary attention metadata = %+v", summary)
+	}
 	if summary.ChildDocVectorPath != filepath.Join(outputDir, "child-doc-vectors.jsonl") || summary.QueryVectorPath != filepath.Join(outputDir, "query-vectors.jsonl") {
 		t.Fatalf("summary paths = %+v", summary)
 	}
@@ -300,6 +303,91 @@ func TestSparseTokenPoolRetrievalVectorExportAppliesManifestEncoderFFN(t *testin
 	}
 	if !manifest.HiddenProjectionApplied || manifest.EncoderRepeatsApplied != 2 || manifest.HiddenProjectionParam != "ffn_up" {
 		t.Fatalf("manifest = %+v", manifest)
+	}
+}
+
+func TestSparseTokenPoolRetrievalVectorExportDenseAttentionMode(t *testing.T) {
+	model, artifactPath := loadTinySparseTokenPoolFFNExportModel(t)
+	dir := t.TempDir()
+	datasetDir := writeTinyRetrievalExportDataset(t, dir)
+	outputDir := filepath.Join(dir, "dense-attention-vectors")
+	manifestPath := filepath.Join(dir, "dense-attention.manifest.json")
+	corpusPath, queriesPath, qrelsPath := BEIRRetrievalPaths(datasetDir, "test")
+
+	summary, err := ExportSparseTokenPoolRetrievalVectors(context.Background(), model, SparseTokenPoolRetrievalVectorExportConfig{
+		DatasetName:      "tiny-sparse-dense-attention",
+		ArtifactPath:     artifactPath,
+		CorpusPath:       corpusPath,
+		QueriesPath:      queriesPath,
+		QrelsPath:        qrelsPath,
+		OutputDir:        outputDir,
+		BatchSize:        1,
+		MaxDocs:          1,
+		MaxQueries:       1,
+		OutputDim:        2,
+		ManifestJSONPath: manifestPath,
+		TopK:             2,
+		Bits:             4,
+		Seed:             23,
+		MaxTokens:        4,
+		AttentionMode:    SparseTokenPoolAttentionModeDense,
+	})
+	if err != nil {
+		t.Fatalf("export sparse token pool dense attention vectors: %v", err)
+	}
+	if summary.AttentionMode != SparseTokenPoolAttentionModeDense || summary.TurboQuantKVApplied || !summary.DenseKVMaterialized || summary.KVDecode != "not_applicable_dense_attention" {
+		t.Fatalf("summary dense attention metadata = %+v", summary)
+	}
+	if !summary.AttentionWeightsApplied || !summary.AttentionOutputApplied || !summary.HiddenProjectionApplied || !summary.ProjectionApplied || summary.EncoderRepeatsApplied != 2 || len(summary.SkippedWeights) != 0 {
+		t.Fatalf("expected full encoder with no skipped weights: %+v", summary)
+	}
+	rows := readJSONLRows(t, summary.DocVectorPath)
+	if len(rows) != 1 {
+		t.Fatalf("doc rows = %d, want 1", len(rows))
+	}
+	embedding, ok := rows[0]["embedding"].([]any)
+	if !ok || len(embedding) != 2 {
+		t.Fatalf("doc embedding = %+v", rows[0]["embedding"])
+	}
+	var norm float64
+	for _, value := range embedding {
+		v := value.(float64)
+		norm += v * v
+	}
+	if math.Abs(math.Sqrt(norm)-1) > 1e-5 {
+		t.Fatalf("doc embedding norm = %.8f, want normalized", math.Sqrt(norm))
+	}
+
+	var manifest SparseTokenPoolRetrievalVectorExportSummary
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if manifest.AttentionMode != SparseTokenPoolAttentionModeDense || manifest.TurboQuantKVApplied || manifest.KVDecode != "not_applicable_dense_attention" || manifest.EncoderRepeatsApplied != 2 {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+}
+
+func TestSparseTokenPoolRetrievalVectorExportInvalidAttentionMode(t *testing.T) {
+	model, artifactPath := loadTinySparseTokenPoolExportModel(t)
+	dir := t.TempDir()
+	datasetDir := writeTinyRetrievalExportDataset(t, dir)
+	corpusPath, queriesPath, qrelsPath := BEIRRetrievalPaths(datasetDir, "test")
+
+	_, err := ExportSparseTokenPoolRetrievalVectors(context.Background(), model, SparseTokenPoolRetrievalVectorExportConfig{
+		DatasetName:   "tiny-invalid-attention",
+		ArtifactPath:  artifactPath,
+		CorpusPath:    corpusPath,
+		QueriesPath:   queriesPath,
+		QrelsPath:     qrelsPath,
+		OutputDir:     filepath.Join(dir, "invalid-attention"),
+		AttentionMode: "approx_dense",
+	})
+	if err == nil || !strings.Contains(err.Error(), "attention-mode must be") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
