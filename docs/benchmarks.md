@@ -28,6 +28,22 @@ EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/bench_sparse_attention.fw
 
 The sparse-attention harness first writes a routed preflight plan as `sparse-attention-plan.tsv` and `sparse-attention-plan.json`, then records CUDA benchmark output as `sparse-attention-bench.jsonl`, `sparse-attention-bench.txt`, `sparse-attention-bench-summary.tsv`, and `sparse-attention-scaling.tsv` under `runs/<run-id>/`. The Go benchmark lines and summary table include selected-key count, candidate-key budget, estimated scores per query, score fraction, subquadratic-plan flag, TurboQuant K/V MiB, and logical K/V compression ratio. The scaling table fits log-log time alpha for exact f16 and routed TurboQuant rows, and the harness fails routed TurboQuant when alpha exceeds `EOS_SPARSE_BENCH_MAX_ROUTED_TIME_ALPHA` (`0.95` by default; set `0` to disable during exploratory runs). Keep exact dense costs bounded with `EOS_SPARSE_BENCH_EXACT_KEY_LENS` (`1024,4096` by default) while extending routed scaling with `EOS_SPARSE_BENCH_ROUTED_KEY_LENS` (`1024,4096,16384` by default).
 
+Bridge the sparse encoder-shaped smoke into the long-context evidence flow with:
+
+```bash
+go run ./cmd/eos smoke-sparse-embedding-encoder \
+  --run-dir runs/eos-sparse-embedding-encoder-smoke-local \
+  --backend host \
+  --seq-len 64 \
+  --query-len 2 \
+  --dim 8 \
+  --top-k 2 \
+  --route-top-blocks 2 \
+  --preflight-key-lens 4096,32768
+```
+
+The smoke writes `manifest.json`, `summary.tsv`, `scorecard.json`, and `scorecard.tsv`. The scorecard row records runtime/backend metadata, 32k preflight status, the 32768-key score fraction, TurboQuant bit width and seed, parity status, `evidence_level=smoke_synthetic_kernel_evidence`, and `quality_claim=false`. It is a reproducible sparse-enabled encoder smoke artifact, not retrieval-quality evidence and not a LongEmbed claim.
+
 Calibrate sparse routing policy quality separately from kernel timing:
 
 ```bash

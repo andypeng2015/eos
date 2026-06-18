@@ -162,4 +162,69 @@ func TestRunSmokeSparseEmbeddingEncoderWritesArtifacts(t *testing.T) {
 	if summaryValues["parity_diagnostics_status"] != "computed" {
 		t.Fatalf("summary diagnostics status=%q, want computed", summaryValues["parity_diagnostics_status"])
 	}
+	scorecardData, err := os.ReadFile(filepath.Join(matches[0], "scorecard.json"))
+	if err != nil {
+		t.Fatalf("read scorecard: %v", err)
+	}
+	var scorecard sparseEmbeddingSmokeScorecard
+	if err := json.Unmarshal(scorecardData, &scorecard); err != nil {
+		t.Fatalf("decode scorecard: %v", err)
+	}
+	if scorecard.Schema != "eos.sparse_embedding_encoder_smoke_scorecard.v1" {
+		t.Fatalf("scorecard schema = %q", scorecard.Schema)
+	}
+	if len(scorecard.Rows) != 1 {
+		t.Fatalf("scorecard rows = %d, want 1", len(scorecard.Rows))
+	}
+	scoreRow := scorecard.Rows[0]
+	if scoreRow.Category != "long_context_sparse_smoke" || scoreRow.Dataset != "synthetic_sparse_embedding_encoder_smoke" {
+		t.Fatalf("scorecard identity category=%q dataset=%q", scoreRow.Category, scoreRow.Dataset)
+	}
+	if scoreRow.EvidenceLevel != "smoke_synthetic_kernel_evidence" || scoreRow.QualityClaim {
+		t.Fatalf("scorecard evidence_level=%q quality_claim=%v", scoreRow.EvidenceLevel, scoreRow.QualityClaim)
+	}
+	if scoreRow.RuntimeSeqLen != 32 || scoreRow.ThirtyTwoKPreflightStatus != "pass" || !scoreRow.ThirtyTwoKPreflightOnly {
+		t.Fatalf("scorecard 32k/runtime fields: %+v", scoreRow)
+	}
+	if scoreRow.Preflight32768ScoreFraction <= 0 || scoreRow.Preflight32768ScoreFraction > 0.2 || !scoreRow.Preflight32768Subquadratic {
+		t.Fatalf("scorecard 32768 preflight fraction=%.9g subq=%v", scoreRow.Preflight32768ScoreFraction, scoreRow.Preflight32768Subquadratic)
+	}
+	if scoreRow.PreflightGateStatus != "pass" {
+		t.Fatalf("scorecard preflight gate=%q, want pass", scoreRow.PreflightGateStatus)
+	}
+	if scoreRow.RequestedBackend != "host" || scoreRow.ActualBackend != "host_reference" || scoreRow.RuntimeBackend != "host_reference" {
+		t.Fatalf("scorecard backend metadata requested=%q actual=%q runtime=%q", scoreRow.RequestedBackend, scoreRow.ActualBackend, scoreRow.RuntimeBackend)
+	}
+	if scoreRow.CUDAAvailable || scoreRow.CUDAEvidenceStatus != "not_requested" || scoreRow.DeviceExecution {
+		t.Fatalf("scorecard cuda/device metadata: %+v", scoreRow)
+	}
+	if !scoreRow.DenseKVMaterialized || scoreRow.KVDecode != "host_reference_decode" {
+		t.Fatalf("scorecard kv metadata dense=%v decode=%q", scoreRow.DenseKVMaterialized, scoreRow.KVDecode)
+	}
+	if scoreRow.Bits != 4 || scoreRow.QuantizerSeed != 5581486560434873699 || scoreRow.EmbeddingDim != 8 || scoreRow.EmbeddingSHA256 == "" {
+		t.Fatalf("scorecard embedding/quant metadata: %+v", scoreRow)
+	}
+	if scoreRow.ParityStatus != "pass" || !scoreRow.ParityBackendVsHostPassed || scoreRow.ParityBackendVsHostMaxAbsError != 0 || scoreRow.ParityBackendVsHostMSE != 0 || scoreRow.ParityBackendVsHostCosineSimilarity < 0.999999 {
+		t.Fatalf("scorecard parity metadata: %+v", scoreRow)
+	}
+	if scoreRow.ParityDiagnosticsStatus != "computed" {
+		t.Fatalf("scorecard diagnostics status=%q, want computed", scoreRow.ParityDiagnosticsStatus)
+	}
+	if scoreRow.SourceManifest != manifestPath || !strings.Contains(scoreRow.ClaimBoundary, "not retrieval quality") {
+		t.Fatalf("scorecard source/claim boundary source=%q claim=%q", scoreRow.SourceManifest, scoreRow.ClaimBoundary)
+	}
+	scorecardTSV, err := os.ReadFile(filepath.Join(matches[0], "scorecard.tsv"))
+	if err != nil {
+		t.Fatalf("read scorecard TSV: %v", err)
+	}
+	scorecardLines := strings.Split(strings.TrimSpace(string(scorecardTSV)), "\n")
+	if len(scorecardLines) != 2 {
+		t.Fatalf("scorecard TSV lines = %d, want 2", len(scorecardLines))
+	}
+	if got, want := len(strings.Split(scorecardLines[0], "\t")), len(strings.Split(scorecardLines[1], "\t")); got != want {
+		t.Fatalf("scorecard TSV columns header=%d row=%d", got, want)
+	}
+	if !strings.Contains(scorecardLines[1], "\tsmoke_synthetic_kernel_evidence\tfalse\t") {
+		t.Fatalf("scorecard TSV row missing evidence boundary:\n%s", scorecardLines[1])
+	}
 }

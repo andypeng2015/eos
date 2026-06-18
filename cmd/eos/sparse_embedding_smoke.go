@@ -53,6 +53,51 @@ type sparseEmbeddingSmokeManifest struct {
 	ThirtyTwoKPreflightOnly bool                       `json:"32k_preflight_only"`
 }
 
+type sparseEmbeddingSmokeScorecard struct {
+	Schema      string                             `json:"schema"`
+	GeneratedAt string                             `json:"generated_at"`
+	Rows        []sparseEmbeddingSmokeScorecardRow `json:"rows"`
+}
+
+type sparseEmbeddingSmokeScorecardRow struct {
+	Category                            string   `json:"category"`
+	Dataset                             string   `json:"dataset"`
+	Baseline                            string   `json:"baseline"`
+	Status                              string   `json:"status"`
+	Method                              string   `json:"method"`
+	EvidenceLevel                       string   `json:"evidence_level"`
+	QualityClaim                        bool     `json:"quality_claim"`
+	ClaimBoundary                       string   `json:"claim_boundary"`
+	SourceManifest                      string   `json:"source_manifest"`
+	SourceArtifacts                     []string `json:"source_artifacts"`
+	RuntimeSeqLen                       int      `json:"runtime_seq_len"`
+	ThirtyTwoKPreflightStatus           string   `json:"thirty_two_k_preflight_status"`
+	ThirtyTwoKPreflightOnly             bool     `json:"32k_preflight_only"`
+	Preflight32768ScoreFraction         float64  `json:"preflight_32768_score_fraction"`
+	Preflight32768Subquadratic          bool     `json:"preflight_32768_subquadratic"`
+	PreflightGateStatus                 string   `json:"preflight_gate_status"`
+	RequestedBackend                    string   `json:"requested_backend"`
+	ActualBackend                       string   `json:"actual_backend"`
+	RuntimeBackend                      string   `json:"runtime_backend"`
+	CUDAAvailable                       bool     `json:"cuda_available"`
+	CUDAEvidenceStatus                  string   `json:"cuda_evidence_status"`
+	FallbackReason                      string   `json:"fallback_reason,omitempty"`
+	DeviceExecution                     bool     `json:"device_execution"`
+	DenseKVMaterialized                 bool     `json:"dense_kv_materialized"`
+	KVDecode                            string   `json:"kv_decode"`
+	TraceVariant                        string   `json:"trace_variant,omitempty"`
+	Bits                                int      `json:"bits"`
+	QuantizerSeed                       int64    `json:"quantizer_seed"`
+	EmbeddingDim                        int      `json:"embedding_dim"`
+	EmbeddingSHA256                     string   `json:"embedding_sha256"`
+	ParityStatus                        string   `json:"parity_status"`
+	ParityBackendVsHostPassed           bool     `json:"parity_backend_vs_host_passed"`
+	ParityBackendVsHostMaxAbsError      float64  `json:"parity_backend_vs_host_max_abs_error"`
+	ParityBackendVsHostMSE              float64  `json:"parity_backend_vs_host_mse"`
+	ParityBackendVsHostCosineSimilarity float64  `json:"parity_backend_vs_host_cosine_similarity"`
+	ParityDiagnosticsStatus             string   `json:"parity_diagnostics_status"`
+}
+
 type sparseEmbedding32KStatus struct {
 	Present bool   `json:"present"`
 	Passed  bool   `json:"passed"`
@@ -152,6 +197,8 @@ func runSmokeSparseEmbeddingEncoder(args []string) error {
 	manifest.Artifacts = map[string]string{
 		"manifest_json":              filepath.Join(cfg.RunDir, "manifest.json"),
 		"summary_tsv":                filepath.Join(cfg.RunDir, "summary.tsv"),
+		"scorecard_json":             filepath.Join(cfg.RunDir, "scorecard.json"),
+		"scorecard_tsv":              filepath.Join(cfg.RunDir, "scorecard.tsv"),
 		"sparse_attention_preflight": preflightPath,
 		"log":                        logPath,
 	}
@@ -159,6 +206,13 @@ func runSmokeSparseEmbeddingEncoder(args []string) error {
 		return err
 	}
 	if err := writeSparseEmbeddingSummary(manifest.Artifacts["summary_tsv"], manifest); err != nil {
+		return err
+	}
+	scorecard := buildSparseEmbeddingSmokeScorecard(manifest)
+	if err := writeSparseEmbeddingSmokeScorecard(manifest.Artifacts["scorecard_json"], scorecard); err != nil {
+		return err
+	}
+	if err := writeSparseEmbeddingSmokeScorecardTSV(manifest.Artifacts["scorecard_tsv"], scorecard); err != nil {
 		return err
 	}
 	logLines = append(logLines,
@@ -178,6 +232,8 @@ func runSmokeSparseEmbeddingEncoder(args []string) error {
 	fmt.Printf("run_dir: %s\n", cfg.RunDir)
 	fmt.Printf("manifest: %s\n", manifest.Artifacts["manifest_json"])
 	fmt.Printf("summary_tsv: %s\n", manifest.Artifacts["summary_tsv"])
+	fmt.Printf("scorecard_json: %s\n", manifest.Artifacts["scorecard_json"])
+	fmt.Printf("scorecard_tsv: %s\n", manifest.Artifacts["scorecard_tsv"])
 	fmt.Printf("preflight_json: %s\n", preflightPath)
 	fmt.Printf("embedding_dim=%d runtime_seq_len=%d requested_backend=%s actual_backend=%s cuda_available=%t 32k_preflight=%s gate=%s\n",
 		manifest.Embedding.Dimension, cfg.RuntimeSeqLen, manifest.Runtime.RequestedBackend, manifest.Runtime.ActualBackend, manifest.Runtime.CUDAAvailable, manifest.ThirtyTwoKPreflight.Status, passFail(preflight.Gate.Passed))
@@ -963,6 +1019,158 @@ func writeSparseEmbeddingSummary(path string, manifest sparseEmbeddingSmokeManif
 		formatParityFloat(manifest.Parity.Diagnostics.RoutedDenseVsTurboQuantRouted.CosineSimilarity),
 	}
 	return os.WriteFile(path, []byte(strings.Join(columns, "\t")+"\n"+strings.Join(row, "\t")+"\n"), 0o644)
+}
+
+func buildSparseEmbeddingSmokeScorecard(manifest sparseEmbeddingSmokeManifest) sparseEmbeddingSmokeScorecard {
+	row32768, has32768 := sparseEmbeddingPreflightRow(manifest.Preflight.Rows, 32768)
+	scoreFraction := 0.0
+	subquadratic := false
+	if has32768 {
+		scoreFraction = row32768.ScoreCountFraction
+		subquadratic = row32768.SubquadraticScorePlan
+	}
+	sourceArtifacts := []string{}
+	for _, key := range []string{"manifest_json", "summary_tsv", "sparse_attention_preflight"} {
+		if path := manifest.Artifacts[key]; path != "" {
+			sourceArtifacts = append(sourceArtifacts, path)
+		}
+	}
+	row := sparseEmbeddingSmokeScorecardRow{
+		Category:                            "long_context_sparse_smoke",
+		Dataset:                             "synthetic_sparse_embedding_encoder_smoke",
+		Baseline:                            "eos-sparse-embedding-encoder",
+		Status:                              manifest.Runtime.Status,
+		Method:                              "routed_turboquant_sparse_attention_encoder_smoke",
+		EvidenceLevel:                       "smoke_synthetic_kernel_evidence",
+		QualityClaim:                        false,
+		ClaimBoundary:                       "synthetic routed TurboQuant sparse-attention encoder smoke; validates preflight/runtime/parity evidence only, not retrieval quality or LongEmbed performance",
+		SourceManifest:                      manifest.Artifacts["manifest_json"],
+		SourceArtifacts:                     sourceArtifacts,
+		RuntimeSeqLen:                       manifest.Config.RuntimeSeqLen,
+		ThirtyTwoKPreflightStatus:           manifest.ThirtyTwoKPreflight.Status,
+		ThirtyTwoKPreflightOnly:             manifest.ThirtyTwoKPreflightOnly,
+		Preflight32768ScoreFraction:         scoreFraction,
+		Preflight32768Subquadratic:          subquadratic,
+		PreflightGateStatus:                 passFail(manifest.Preflight.Gate.Passed),
+		RequestedBackend:                    manifest.Runtime.RequestedBackend,
+		ActualBackend:                       manifest.Runtime.ActualBackend,
+		RuntimeBackend:                      manifest.Runtime.Backend,
+		CUDAAvailable:                       manifest.Runtime.CUDAAvailable,
+		CUDAEvidenceStatus:                  manifest.Runtime.CUDAEvidenceStatus,
+		FallbackReason:                      manifest.Runtime.FallbackReason,
+		DeviceExecution:                     manifest.Runtime.DeviceExecution,
+		DenseKVMaterialized:                 manifest.Runtime.DenseKVMaterialized,
+		KVDecode:                            manifest.Runtime.KVDecode,
+		TraceVariant:                        manifest.Runtime.TraceVariant,
+		Bits:                                manifest.Config.Bits,
+		QuantizerSeed:                       manifest.Config.Seed,
+		EmbeddingDim:                        manifest.Embedding.Dimension,
+		EmbeddingSHA256:                     manifest.Embedding.SHA256,
+		ParityStatus:                        manifest.Parity.Status,
+		ParityBackendVsHostPassed:           manifest.Parity.BackendVsHostTurboQuant.Passed,
+		ParityBackendVsHostMaxAbsError:      manifest.Parity.BackendVsHostTurboQuant.MaxAbsError,
+		ParityBackendVsHostMSE:              manifest.Parity.BackendVsHostTurboQuant.MSE,
+		ParityBackendVsHostCosineSimilarity: manifest.Parity.BackendVsHostTurboQuant.CosineSimilarity,
+		ParityDiagnosticsStatus:             manifest.Parity.Diagnostics.Status,
+	}
+	return sparseEmbeddingSmokeScorecard{
+		Schema:      "eos.sparse_embedding_encoder_smoke_scorecard.v1",
+		GeneratedAt: manifest.GeneratedAt,
+		Rows:        []sparseEmbeddingSmokeScorecardRow{row},
+	}
+}
+
+func sparseEmbeddingPreflightRow(rows []sparseAttentionPlanRow, keyLen int) (sparseAttentionPlanRow, bool) {
+	for _, row := range rows {
+		if row.KeyLen == keyLen {
+			return row, true
+		}
+	}
+	return sparseAttentionPlanRow{}, false
+}
+
+func writeSparseEmbeddingSmokeScorecard(path string, scorecard sparseEmbeddingSmokeScorecard) error {
+	data, err := json.MarshalIndent(scorecard, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+func writeSparseEmbeddingSmokeScorecardTSV(path string, scorecard sparseEmbeddingSmokeScorecard) error {
+	columns := []string{
+		"category",
+		"dataset",
+		"baseline",
+		"status",
+		"method",
+		"evidence_level",
+		"quality_claim",
+		"runtime_seq_len",
+		"32k_preflight_status",
+		"32k_preflight_only",
+		"preflight_32768_score_fraction",
+		"preflight_32768_subquadratic",
+		"preflight_gate_status",
+		"requested_backend",
+		"actual_backend",
+		"runtime_backend",
+		"cuda_available",
+		"cuda_evidence_status",
+		"device_execution",
+		"dense_kv_materialized",
+		"kv_decode",
+		"bits",
+		"quantizer_seed",
+		"embedding_dim",
+		"embedding_sha256",
+		"parity_status",
+		"parity_backend_vs_host_passed",
+		"parity_backend_vs_host_max_abs_error",
+		"parity_backend_vs_host_mse",
+		"parity_backend_vs_host_cosine_similarity",
+		"parity_diagnostics_status",
+		"source_manifest",
+	}
+	lines := []string{strings.Join(columns, "\t")}
+	for _, row := range scorecard.Rows {
+		values := []string{
+			row.Category,
+			row.Dataset,
+			row.Baseline,
+			row.Status,
+			row.Method,
+			row.EvidenceLevel,
+			strconv.FormatBool(row.QualityClaim),
+			strconv.Itoa(row.RuntimeSeqLen),
+			row.ThirtyTwoKPreflightStatus,
+			strconv.FormatBool(row.ThirtyTwoKPreflightOnly),
+			fmt.Sprintf("%.6f", row.Preflight32768ScoreFraction),
+			strconv.FormatBool(row.Preflight32768Subquadratic),
+			row.PreflightGateStatus,
+			row.RequestedBackend,
+			row.ActualBackend,
+			row.RuntimeBackend,
+			strconv.FormatBool(row.CUDAAvailable),
+			row.CUDAEvidenceStatus,
+			strconv.FormatBool(row.DeviceExecution),
+			strconv.FormatBool(row.DenseKVMaterialized),
+			row.KVDecode,
+			strconv.Itoa(row.Bits),
+			strconv.FormatInt(row.QuantizerSeed, 10),
+			strconv.Itoa(row.EmbeddingDim),
+			row.EmbeddingSHA256,
+			row.ParityStatus,
+			strconv.FormatBool(row.ParityBackendVsHostPassed),
+			formatParityFloat(row.ParityBackendVsHostMaxAbsError),
+			formatParityFloat(row.ParityBackendVsHostMSE),
+			formatParityFloat(row.ParityBackendVsHostCosineSimilarity),
+			row.ParityDiagnosticsStatus,
+			row.SourceManifest,
+		}
+		lines = append(lines, strings.Join(values, "\t"))
+	}
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
 }
 
 func formatParityFloat(v float64) string {
