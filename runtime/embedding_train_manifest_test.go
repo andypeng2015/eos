@@ -96,6 +96,41 @@ func TestEmbeddingTrainManifestRoundTripTurboQuantPrefixObjectives(t *testing.T)
 	}
 }
 
+func TestEmbeddingTrainManifestRoundTripTurboQuantRankMarginObjectives(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tiny_train_embed_q8.train.mll")
+	want := EmbeddingTrainManifest{
+		Name:      "tiny_train_embed_q8",
+		Embedding: tinyMaskedEmbeddingManifest(),
+		Config: EmbeddingTrainConfig{
+			LearningRate:    0.05,
+			WeightBits:      8,
+			Optimizer:       "adamw",
+			ContrastiveLoss: "infonce",
+			Temperature:     0.05,
+			MatryoshkaDims:  []int{64, 128},
+			TurboQuantRankMarginObjectives: []TurboQuantPrefixObjective{
+				{Dim: 128, BitWidth: 4, Weight: 0.1},
+			},
+			TurboQuantRankMargin:      0.03,
+			TurboQuantPrefixSeed:      DefaultTurboQuantMultiVectorQuantizerSeed,
+			TurboQuantPrefixScoreMode: TurboQuantPrefixScoreModePreparedIP,
+		},
+	}
+	if err := want.WriteFile(path); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	got, err := ReadEmbeddingTrainManifestFile(path)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if formatted := FormatTurboQuantPrefixObjectives(got.Config.TurboQuantRankMarginObjectives); formatted != "128:4=0.1" {
+		t.Fatalf("turboquant rank-margin objectives = %q", formatted)
+	}
+	if got.Config.TurboQuantRankMargin != 0.03 {
+		t.Fatalf("turboquant rank margin = %f, want 0.03", got.Config.TurboQuantRankMargin)
+	}
+}
+
 func TestEmbeddingTrainManifestValidateModule(t *testing.T) {
 	src := []byte(`
 param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable

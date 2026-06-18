@@ -157,6 +157,58 @@ func TestEstimateHardNegativeTrainWorkloadWithTurboQuantPrefixObjectives(t *test
 	}
 }
 
+func TestEstimateHardNegativeTrainWorkloadWithTurboQuantRankMarginObjectives(t *testing.T) {
+	workload := EstimateHardNegativeTrainWorkload(128, 1, 0, EmbeddingTrainRunConfig{
+		Epochs:          1,
+		BatchSize:       64,
+		ContrastiveLoss: "grouped_infonce",
+		MatryoshkaDims:  []int{64, 128},
+		TurboQuantRankMarginObjectives: []TurboQuantPrefixObjective{
+			{Dim: 64, BitWidth: 2, Weight: 0},
+			{Dim: 128, BitWidth: 4, Weight: 0.25},
+		},
+	})
+	if workload.TrainPairsPerEpoch != 896 {
+		t.Fatalf("train pairs/epoch = %d, want 896", workload.TrainPairsPerEpoch)
+	}
+}
+
+func TestTurboQuantRankMarginHardNegativeCountsEligibleRows(t *testing.T) {
+	queries := []*embeddingEncodedSequence{
+		{pooled: []float32{1, 0}},
+		{pooled: []float32{1, 0}},
+	}
+	candidates := []*embeddingEncodedSequence{
+		{pooled: []float32{1, 0}},
+		{pooled: []float32{0.99, 0.01}},
+		{pooled: []float32{1, 0}},
+		{pooled: []float32{0.99, 0.01}},
+	}
+	spans := []embeddingCandidateSpan{{Start: 0, End: 2}, {Start: 2, End: 4}}
+	teacherScores := [][]float32{
+		{1.0, 0.5},
+		{1.0, 1.0},
+	}
+	queryGrads := newEmbeddingPooledGradBuffers(queries)
+	candidateGrads := newEmbeddingPooledGradBuffers(candidates)
+	loss, _, pairs := accumulateTurboQuantRankMarginHardNegativeGrads(queries, candidates, spans, teacherScores, EmbeddingTrainConfig{
+		MatryoshkaDims: []int{2},
+		TurboQuantRankMarginObjectives: []TurboQuantPrefixObjective{
+			{Dim: 2, BitWidth: 2, Weight: 0.5},
+			{Dim: 2, BitWidth: 4, Weight: 0.5},
+		},
+		TurboQuantRankMargin:      1,
+		TurboQuantPrefixScoreMode: TurboQuantPrefixScoreModePreparedIP,
+		TurboQuantPrefixSeed:      DefaultTurboQuantMultiVectorQuantizerSeed,
+	}, queryGrads, candidateGrads)
+	if pairs != 2 {
+		t.Fatalf("rank-margin pairs = %d, want one eligible row per active objective", pairs)
+	}
+	if loss <= 0 {
+		t.Fatalf("rank-margin loss = %f, want positive hinge loss", loss)
+	}
+}
+
 func TestEmbeddingTrainerFitImprovesEvalAndTracksBest(t *testing.T) {
 	trainer := newTinyTrainableEmbeddingTrainer(t, 0.05)
 	trainSet := tinyEmbeddingPairDataset()

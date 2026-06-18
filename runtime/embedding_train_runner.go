@@ -14,42 +14,45 @@ import (
 
 // EmbeddingTrainRunConfig controls dataset-level native training.
 type EmbeddingTrainRunConfig struct {
-	Epochs                     int
-	BatchSize                  int
-	Shuffle                    bool
-	Seed                       int64
-	EvalEveryEpoch             int
-	EvalEverySteps             int
-	EarlyStoppingPatience      int
-	SelectMetric               string
-	MinDelta                   float32
-	RestoreBest                bool
-	EvalOnly                   bool
-	PairwiseTrain              bool
-	HardNegativeTrain          bool
-	HardNegativesPerQuery      int
-	HardNegativeSourceWeights  map[string]int
-	LengthBucketBatches        bool
-	LearningRate               float32
-	ContrastiveLoss            string
-	Temperature                float32
-	GroupedLossWeight          float32
-	TeacherLossWeight          float32
-	TeacherLossWeightSet       bool
-	TeacherTemperature         float32
-	TeacherSourceTemperatures  map[string]float32
-	TeacherSourceWeights       map[string]float32
-	MatryoshkaDims             []int
-	MatryoshkaWeights          []float32
-	ClearTurboQuantPrefix      bool
-	TurboQuantPrefixBits       []int
-	TurboQuantPrefixObjectives []TurboQuantPrefixObjective
-	TurboQuantPrefixWeight     float32
-	TurboQuantPrefixSeed       int64
-	TurboQuantPrefixScoreMode  string
-	TeacherScoreNormalization  string
-	ProgressEverySteps         int
-	Progress                   EmbeddingTrainProgressFunc
+	Epochs                         int
+	BatchSize                      int
+	Shuffle                        bool
+	Seed                           int64
+	EvalEveryEpoch                 int
+	EvalEverySteps                 int
+	EarlyStoppingPatience          int
+	SelectMetric                   string
+	MinDelta                       float32
+	RestoreBest                    bool
+	EvalOnly                       bool
+	PairwiseTrain                  bool
+	HardNegativeTrain              bool
+	HardNegativesPerQuery          int
+	HardNegativeSourceWeights      map[string]int
+	LengthBucketBatches            bool
+	LearningRate                   float32
+	ContrastiveLoss                string
+	Temperature                    float32
+	GroupedLossWeight              float32
+	TeacherLossWeight              float32
+	TeacherLossWeightSet           bool
+	TeacherTemperature             float32
+	TeacherSourceTemperatures      map[string]float32
+	TeacherSourceWeights           map[string]float32
+	MatryoshkaDims                 []int
+	MatryoshkaWeights              []float32
+	ClearTurboQuantPrefix          bool
+	TurboQuantPrefixBits           []int
+	TurboQuantPrefixObjectives     []TurboQuantPrefixObjective
+	TurboQuantPrefixWeight         float32
+	TurboQuantPrefixSeed           int64
+	TurboQuantPrefixScoreMode      string
+	ClearTurboQuantRankMargin      bool
+	TurboQuantRankMarginObjectives []TurboQuantPrefixObjective
+	TurboQuantRankMargin           float32
+	TeacherScoreNormalization      string
+	ProgressEverySteps             int
+	Progress                       EmbeddingTrainProgressFunc
 	// Retrieval-nDCG eval gate (optional). When RetrievalEvalRuntime and a
 	// complete RetrievalEval (corpus/queries/qrels) are set, each eval also
 	// reports nDCG@10 over that held-out set, usable as -select-metric
@@ -151,6 +154,12 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 	if err := validateClearTurboQuantPrefixRunConfig(cfg); err != nil {
 		return EmbeddingTrainRunSummary{}, err
 	}
+	if err := validateClearTurboQuantRankMarginRunConfig(cfg); err != nil {
+		return EmbeddingTrainRunSummary{}, err
+	}
+	if len(cfg.TurboQuantRankMarginObjectives) > 0 {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("turboquant_rank_margin_objectives require hard-negative training")
+	}
 	if cfg.EvalOnly {
 		if len(evalSet) == 0 {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("eval dataset is empty")
@@ -186,6 +195,9 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 		return EmbeddingTrainRunSummary{}, err
 	}
 	cfg = t.syncTrainRunObjectiveConfig(cfg)
+	if len(cfg.TurboQuantRankMarginObjectives) > 0 {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("turboquant_rank_margin_objectives require hard-negative training")
+	}
 
 	runStart := time.Now()
 	startStep := t.step
@@ -348,6 +360,12 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 	if err := validateClearTurboQuantPrefixRunConfig(cfg); err != nil {
 		return EmbeddingTrainRunSummary{}, err
 	}
+	if err := validateClearTurboQuantRankMarginRunConfig(cfg); err != nil {
+		return EmbeddingTrainRunSummary{}, err
+	}
+	if len(cfg.TurboQuantRankMarginObjectives) > 0 {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("turboquant_rank_margin_objectives require hard-negative training")
+	}
 	if cfg.EvalOnly {
 		if len(evalSet) == 0 {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("eval dataset is empty")
@@ -383,6 +401,9 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		return EmbeddingTrainRunSummary{}, err
 	}
 	cfg = t.syncTrainRunObjectiveConfig(cfg)
+	if len(cfg.TurboQuantRankMarginObjectives) > 0 {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("turboquant_rank_margin_objectives require hard-negative training")
+	}
 
 	runStart := time.Now()
 	startStep := t.step
@@ -595,6 +616,9 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 	}
 	cfg = normalizedTrainRunConfig(cfg)
 	if err := validateClearTurboQuantPrefixRunConfig(cfg); err != nil {
+		return EmbeddingTrainRunSummary{}, err
+	}
+	if err := validateClearTurboQuantRankMarginRunConfig(cfg); err != nil {
 		return EmbeddingTrainRunSummary{}, err
 	}
 	if cfg.EvalOnly {
@@ -916,7 +940,7 @@ func EstimateHardNegativeTrainWorkload(trainExamples, negativesPerExample, evalE
 	if negativesPerExample < 0 {
 		negativesPerExample = 0
 	}
-	batches, trainPairsPerEpoch := hardNegativeBatchWork(trainExamples, cfg.BatchSize, negativesPerExample, cfg.ContrastiveLoss, cfg.TeacherLossWeight, compactPrefixObjectiveMultiplier(cfg))
+	batches, trainPairsPerEpoch := hardNegativeBatchWork(trainExamples, cfg.BatchSize, negativesPerExample, cfg.ContrastiveLoss, cfg.TeacherLossWeight, compactPrefixObjectiveMultiplier(cfg), turboQuantRankMarginObjectiveCount(cfg.TurboQuantRankMarginObjectives))
 	evalPasses := plannedEvalPassCount(evalExamples, cfg.Epochs, cfg.EvalEveryEpoch)
 	if cfg.RestoreBest && evalExamples > 0 {
 		evalPasses++
@@ -1013,7 +1037,7 @@ func contrastiveEvalPairs(total int) int64 {
 	return int64(total) * int64(total)
 }
 
-func hardNegativeBatchWork(total, batchSize, negativesPerExample int, loss string, teacherLossWeight float32, matryoshkaMultiplier int) (int, int64) {
+func hardNegativeBatchWork(total, batchSize, negativesPerExample int, loss string, teacherLossWeight float32, matryoshkaMultiplier, rankMarginObjectives int) (int, int64) {
 	if total <= 0 || batchSize <= 0 {
 		return 0, 0
 	}
@@ -1062,6 +1086,9 @@ func hardNegativeBatchWork(total, batchSize, negativesPerExample int, loss strin
 		pairs += basePairs * int64(matryoshkaMultiplier)
 		if teacherLossWeight > 0 && candidatesPerExample >= 2 {
 			pairs += int64(n) * candidatesPerExample
+		}
+		if rankMarginObjectives > 0 && candidatesPerExample >= 2 {
+			pairs += int64(n) * int64(rankMarginObjectives)
 		}
 	}
 	return batches, pairs
@@ -1641,7 +1668,7 @@ func (t *EmbeddingTrainer) runHardNegativeEpoch(trainSet []EmbeddingHardNegative
 	if len(cfg.HardNegativeSourceWeights) == 0 {
 		order = spreadHardNegativeOrderByQuery(trainSet, order)
 	}
-	totalBatches, plannedEpochPairs := hardNegativeBatchWork(len(order), batchSize, cfg.HardNegativesPerQuery, cfg.ContrastiveLoss, cfg.TeacherLossWeight, compactPrefixObjectiveMultiplier(cfg))
+	totalBatches, plannedEpochPairs := hardNegativeBatchWork(len(order), batchSize, cfg.HardNegativesPerQuery, cfg.ContrastiveLoss, cfg.TeacherLossWeight, compactPrefixObjectiveMultiplier(cfg), turboQuantRankMarginObjectiveCount(cfg.TurboQuantRankMarginObjectives))
 	for start := 0; start < len(order); start += batchSize {
 		end := start + batchSize
 		if end > len(order) {
@@ -1873,7 +1900,13 @@ func normalizedTrainRunConfig(cfg EmbeddingTrainRunConfig) EmbeddingTrainRunConf
 	if objectives, err := normalizeTurboQuantPrefixObjectives(cfg.TurboQuantPrefixObjectives, cfg.MatryoshkaDims, 0); err == nil {
 		cfg.TurboQuantPrefixObjectives = objectives
 	}
-	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 {
+	if objectives, err := normalizeTurboQuantPrefixObjectives(cfg.TurboQuantRankMarginObjectives, cfg.MatryoshkaDims, 0); err == nil {
+		cfg.TurboQuantRankMarginObjectives = objectives
+	}
+	if len(cfg.TurboQuantRankMarginObjectives) > 0 && cfg.TurboQuantRankMargin == 0 {
+		cfg.TurboQuantRankMargin = effectiveTurboQuantRankMargin(cfg.TurboQuantRankMargin)
+	}
+	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 || len(cfg.TurboQuantRankMarginObjectives) > 0 {
 		if cfg.TurboQuantPrefixWeight == 0 {
 			if len(cfg.TurboQuantPrefixBits) > 0 {
 				cfg.TurboQuantPrefixWeight = 1
@@ -1906,6 +1939,19 @@ func validateClearTurboQuantPrefixRunConfig(cfg EmbeddingTrainRunConfig) error {
 	}
 	if strings.TrimSpace(cfg.TurboQuantPrefixScoreMode) != "" {
 		return fmt.Errorf("clear_turboquant_prefix is mutually exclusive with turboquant_prefix_score_mode")
+	}
+	return nil
+}
+
+func validateClearTurboQuantRankMarginRunConfig(cfg EmbeddingTrainRunConfig) error {
+	if !cfg.ClearTurboQuantRankMargin {
+		return nil
+	}
+	if len(cfg.TurboQuantRankMarginObjectives) > 0 {
+		return fmt.Errorf("clear_turboquant_rank_margin is mutually exclusive with turboquant_rank_margin_objectives")
+	}
+	if cfg.TurboQuantRankMargin != 0 {
+		return fmt.Errorf("clear_turboquant_rank_margin is mutually exclusive with turboquant_rank_margin")
 	}
 	return nil
 }
@@ -1970,10 +2016,26 @@ func (t *EmbeddingTrainer) applyTrainRunOverrides(cfg EmbeddingTrainRunConfig) e
 		next.TurboQuantPrefixScoreMode = ""
 		changed = true
 	}
+	if cfg.ClearTurboQuantRankMargin {
+		next.TurboQuantRankMarginObjectives = nil
+		next.TurboQuantRankMargin = 0
+		if len(next.TurboQuantPrefixBits) == 0 && len(next.TurboQuantPrefixObjectives) == 0 {
+			next.TurboQuantPrefixSeed = 0
+			next.TurboQuantPrefixScoreMode = ""
+		}
+		changed = true
+	}
 	if len(cfg.TurboQuantPrefixBits) > 0 {
 		next.TurboQuantPrefixBits = append([]int(nil), cfg.TurboQuantPrefixBits...)
 		next.TurboQuantPrefixObjectives = nil
 		next.TurboQuantPrefixWeight = cfg.TurboQuantPrefixWeight
+		next.TurboQuantPrefixSeed = cfg.TurboQuantPrefixSeed
+		next.TurboQuantPrefixScoreMode = cfg.TurboQuantPrefixScoreMode
+		changed = true
+	}
+	if len(cfg.TurboQuantRankMarginObjectives) > 0 {
+		next.TurboQuantRankMarginObjectives = append([]TurboQuantPrefixObjective(nil), cfg.TurboQuantRankMarginObjectives...)
+		next.TurboQuantRankMargin = cfg.TurboQuantRankMargin
 		next.TurboQuantPrefixSeed = cfg.TurboQuantPrefixSeed
 		next.TurboQuantPrefixScoreMode = cfg.TurboQuantPrefixScoreMode
 		changed = true
@@ -2040,6 +2102,19 @@ func (t *EmbeddingTrainer) syncTrainRunObjectiveConfig(cfg EmbeddingTrainRunConf
 		cfg.TurboQuantPrefixSeed = t.config.TurboQuantPrefixSeed
 		cfg.TurboQuantPrefixScoreMode = t.config.TurboQuantPrefixScoreMode
 	}
+	if cfg.ClearTurboQuantRankMargin {
+		cfg.TurboQuantRankMarginObjectives = nil
+		cfg.TurboQuantRankMargin = 0
+		if len(cfg.TurboQuantPrefixBits) == 0 && len(cfg.TurboQuantPrefixObjectives) == 0 {
+			cfg.TurboQuantPrefixSeed = 0
+			cfg.TurboQuantPrefixScoreMode = ""
+		}
+	} else if len(cfg.TurboQuantRankMarginObjectives) == 0 && len(t.config.TurboQuantRankMarginObjectives) > 0 {
+		cfg.TurboQuantRankMarginObjectives = append([]TurboQuantPrefixObjective(nil), t.config.TurboQuantRankMarginObjectives...)
+		cfg.TurboQuantRankMargin = t.config.TurboQuantRankMargin
+		cfg.TurboQuantPrefixSeed = t.config.TurboQuantPrefixSeed
+		cfg.TurboQuantPrefixScoreMode = t.config.TurboQuantPrefixScoreMode
+	}
 	if !cfg.ClearTurboQuantPrefix && len(cfg.TurboQuantPrefixBits) == 0 && len(cfg.TurboQuantPrefixObjectives) == 0 && len(t.config.TurboQuantPrefixObjectives) > 0 {
 		cfg.TurboQuantPrefixObjectives = append([]TurboQuantPrefixObjective(nil), t.config.TurboQuantPrefixObjectives...)
 		cfg.TurboQuantPrefixWeight = t.config.TurboQuantPrefixWeight
@@ -2052,7 +2127,11 @@ func (t *EmbeddingTrainer) syncTrainRunObjectiveConfig(cfg EmbeddingTrainRunConf
 	cfg.MatryoshkaDims, cfg.MatryoshkaWeights, _ = normalizeMatryoshkaDimsAndWeights(cfg.MatryoshkaDims, cfg.MatryoshkaWeights, trainerEmbeddingDim(t))
 	cfg.TurboQuantPrefixBits, _ = normalizeTurboQuantPrefixBits(cfg.TurboQuantPrefixBits)
 	cfg.TurboQuantPrefixObjectives, _ = normalizeTurboQuantPrefixObjectives(cfg.TurboQuantPrefixObjectives, cfg.MatryoshkaDims, trainerEmbeddingDim(t))
-	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 {
+	cfg.TurboQuantRankMarginObjectives, _ = normalizeTurboQuantPrefixObjectives(cfg.TurboQuantRankMarginObjectives, cfg.MatryoshkaDims, trainerEmbeddingDim(t))
+	if len(cfg.TurboQuantRankMarginObjectives) > 0 && cfg.TurboQuantRankMargin == 0 {
+		cfg.TurboQuantRankMargin = effectiveTurboQuantRankMargin(cfg.TurboQuantRankMargin)
+	}
+	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 || len(cfg.TurboQuantRankMarginObjectives) > 0 {
 		if cfg.TurboQuantPrefixWeight == 0 {
 			if len(cfg.TurboQuantPrefixBits) > 0 {
 				cfg.TurboQuantPrefixWeight = 1

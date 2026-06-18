@@ -65,6 +65,9 @@ type candidateConfig struct {
 	TurboQuantPrefixWeight string
 	TurboQuantPrefixSeed string
 	TurboQuantPrefixScoreMode string
+	ClearTurboQuantRankMargin string
+	TurboQuantRankMarginObjectives string
+	TurboQuantRankMargin string
 	EvalEvery           string
 	EvalEverySteps      string
 	Patience            string
@@ -522,6 +525,9 @@ func writeManifest(cfg candidateConfig, status string) error {
     "turboquant_prefix_weight": %s,
     "turboquant_prefix_seed": %s,
     "turboquant_prefix_score_mode": %s,
+    "clear_turboquant_rank_margin": %s,
+    "turboquant_rank_margin_objectives": %s,
+    "turboquant_rank_margin": %s,
     "select_metric": %s,
     "quality_target": %s,
     "eval_every": %s,
@@ -590,6 +596,9 @@ func writeManifest(cfg candidateConfig, status string) error {
 		jsonString(cfg.TurboQuantPrefixWeight),
 		jsonString(cfg.TurboQuantPrefixSeed),
 		jsonString(cfg.TurboQuantPrefixScoreMode),
+		jsonBool(configBool(cfg.ClearTurboQuantRankMargin)),
+		jsonString(cfg.TurboQuantRankMarginObjectives),
+		jsonString(cfg.TurboQuantRankMargin),
 		jsonString(cfg.SelectMetric),
 		jsonString(cfg.QualityTarget),
 		cfg.EvalEvery,
@@ -722,6 +731,9 @@ func prepareConfig(root string) (candidateConfig, error) {
 		TurboQuantPrefixWeight: getenv("EOS_TURBOQUANT_PREFIX_WEIGHT", ""),
 		TurboQuantPrefixSeed: getenv("EOS_TURBOQUANT_PREFIX_SEED", ""),
 		TurboQuantPrefixScoreMode: getenv("EOS_TURBOQUANT_PREFIX_SCORE_MODE", ""),
+		ClearTurboQuantRankMargin: getenv("EOS_CLEAR_TURBOQUANT_RANK_MARGIN", ""),
+		TurboQuantRankMarginObjectives: getenv("EOS_TURBOQUANT_RANK_MARGIN_OBJECTIVES", ""),
+		TurboQuantRankMargin: getenv("EOS_TURBOQUANT_RANK_MARGIN", ""),
 		EvalEvery:           getenv("EOS_EVAL_EVERY", "1"),
 		EvalEverySteps:      getenv("EOS_EVAL_EVERY_STEPS", "0"),
 		Patience:            getenv("EOS_PATIENCE", "3"),
@@ -899,6 +911,15 @@ func trainCommonArgs(cfg candidateConfig) []string {
 	}
 	if cfg.TurboQuantPrefixScoreMode != "" {
 		args = append(args, "--turboquant-prefix-score-mode", cfg.TurboQuantPrefixScoreMode)
+	}
+	if configBool(cfg.ClearTurboQuantRankMargin) {
+		args = append(args, "--clear-turboquant-rank-margin")
+	}
+	if cfg.TurboQuantRankMarginObjectives != "" {
+		args = append(args, "--turboquant-rank-margin-objectives", cfg.TurboQuantRankMarginObjectives)
+	}
+	if cfg.TurboQuantRankMargin != "" {
+		args = append(args, "--turboquant-rank-margin", cfg.TurboQuantRankMargin)
 	}
 	return args
 }

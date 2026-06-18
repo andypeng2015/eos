@@ -3102,6 +3102,72 @@ func TestRunTrainEmbedAcceptsTurboQuantPrefixObjectives(t *testing.T) {
 	}
 }
 
+func TestRunTrainEmbedAcceptsTurboQuantRankMarginObjectives(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	dir := t.TempDir()
+	trainPath := filepath.Join(dir, "hard-train.jsonl")
+	metricsPath := filepath.Join(dir, "train.metrics.json")
+	examples := []eosruntime.EmbeddingHardNegativeExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}, NegativeTokens: [][]int32{{2, 3}}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}, NegativeMasks: [][]int32{{1, 1}}, TeacherScores: []float32{1, 0}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}, NegativeTokens: [][]int32{{1, 2}}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}, NegativeMasks: [][]int32{{1, 1}}, TeacherScores: []float32{1, 0}},
+	}
+	if err := eosruntime.WriteEmbeddingHardNegativeExamplesFile(trainPath, examples); err != nil {
+		t.Fatalf("write train dataset: %v", err)
+	}
+	if err := run([]string{"train-embed", "--hard-negative-train", "--epochs", "1", "--batch-size", "2", "--contrastive-loss", "grouped_infonce", "--matryoshka-dims", "2", "--turboquant-rank-margin-objectives", "2:2=0.25", "--turboquant-prefix-score-mode", "prepared-ip", "--metrics-json", metricsPath, path, trainPath}); err != nil {
+		t.Fatalf("run train-embed turboquant rank-margin objectives: %v", err)
+	}
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(eosruntime.DefaultEmbeddingCheckpointPath(path))
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if got := checkpoint.Config.TurboQuantRankMarginObjectives; len(got) != 1 || got[0].Dim != 2 || got[0].BitWidth != 2 || got[0].Weight != 0.25 {
+		t.Fatalf("turboquant rank-margin objectives = %+v", got)
+	}
+	if checkpoint.Config.TurboQuantRankMargin != 0.02 {
+		t.Fatalf("turboquant rank margin = %f, want default 0.02", checkpoint.Config.TurboQuantRankMargin)
+	}
+	if checkpoint.Config.TurboQuantPrefixScoreMode != eosruntime.TurboQuantPrefixScoreModePreparedIP {
+		t.Fatalf("score mode = %q, want prepared_ip", checkpoint.Config.TurboQuantPrefixScoreMode)
+	}
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	var metrics trainMetricsJSON
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		t.Fatalf("unmarshal metrics: %v", err)
+	}
+	if got := metrics.Config.TurboQuantRankMarginObjectives; len(got) != 1 || got[0].Dim != 2 || got[0].BitWidth != 2 || got[0].Weight != 0.25 {
+		t.Fatalf("metrics turboquant rank-margin objectives = %+v", got)
+	}
+	if metrics.Workload.TrainPairsPerEpoch != 10 {
+		t.Fatalf("metrics train pairs/epoch = %d, want base grouped+matryoshka+rank-margin pairs", metrics.Workload.TrainPairsPerEpoch)
+	}
+}
+
+func TestRunTrainEmbedRejectsTurboQuantRankMarginWithoutHardNegativeTrain(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	trainPath := filepath.Join(t.TempDir(), "train.jsonl")
+	examples := []eosruntime.EmbeddingContrastiveExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
+	}
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
+		t.Fatalf("write train dataset: %v", err)
+	}
+	err := run([]string{"train-embed", "--epochs", "1", "--batch-size", "2", "--matryoshka-dims", "2", "--turboquant-rank-margin-objectives", "2:2=0.25", path, trainPath})
+	if err == nil || !strings.Contains(err.Error(), "requires --hard-negative-train") {
+		t.Fatalf("rank-margin without hard-negative error = %v", err)
+	}
+}
+
 func TestRunTrainEmbedClearTurboQuantPrefixClearsInheritedMetricsAndCheckpoint(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
