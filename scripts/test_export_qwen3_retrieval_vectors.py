@@ -66,7 +66,7 @@ class ExportRetrievalVectorsTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             output_path = Path(tmp) / "child-doc-vectors.jsonl"
-            exporter.write_child_vectors(
+            result = exporter.write_child_vectors(
                 model,
                 chunks,
                 output_path,
@@ -77,10 +77,21 @@ class ExportRetrievalVectorsTest(unittest.TestCase):
             rows = [json.loads(line) for line in output_path.read_text().splitlines()]
 
         self.assertEqual(model.encoded_texts, ["doc: alpha beta", "doc: beta gamma delta"])
+        self.assertEqual(result, exporter.WriteResult(rows=2, native_dim=2, output_dim=2))
         self.assertEqual(rows[0]["parent_id"], "p1")
         self.assertEqual(rows[0]["child_id"], "p1#chunk-0000")
         self.assertEqual(rows[0]["embedding"], [0.0, 3.0])
         self.assertEqual(rows[1]["child_id"], "p1#chunk-0001")
+
+    def test_prepare_embedding_truncates_and_renormalizes_prefix(self) -> None:
+        vector, native_dim = exporter.prepare_embedding([3.0, 4.0, 12.0], output_dim=2)
+
+        self.assertEqual(native_dim, 3)
+        self.assertEqual(vector, [0.6, 0.8])
+
+    def test_prepare_embedding_rejects_output_dim_larger_than_native_dim(self) -> None:
+        with self.assertRaisesRegex(ValueError, "exceeds native embedding dimension"):
+            exporter.prepare_embedding([1.0, 2.0], output_dim=3)
 
 
 if __name__ == "__main__":

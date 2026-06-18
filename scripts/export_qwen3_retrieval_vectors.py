@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, NamedTuple
@@ -39,6 +40,12 @@ class DocumentChunk(NamedTuple):
     parent_id: str
     child_id: str
     text: str
+
+
+class WriteResult(NamedTuple):
+    rows: int
+    native_dim: int
+    output_dim: int
 
 
 def parse_args() -> argparse.Namespace:
@@ -120,6 +127,15 @@ def parse_args() -> argparse.Namespace:
         "--no-normalize",
         action="store_true",
         help="Do not request normalized embeddings from SentenceTransformers.",
+    )
+    parser.add_argument(
+        "--output-dim",
+        type=int,
+        default=None,
+        help=(
+            "When positive, prefix-truncate embeddings to this dimension and "
+            "L2-renormalize before writing."
+        ),
     )
     return parser.parse_args()
 
@@ -245,6 +261,20 @@ def embedding_to_list(embedding) -> list[float]:
     return [float(value) for value in values]
 
 
+def prepare_embedding(embedding, output_dim: int | None) -> tuple[list[float], int]:
+    vector = embedding_to_list(embedding)
+    native_dim = len(vector)
+    if output_dim is None:
+        return vector, native_dim
+    if output_dim > native_dim:
+        raise ValueError(f"--output-dim {output_dim} exceeds native embedding dimension {native_dim}")
+    vector = vector[:output_dim]
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm > 0:
+        vector = [value / norm for value in vector]
+    return vector, native_dim
+
+
 def write_vectors(
     model,
     items: list[tuple[str, str]],
@@ -252,8 +282,11 @@ def write_vectors(
     prefix: str,
     batch_size: int,
     normalize: bool,
-) -> None:
+    output_dim: int | None = None,
+) -> WriteResult:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    native_dim = 0
+    written_dim = 0
     with output_path.open("w", encoding="utf-8") as handle:
         written = 0
         for batch in batches(items, batch_size):
@@ -267,10 +300,18 @@ def write_vectors(
                 show_progress_bar=True,
             )
             for item_id, embedding in zip(ids, embeddings):
-                vector = embedding_to_list(embedding)
+                vector, row_native_dim = prepare_embedding(embedding, output_dim)
+                if native_dim == 0:
+                    native_dim = row_native_dim
+                    written_dim = len(vector)
+                elif row_native_dim != native_dim:
+                    raise ValueError(
+                        f"inconsistent native embedding dimension: got {row_native_dim}, expected {native_dim}"
+                    )
                 handle.write(json.dumps({"id": item_id, "embedding": vector}) + "\n")
                 written += 1
         print(f"wrote {written} rows to {output_path}", flush=True)
+    return WriteResult(written, native_dim, written_dim)
 
 
 def write_child_vectors(
@@ -280,8 +321,11 @@ def write_child_vectors(
     prefix: str,
     batch_size: int,
     normalize: bool,
-) -> None:
+    output_dim: int | None = None,
+) -> WriteResult:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    native_dim = 0
+    written_dim = 0
     with output_path.open("w", encoding="utf-8") as handle:
         written = 0
         for batch in batches(chunks, batch_size):
@@ -294,7 +338,14 @@ def write_child_vectors(
                 show_progress_bar=True,
             )
             for chunk, embedding in zip(batch, embeddings):
-                vector = embedding_to_list(embedding)
+                vector, row_native_dim = prepare_embedding(embedding, output_dim)
+                if native_dim == 0:
+                    native_dim = row_native_dim
+                    written_dim = len(vector)
+                elif row_native_dim != native_dim:
+                    raise ValueError(
+                        f"inconsistent native embedding dimension: got {row_native_dim}, expected {native_dim}"
+                    )
                 handle.write(
                     json.dumps(
                         {
@@ -307,12 +358,58 @@ def write_child_vectors(
                 )
                 written += 1
         print(f"wrote {written} rows to {output_path}", flush=True)
+    return WriteResult(written, native_dim, written_dim)
+
+
+def write_manifest(
+    output_path: Path,
+    args: argparse.Namespace,
+    docs: list[tuple[str, str]],
+    queries: list[tuple[str, str]],
+    chunks: list[DocumentChunk],
+    vector_result: WriteResult,
+    query_result: WriteResult,
+    normalize: bool,
+) -> None:
+    if vector_result.native_dim != query_result.native_dim:
+        raise ValueError(
+            "document/query native embedding dimensions differ: "
+            f"{vector_result.native_dim} != {query_result.native_dim}"
+        )
+    if vector_result.output_dim != query_result.output_dim:
+        raise ValueError(
+            "document/query output embedding dimensions differ: "
+            f"{vector_result.output_dim} != {query_result.output_dim}"
+        )
+    manifest = {
+        "dataset_name": args.dataset_name,
+        "dataset_dir": str(args.dataset_dir),
+        "model_name": args.model_name,
+        "normalize_embeddings": normalize,
+        "native_dim": vector_result.native_dim,
+        "output_dim": vector_result.output_dim,
+        "requested_output_dim": args.output_dim,
+        "document_count": len(docs),
+        "query_count": len(queries),
+        "document_vector_rows": vector_result.rows,
+        "query_vector_rows": query_result.rows,
+        "document_chunk_words": args.document_chunk_words,
+        "document_chunk_overlap": args.document_chunk_overlap,
+        "document_chunk_min_words": args.document_chunk_min_words,
+        "child_chunk_count": len(chunks),
+        "query_prefix": args.query_prefix,
+        "document_prefix": args.document_prefix,
+    }
+    output_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"wrote manifest to {output_path}", flush=True)
 
 
 def main() -> int:
     args = parse_args()
     if args.batch_size <= 0:
         raise SystemExit("--batch-size must be positive")
+    if args.output_dim is not None and args.output_dim <= 0:
+        raise SystemExit("--output-dim must be positive when provided")
     if args.max_docs < 0 or args.max_queries < 0:
         raise SystemExit("--max-docs and --max-queries must be non-negative")
     if args.document_chunk_words < 0:
@@ -362,29 +459,42 @@ def main() -> int:
         flush=True,
     )
     if args.document_chunk_words > 0:
-        write_child_vectors(
+        vector_result = write_child_vectors(
             model,
             chunks,
             out_dir / "child-doc-vectors.jsonl",
             args.document_prefix,
             args.batch_size,
             normalize,
+            args.output_dim,
         )
     else:
-        write_vectors(
+        vector_result = write_vectors(
             model,
             docs,
             out_dir / "doc-vectors.jsonl",
             args.document_prefix,
             args.batch_size,
             normalize,
+            args.output_dim,
         )
-    write_vectors(
+    query_result = write_vectors(
         model,
         queries,
         out_dir / "query-vectors.jsonl",
         args.query_prefix,
         args.batch_size,
+        normalize,
+        args.output_dim,
+    )
+    write_manifest(
+        out_dir / "manifest.json",
+        args,
+        docs,
+        queries,
+        chunks,
+        vector_result,
+        query_result,
         normalize,
     )
     return 0

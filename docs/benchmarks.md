@@ -70,6 +70,8 @@ ferrous-wheel run scripts/smoke_eos_long_context_chunked_baseline.fw
 
 This harness generates a BEIR-shaped synthetic long-document dataset with relevant evidence near the end of each document, then compares live Eos single-vector retrieval, BM25, exported Eos single-vector cache retrieval, dense chunked child-vector max rollup, and q2/q4/q8 TurboQuant child-vector max rollup. The checkpoint run at `runs/eos-long-context-chunked-baseline-smoke-v1-20260618T054701Z/` recorded direct Eos nDCG@10 `0.119502020`, single-vector cache nDCG@10 `0.151840834`, and perfect nDCG@10/recall@100 for BM25 plus chunked dense/q2/q4/q8 rows; treat this as synthetic smoke evidence for the harness shape, not LongEmbed proof or a real long-document benchmark. See `.tiller/scratch/codex/eos-long-context-chunked-baseline-smoke-v1-report.md` for the detailed artifact summary.
 
+The external preset exporter also supports `--output-dim` for prefix truncation plus L2 renormalization, giving compact vector-cache parity through `scripts/export_retrieval_vectors.py` wrapper commands. Offline cached Qwen3 0.6B and mxbai-large runs on `late-needle-w96-o16` produced native 1024d and compact 128d child caches at `runs/eos-late-needle-external-baselines-v1-20260618T060510Z/`: native dense/q2/q4/q8 rows were perfect for both embedders; compact 128d dense/q4/q8 rows were also perfect; compact q2 kept recall@100 at `1.0` but dropped to Qwen3 nDCG@10 `0.948904` and mxbai nDCG@10 `0.958333`. Because this is still synthetic and BM25 also scores perfectly, treat it as exporter and comparison-harness evidence, not LongEmbed proof.
+
 Calibrate hybrid retrieval before using `eos-hybrid` rows as product evidence:
 
 ```bash
