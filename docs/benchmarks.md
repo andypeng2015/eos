@@ -74,6 +74,14 @@ Set `EOS_LONG_CONTEXT_SMOKE_SCENARIO=semantic_late_needle` for a harder syntheti
 
 The external preset exporter also supports `--output-dim` for prefix truncation plus L2 renormalization, giving compact vector-cache parity through `scripts/export_retrieval_vectors.py` wrapper commands. Offline cached Qwen3 0.6B and mxbai-large runs on `late-needle-w96-o16` produced native 1024d and compact 128d child caches at `runs/eos-late-needle-external-baselines-v1-20260618T060510Z/`: native dense/q2/q4/q8 rows were perfect for both embedders; compact 128d dense/q4/q8 rows were also perfect; compact q2 kept recall@100 at `1.0` but dropped to Qwen3 nDCG@10 `0.948904` and mxbai nDCG@10 `0.958333`. Because this is still synthetic and BM25 also scores perfectly, treat it as exporter and comparison-harness evidence, not LongEmbed proof.
 
+Build a small non-synthetic local-doc long-retrieval lane with:
+
+```bash
+EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/build_repo_docs_longembed_dataset.fw
+```
+
+This writes a BEIR-shaped `datasets/longembed/repo-docs` dataset from local repository Markdown and skill docs. The verified lane currently has `11` documents, `80` heuristic qrels, and `6` documents at `>=2048` words. In the checkpoint run summarized at `.tiller/scratch/codex/eos-repo-docs-longembed-lane-v1-report.md`, BM25 reached nDCG@10 `0.717080`, the Eos default single-vector row reached `0.644872`, Qwen3 0.6B 128d dense child-max reached `0.771170`, and Qwen3 q4 child-max reached `0.739269`. Treat this as local harness coverage over real repo text, not LongEmbed proof: qrels are deterministic path/heading heuristics, the dataset is small and repo-specific, and BM25 benefits from path and heading lexical overlap.
+
 Calibrate hybrid retrieval before using `eos-hybrid` rows as product evidence:
 
 ```bash

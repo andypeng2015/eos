@@ -1,0 +1,481 @@
+package main
+
+// build_repo_docs_longembed_dataset emits a small BEIR-shaped local
+// long-document retrieval dataset from repo documentation. It is intended as a
+// non-synthetic scoreboard lane under datasets/longembed/repo-docs, with
+// heuristic qrels derived from document paths and Markdown headings.
+//
+// Usage:
+//   EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/build_repo_docs_longembed_dataset.fw
+//
+// Useful overrides:
+//   EOS_REPO_DOCS_LONG_OUT=datasets/longembed/repo-docs
+//   EOS_REPO_DOCS_LONG_MAX_DOCS=0
+//   EOS_REPO_DOCS_LONG_MAX_QUERIES=80
+//   EOS_REPO_DOCS_LONG_MIN_WORDS=80
+//   EOS_REPO_DOCS_LONG_PATHS=AGENTS.md,.codex/skills,docs
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type repoDoc struct {
+	ID       string
+	Path     string
+	RelPath  string
+	Title    string
+	Text     string
+	Words    int
+	Headings []string
+}
+
+type corpusRow struct {
+	ID    string `json:"_id"`
+	Title string `json:"title"`
+	Text  string `json:"text"`
+}
+
+type queryRow struct {
+	ID   string `json:"_id"`
+	Text string `json:"text"`
+}
+
+type manifestDoc struct {
+	ID           string   `json:"id"`
+	Path         string   `json:"path"`
+	Title        string   `json:"title"`
+	Words        int      `json:"words"`
+	QueryIDs     []string `json:"query_ids"`
+	HeadingCount int      `json:"heading_count"`
+}
+
+type datasetManifest struct {
+	Schema        string         `json:"schema"`
+	GeneratedAt   string         `json:"generated_at"`
+	RepoRoot      string         `json:"repo_root"`
+	OutputDir     string         `json:"output_dir"`
+	Inputs        []string       `json:"inputs"`
+	Config        map[string]int `json:"config"`
+	Counts        map[string]int `json:"counts"`
+	LengthBuckets map[string]int `json:"length_buckets"`
+	Docs          []manifestDoc  `json:"docs"`
+	Caveats       []string       `json:"caveats"`
+}
+
+func getenv(name string, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func parseIntEnv(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func relPath(root string, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err == nil {
+		return filepath.ToSlash(rel)
+	}
+	return filepath.ToSlash(path)
+}
+
+func normalizeText(text string) string {
+	lines := []string{}
+	inFence := false
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "```") {
+			inFence = !inFence
+		}
+		if line == "" {
+			continue
+		}
+		if !inFence && strings.HasPrefix(line, "<!--") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func cleanHeading(line string) string {
+	line = strings.TrimSpace(line)
+	line = strings.TrimLeft(line, "#")
+	line = strings.TrimSpace(line)
+	line = strings.Trim(line, "`*_ ")
+	return line
+}
+
+func extractHeadings(text string) []string {
+	headings := []string{}
+	seen := map[string]bool{}
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if !strings.HasPrefix(line, "#") {
+			continue
+		}
+		heading := cleanHeading(line)
+		if heading == "" || seen[strings.ToLower(heading)] {
+			continue
+		}
+		seen[strings.ToLower(heading)] = true
+		headings = append(headings, heading)
+	}
+	return headings
+}
+
+func titleFromPath(rel string, text string) string {
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "#") {
+			heading := cleanHeading(line)
+			if heading != "" {
+				return heading
+			}
+		}
+	}
+	base := strings.TrimSuffix(filepath.Base(rel), filepath.Ext(rel))
+	base = strings.ReplaceAll(base, "-", " ")
+	base = strings.ReplaceAll(base, "_", " ")
+	if strings.TrimSpace(base) == "" {
+		return rel
+	}
+	return base
+}
+
+func sanitizeID(value string) string {
+	value = strings.ToLower(value)
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if ok {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "doc"
+	}
+	return out
+}
+
+func addFile(root string, path string, docs []repoDoc, minWords int) []repoDoc {
+	if !fileExists(path) {
+		return docs
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Println(f"[repo-docs] read failed: {path}: {err}")
+		return docs
+	}
+	text := normalizeText(string(data))
+	words := len(strings.Fields(text))
+	if words < minWords {
+		return docs
+	}
+	rel := relPath(root, path)
+	id := sanitizeID(rel)
+	docs = append(docs, repoDoc{
+		ID:       id,
+		Path:     path,
+		RelPath:  rel,
+		Title:    titleFromPath(rel, text),
+		Text:     text,
+		Words:    words,
+		Headings: extractHeadings(text),
+	})
+	return docs
+}
+
+func addTree(root string, dir string, docs []repoDoc, minWords int, include func(string) bool) []repoDoc {
+	if _, err := os.Stat(dir); err != nil {
+		return docs
+	}
+	filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			name := entry.Name()
+			if name == ".git" || name == "datasets" || name == "runs" || name == "bin" || name == "dist" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if include(path) {
+			docs = addFile(root, path, docs, minWords)
+		}
+		return nil
+	})
+	return docs
+}
+
+func collectDocs(root string, minWords int) ([]repoDoc, []string) {
+	docs := []repoDoc{}
+	inputs := []string{}
+	rawPaths := getenv("EOS_REPO_DOCS_LONG_PATHS", "AGENTS.md,.codex/skills,docs")
+	for _, raw := range strings.Split(rawPaths, ",") {
+		item := strings.TrimSpace(raw)
+		if item == "" {
+			continue
+		}
+		inputs = append(inputs, item)
+		path := item
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(root, path)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			fmt.Println(f"[repo-docs] missing input: {item}")
+			continue
+		}
+		if info.IsDir() {
+			docs = addTree(root, path, docs, minWords, func(candidate string) bool {
+				if filepath.Base(candidate) == "SKILL.md" {
+					return true
+				}
+				return strings.EqualFold(filepath.Ext(candidate), ".md")
+			})
+			continue
+		}
+		docs = addFile(root, path, docs, minWords)
+	}
+	sort.Slice(docs, func(i int, j int) bool {
+		return docs[i].RelPath < docs[j].RelPath
+	})
+	maxDocs := parseIntEnv("EOS_REPO_DOCS_LONG_MAX_DOCS", 0)
+	if maxDocs > 0 && len(docs) > maxDocs {
+		docs = docs[:maxDocs]
+	}
+	return docs, inputs
+}
+
+func queryTexts(doc repoDoc, maxPerDoc int) []string {
+	out := []string{}
+	out = append(out, "Find the local repository documentation for " + doc.Title + ".")
+	out = append(out, "Which document contains guidance from " + doc.RelPath + "?")
+	for _, heading := range doc.Headings {
+		if len(out) >= maxPerDoc {
+			break
+		}
+		out = append(out, "Find guidance about " + heading + " in the local Eos documentation.")
+	}
+	return out
+}
+
+func writeJSONL(path string, rows []interface{}) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	w := bufio.NewWriter(f)
+	defer w.Flush()
+	enc := json.NewEncoder(w)
+	for _, row := range rows {
+		if err := enc.Encode(row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func lengthBuckets(docs []repoDoc) map[string]int {
+	buckets := map[string]int{
+		"lt_256": 0,
+		"256_511": 0,
+		"512_1023": 0,
+		"1024_2047": 0,
+		"gte_2048": 0,
+	}
+	for _, doc := range docs {
+		if doc.Words < 256 {
+			buckets["lt_256"]++
+		} else if doc.Words < 512 {
+			buckets["256_511"]++
+		} else if doc.Words < 1024 {
+			buckets["512_1023"]++
+		} else if doc.Words < 2048 {
+			buckets["1024_2047"]++
+		} else {
+			buckets["gte_2048"]++
+		}
+	}
+	return buckets
+}
+
+func writeDataset(root string, outDir string, docs []repoDoc, inputs []string) error {
+	if len(docs) == 0 {
+		return fmt.Errorf("no repo docs met EOS_REPO_DOCS_LONG_MIN_WORDS")
+	}
+	if err := os.MkdirAll(filepath.Join(outDir, "qrels"), 0o755); err != nil {
+		return err
+	}
+	corpus := []interface{}{}
+	queries := []interface{}{}
+	var qrels strings.Builder
+	qrels.WriteString("query-id\tcorpus-id\tscore\n")
+	manifestDocs := []manifestDoc{}
+	maxQueries := parseIntEnv("EOS_REPO_DOCS_LONG_MAX_QUERIES", 80)
+	if maxQueries <= 0 {
+		maxQueries = 1 << 30
+	}
+	maxQueriesPerDoc := parseIntEnv("EOS_REPO_DOCS_LONG_MAX_QUERIES_PER_DOC", 8)
+	if maxQueriesPerDoc < 2 {
+		maxQueriesPerDoc = 2
+	}
+	queryCount := 0
+	for _, doc := range docs {
+		corpus = append(corpus, corpusRow{ID: doc.ID, Title: doc.Title, Text: doc.Text})
+		queryIDs := []string{}
+		for _, text := range queryTexts(doc, maxQueriesPerDoc) {
+			if queryCount >= maxQueries {
+				break
+			}
+			qid := fmt.Sprintf("q-%04d-%s", queryCount+1, doc.ID)
+			queries = append(queries, queryRow{ID: qid, Text: text})
+			qrels.WriteString(fmt.Sprintf("%s\t%s\t1\n", qid, doc.ID))
+			queryIDs = append(queryIDs, qid)
+			queryCount++
+		}
+		manifestDocs = append(manifestDocs, manifestDoc{
+			ID:           doc.ID,
+			Path:         doc.RelPath,
+			Title:        doc.Title,
+			Words:        doc.Words,
+			QueryIDs:     queryIDs,
+			HeadingCount: len(doc.Headings),
+		})
+	}
+	if len(queries) == 0 {
+		return fmt.Errorf("no queries generated")
+	}
+	if err := writeJSONL(filepath.Join(outDir, "corpus.jsonl"), corpus); err != nil {
+		return err
+	}
+	if err := writeJSONL(filepath.Join(outDir, "queries.jsonl"), queries); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "qrels", "test.tsv"), []byte(qrels.String()), 0o644); err != nil {
+		return err
+	}
+	manifest := datasetManifest{
+		Schema:      "eos.repo_docs_longembed_dataset.v1",
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		RepoRoot:    root,
+		OutputDir:   outDir,
+		Inputs:      inputs,
+		Config: map[string]int{
+			"min_words": parseIntEnv("EOS_REPO_DOCS_LONG_MIN_WORDS", 80),
+			"max_docs": parseIntEnv("EOS_REPO_DOCS_LONG_MAX_DOCS", 0),
+			"max_queries": parseIntEnv("EOS_REPO_DOCS_LONG_MAX_QUERIES", 80),
+			"max_queries_per_doc": maxQueriesPerDoc,
+		},
+		Counts: map[string]int{
+			"documents": len(docs),
+			"queries": len(queries),
+			"qrels": len(queries),
+		},
+		LengthBuckets: lengthBuckets(docs),
+		Docs:        manifestDocs,
+		Caveats: []string{
+			"Qrels are deterministic local-doc heuristics from paths and Markdown headings, not human relevance judgments.",
+			"This dataset is non-synthetic source material but small and repo-specific; use it as a long-document harness lane, not a public benchmark claim.",
+		},
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(outDir, "dataset-manifest.json"), append(data, '\n'), 0o644)
+}
+
+func main() {
+	root, err := findRoot()
+	guard err == nil else {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	outDir := getenv("EOS_REPO_DOCS_LONG_OUT", filepath.Join(root, "datasets", "longembed", "repo-docs"))
+	if !filepath.IsAbs(outDir) {
+		outDir = filepath.Join(root, outDir)
+	}
+	minWords := parseIntEnv("EOS_REPO_DOCS_LONG_MIN_WORDS", 80)
+	if minWords < 1 {
+		minWords = 1
+	}
+	docs, inputs := collectDocs(root, minWords)
+	err = writeDataset(root, outDir, docs, inputs)
+	guard err == nil else {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	buckets := lengthBuckets(docs)
+	fmt.Println(f"wrote {outDir}")
+	fmt.Println(f"documents={len(docs)}")
+	fmt.Printf("length_buckets lt_256=%d 256_511=%d 512_1023=%d 1024_2047=%d gte_2048=%d\n",
+		buckets["lt_256"],
+		buckets["256_511"],
+		buckets["512_1023"],
+		buckets["1024_2047"],
+		buckets["gte_2048"],
+	)
+}
