@@ -28,6 +28,27 @@ EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/bench_sparse_attention.fw
 
 The sparse-attention harness first writes a routed preflight plan as `sparse-attention-plan.tsv` and `sparse-attention-plan.json`, then records CUDA benchmark output as `sparse-attention-bench.jsonl`, `sparse-attention-bench.txt`, `sparse-attention-bench-summary.tsv`, and `sparse-attention-scaling.tsv` under `runs/<run-id>/`. The Go benchmark lines and summary table include selected-key count, candidate-key budget, estimated scores per query, score fraction, subquadratic-plan flag, TurboQuant K/V MiB, and logical K/V compression ratio. The scaling table fits log-log time alpha for exact f16 and routed TurboQuant rows, and the harness fails routed TurboQuant when alpha exceeds `EOS_SPARSE_BENCH_MAX_ROUTED_TIME_ALPHA` (`0.95` by default; set `0` to disable during exploratory runs). Keep exact dense costs bounded with `EOS_SPARSE_BENCH_EXACT_KEY_LENS` (`1024,4096` by default) while extending routed scaling with `EOS_SPARSE_BENCH_ROUTED_KEY_LENS` (`1024,4096,16384` by default).
 
+Calibrate sparse routing policy quality separately from kernel timing:
+
+```bash
+go run ./cmd/eos calibrate-sparse-routing \
+  --run-dir runs/eos-sparse-routing-calibration-local \
+  --seq-len 4096 \
+  --query-len 8 \
+  --dim 64 \
+  --top-k 64 \
+  --route-block-size 10 \
+  --route-top-blocks 35,36,37,38,39,40 \
+  --route-modes anchor,multiprobe,summary_mean,oracle_block_max \
+  --route-probes 1,2,4,8 \
+  --max-score-fraction 0.2 \
+  --min-exact-topk-recall 0.95 \
+  --min-exact-topk-recall-min 0.95 \
+  --min-output-cosine 0.98
+```
+
+The command writes `calibration.json` and `calibration.tsv` under the run directory. Use `--route-modes` to compare deployable heuristics with teacher-only `oracle_block_max`, and treat the output as routing calibration evidence only: it does not prove downstream retrieval quality or learned selector feasibility.
+
 Run the default-model training smoke from a local asset package:
 
 ```bash

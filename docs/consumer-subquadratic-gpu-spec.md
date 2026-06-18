@@ -166,8 +166,8 @@ Kernel-level gates:
 
 Teacher-comparison gates:
 
-- top-block recall against dense/high-budget teacher: `>= 0.95` for synthetic retrieval cases
-- top-token recall inside selected blocks: `>= 0.90`
+- average top-block/top-token recall against dense/high-budget teacher: `>= 0.95` for synthetic calibration cases
+- per-query minimum top-block/top-token recall: explicit gate, target `>= 0.95` for robust sparse-routing promotion; record failures separately from average recall
 - attention output cosine similarity to teacher: `>= 0.98` on calibration batches
 
 Task-level gates:
@@ -190,6 +190,8 @@ Already present in the repo:
 ```eos
 turbo_sparse_attention(q, kc, kn, vc, vn, top_k, route_block_size, route_top_blocks)
 ```
+
+Sparse embedding smoke now has CUDA backend evidence and a strict backend-vs-host TurboQuant parity gate. Routing calibration is separate: `eos calibrate-sparse-routing` sweeps `anchor`, `multiprobe`, `summary_mean`, and teacher-only `oracle_block_max` policies, writes `calibration.json` and `calibration.tsv`, and can gate both average and per-query minimum recall. The current decision baseline is mixed: default-scale anchor and simple config/block-size sweeps do not pass under `score_count_fraction <= 0.2`, `recall_avg >= 0.95`, and `cosine >= 0.98`; best under-budget multiprobe at `4096x8x64`, block `64`, top blocks `8`, probes `4` reached recall avg `0.486328125`, cosine `0.98335072496811`, and score fraction `0.1875`. Coarse oracle block-size sweeping with min recall had no robust pass; its best under-budget row, block `16` / top blocks `32`, reached recall avg/min `0.9921875 / 0.9375`, cosine `0.999981385545`, and score fraction `0.1875`, failing only the min recall `0.95` gate. A fine-grained teacher-only oracle boundary sweep found a narrow robust upper-bound region: block `10` / top blocks `38` reached recall avg/min `1 / 1`, cosine `1`, MSE `0`, and score fraction `0.19287109375`. Passing ranges were block `8` top blocks `36,37,38`, block `10` `35..40`, block `12` `35..39`, block `14` `34..37`, block `16` `33..35`, and block `24` none. This is calibration upper-bound evidence, not retrieval quality proof or a deployable selector.
 
 Current routed implementation:
 
@@ -277,7 +279,7 @@ Implementation:
 
 Pass:
 
-- top-block recall clears `0.95` on calibration
+- average and per-query minimum top-block recall clear the selected calibration gates
 - task loss clears the quality gate at target budget
 - router remains stable when context length extrapolates beyond training length
 
@@ -417,9 +419,9 @@ Minimum matrix for a success claim:
 | Sequence length | `4k`, `8k`, `16k`, `32k`, `64k`; `128k` for inference |
 | Head dim | `64`, `128` |
 | Top-k | `16`, `32`, `64` |
-| Routing | exact, block-anchor, block-summary, learned |
-| Route block size | fixed, `sqrt(N)`, learned/hierarchical |
-| Route top blocks | `1`, `2`, `4`, `8` |
+| Routing | exact, block-anchor, multiprobe, block-summary, learned, oracle upper-bound |
+| Route block size | fixed, `8..16` boundary candidates, `sqrt(N)`, learned/hierarchical |
+| Route top blocks | powers of two for coarse scans plus boundary ranges near the score budget, including `33..40` where block sizes `8..16` currently pass teacher-only oracle gates |
 | K/V dtype | dense f16, q8, q4 TurboQuant |
 | Hardware tier | `C16`, `C24` |
 
@@ -438,7 +440,7 @@ Gate B: scaling
 
 Gate C: quality
 
-- teacher recall and output similarity clear calibration gates
+- teacher recall average, teacher recall per-query minimum, and output similarity clear calibration gates
 - task metrics clear long-context gates
 
 Gate D: trainability
@@ -502,12 +504,12 @@ Milestone 3: block summaries
 
 - add summary cache representation
 - update summaries on K/V append
-- compare anchor vs summary routing
+- compare anchor, multiprobe, summary, and deployable approximations to the teacher-only oracle boundary region
 
 Milestone 4: learned router
 
 - build dense/high-budget teacher label generation
-- train router on short contexts
+- train or approximate block labels around block sizes `8..16`, with block `10` / top blocks `38` as the first calibration target
 - test extrapolation to longer contexts
 
 Milestone 5: sparse backward
