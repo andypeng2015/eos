@@ -60,6 +60,16 @@ ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
 
 The scoreboard run writes `scoreboard.tsv`, `scoreboard.json`, per-task metrics JSON, command logs, and a run-local `eos` binary under `runs/<run-id>/`. Dense local rows default to `baseline=eos`; hybrid rows default to `baseline=eos-hybrid`; local TurboQuant rows use `eos-turboquant` for direct quantized scoring and `eos-turboquant-rerank` for quantized candidate overfetch plus rerank storage modes such as fp16; external TurboQuant rows use `<external>-turboquant`. Set `EOS_SCOREBOARD_BASELINE_LABEL=manta` and `EOS_SCOREBOARD_HYBRID_BASELINE_LABEL=manta-hybrid` only when intentionally producing a legacy-labeled scoreboard. Pairwise rows use `EOS_SCOREBOARD_PAIRWISE_ARTIFACT` when set, or infer the sibling trainable package from a sealed artifact path. Add `EOS_SCOREBOARD_LONG_ROOT` and `EOS_SCOREBOARD_LONG_DATASETS` when long-document retrieval datasets are prepared.
 
+For the current synthetic late-needle long-context smoke, run:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+EOS_LONG_CONTEXT_SMOKE_RUN_DIR=runs/eos-long-context-chunked-baseline-smoke-v1-repro \
+ferrous-wheel run scripts/smoke_eos_long_context_chunked_baseline.fw
+```
+
+This harness generates a BEIR-shaped synthetic long-document dataset with relevant evidence near the end of each document, then compares live Eos single-vector retrieval, BM25, exported Eos single-vector cache retrieval, dense chunked child-vector max rollup, and q2/q4/q8 TurboQuant child-vector max rollup. The checkpoint run at `runs/eos-long-context-chunked-baseline-smoke-v1-20260618T054701Z/` recorded direct Eos nDCG@10 `0.119502020`, single-vector cache nDCG@10 `0.151840834`, and perfect nDCG@10/recall@100 for BM25 plus chunked dense/q2/q4/q8 rows; treat this as synthetic smoke evidence for the harness shape, not LongEmbed proof or a real long-document benchmark. See `.tiller/scratch/codex/eos-long-context-chunked-baseline-smoke-v1-report.md` for the detailed artifact summary.
+
 Calibrate hybrid retrieval before using `eos-hybrid` rows as product evidence:
 
 ```bash

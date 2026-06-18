@@ -1,0 +1,462 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type quality struct {
+	NDCGAt10    float64 `json:"ndcg_at_10"`
+	RecallAt100 float64 `json:"recall_at_100"`
+}
+
+type retrievalMetrics struct {
+	Dataset string `json:"dataset"`
+	Backend string `json:"backend"`
+	Inputs struct {
+		Documents int `json:"documents"`
+		Queries   int `json:"queries"`
+	} `json:"inputs"`
+	Quality quality `json:"quality"`
+}
+
+type exportManifest struct {
+	Dimension          int     `json:"dimension"`
+	ModelDimension     int     `json:"model_dimension"`
+	OutputDimension    int     `json:"output_dimension"`
+	Documents          int     `json:"documents"`
+	Queries            int     `json:"queries"`
+	ChildVectors       int     `json:"child_vectors"`
+	DocumentChunkWords int     `json:"document_chunk_words"`
+	ElapsedSeconds     float64 `json:"elapsed_seconds"`
+}
+
+type mvMetrics struct {
+	Dataset string `json:"dataset"`
+	Backend string `json:"backend"`
+	Inputs struct {
+		ParentCount          int     `json:"parent_count"`
+		ChildCount           int     `json:"child_count"`
+		AvgChildrenPerParent float64 `json:"avg_children_per_parent"`
+		MaxChildrenPerParent int     `json:"max_children_per_parent"`
+		Queries              int     `json:"queries"`
+	} `json:"inputs"`
+	Config struct {
+		QuantizerSeed int64 `json:"quantizer_seed"`
+		BaselineDim   int   `json:"baseline_dim"`
+	} `json:"config"`
+	Dense struct {
+		Quality                        quality `json:"quality"`
+		ChildVectorBytes               int64   `json:"child_vector_bytes"`
+		DenseChildBytes                int64   `json:"dense_child_bytes"`
+		DenseBaselineBytes             int64   `json:"dense_baseline_bytes"`
+		StorageMultipleOfDenseBaseline float64 `json:"storage_multiple_of_dense_baseline"`
+	} `json:"dense"`
+	Rows []struct {
+		Bits                             int     `json:"bits"`
+		Method                           string  `json:"method"`
+		Quality                          quality `json:"quality"`
+		NDCGAt10Delta                    float64 `json:"ndcg_at_10_delta"`
+		RecallAt100Delta                 float64 `json:"recall_at_100_delta"`
+		QuantizedVectorBytes             int64   `json:"quantized_vector_bytes"`
+		QuantizedChildBytes              int64   `json:"quantized_child_bytes"`
+		StorageMultipleOfDenseBaseline   float64 `json:"storage_multiple_of_dense_baseline"`
+		VectorsThatFitInOneDenseBaseline int64   `json:"vectors_that_fit_in_one_dense_baseline"`
+	} `json:"rows"`
+}
+
+type commandRecord struct {
+	Label string   `json:"label"`
+	Args  []string `json:"args"`
+	Log   string   `json:"log"`
+}
+
+type summaryRow struct {
+	Row                      string  `json:"row"`
+	Bits                     int     `json:"bits,omitempty"`
+	Method                   string  `json:"method"`
+	NDCGAt10                 float64 `json:"ndcg_at_10"`
+	RecallAt100              float64 `json:"recall_at_100"`
+	Parents                  int     `json:"parents"`
+	Children                 int     `json:"children"`
+	AvgChildrenPerParent     float64 `json:"avg_children_per_parent"`
+	VectorDim                int     `json:"vector_dim"`
+	BaselineDim              int     `json:"baseline_dim,omitempty"`
+	CompressionRatio         float64 `json:"compression_ratio,omitempty"`
+	StorageMultiple          float64 `json:"storage_multiple_of_dense_baseline,omitempty"`
+	QuantizedVectorBytes     int64   `json:"quantized_vector_bytes,omitempty"`
+	VectorsFitOneDenseParent int64   `json:"vectors_that_fit_in_one_dense_parent,omitempty"`
+	MetricsPath              string  `json:"metrics_path"`
+}
+
+type manifest struct {
+	Schema      string            `json:"schema"`
+	GeneratedAt string            `json:"generated_at"`
+	RepoRoot    string            `json:"repo_root"`
+	RunDir      string            `json:"run_dir"`
+	Inputs      map[string]string `json:"inputs"`
+	Commands    []commandRecord   `json:"commands"`
+	Rows        []summaryRow      `json:"rows"`
+	Caveats     []string          `json:"caveats"`
+}
+
+func getenv(name string, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func parseIntEnv(name string, fallback int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func runCmd(root string, label string, logPath string, name string, args []string) (commandRecord, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	_ = os.WriteFile(logPath, out, 0o644)
+	record := commandRecord{Label: label, Args: append([]string{name}, args...), Log: logPath}
+	if err != nil {
+		return record, fmt.Errorf("%s failed: %w; see %s", label, err, logPath)
+	}
+	return record, nil
+}
+
+func writeJSONL(path string, rows []map[string]interface{}) error {
+	var b strings.Builder
+	for _, row := range rows {
+		data, err := json.Marshal(row)
+		if err != nil {
+			return err
+		}
+		b.Write(data)
+		b.WriteByte('\n')
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func generateDataset(datasetDir string, docs int, queries int, prefixWords int) error {
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		return err
+	}
+	topics := []string{
+		"alpine insulin cedar moonstone",
+		"bronze library sodium harbor",
+		"crimson telescope velvet enzyme",
+		"delta orchard ceramic photon",
+		"ember archive nickel compass",
+		"frost canal amber protein",
+		"granite museum cobalt lantern",
+		"hazel observatory quartz peptide",
+		"ivory station copper prism",
+		"juniper clinic silver turbine",
+		"kelp gallery oxygen spindle",
+		"lunar depot violet catalyst",
+	}
+	if queries > len(topics) {
+		queries = len(topics)
+	}
+	common := strings.Repeat("general background paragraph about local retrieval systems storage budgets embeddings compression evaluation documents and ordinary context ", prefixWords/12+1)
+	commonWords := strings.Fields(common)
+	if len(commonWords) > prefixWords {
+		commonWords = commonWords[:prefixWords]
+	}
+	prefix := strings.Join(commonWords, " ")
+	corpusRows := []map[string]interface{}{}
+	queryRows := []map[string]interface{}{}
+	var qrels strings.Builder
+	qrels.WriteString("query-id\tcorpus-id\tscore\n")
+	for i := 0; i < docs; i++ {
+		topic := topics[i%len(topics)]
+		id := fmt.Sprintf("doc-%02d", i)
+		late := fmt.Sprintf("Late evidence marker. The archive answer is %s. This sentence is intentionally near the end of the long document.", topic)
+		text := prefix + " " + late
+		corpusRows = append(corpusRows, map[string]interface{}{
+			"_id":   id,
+			"title": fmt.Sprintf("Synthetic long document %02d", i),
+			"text":  text,
+		})
+		if i < queries {
+			qid := fmt.Sprintf("q-%02d", i)
+			queryRows = append(queryRows, map[string]interface{}{
+				"_id":  qid,
+				"text": fmt.Sprintf("Which document says the archive answer is %s?", topic),
+			})
+			qrels.WriteString(fmt.Sprintf("%s\t%s\t1\n", qid, id))
+		}
+	}
+	if err := writeJSONL(filepath.Join(datasetDir, "corpus.jsonl"), corpusRows); err != nil {
+		return err
+	}
+	if err := writeJSONL(filepath.Join(datasetDir, "queries.jsonl"), queryRows); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(datasetDir, "qrels", "test.tsv"), []byte(qrels.String()), 0o644)
+}
+
+func readJSON(path string, out interface{}) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, out)
+}
+
+func writeSummaryTSV(path string, rows []summaryRow) error {
+	var b strings.Builder
+	b.WriteString("row\tbits\tmethod\tndcg_at_10\trecall_at_100\tparents\tchildren\tavg_children_per_parent\tvector_dim\tbaseline_dim\tcompression_ratio\tstorage_multiple_of_dense_baseline\tquantized_vector_bytes\tvectors_that_fit_in_one_dense_parent\tmetrics_path\n")
+	for _, row := range rows {
+		b.WriteString(fmt.Sprintf("%s\t%d\t%s\t%.9f\t%.9f\t%d\t%d\t%.6f\t%d\t%d\t%.6f\t%.6f\t%d\t%d\t%s\n",
+			row.Row, row.Bits, row.Method, row.NDCGAt10, row.RecallAt100, row.Parents, row.Children,
+			row.AvgChildrenPerParent, row.VectorDim, row.BaselineDim, row.CompressionRatio,
+			row.StorageMultiple, row.QuantizedVectorBytes, row.VectorsFitOneDenseParent, row.MetricsPath))
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func main() {
+	root, err := findRoot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	timestamp := time.Now().UTC().Format("20060102T150405Z")
+	runDir := getenv("EOS_LONG_CONTEXT_SMOKE_RUN_DIR", filepath.Join(root, "runs", "eos-long-context-chunked-baseline-smoke-v1-"+timestamp))
+	if !filepath.IsAbs(runDir) {
+		runDir = filepath.Join(root, runDir)
+	}
+	artifact := getenv("EOS_LONG_CONTEXT_SMOKE_ARTIFACT", filepath.Join(root, "assets", "corkscrewdb-default-embedder", "corkscrewdb-default-embedder.mll"))
+	if _, err := os.Stat(artifact); err != nil {
+		artifact = filepath.Join(root, "runs", "current-release-qwen3-nf005-continuation-20260616T224102Z", "candidate", "eos-embed-v1.sealed.mll")
+	}
+	docs, err := parseIntEnv("EOS_LONG_CONTEXT_SMOKE_DOCS", 24)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	queries, err := parseIntEnv("EOS_LONG_CONTEXT_SMOKE_QUERIES", 12)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	prefixWords, err := parseIntEnv("EOS_LONG_CONTEXT_SMOKE_PREFIX_WORDS", 720)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	outputDim, _ := parseIntEnv("EOS_LONG_CONTEXT_SMOKE_OUTPUT_DIM", 128)
+	chunkWords, _ := parseIntEnv("EOS_LONG_CONTEXT_SMOKE_CHUNK_WORDS", 96)
+	chunkOverlap, _ := parseIntEnv("EOS_LONG_CONTEXT_SMOKE_CHUNK_OVERLAP", 16)
+	baselineDim, _ := parseIntEnv("EOS_LONG_CONTEXT_SMOKE_BASELINE_DIM", 3072)
+
+	dataDir := filepath.Join(runDir, "data", "late-needle")
+	logDir := filepath.Join(runDir, "logs")
+	cacheDir := filepath.Join(runDir, "vectors")
+	binDir := filepath.Join(runDir, "bin")
+	for _, dir := range []string{dataDir, logDir, cacheDir, binDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	if err := generateDataset(dataDir, docs, queries, prefixWords); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	eosBin := filepath.Join(binDir, "eos")
+	commands := []commandRecord{}
+	rec, err := runCmd(root, "Build eos CLI", filepath.Join(logDir, "go-build.log"), "go", []string{"build", "-trimpath", "-o", eosBin, "./cmd/eos"})
+	commands = append(commands, rec)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	directMetrics := filepath.Join(runDir, "direct-eos.metrics.json")
+	rec, err = runCmd(root, "Evaluate direct single-vector Eos", filepath.Join(logDir, "direct-eos.log"), eosBin, []string{"eval-retrieval", "--dataset", "late-needle", "--top-k", "100", "--metrics-json", directMetrics, artifact, dataDir})
+	commands = append(commands, rec)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	bm25Metrics := filepath.Join(runDir, "bm25.metrics.json")
+	rec, err = runCmd(root, "Evaluate BM25", filepath.Join(logDir, "bm25.log"), eosBin, []string{"eval-retrieval-bm25", "--dataset", "late-needle", "--top-k", "100", "--metrics-json", bm25Metrics, dataDir})
+	commands = append(commands, rec)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	singleDir := filepath.Join(cacheDir, "single")
+	singleManifestPath := filepath.Join(singleDir, "manifest.json")
+	rec, err = runCmd(root, "Export single-vector cache", filepath.Join(logDir, "export-single.log"), eosBin, []string{"export-retrieval-vectors", "--dataset", "late-needle", "--batch-size", "64", "--output-dim", strconv.Itoa(outputDim), "--manifest-json", singleManifestPath, artifact, dataDir, singleDir})
+	commands = append(commands, rec)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	singleMetrics := filepath.Join(runDir, "single-vector-cache.metrics.json")
+	rec, err = runCmd(root, "Evaluate single-vector cache", filepath.Join(logDir, "single-vector-cache.log"), eosBin, []string{"eval-retrieval-vectors", "--dataset", "late-needle", "--backend", "eos-single-cache", "--artifact", filepath.Base(artifact), "--doc-vectors", filepath.Join(singleDir, "doc-vectors.jsonl"), "--query-vectors", filepath.Join(singleDir, "query-vectors.jsonl"), "--top-k", "100", "--metrics-json", singleMetrics, dataDir})
+	commands = append(commands, rec)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	chunkDir := filepath.Join(cacheDir, "chunked")
+	chunkManifestPath := filepath.Join(chunkDir, "manifest.json")
+	rec, err = runCmd(root, "Export chunked child-vector cache", filepath.Join(logDir, "export-chunked.log"), eosBin, []string{"export-retrieval-vectors", "--dataset", "late-needle", "--batch-size", "64", "--output-dim", strconv.Itoa(outputDim), "--document-chunk-words", strconv.Itoa(chunkWords), "--document-chunk-overlap", strconv.Itoa(chunkOverlap), "--document-chunk-min-words", "16", "--manifest-json", chunkManifestPath, artifact, dataDir, chunkDir})
+	commands = append(commands, rec)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	mvMetricsPath := filepath.Join(runDir, "chunked-multivector-turboquant.metrics.json")
+	mvTSV := filepath.Join(runDir, "chunked-multivector-turboquant.metrics.tsv")
+	rec, err = runCmd(root, "Evaluate chunked multivector TurboQuant", filepath.Join(logDir, "chunked-multivector-turboquant.log"), eosBin, []string{"eval-retrieval-multivector-turboquant", "--dataset", "late-needle", "--backend", "eos-chunked-child-cache", "--artifact", filepath.Base(artifact), "--doc-vectors", filepath.Join(chunkDir, "child-doc-vectors.jsonl"), "--query-vectors", filepath.Join(chunkDir, "query-vectors.jsonl"), "--bits", "2,4,8", "--baseline-dim", strconv.Itoa(baselineDim), "--metrics-json", mvMetricsPath, "--metrics-tsv", mvTSV, dataDir})
+	commands = append(commands, rec)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	var direct retrievalMetrics
+	var bm25 retrievalMetrics
+	var single retrievalMetrics
+	var singleManifest exportManifest
+	var chunkManifest exportManifest
+	var mv mvMetrics
+	for _, item := range []struct {
+		path string
+		out  interface{}
+	}{
+		{directMetrics, &direct},
+		{bm25Metrics, &bm25},
+		{singleMetrics, &single},
+		{singleManifestPath, &singleManifest},
+		{chunkManifestPath, &chunkManifest},
+		{mvMetricsPath, &mv},
+	} {
+		if err := readJSON(item.path, item.out); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+
+	rows := []summaryRow{
+		{Row: "direct_eos", Method: "single_vector_live", NDCGAt10: direct.Quality.NDCGAt10, RecallAt100: direct.Quality.RecallAt100, Parents: docs, Children: docs, AvgChildrenPerParent: 1, VectorDim: singleManifest.Dimension, MetricsPath: directMetrics},
+		{Row: "bm25", Method: "lexical_bm25", NDCGAt10: bm25.Quality.NDCGAt10, RecallAt100: bm25.Quality.RecallAt100, Parents: docs, Children: docs, AvgChildrenPerParent: 1, VectorDim: 0, MetricsPath: bm25Metrics},
+		{Row: "single_vector_cache", Method: "single_vector_cache", NDCGAt10: single.Quality.NDCGAt10, RecallAt100: single.Quality.RecallAt100, Parents: docs, Children: docs, AvgChildrenPerParent: 1, VectorDim: singleManifest.Dimension, MetricsPath: singleMetrics},
+		{Row: "chunked_dense_child", Method: "dense_child_max", NDCGAt10: mv.Dense.Quality.NDCGAt10, RecallAt100: mv.Dense.Quality.RecallAt100, Parents: mv.Inputs.ParentCount, Children: mv.Inputs.ChildCount, AvgChildrenPerParent: mv.Inputs.AvgChildrenPerParent, VectorDim: chunkManifest.Dimension, BaselineDim: mv.Config.BaselineDim, StorageMultiple: mv.Dense.StorageMultipleOfDenseBaseline, MetricsPath: mvMetricsPath},
+	}
+	for _, bitRow := range mv.Rows {
+		compression := 0.0
+		if bitRow.StorageMultipleOfDenseBaseline > 0 {
+			compression = 1.0 / bitRow.StorageMultipleOfDenseBaseline
+		}
+		rows = append(rows, summaryRow{
+			Row:                      fmt.Sprintf("chunked_q%d", bitRow.Bits),
+			Bits:                     bitRow.Bits,
+			Method:                   bitRow.Method,
+			NDCGAt10:                 bitRow.Quality.NDCGAt10,
+			RecallAt100:              bitRow.Quality.RecallAt100,
+			Parents:                  mv.Inputs.ParentCount,
+			Children:                 mv.Inputs.ChildCount,
+			AvgChildrenPerParent:     mv.Inputs.AvgChildrenPerParent,
+			VectorDim:                chunkManifest.Dimension,
+			BaselineDim:              mv.Config.BaselineDim,
+			CompressionRatio:         compression,
+			StorageMultiple:          bitRow.StorageMultipleOfDenseBaseline,
+			QuantizedVectorBytes:     bitRow.QuantizedVectorBytes,
+			VectorsFitOneDenseParent: bitRow.VectorsThatFitInOneDenseBaseline,
+			MetricsPath:              mvMetricsPath,
+		})
+	}
+
+	summaryTSV := filepath.Join(runDir, "summary.tsv")
+	if err := writeSummaryTSV(summaryTSV, rows); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	out := manifest{
+		Schema:      "eos.long_context_chunked_baseline_smoke.v1",
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		RepoRoot:    root,
+		RunDir:      runDir,
+		Inputs: map[string]string{
+			"artifact":               artifact,
+			"dataset_dir":            dataDir,
+			"single_vector_manifest": singleManifestPath,
+			"chunk_manifest":         chunkManifestPath,
+			"summary_tsv":            summaryTSV,
+		},
+		Commands: commands,
+		Rows:     rows,
+		Caveats: []string{
+			"Synthetic late-needle BEIR-shaped smoke, not LongEmbed proof or a real long-document benchmark.",
+			"Uses local checked-in/default Eos asset when present; no network or training path.",
+			"Chunked rows use deterministic word chunks and parent max-child rollup; q2/q4/q8 rows are direct TurboQuant child scoring without fp16 sidecar rerank.",
+			"External Qwen3/mxbai chunked baseline is not run here because this smoke avoids network and no local export cache is assumed.",
+		},
+	}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	manifestPath := filepath.Join(runDir, "manifest.json")
+	if err := os.WriteFile(manifestPath, append(data, '\n'), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Printf("summary_tsv=%s\n", summaryTSV)
+	fmt.Printf("manifest=%s\n", manifestPath)
+	for _, row := range rows {
+		fmt.Printf("%s ndcg@10=%.6f recall@100=%.6f children=%d avg_children=%.3f\n", row.Row, row.NDCGAt10, row.RecallAt100, row.Children, row.AvgChildrenPerParent)
+	}
+}
