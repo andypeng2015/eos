@@ -173,6 +173,8 @@ func run(args []string) error {
 		return runSampleCorpusNegatives(args[1:])
 	case "plan-sparse-attention":
 		return runPlanSparseAttention(args[1:])
+	case "smoke-sparse-embedding-encoder":
+		return runSmokeSparseEmbeddingEncoder(args[1:])
 	case "plan-multivector-storage":
 		return runPlanMultiVectorStorage(args[1:])
 	case "train-embed":
@@ -6465,6 +6467,7 @@ func printUsage() {
 	fmt.Println("  eos relabel-teacher-negatives [flags] <scored-hard-negatives.jsonl> <output.jsonl>")
 	fmt.Println("  eos sample-corpus-negatives [flags] <beir-dataset-dir> <output.jsonl>")
 	fmt.Println("  eos plan-sparse-attention [flags]")
+	fmt.Println("  eos smoke-sparse-embedding-encoder [flags]")
 	fmt.Println("  eos plan-multivector-storage [flags]")
 	fmt.Println("  eos init-model [flags] <artifact.mll>")
 	fmt.Println("  eos init-mirage [flags] <artifact.mll>")
@@ -6512,6 +6515,7 @@ func printUsage() {
 	fmt.Println("relabel-teacher-negatives promotes teacher-confirmed-relevant mined negatives to positive rows, keeps teacher-confirmed-irrelevant candidates as negatives, and drops the ambiguous band.")
 	fmt.Println("sample-corpus-negatives emits random non-qrel corpus documents per query for teacher scoring into a true-negative pool.")
 	fmt.Println("plan-sparse-attention preflights routed sparse attention plus logical TurboQuant K/V memory budgets before GPU runs.")
+	fmt.Println("smoke-sparse-embedding-encoder runs a deterministic routed TurboQuant sparse-attention encoder-shaped host smoke and writes manifest.json plus summary.tsv.")
 	fmt.Println("plan-multivector-storage estimates how many TurboQuant child vectors per parent fit in one dense fp32 baseline-vector budget; use --baseline-dim to compare compact children against a larger dense baseline, and --series-lengths with --window-size/--window-stride to derive vectors per object from time-series windows.")
 	fmt.Println("init-model creates the Eos-owned default quantized embedding training package.")
 	fmt.Println("init-mirage creates the Eos-owned Mirage Image v1 host-reference artifact.")
