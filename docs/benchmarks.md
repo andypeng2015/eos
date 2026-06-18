@@ -44,6 +44,29 @@ go run ./cmd/eos smoke-sparse-embedding-encoder \
 
 The smoke writes `manifest.json`, `summary.tsv`, `scorecard.json`, and `scorecard.tsv`. The scorecard row records runtime/backend metadata, 32k preflight status, the 32768-key score fraction, TurboQuant bit width and seed, parity status, `evidence_level=smoke_synthetic_kernel_evidence`, and `quality_claim=false`. It is a reproducible sparse-enabled encoder smoke artifact, not retrieval-quality evidence and not a LongEmbed claim.
 
+Export the first retrieval-compatible sparse-token pooling prototype from an existing trainable embedding package with:
+
+```bash
+go run ./cmd/eos export-sparse-token-pool-vectors \
+  --dataset repo-docs-sparse-prototype \
+  --split test \
+  --manifest-json runs/eos-sparse-token-pool-retrieval-prototype/manifest.json \
+  --document-chunk-words 256 \
+  --document-chunk-overlap 32 \
+  --document-chunk-min-words 64 \
+  --max-tokens 4096 \
+  --top-k 64 \
+  --route-block-size 64 \
+  --route-top-blocks 8 \
+  --bits 4 \
+  --seed 5581486560434873699 \
+  /path/to/eos-embed-trainable.mll \
+  datasets/longembed/repo-docs \
+  runs/eos-sparse-token-pool-retrieval-prototype/repo-docs
+```
+
+This writes `child-doc-vectors.jsonl` or `doc-vectors.jsonl`, `query-vectors.jsonl`, and a manifest with `method=experimental_sparse_token_pool` and `quality_claim=false`. It loads the tokenizer and sibling weights, gathers actual token_embedding rows, applies Q/K/V/O/projection weights only when manifest names and tensor shapes line up, and runs host-reference routed `TurboSparseAttentionReference` over TurboQuant-encoded K/V. Score the cache with `eos eval-retrieval-vectors` or `eos eval-retrieval-vectors-turboquant` before comparing it to dense or external baselines. This is a bridge row for retrieval evaluation only, not production embedder output, not a trained sparse encoder, and not LongEmbed proof.
+
 Calibrate sparse routing policy quality separately from kernel timing:
 
 ```bash
