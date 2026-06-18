@@ -49,71 +49,98 @@ type SparseTokenPoolRetrievalVectorExportConfig struct {
 	ValueBits             int
 	Seed                  int64
 	MaxTokens             int
+	MinObservedDocTokens  int
 	AttentionMode         string
 }
 
 // SparseTokenPoolRetrievalVectorExportSummary is the manifest written beside
 // experimental sparse-token pooled vector caches.
 type SparseTokenPoolRetrievalVectorExportSummary struct {
-	Schema                  string    `json:"schema"`
-	Method                  string    `json:"method"`
-	Experimental            bool      `json:"experimental"`
-	QualityClaim            bool      `json:"quality_claim"`
-	ClaimBoundary           string    `json:"claim_boundary"`
-	Dataset                 string    `json:"dataset"`
-	Artifact                string    `json:"artifact,omitempty"`
-	WeightFile              string    `json:"weight_file,omitempty"`
-	TokenizerPresent        bool      `json:"tokenizer_present"`
-	Documents               int       `json:"documents"`
-	Queries                 int       `json:"queries"`
-	ChildVectors            int       `json:"child_vectors,omitempty"`
-	Dimension               int       `json:"dimension"`
-	ModelDimension          int       `json:"model_dimension,omitempty"`
-	OutputDimension         int       `json:"output_dimension,omitempty"`
-	DocVectorPath           string    `json:"doc_vector_path,omitempty"`
-	ChildDocVectorPath      string    `json:"child_doc_vector_path,omitempty"`
-	QueryVectorPath         string    `json:"query_vector_path"`
-	DocumentChunkWords      int       `json:"document_chunk_words,omitempty"`
-	DocumentChunkOverlap    int       `json:"document_chunk_overlap,omitempty"`
-	DocumentChunkMinWords   int       `json:"document_chunk_min_words,omitempty"`
-	BatchSize               int       `json:"batch_size"`
-	MaxDocs                 int       `json:"max_docs,omitempty"`
-	MaxQueries              int       `json:"max_queries,omitempty"`
-	MaxTokens               int       `json:"max_tokens,omitempty"`
-	CorpusPath              string    `json:"corpus_path,omitempty"`
-	QueriesPath             string    `json:"queries_path,omitempty"`
-	QrelsPath               string    `json:"qrels_path,omitempty"`
-	TopK                    int       `json:"top_k"`
-	RouteBlockSize          int       `json:"route_block_size,omitempty"`
-	RouteTopBlocks          int       `json:"route_top_blocks,omitempty"`
-	Bits                    int       `json:"bits"`
-	KeyBits                 int       `json:"key_bits"`
-	ValueBits               int       `json:"value_bits"`
-	QuantizerSeed           int64     `json:"quantizer_seed"`
-	AttentionMode           string    `json:"attention_mode"`
-	TurboQuantKVApplied     bool      `json:"turboquant_kv_applied"`
-	DenseKVMaterialized     bool      `json:"dense_kv_materialized"`
-	KVDecode                string    `json:"kv_decode"`
-	AttentionWeightsApplied bool      `json:"attention_weights_applied"`
-	AttentionOutputApplied  bool      `json:"attention_output_applied"`
-	HiddenProjectionApplied bool      `json:"hidden_projection_applied"`
-	ProjectionApplied       bool      `json:"projection_applied"`
-	EncoderRepeatsApplied   int       `json:"encoder_repeats_applied,omitempty"`
-	AttentionResidual       bool      `json:"attention_residual,omitempty"`
-	AttentionLayerNorm      bool      `json:"attention_layernorm,omitempty"`
-	FFNResidual             bool      `json:"ffn_residual,omitempty"`
-	FFNLayerNorm            bool      `json:"ffn_layernorm,omitempty"`
-	TokenEmbeddingParam     string    `json:"token_embedding_param"`
-	AttentionQueryParam     string    `json:"attention_query_param,omitempty"`
-	AttentionKeyParam       string    `json:"attention_key_param,omitempty"`
-	AttentionValueParam     string    `json:"attention_value_param,omitempty"`
-	AttentionOutputParam    string    `json:"attention_output_param,omitempty"`
-	HiddenProjectionParam   string    `json:"hidden_projection_param,omitempty"`
-	ProjectionParam         string    `json:"projection_param,omitempty"`
-	SkippedWeights          []string  `json:"skipped_weights,omitempty"`
-	Caveats                 []string  `json:"caveats"`
-	ElapsedSeconds          float64   `json:"elapsed_seconds"`
-	CreatedAt               time.Time `json:"created_at"`
+	Schema                  string                    `json:"schema"`
+	Method                  string                    `json:"method"`
+	Experimental            bool                      `json:"experimental"`
+	QualityClaim            bool                      `json:"quality_claim"`
+	ClaimBoundary           string                    `json:"claim_boundary"`
+	Dataset                 string                    `json:"dataset"`
+	Artifact                string                    `json:"artifact,omitempty"`
+	WeightFile              string                    `json:"weight_file,omitempty"`
+	TokenizerPresent        bool                      `json:"tokenizer_present"`
+	Documents               int                       `json:"documents"`
+	Queries                 int                       `json:"queries"`
+	ChildVectors            int                       `json:"child_vectors,omitempty"`
+	Dimension               int                       `json:"dimension"`
+	ModelDimension          int                       `json:"model_dimension,omitempty"`
+	OutputDimension         int                       `json:"output_dimension,omitempty"`
+	DocVectorPath           string                    `json:"doc_vector_path,omitempty"`
+	ChildDocVectorPath      string                    `json:"child_doc_vector_path,omitempty"`
+	QueryVectorPath         string                    `json:"query_vector_path"`
+	DocumentChunkWords      int                       `json:"document_chunk_words,omitempty"`
+	DocumentChunkOverlap    int                       `json:"document_chunk_overlap,omitempty"`
+	DocumentChunkMinWords   int                       `json:"document_chunk_min_words,omitempty"`
+	BatchSize               int                       `json:"batch_size"`
+	MaxDocs                 int                       `json:"max_docs,omitempty"`
+	MaxQueries              int                       `json:"max_queries,omitempty"`
+	MaxTokens               int                       `json:"max_tokens,omitempty"`
+	MinObservedDocTokens    int                       `json:"min_observed_doc_tokens,omitempty"`
+	CorpusPath              string                    `json:"corpus_path,omitempty"`
+	QueriesPath             string                    `json:"queries_path,omitempty"`
+	QrelsPath               string                    `json:"qrels_path,omitempty"`
+	TopK                    int                       `json:"top_k"`
+	RouteBlockSize          int                       `json:"route_block_size,omitempty"`
+	RouteTopBlocks          int                       `json:"route_top_blocks,omitempty"`
+	Bits                    int                       `json:"bits"`
+	KeyBits                 int                       `json:"key_bits"`
+	ValueBits               int                       `json:"value_bits"`
+	QuantizerSeed           int64                     `json:"quantizer_seed"`
+	AttentionMode           string                    `json:"attention_mode"`
+	TurboQuantKVApplied     bool                      `json:"turboquant_kv_applied"`
+	DenseKVMaterialized     bool                      `json:"dense_kv_materialized"`
+	KVDecode                string                    `json:"kv_decode"`
+	AttentionWeightsApplied bool                      `json:"attention_weights_applied"`
+	AttentionOutputApplied  bool                      `json:"attention_output_applied"`
+	HiddenProjectionApplied bool                      `json:"hidden_projection_applied"`
+	ProjectionApplied       bool                      `json:"projection_applied"`
+	EncoderRepeatsApplied   int                       `json:"encoder_repeats_applied,omitempty"`
+	AttentionResidual       bool                      `json:"attention_residual,omitempty"`
+	AttentionLayerNorm      bool                      `json:"attention_layernorm,omitempty"`
+	FFNResidual             bool                      `json:"ffn_residual,omitempty"`
+	FFNLayerNorm            bool                      `json:"ffn_layernorm,omitempty"`
+	TokenEmbeddingParam     string                    `json:"token_embedding_param"`
+	AttentionQueryParam     string                    `json:"attention_query_param,omitempty"`
+	AttentionKeyParam       string                    `json:"attention_key_param,omitempty"`
+	AttentionValueParam     string                    `json:"attention_value_param,omitempty"`
+	AttentionOutputParam    string                    `json:"attention_output_param,omitempty"`
+	HiddenProjectionParam   string                    `json:"hidden_projection_param,omitempty"`
+	ProjectionParam         string                    `json:"projection_param,omitempty"`
+	SkippedWeights          []string                  `json:"skipped_weights,omitempty"`
+	DocumentTokenizerOutput TokenizerOutputTokenStats `json:"document_tokenizer_output"`
+	QueryTokenizerOutput    TokenizerOutputTokenStats `json:"query_tokenizer_output"`
+	Caveats                 []string                  `json:"caveats"`
+	ElapsedSeconds          float64                   `json:"elapsed_seconds"`
+	CreatedAt               time.Time                 `json:"created_at"`
+}
+
+// TokenizerOutputTokenStats records token lengths after the packaged
+// tokenizer and after the export-level --max-tokens cap, matching the sequence
+// lengths consumed by the sparse-token-pool encoder.
+type TokenizerOutputTokenStats struct {
+	RecordCount               int     `json:"record_count"`
+	TotalTokens               int64   `json:"total_tokens"`
+	MaxObservedTokens         int     `json:"max_observed_tokens"`
+	MeanObservedTokens        float64 `json:"mean_observed_tokens"`
+	TruncatedByMaxTokensCount int     `json:"truncated_by_max_tokens_count"`
+}
+
+type sparseTokenPoolTokenLengthStats struct {
+	RecordCount               int
+	TotalTokens               int64
+	MaxObservedTokens         int
+	TruncatedByMaxTokensCount int
+}
+
+type sparseTokenPoolTokenObservation struct {
+	ObservedTokens       int
+	TruncatedByMaxTokens bool
 }
 
 type sparseTokenPoolEncoder struct {
@@ -197,25 +224,29 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 	queryVectorPath := filepath.Join(cfg.OutputDir, "query-vectors.jsonl")
 	var docVectorPath, childDocVectorPath string
 	var dim, modelDim, childCount int
+	var docTokenStats, queryTokenStats sparseTokenPoolTokenLengthStats
 	if cfg.DocumentChunkWords > 0 {
 		chunks := chunkRetrievalDocuments(corpus, cfg.DocumentChunkWords, cfg.DocumentChunkOverlap, cfg.DocumentChunkMinWords)
 		if len(chunks) == 0 {
 			return SparseTokenPoolRetrievalVectorExportSummary{}, fmt.Errorf("document chunking selected no chunks")
 		}
 		childDocVectorPath = filepath.Join(cfg.OutputDir, "child-doc-vectors.jsonl")
-		dim, modelDim, err = writeSparseTokenPoolChildVectorCache(ctx, encoder, chunks, childDocVectorPath, cfg.DocumentPrefix, cfg.OutputDim)
+		dim, modelDim, docTokenStats, err = writeSparseTokenPoolChildVectorCache(ctx, encoder, chunks, childDocVectorPath, cfg.DocumentPrefix, cfg.OutputDim)
 		if err != nil {
 			return SparseTokenPoolRetrievalVectorExportSummary{}, fmt.Errorf("write child document vectors: %w", err)
 		}
 		childCount = len(chunks)
 	} else {
 		docVectorPath = filepath.Join(cfg.OutputDir, "doc-vectors.jsonl")
-		dim, modelDim, err = writeSparseTokenPoolVectorCache(ctx, encoder, corpus, docVectorPath, cfg.DocumentPrefix, cfg.OutputDim)
+		dim, modelDim, docTokenStats, err = writeSparseTokenPoolVectorCache(ctx, encoder, corpus, docVectorPath, cfg.DocumentPrefix, cfg.OutputDim)
 		if err != nil {
 			return SparseTokenPoolRetrievalVectorExportSummary{}, fmt.Errorf("write document vectors: %w", err)
 		}
 	}
-	queryDim, queryModelDim, err := writeSparseTokenPoolVectorCache(ctx, encoder, queries, queryVectorPath, cfg.QueryPrefix, cfg.OutputDim)
+	if cfg.MinObservedDocTokens > 0 && docTokenStats.MaxObservedTokens < cfg.MinObservedDocTokens {
+		return SparseTokenPoolRetrievalVectorExportSummary{}, fmt.Errorf("sparse-token-pool observed document tokenizer-output max tokens %d below --min-observed-doc-tokens %d; check the tokenizer max sequence, input corpus length, --max-tokens, and qrels/max-docs filtering", docTokenStats.MaxObservedTokens, cfg.MinObservedDocTokens)
+	}
+	queryDim, queryModelDim, queryTokenStats, err := writeSparseTokenPoolVectorCache(ctx, encoder, queries, queryVectorPath, cfg.QueryPrefix, cfg.OutputDim)
 	if err != nil {
 		return SparseTokenPoolRetrievalVectorExportSummary{}, fmt.Errorf("write query vectors: %w", err)
 	}
@@ -252,6 +283,7 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 		MaxDocs:                 cfg.MaxDocs,
 		MaxQueries:              cfg.MaxQueries,
 		MaxTokens:               cfg.MaxTokens,
+		MinObservedDocTokens:    cfg.MinObservedDocTokens,
 		CorpusPath:              cfg.CorpusPath,
 		QueriesPath:             cfg.QueriesPath,
 		QrelsPath:               cfg.QrelsPath,
@@ -283,6 +315,8 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 		HiddenProjectionParam:   encoder.manifest.HiddenProjectionParam,
 		ProjectionParam:         encoder.manifest.ProjectionParam,
 		SkippedWeights:          encoder.skippedWeights,
+		DocumentTokenizerOutput: docTokenStats.summary(),
+		QueryTokenizerOutput:    queryTokenStats.summary(),
 		Caveats:                 encoder.caveats(),
 		ElapsedSeconds:          time.Since(start).Seconds(),
 		CreatedAt:               time.Now().UTC(),
@@ -362,8 +396,8 @@ func validateSparseTokenPoolExportConfig(cfg SparseTokenPoolRetrievalVectorExpor
 	if cfg.ValueBits != 2 && cfg.ValueBits != 4 && cfg.ValueBits != 8 {
 		return fmt.Errorf("value-bits must be 0, 2, 4, or 8")
 	}
-	if cfg.TopK < 0 || cfg.RouteBlockSize < 0 || cfg.RouteTopBlocks < 0 || cfg.MaxTokens < 0 {
-		return fmt.Errorf("top-k, route-block-size, route-top-blocks, and max-tokens must be non-negative")
+	if cfg.TopK < 0 || cfg.RouteBlockSize < 0 || cfg.RouteTopBlocks < 0 || cfg.MaxTokens < 0 || cfg.MinObservedDocTokens < 0 {
+		return fmt.Errorf("top-k, route-block-size, route-top-blocks, max-tokens, and min-observed-doc-tokens must be non-negative")
 	}
 	switch cfg.AttentionMode {
 	case SparseTokenPoolAttentionModeTurboQuantSparse, SparseTokenPoolAttentionModeDense:
@@ -451,113 +485,133 @@ func (e *sparseTokenPoolEncoder) optionalProjection(name string, in int) *backen
 	return t
 }
 
-func writeSparseTokenPoolVectorCache(ctx context.Context, encoder *sparseTokenPoolEncoder, records []retrievalTextRecord, path, prefix string, outputDim int) (int, int, error) {
+func writeSparseTokenPoolVectorCache(ctx context.Context, encoder *sparseTokenPoolEncoder, records []retrievalTextRecord, path, prefix string, outputDim int) (int, int, sparseTokenPoolTokenLengthStats, error) {
 	file, err := os.Create(path)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, sparseTokenPoolTokenLengthStats{}, err
 	}
 	defer file.Close()
 	writer := bufio.NewWriter(file)
 	dim, modelDim := 0, 0
+	var stats sparseTokenPoolTokenLengthStats
 	for _, record := range prefixRetrievalRecords(records, prefix) {
 		if err := ctx.Err(); err != nil {
-			return 0, 0, err
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, err
 		}
-		vector, err := encoder.embedText(record.Text)
+		vector, observation, err := encoder.embedText(record.Text)
 		if err != nil {
-			return 0, 0, fmt.Errorf("vector for %q: %w", record.ID, err)
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, fmt.Errorf("vector for %q: %w", record.ID, err)
 		}
+		stats.add(observation)
 		if modelDim == 0 {
 			modelDim = len(vector)
 		} else if len(vector) != modelDim {
-			return 0, 0, fmt.Errorf("vector for %q has encoded dimension %d, want %d", record.ID, len(vector), modelDim)
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, fmt.Errorf("vector for %q has encoded dimension %d, want %d", record.ID, len(vector), modelDim)
 		}
 		embedding, err := transformRetrievalExportVector(vector, outputDim)
 		if err != nil {
-			return 0, 0, fmt.Errorf("vector for %q: %w", record.ID, err)
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, fmt.Errorf("vector for %q: %w", record.ID, err)
 		}
 		if dim == 0 {
 			dim = len(embedding)
 		} else if len(embedding) != dim {
-			return 0, 0, fmt.Errorf("vector for %q has dimension %d, want %d", record.ID, len(embedding), dim)
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, fmt.Errorf("vector for %q has dimension %d, want %d", record.ID, len(embedding), dim)
 		}
 		row := retrievalVectorExportRow{ID: record.ID, Embedding: embedding}
 		data, err := json.Marshal(row)
 		if err != nil {
-			return 0, 0, err
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, err
 		}
 		if _, err := writer.Write(append(data, '\n')); err != nil {
-			return 0, 0, err
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, err
 		}
 	}
 	if err := writer.Flush(); err != nil {
-		return 0, 0, err
+		return 0, 0, sparseTokenPoolTokenLengthStats{}, err
 	}
-	return dim, modelDim, nil
+	return dim, modelDim, stats, nil
 }
 
-func writeSparseTokenPoolChildVectorCache(ctx context.Context, encoder *sparseTokenPoolEncoder, chunks []retrievalDocumentChunk, path, prefix string, outputDim int) (int, int, error) {
+func writeSparseTokenPoolChildVectorCache(ctx context.Context, encoder *sparseTokenPoolEncoder, chunks []retrievalDocumentChunk, path, prefix string, outputDim int) (int, int, sparseTokenPoolTokenLengthStats, error) {
 	file, err := os.Create(path)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, sparseTokenPoolTokenLengthStats{}, err
 	}
 	defer file.Close()
 	writer := bufio.NewWriter(file)
 	dim, modelDim := 0, 0
+	var stats sparseTokenPoolTokenLengthStats
 	for _, chunk := range chunks {
 		if err := ctx.Err(); err != nil {
-			return 0, 0, err
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, err
 		}
-		vector, err := encoder.embedText(prefix + chunk.Text)
+		vector, observation, err := encoder.embedText(prefix + chunk.Text)
 		if err != nil {
-			return 0, 0, fmt.Errorf("vector for %q: %w", chunk.ChildID, err)
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, fmt.Errorf("vector for %q: %w", chunk.ChildID, err)
 		}
+		stats.add(observation)
 		if modelDim == 0 {
 			modelDim = len(vector)
 		} else if len(vector) != modelDim {
-			return 0, 0, fmt.Errorf("vector for %q has encoded dimension %d, want %d", chunk.ChildID, len(vector), modelDim)
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, fmt.Errorf("vector for %q has encoded dimension %d, want %d", chunk.ChildID, len(vector), modelDim)
 		}
 		embedding, err := transformRetrievalExportVector(vector, outputDim)
 		if err != nil {
-			return 0, 0, fmt.Errorf("vector for %q: %w", chunk.ChildID, err)
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, fmt.Errorf("vector for %q: %w", chunk.ChildID, err)
 		}
 		if dim == 0 {
 			dim = len(embedding)
 		} else if len(embedding) != dim {
-			return 0, 0, fmt.Errorf("vector for %q has dimension %d, want %d", chunk.ChildID, len(embedding), dim)
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, fmt.Errorf("vector for %q has dimension %d, want %d", chunk.ChildID, len(embedding), dim)
 		}
 		row := retrievalVectorExportRow{ParentID: chunk.ParentID, ChildID: chunk.ChildID, Embedding: embedding}
 		data, err := json.Marshal(row)
 		if err != nil {
-			return 0, 0, err
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, err
 		}
 		if _, err := writer.Write(append(data, '\n')); err != nil {
-			return 0, 0, err
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, err
 		}
 	}
 	if err := writer.Flush(); err != nil {
-		return 0, 0, err
+		return 0, 0, sparseTokenPoolTokenLengthStats{}, err
 	}
-	return dim, modelDim, nil
+	return dim, modelDim, stats, nil
 }
 
-func (e *sparseTokenPoolEncoder) embedText(text string) ([]float32, error) {
+func (e *sparseTokenPoolEncoder) embedText(text string) ([]float32, sparseTokenPoolTokenObservation, error) {
 	tokens, mask, err := e.model.TokenizeText(text)
 	if err != nil {
-		return nil, err
+		return nil, sparseTokenPoolTokenObservation{}, err
 	}
+	truncatedByMaxTokens := false
 	if e.cfg.MaxTokens > 0 && len(tokens) > e.cfg.MaxTokens {
 		tokens = tokens[:e.cfg.MaxTokens]
 		if len(mask) > e.cfg.MaxTokens {
 			mask = mask[:e.cfg.MaxTokens]
 		}
+		truncatedByMaxTokens = true
 	}
 	if len(tokens) == 0 {
-		return nil, fmt.Errorf("tokenizer produced no tokens")
+		return nil, sparseTokenPoolTokenObservation{}, fmt.Errorf("tokenizer produced no tokens")
 	}
+	observation := sparseTokenPoolTokenObservation{
+		ObservedTokens:       len(tokens),
+		TruncatedByMaxTokens: truncatedByMaxTokens,
+	}
+	var vector []float32
 	if e.fullEncoderOK {
-		return e.embedTextFullEncoder(tokens, mask)
+		vector, err = e.embedTextFullEncoder(tokens, mask)
+	} else {
+		vector, err = e.embedTokenIDs(tokens)
 	}
+	if err != nil {
+		return nil, sparseTokenPoolTokenObservation{}, err
+	}
+	return vector, observation, nil
+}
+
+func (e *sparseTokenPoolEncoder) embedTokenIDs(tokens []int32) ([]float32, error) {
 	if e.cfg.AttentionMode == SparseTokenPoolAttentionModeDense {
 		return nil, fmt.Errorf("attention-mode %q requires full manifest encoder weights; missing/invalid weights: %v", e.cfg.AttentionMode, e.skippedWeights)
 	}
@@ -625,6 +679,30 @@ func (e *sparseTokenPoolEncoder) embedText(text string) ([]float32, error) {
 		vector = matmulVectorRight(vector, e.projection)
 	}
 	return normalizeRetrievalVector(vector), nil
+}
+
+func (s *sparseTokenPoolTokenLengthStats) add(observation sparseTokenPoolTokenObservation) {
+	s.RecordCount++
+	s.TotalTokens += int64(observation.ObservedTokens)
+	if observation.ObservedTokens > s.MaxObservedTokens {
+		s.MaxObservedTokens = observation.ObservedTokens
+	}
+	if observation.TruncatedByMaxTokens {
+		s.TruncatedByMaxTokensCount++
+	}
+}
+
+func (s sparseTokenPoolTokenLengthStats) summary() TokenizerOutputTokenStats {
+	out := TokenizerOutputTokenStats{
+		RecordCount:               s.RecordCount,
+		TotalTokens:               s.TotalTokens,
+		MaxObservedTokens:         s.MaxObservedTokens,
+		TruncatedByMaxTokensCount: s.TruncatedByMaxTokensCount,
+	}
+	if s.RecordCount > 0 {
+		out.MeanObservedTokens = float64(s.TotalTokens) / float64(s.RecordCount)
+	}
+	return out
 }
 
 func (e *sparseTokenPoolEncoder) embedTextFullEncoder(tokens []int32, mask []int32) ([]float32, error) {

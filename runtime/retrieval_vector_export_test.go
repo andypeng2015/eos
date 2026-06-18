@@ -187,6 +187,15 @@ func TestSparseTokenPoolRetrievalVectorExportWritesPrototypeManifest(t *testing.
 	if !summary.DenseKVMaterialized || summary.KVDecode != "host_reference_decode" || summary.Bits != 2 || summary.KeyBits != 2 || summary.ValueBits != 2 || summary.QuantizerSeed != 17 || summary.TopK != 1 {
 		t.Fatalf("summary sparse metadata = %+v", summary)
 	}
+	if summary.DocumentTokenizerOutput.RecordCount != 3 || summary.DocumentTokenizerOutput.RecordCount != summary.ChildVectors || summary.DocumentTokenizerOutput.MaxObservedTokens != 4 || summary.DocumentTokenizerOutput.TotalTokens != 12 || summary.DocumentTokenizerOutput.TruncatedByMaxTokensCount != summary.ChildVectors {
+		t.Fatalf("summary document tokenizer-output stats = %+v", summary.DocumentTokenizerOutput)
+	}
+	if math.Abs(summary.DocumentTokenizerOutput.MeanObservedTokens-4) > 1e-9 {
+		t.Fatalf("summary document mean tokens = %.12f, want 4", summary.DocumentTokenizerOutput.MeanObservedTokens)
+	}
+	if summary.QueryTokenizerOutput.RecordCount != 1 || summary.QueryTokenizerOutput.MaxObservedTokens != 3 || summary.QueryTokenizerOutput.TotalTokens != 3 || summary.QueryTokenizerOutput.TruncatedByMaxTokensCount != 0 {
+		t.Fatalf("summary query tokenizer-output stats = %+v", summary.QueryTokenizerOutput)
+	}
 	if summary.AttentionMode != SparseTokenPoolAttentionModeTurboQuantSparse || !summary.TurboQuantKVApplied {
 		t.Fatalf("summary attention metadata = %+v", summary)
 	}
@@ -237,6 +246,39 @@ func TestSparseTokenPoolRetrievalVectorExportWritesPrototypeManifest(t *testing.
 	}
 	if manifest.Bits != 2 || manifest.KeyBits != 2 || manifest.ValueBits != 2 {
 		t.Fatalf("manifest bits = bits:%d key:%d value:%d, want 2/2/2", manifest.Bits, manifest.KeyBits, manifest.ValueBits)
+	}
+	if manifest.DocumentTokenizerOutput != summary.DocumentTokenizerOutput || manifest.QueryTokenizerOutput != summary.QueryTokenizerOutput {
+		t.Fatalf("manifest tokenizer-output stats = doc:%+v query:%+v, summary doc:%+v query:%+v", manifest.DocumentTokenizerOutput, manifest.QueryTokenizerOutput, summary.DocumentTokenizerOutput, summary.QueryTokenizerOutput)
+	}
+}
+
+func TestSparseTokenPoolRetrievalVectorExportMinObservedDocTokensGuard(t *testing.T) {
+	model, artifactPath := loadTinySparseTokenPoolExportModel(t)
+	dir := t.TempDir()
+	datasetDir := writeTinyRetrievalExportDataset(t, dir)
+	corpusPath, queriesPath, qrelsPath := BEIRRetrievalPaths(datasetDir, "test")
+
+	_, err := ExportSparseTokenPoolRetrievalVectors(context.Background(), model, SparseTokenPoolRetrievalVectorExportConfig{
+		DatasetName:           "tiny-sparse-token-guard",
+		ArtifactPath:          artifactPath,
+		CorpusPath:            corpusPath,
+		QueriesPath:           queriesPath,
+		QrelsPath:             qrelsPath,
+		OutputDir:             filepath.Join(dir, "sparse-token-guard-vectors"),
+		BatchSize:             1,
+		MaxDocs:               1,
+		MaxQueries:            1,
+		DocumentChunkWords:    4,
+		DocumentChunkOverlap:  1,
+		DocumentChunkMinWords: 2,
+		TopK:                  1,
+		Bits:                  2,
+		Seed:                  17,
+		MaxTokens:             4,
+		MinObservedDocTokens:  5,
+	})
+	if err == nil || !strings.Contains(err.Error(), "observed document tokenizer-output max tokens 4 below --min-observed-doc-tokens 5") {
+		t.Fatalf("guard error = %v", err)
 	}
 }
 

@@ -580,6 +580,7 @@ func runExportSparseTokenPoolVectors(args []string) error {
 	valueBits := fs.Int("value-bits", 0, "TurboQuant value bits override: 0 inherits --bits; supported: 2, 4, or 8")
 	seed := fs.Int64("seed", 0x4d697261, "TurboQuant Hadamard seed")
 	maxTokens := fs.Int("max-tokens", 0, "truncate tokenized text to at most this many tokens after tokenizer limits; 0 keeps tokenizer output")
+	minObservedDocTokens := fs.Int("min-observed-doc-tokens", 0, "fail when max observed document tokenizer-output tokens consumed by the sparse-token-pool encoder is below this threshold; 0 disables")
 	attentionMode := fs.String("attention-mode", eosruntime.SparseTokenPoolAttentionModeTurboQuantSparse, "attention implementation: turboquant_sparse or dense")
 	weightPath := fs.String("weights", "", "explicit sibling weight file path; default is <artifact>.weights.mll")
 	if err := fs.Parse(args); err != nil {
@@ -630,6 +631,7 @@ func runExportSparseTokenPoolVectors(args []string) error {
 		ValueBits:             *valueBits,
 		Seed:                  *seed,
 		MaxTokens:             *maxTokens,
+		MinObservedDocTokens:  *minObservedDocTokens,
 		AttentionMode:         *attentionMode,
 	})
 	if err != nil {
@@ -642,6 +644,7 @@ func runExportSparseTokenPoolVectors(args []string) error {
 	fmt.Printf(" dim=%d quality_claim=%t\n", summary.Dimension, summary.QualityClaim)
 	fmt.Printf("method: %s\n", summary.Method)
 	fmt.Printf("attention: mode=%s turboquant_kv_applied=%t kv_decode=%s top_k=%d route_block_size=%d route_top_blocks=%d bits=%d key_bits=%d value_bits=%d seed=%d\n", summary.AttentionMode, summary.TurboQuantKVApplied, summary.KVDecode, summary.TopK, summary.RouteBlockSize, summary.RouteTopBlocks, summary.Bits, summary.KeyBits, summary.ValueBits, summary.QuantizerSeed)
+	fmt.Printf("tokenizer_output: doc_records=%d doc_max_tokens=%d doc_mean_tokens=%.2f doc_total_tokens=%d doc_truncated_by_max_tokens=%d query_records=%d query_max_tokens=%d query_mean_tokens=%.2f query_total_tokens=%d query_truncated_by_max_tokens=%d\n", summary.DocumentTokenizerOutput.RecordCount, summary.DocumentTokenizerOutput.MaxObservedTokens, summary.DocumentTokenizerOutput.MeanObservedTokens, summary.DocumentTokenizerOutput.TotalTokens, summary.DocumentTokenizerOutput.TruncatedByMaxTokensCount, summary.QueryTokenizerOutput.RecordCount, summary.QueryTokenizerOutput.MaxObservedTokens, summary.QueryTokenizerOutput.MeanObservedTokens, summary.QueryTokenizerOutput.TotalTokens, summary.QueryTokenizerOutput.TruncatedByMaxTokensCount)
 	fmt.Printf("weights: attention=%t attention_output=%t hidden_projection=%t projection=%t dense_kv_materialized=%t\n", summary.AttentionWeightsApplied, summary.AttentionOutputApplied, summary.HiddenProjectionApplied, summary.ProjectionApplied, summary.DenseKVMaterialized)
 	if summary.DocVectorPath != "" {
 		fmt.Printf("doc_vectors: %s\n", summary.DocVectorPath)
@@ -6600,7 +6603,7 @@ func printUsage() {
 	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Eos metadata in XMTA.")
 	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
 	fmt.Println("export-retrieval-vectors writes BEIR document/query vector caches from a packaged or sealed Eos embedding .mll, optionally as parent-child document chunks.")
-	fmt.Println("export-sparse-token-pool-vectors writes experimental_sparse_token_pool BEIR vector caches from tokenizer ids, token_embedding rows, and host-reference attention (--attention-mode turboquant_sparse|dense); quality_claim=false.")
+	fmt.Println("export-sparse-token-pool-vectors writes experimental_sparse_token_pool BEIR vector caches from tokenizer ids, token_embedding rows, and host-reference attention (--attention-mode turboquant_sparse|dense); quality_claim=false; --min-observed-doc-tokens can fail runs that never consume the requested document token length.")
 	fmt.Println("export-timeseries-vectors writes text-rendered time-series window child-vector caches plus query vectors for the multivector TurboQuant quality harness.")
 	fmt.Println("export-event-trace-vectors writes text-rendered event/trace child-vector caches plus query vectors for the multivector TurboQuant quality harness.")
 	fmt.Println("eval-retrieval scores a sealed embedding .mll on BEIR-style corpus/query/qrels files with nDCG/MRR/Recall metrics.")
