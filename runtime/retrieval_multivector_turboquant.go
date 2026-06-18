@@ -1,15 +1,19 @@
 package eosruntime
 
 import (
+	"bufio"
 	"container/heap"
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	"m31labs.dev/turboquant"
 )
 
 const TurboQuantMultiVectorRetrievalEvalMetricsSchema = "manta.embedding_turboquant_multivector_retrieval_metrics.v1"
+const TurboQuantMultiVectorRetrievalPerQuerySchema = "manta.embedding_turboquant_multivector_retrieval_per_query.v1"
 const DefaultTurboQuantMultiVectorQuantizerSeed int64 = 0x4d756c7469566563
 
 // TurboQuantMultiVectorRetrievalEvalMetrics compares parent-child dense
@@ -106,6 +110,21 @@ type TurboQuantMultiVectorBitMetrics struct {
 	SkippedQueries                   int                         `json:"skipped_queries_without_relevant_docs,omitempty"`
 }
 
+type TurboQuantMultiVectorRetrievalPerQueryRow struct {
+	Schema            string                        `json:"schema"`
+	Dataset           string                        `json:"dataset"`
+	QueryID           string                        `json:"query_id"`
+	Method            string                        `json:"method"`
+	Bits              int                           `json:"bits,omitempty"`
+	ScoringSurface    string                        `json:"scoring_surface"`
+	QuantizerSeed     int64                         `json:"quantizer_seed,omitempty"`
+	TopKLimit         int                           `json:"top_k_limit"`
+	RelevantCount     int                           `json:"relevant_count"`
+	FirstRelevantRank int                           `json:"first_relevant_rank"`
+	Quality           RetrievalEvalQualityMetrics   `json:"quality"`
+	TopK              []RetrievalEvalPerQueryTopDoc `json:"top_k"`
+}
+
 // EvaluateTurboQuantMultiVectorCacheRetrieval evaluates precomputed child
 // document vectors and query vectors against parent-document qrels. Every child
 // is scored, scores are aggregated by max child score per parent, and parent IDs
@@ -181,7 +200,14 @@ func EvaluateTurboQuantMultiVectorCacheRetrieval(ctx context.Context, cfg Retrie
 }
 
 func evaluateTurboQuantMultiVectorRetrieval(ctx context.Context, cfg RetrievalEvalConfig, bits []int, children []retrievalChildVectorRecord, queries []retrievalVectorRecord, qrels retrievalQrels) (TurboQuantMultiVectorRetrievalEvalMetrics, error) {
+	perQueryTopK := cfg.TopK
 	cfg = normalizeRetrievalEvalConfig(cfg)
+	if cfg.PerQueryTopK > 0 {
+		perQueryTopK = cfg.PerQueryTopK
+	}
+	if perQueryTopK <= 0 {
+		perQueryTopK = cfg.TopK
+	}
 	bits = normalizeTurboQuantRetrievalBits(bits)
 	if err := validateTurboQuantRetrievalBits(bits); err != nil {
 		return TurboQuantMultiVectorRetrievalEvalMetrics{}, err
@@ -234,6 +260,14 @@ func evaluateTurboQuantMultiVectorRetrieval(ctx context.Context, cfg RetrievalEv
 	denseScoreDuration := time.Since(scoreStart)
 	if evaluatedQueries == 0 {
 		return TurboQuantMultiVectorRetrievalEvalMetrics{}, fmt.Errorf("no queries had relevant parent documents in the evaluated vector cache")
+	}
+	perQueryWriter, err := newTurboQuantMultiVectorPerQueryWriter(cfg.PerQueryJSONLPath)
+	if err != nil {
+		return TurboQuantMultiVectorRetrievalEvalMetrics{}, err
+	}
+	if err := writeDenseMultiVectorPerQueryRows(ctx, perQueryWriter, cfg.DatasetName, perQueryTopK, queries, children, qrels); err != nil {
+		_ = perQueryWriter.Close()
+		return TurboQuantMultiVectorRetrievalEvalMetrics{}, err
 	}
 
 	scoredPairs := int64(evaluatedQueries) * int64(len(children))
@@ -289,13 +323,17 @@ func evaluateTurboQuantMultiVectorRetrieval(ctx context.Context, cfg RetrievalEv
 		Rows: make([]TurboQuantMultiVectorBitMetrics, 0, len(bits)),
 	}
 	for _, bitWidth := range bits {
-		row, err := evaluateTurboQuantMultiVectorBits(ctx, dim, baselineDim, bitWidth, cfg.TopK, cfg.QuantizerSeed, children, queries, qrels, denseQuality, parentCount, maxChildrenPerParent, denseBaselineBytes, denseParentBytes, denseChildBytes, scoredPairs)
+		row, err := evaluateTurboQuantMultiVectorBits(ctx, dim, baselineDim, bitWidth, cfg.TopK, perQueryTopK, cfg.QuantizerSeed, children, queries, qrels, denseQuality, parentCount, maxChildrenPerParent, denseBaselineBytes, denseParentBytes, denseChildBytes, scoredPairs, perQueryWriter, cfg.DatasetName)
 		if err != nil {
+			_ = perQueryWriter.Close()
 			return TurboQuantMultiVectorRetrievalEvalMetrics{}, err
 		}
 		row.SkippedRelevantDocs = skippedRelevantDocs
 		row.SkippedQueries = skippedNoRelevant
 		out.Rows = append(out.Rows, row)
+	}
+	if err := perQueryWriter.Close(); err != nil {
+		return TurboQuantMultiVectorRetrievalEvalMetrics{}, err
 	}
 	return out, nil
 }
@@ -306,7 +344,184 @@ type turboQuantMultiVectorChild struct {
 	Vector   turboquant.IPQuantized
 }
 
-func evaluateTurboQuantMultiVectorBits(ctx context.Context, dim, baselineDim, bitWidth, topK int, quantizerSeed int64, children []retrievalChildVectorRecord, queries []retrievalVectorRecord, qrels retrievalQrels, denseQuality RetrievalEvalQualityMetrics, parentCount, maxChildrenPerParent int, denseBaselineBytes, denseParentBytes, denseChildBytes, scoredPairs int64) (TurboQuantMultiVectorBitMetrics, error) {
+type turboQuantMultiVectorPerQueryWriter struct {
+	file   *os.File
+	writer *bufio.Writer
+}
+
+func newTurboQuantMultiVectorPerQueryWriter(path string) (*turboQuantMultiVectorPerQueryWriter, error) {
+	if path == "" {
+		return &turboQuantMultiVectorPerQueryWriter{}, nil
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		return nil, fmt.Errorf("create multivector TurboQuant per-query JSONL: %w", err)
+	}
+	return &turboQuantMultiVectorPerQueryWriter{file: file, writer: bufio.NewWriter(file)}, nil
+}
+
+func (w *turboQuantMultiVectorPerQueryWriter) Write(row TurboQuantMultiVectorRetrievalPerQueryRow) error {
+	if w == nil || w.writer == nil {
+		return nil
+	}
+	data, err := json.Marshal(row)
+	if err != nil {
+		return fmt.Errorf("marshal multivector TurboQuant per-query row: %w", err)
+	}
+	if _, err := w.writer.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("write multivector TurboQuant per-query JSONL: %w", err)
+	}
+	return nil
+}
+
+func (w *turboQuantMultiVectorPerQueryWriter) Close() error {
+	if w == nil || w.file == nil {
+		return nil
+	}
+	flushErr := w.writer.Flush()
+	closeErr := w.file.Close()
+	w.file = nil
+	w.writer = nil
+	if flushErr != nil {
+		return fmt.Errorf("flush multivector TurboQuant per-query JSONL: %w", flushErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close multivector TurboQuant per-query JSONL: %w", closeErr)
+	}
+	return nil
+}
+
+func writeDenseMultiVectorPerQueryRows(ctx context.Context, writer *turboQuantMultiVectorPerQueryWriter, datasetName string, topK int, queries []retrievalVectorRecord, children []retrievalChildVectorRecord, qrels retrievalQrels) error {
+	if writer == nil || writer.writer == nil {
+		return nil
+	}
+	parentIDSet := make(map[string]bool, len(children))
+	for _, child := range children {
+		parentIDSet[child.ParentID] = true
+	}
+	evalTopK, outputTopK := multiVectorEvalAndOutputTopK(topK, len(parentIDSet))
+	for _, query := range queries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		filteredRels := filterParentRels(qrels[query.ID], parentIDSet, new(int))
+		if len(filteredRels) == 0 {
+			continue
+		}
+		scores := topDenseMultiVectorParentScores(query.Vector, children, evalTopK)
+		row := buildTurboQuantMultiVectorPerQueryRow(datasetName, query.ID, "float32_child_max", 0, "dense_child_max", 0, outputTopK, scores, filteredRels, nil)
+		if err := writer.Write(row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeTurboQuantMultiVectorPerQueryRows(ctx context.Context, writer *turboQuantMultiVectorPerQueryWriter, datasetName string, bitWidth, topK int, quantizerSeed int64, q *turboquant.IPQuantizer, denseChildren []retrievalChildVectorRecord, compactChildren []turboQuantMultiVectorChild, queries []retrievalVectorRecord, qrels retrievalQrels) error {
+	if writer == nil || writer.writer == nil {
+		return nil
+	}
+	parentIDSet := make(map[string]bool, len(compactChildren))
+	for _, child := range compactChildren {
+		parentIDSet[child.ParentID] = true
+	}
+	evalTopK, outputTopK := multiVectorEvalAndOutputTopK(topK, len(parentIDSet))
+	method := fmt.Sprintf("turboquant_ip_b%d_child_max", bitWidth)
+	for _, query := range queries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		filteredRels := filterParentRels(qrels[query.ID], parentIDSet, new(int))
+		if len(filteredRels) == 0 {
+			continue
+		}
+		denseScores := topDenseMultiVectorParentScores(query.Vector, denseChildren, evalTopK)
+		denseRanks := multiVectorRankEvidence(denseScores)
+		prepared := q.PrepareQuery(query.Vector)
+		compactScores := topTurboQuantMultiVectorParentScores(q, prepared, compactChildren, evalTopK)
+		row := buildTurboQuantMultiVectorPerQueryRow(datasetName, query.ID, method, bitWidth, "turboquant_ip_prepared_child_max", quantizerSeed, outputTopK, compactScores, filteredRels, denseRanks)
+		if err := writer.Write(row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func buildTurboQuantMultiVectorPerQueryRow(datasetName, queryID, method string, bitWidth int, surface string, quantizerSeed int64, outputTopK int, scores []retrievalScoredDoc, rels map[string]float64, denseRanks map[string]retrievalScoredDoc) TurboQuantMultiVectorRetrievalPerQueryRow {
+	row := TurboQuantMultiVectorRetrievalPerQueryRow{
+		Schema:            TurboQuantMultiVectorRetrievalPerQuerySchema,
+		Dataset:           datasetName,
+		QueryID:           queryID,
+		Method:            method,
+		Bits:              bitWidth,
+		ScoringSurface:    surface,
+		QuantizerSeed:     quantizerSeed,
+		TopKLimit:         outputTopK,
+		RelevantCount:     len(rels),
+		FirstRelevantRank: firstRelevantRank(scores, rels),
+		Quality:           retrievalQualityForQuery(scores, rels),
+		TopK:              make([]RetrievalEvalPerQueryTopDoc, 0, min(outputTopK, len(scores))),
+	}
+	if outputTopK <= 0 || outputTopK > len(scores) {
+		outputTopK = len(scores)
+	}
+	compactRanks := multiVectorRankEvidence(scores)
+	for i := 0; i < outputTopK; i++ {
+		score := scores[i]
+		topDoc := RetrievalEvalPerQueryTopDoc{
+			Rank:       i + 1,
+			DocID:      score.ID,
+			Score:      score.Score,
+			Relevance:  rels[score.ID],
+			ChildID:    score.ChildID,
+			ChildScore: score.ChildScore,
+		}
+		if denseRanks != nil {
+			if dense, ok := denseRanks[score.ID]; ok {
+				topDoc.DenseRank = optionalPositiveInt(dense.DenseRank)
+				topDoc.DenseScore = dense.DenseScore
+				topDoc.DenseChildID = dense.ChildID
+				topDoc.DenseChildScore = dense.ChildScore
+			}
+			if compact, ok := compactRanks[score.ID]; ok {
+				topDoc.CompactRank = optionalPositiveInt(compact.DenseRank)
+				topDoc.CompactScore = compact.DenseScore
+				topDoc.CompactChildID = compact.ChildID
+				topDoc.CompactChildScore = compact.ChildScore
+			}
+		}
+		row.TopK = append(row.TopK, topDoc)
+	}
+	return row
+}
+
+func multiVectorEvalAndOutputTopK(requestedTopK, parentCount int) (int, int) {
+	outputTopK := requestedTopK
+	if outputTopK <= 0 || outputTopK > parentCount {
+		outputTopK = parentCount
+	}
+	evalTopK := outputTopK
+	if evalTopK < 100 {
+		evalTopK = 100
+	}
+	if evalTopK > parentCount {
+		evalTopK = parentCount
+	}
+	return evalTopK, outputTopK
+}
+
+func multiVectorRankEvidence(scores []retrievalScoredDoc) map[string]retrievalScoredDoc {
+	out := make(map[string]retrievalScoredDoc, len(scores))
+	for i, score := range scores {
+		score.DenseRank = i + 1
+		value := float64(score.Score)
+		score.DenseScore = &value
+		out[score.ID] = score
+	}
+	return out
+}
+
+func evaluateTurboQuantMultiVectorBits(ctx context.Context, dim, baselineDim, bitWidth, topK, perQueryTopK int, quantizerSeed int64, children []retrievalChildVectorRecord, queries []retrievalVectorRecord, qrels retrievalQrels, denseQuality RetrievalEvalQualityMetrics, parentCount, maxChildrenPerParent int, denseBaselineBytes, denseParentBytes, denseChildBytes, scoredPairs int64, perQueryWriter *turboQuantMultiVectorPerQueryWriter, datasetName string) (TurboQuantMultiVectorBitMetrics, error) {
 	q := turboquant.NewIPWithSeed(dim, bitWidth, quantizerSeed)
 	quantizeStart := time.Now()
 	qchildren := make([]turboQuantMultiVectorChild, len(children))
@@ -327,6 +542,9 @@ func evaluateTurboQuantMultiVectorBits(ctx context.Context, dim, baselineDim, bi
 	quality, evaluatedQueries, _, skippedRelevantDocs, skippedNoRelevant, queryLatency := computeTurboQuantMultiVectorRetrievalQuality(ctx, q, queries, qchildren, qrels, topK)
 	if evaluatedQueries == 0 {
 		return TurboQuantMultiVectorBitMetrics{}, fmt.Errorf("no queries had relevant parent documents in the evaluated vector cache")
+	}
+	if err := writeTurboQuantMultiVectorPerQueryRows(ctx, perQueryWriter, datasetName, bitWidth, perQueryTopK, q.Seed(), q, children, qchildren, queries, qrels); err != nil {
+		return TurboQuantMultiVectorBitMetrics{}, err
 	}
 	scoreDuration := time.Since(scoreStart)
 	return TurboQuantMultiVectorBitMetrics{
@@ -487,34 +705,50 @@ func filterParentRels(rels map[string]float64, parentIDSet map[string]bool, skip
 }
 
 func topDenseMultiVectorParentScores(query []float32, children []retrievalChildVectorRecord, topK int) []retrievalScoredDoc {
-	best := make(map[string]float32, len(children))
+	best := make(map[string]retrievalScoredDoc, len(children))
 	for _, child := range children {
 		score := dotRetrievalVectors(query, child.Vector)
-		if prior, ok := best[child.ParentID]; !ok || score > prior {
-			best[child.ParentID] = score
+		score64 := float64(score)
+		next := retrievalScoredDoc{ID: child.ParentID, Score: score, ChildID: child.ChildID, ChildScore: &score64}
+		if prior, ok := best[child.ParentID]; !ok || multiVectorChildScoreBetter(next, prior) {
+			best[child.ParentID] = next
 		}
 	}
 	return topParentScoresFromMap(best, topK)
 }
 
 func topTurboQuantMultiVectorParentScores(q *turboquant.IPQuantizer, prepared turboquant.PreparedQuery, children []turboQuantMultiVectorChild, topK int) []retrievalScoredDoc {
-	best := make(map[string]float32, len(children))
+	best := make(map[string]retrievalScoredDoc, len(children))
 	for _, child := range children {
 		score := q.InnerProductPrepared(child.Vector, prepared)
-		if prior, ok := best[child.ParentID]; !ok || score > prior {
-			best[child.ParentID] = score
+		score64 := float64(score)
+		next := retrievalScoredDoc{ID: child.ParentID, Score: score, ChildID: child.ChildID, ChildScore: &score64}
+		if prior, ok := best[child.ParentID]; !ok || multiVectorChildScoreBetter(next, prior) {
+			best[child.ParentID] = next
 		}
 	}
 	return topParentScoresFromMap(best, topK)
 }
 
-func topParentScoresFromMap(best map[string]float32, topK int) []retrievalScoredDoc {
+func multiVectorChildScoreBetter(a, b retrievalScoredDoc) bool {
+	if a.Score > b.Score {
+		return true
+	}
+	if a.Score < b.Score {
+		return false
+	}
+	if a.ChildID != b.ChildID {
+		return a.ChildID < b.ChildID
+	}
+	return a.ID < b.ID
+}
+
+func topParentScoresFromMap(best map[string]retrievalScoredDoc, topK int) []retrievalScoredDoc {
 	if topK <= 0 || topK > len(best) {
 		topK = len(best)
 	}
 	h := make(retrievalScoreHeap, 0, topK)
-	for id, scoreValue := range best {
-		score := retrievalScoredDoc{ID: id, Score: scoreValue}
+	for _, score := range best {
 		if len(h) < topK {
 			heap.Push(&h, score)
 			continue

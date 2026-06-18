@@ -692,6 +692,7 @@ func TestRunEvalRetrievalMultiVectorTurboQuantWritesMetrics(t *testing.T) {
 	queryVectorsPath := filepath.Join(dir, "query-vectors.jsonl")
 	metricsPath := filepath.Join(dir, "metrics.json")
 	tsvPath := filepath.Join(dir, "metrics.tsv")
+	perQueryPath := filepath.Join(dir, "per-query.jsonl")
 	if err := os.WriteFile(corpusPath, []byte(
 		`{"_id":"p1","text":"alpha parent"}`+"\n"+
 			`{"_id":"p2","text":"beta parent"}`+"\n"), 0o644); err != nil {
@@ -725,6 +726,7 @@ func TestRunEvalRetrievalMultiVectorTurboQuantWritesMetrics(t *testing.T) {
 		"--query-vectors", queryVectorsPath,
 		"--metrics-json", metricsPath,
 		"--metrics-tsv", tsvPath,
+		"--per-query-jsonl", perQueryPath,
 		dir,
 	})
 	for _, want := range []string{
@@ -734,6 +736,7 @@ func TestRunEvalRetrievalMultiVectorTurboQuantWritesMetrics(t *testing.T) {
 		"q8: ndcg@10=",
 		"metrics: " + metricsPath,
 		"metrics_tsv: " + tsvPath,
+		"per_query: " + perQueryPath,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("output missing %q\n%s", want, output)
@@ -764,6 +767,21 @@ func TestRunEvalRetrievalMultiVectorTurboQuantWritesMetrics(t *testing.T) {
 	}
 	if metrics.Rows[0].BaselineDim != 32 || metrics.Rows[0].QuantizedVectorBytes <= 0 || metrics.Rows[0].VectorsThatFitInOneDenseBaseline <= 0 || metrics.Rows[0].StorageMultipleOfDenseBaseline <= 0 {
 		t.Fatalf("row storage accounting = %+v", metrics.Rows[0])
+	}
+	perQueryData, err := os.ReadFile(perQueryPath)
+	if err != nil {
+		t.Fatalf("read per-query: %v", err)
+	}
+	perQueryLines := strings.Split(strings.TrimSpace(string(perQueryData)), "\n")
+	if len(perQueryLines) != 2 {
+		t.Fatalf("per-query lines = %d, want dense and q8 rows\n%s", len(perQueryLines), perQueryData)
+	}
+	var perQueryRow eosruntime.TurboQuantMultiVectorRetrievalPerQueryRow
+	if err := json.Unmarshal([]byte(perQueryLines[1]), &perQueryRow); err != nil {
+		t.Fatalf("decode per-query row: %v", err)
+	}
+	if perQueryRow.Schema != eosruntime.TurboQuantMultiVectorRetrievalPerQuerySchema || perQueryRow.Method != "turboquant_ip_b8_child_max" || perQueryRow.QuantizerSeed != 99 || len(perQueryRow.TopK) == 0 || perQueryRow.TopK[0].ChildID == "" {
+		t.Fatalf("per-query row = %+v", perQueryRow)
 	}
 	tsv, err := os.ReadFile(tsvPath)
 	if err != nil {

@@ -1465,6 +1465,56 @@ func TestEvaluateTurboQuantMultiVectorRetrievalSeededRowsRepeat(t *testing.T) {
 	}
 }
 
+func TestEvaluateTurboQuantMultiVectorRetrievalWritesPerQueryJSONL(t *testing.T) {
+	children := []retrievalChildVectorRecord{
+		{ParentID: "p1", ChildID: "p1-a", Vector: normalizeRetrievalVector([]float32{0, 1, 0, 0, 0, 0, 0, 0})},
+		{ParentID: "p1", ChildID: "p1-b", Vector: normalizeRetrievalVector([]float32{1, 0, 0, 0, 0, 0, 0, 0})},
+		{ParentID: "p2", ChildID: "p2-a", Vector: normalizeRetrievalVector([]float32{0, 1, 0, 0, 0, 0, 0, 0})},
+	}
+	queries := []retrievalVectorRecord{
+		{ID: "q1", Vector: normalizeRetrievalVector([]float32{1, 0, 0, 0, 0, 0, 0, 0})},
+	}
+	qrels := retrievalQrels{"q1": {"p1": 1}}
+	perQueryPath := filepath.Join(t.TempDir(), "multivector.per-query.jsonl")
+
+	_, err := evaluateTurboQuantMultiVectorRetrieval(context.Background(), RetrievalEvalConfig{
+		DatasetName:       "tiny-multivector",
+		TopK:              1,
+		QuantizerSeed:     99,
+		PerQueryJSONLPath: perQueryPath,
+	}, []int{8}, children, queries, qrels)
+	if err != nil {
+		t.Fatalf("evaluate multivector turboquant retrieval: %v", err)
+	}
+	data, err := os.ReadFile(perQueryPath)
+	if err != nil {
+		t.Fatalf("read per-query JSONL: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("per-query lines = %d, want dense and q8 rows\n%s", len(lines), data)
+	}
+	var dense, compact TurboQuantMultiVectorRetrievalPerQueryRow
+	if err := json.Unmarshal([]byte(lines[0]), &dense); err != nil {
+		t.Fatalf("decode dense row: %v", err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &compact); err != nil {
+		t.Fatalf("decode compact row: %v", err)
+	}
+	if dense.Schema != TurboQuantMultiVectorRetrievalPerQuerySchema || dense.Dataset != "tiny-multivector" || dense.Method != "float32_child_max" || dense.QueryID != "q1" {
+		t.Fatalf("dense row identity = %+v", dense)
+	}
+	if dense.FirstRelevantRank != 1 || dense.RelevantCount != 1 || len(dense.TopK) == 0 || dense.TopK[0].DocID != "p1" || dense.TopK[0].ChildID != "p1-b" || dense.TopK[0].ChildScore == nil {
+		t.Fatalf("dense row evidence = %+v", dense)
+	}
+	if compact.Method != "turboquant_ip_b8_child_max" || compact.Bits != 8 || compact.QuantizerSeed != 99 || compact.ScoringSurface != "turboquant_ip_prepared_child_max" {
+		t.Fatalf("compact row identity = %+v", compact)
+	}
+	if len(compact.TopK) == 0 || compact.TopK[0].CompactRank == nil || *compact.TopK[0].CompactRank != 1 || compact.TopK[0].CompactChildID == "" || compact.TopK[0].DenseRank == nil || compact.TopK[0].DenseChildID != "p1-b" {
+		t.Fatalf("compact row evidence = %+v", compact)
+	}
+}
+
 func TestEvaluateVectorCacheRetrievalRejectsDimensionMismatch(t *testing.T) {
 	dir := t.TempDir()
 	qrelsDir := filepath.Join(dir, "qrels")

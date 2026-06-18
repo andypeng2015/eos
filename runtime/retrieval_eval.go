@@ -34,6 +34,7 @@ type RetrievalEvalConfig struct {
 	BackendName          string
 	BatchSize            int
 	TopK                 int
+	PerQueryTopK         int
 	MaxDocs              int
 	MaxQueries           int
 	PerQueryJSONLPath    string
@@ -142,11 +143,17 @@ type RetrievalEvalPerQueryTopDoc struct {
 	DocID                string   `json:"doc_id"`
 	Score                float32  `json:"score"`
 	Relevance            float64  `json:"relevance"`
+	ChildID              string   `json:"child_id,omitempty"`
+	ChildScore           *float64 `json:"child_score,omitempty"`
 	DenseRank            *int     `json:"dense_rank,omitempty"`
 	BM25Rank             *int     `json:"bm25_rank,omitempty"`
 	DenseScore           *float64 `json:"dense_score,omitempty"`
+	DenseChildID         string   `json:"dense_child_id,omitempty"`
+	DenseChildScore      *float64 `json:"dense_child_score,omitempty"`
 	CompactRank          *int     `json:"compact_rank,omitempty"`
 	CompactScore         *float64 `json:"compact_score,omitempty"`
+	CompactChildID       string   `json:"compact_child_id,omitempty"`
+	CompactChildScore    *float64 `json:"compact_child_score,omitempty"`
 	BM25Score            *float64 `json:"bm25_score,omitempty"`
 	DenseNormalizedScore *float64 `json:"dense_normalized_score,omitempty"`
 	BM25NormalizedScore  *float64 `json:"bm25_normalized_score,omitempty"`
@@ -943,9 +950,13 @@ func normalizeRetrievalVector(in []float32) []float32 {
 type retrievalScoredDoc struct {
 	ID                   string
 	Score                float32
+	ChildID              string
+	ChildScore           *float64
 	DenseRank            int
 	BM25Rank             int
 	DenseScore           *float64
+	DenseChildID         string
+	DenseChildScore      *float64
 	BM25Score            *float64
 	DenseNormalizedScore *float64
 	BM25NormalizedScore  *float64
@@ -1152,9 +1163,13 @@ func buildRetrievalPerQueryRow(datasetName, queryID string, scores []retrievalSc
 			DocID:                score.ID,
 			Score:                score.Score,
 			Relevance:            rels[score.ID],
+			ChildID:              score.ChildID,
+			ChildScore:           score.ChildScore,
 			DenseRank:            optionalPositiveInt(score.DenseRank),
 			BM25Rank:             optionalPositiveInt(score.BM25Rank),
 			DenseScore:           score.DenseScore,
+			DenseChildID:         score.DenseChildID,
+			DenseChildScore:      score.DenseChildScore,
 			BM25Score:            score.BM25Score,
 			DenseNormalizedScore: score.DenseNormalizedScore,
 			BM25NormalizedScore:  score.BM25NormalizedScore,

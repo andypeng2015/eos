@@ -1240,6 +1240,7 @@ func runEvalRetrievalMultiVectorTurboQuant(args []string) error {
 	allowMissingRelevant := fs.Bool("allow-missing-relevant", false, "allow qrels-relevant parent IDs missing from the child-vector cache")
 	metricsPath := fs.String("metrics-json", "", "write parent-child TurboQuant retrieval metrics JSON")
 	metricsTSVPath := fs.String("metrics-tsv", "", "write compact parent-child dense/quantized metrics TSV")
+	perQueryPath := fs.String("per-query-jsonl", "", "write one parent-child retrieval diagnostics JSONL row per evaluated query and dense/q-bit method")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1268,11 +1269,13 @@ func runEvalRetrievalMultiVectorTurboQuant(args []string) error {
 		QueryVectorPath:      *queryVectorsPath,
 		BackendName:          *backendName,
 		TopK:                 *topK,
+		PerQueryTopK:         *topK,
 		MaxDocs:              *maxDocs,
 		MaxQueries:           *maxQueries,
 		AllowMissingRelevant: *allowMissingRelevant,
 		QuantizerSeed:        *quantizerSeed,
 		BaselineDim:          *baselineDim,
+		PerQueryJSONLPath:    *perQueryPath,
 	}, bits)
 	if err != nil {
 		return err
@@ -1317,6 +1320,9 @@ func runEvalRetrievalMultiVectorTurboQuant(args []string) error {
 	}
 	if *metricsTSVPath != "" {
 		fmt.Printf("metrics_tsv: %s\n", *metricsTSVPath)
+	}
+	if *perQueryPath != "" {
+		fmt.Printf("per_query: %s\n", *perQueryPath)
 	}
 	return nil
 }
