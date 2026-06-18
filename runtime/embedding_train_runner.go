@@ -41,6 +41,7 @@ type EmbeddingTrainRunConfig struct {
 	TeacherSourceWeights       map[string]float32
 	MatryoshkaDims             []int
 	MatryoshkaWeights          []float32
+	ClearTurboQuantPrefix      bool
 	TurboQuantPrefixBits       []int
 	TurboQuantPrefixObjectives []TurboQuantPrefixObjective
 	TurboQuantPrefixWeight     float32
@@ -147,6 +148,9 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("embedding trainer is not initialized")
 	}
 	cfg = normalizedTrainRunConfig(cfg)
+	if err := validateClearTurboQuantPrefixRunConfig(cfg); err != nil {
+		return EmbeddingTrainRunSummary{}, err
+	}
 	if cfg.EvalOnly {
 		if len(evalSet) == 0 {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("eval dataset is empty")
@@ -341,6 +345,9 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("embedding trainer is not initialized")
 	}
 	cfg = normalizedTrainRunConfig(cfg)
+	if err := validateClearTurboQuantPrefixRunConfig(cfg); err != nil {
+		return EmbeddingTrainRunSummary{}, err
+	}
 	if cfg.EvalOnly {
 		if len(evalSet) == 0 {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("eval dataset is empty")
@@ -587,6 +594,9 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("embedding trainer is not initialized")
 	}
 	cfg = normalizedTrainRunConfig(cfg)
+	if err := validateClearTurboQuantPrefixRunConfig(cfg); err != nil {
+		return EmbeddingTrainRunSummary{}, err
+	}
 	if cfg.EvalOnly {
 		if len(evalSet) == 0 {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("eval dataset is empty")
@@ -1878,6 +1888,28 @@ func normalizedTrainRunConfig(cfg EmbeddingTrainRunConfig) EmbeddingTrainRunConf
 	return cfg
 }
 
+func validateClearTurboQuantPrefixRunConfig(cfg EmbeddingTrainRunConfig) error {
+	if !cfg.ClearTurboQuantPrefix {
+		return nil
+	}
+	if len(cfg.TurboQuantPrefixBits) > 0 {
+		return fmt.Errorf("clear_turboquant_prefix is mutually exclusive with turboquant_prefix_bits")
+	}
+	if len(cfg.TurboQuantPrefixObjectives) > 0 {
+		return fmt.Errorf("clear_turboquant_prefix is mutually exclusive with turboquant_prefix_objectives")
+	}
+	if cfg.TurboQuantPrefixWeight != 0 {
+		return fmt.Errorf("clear_turboquant_prefix is mutually exclusive with turboquant_prefix_weight")
+	}
+	if cfg.TurboQuantPrefixSeed != 0 {
+		return fmt.Errorf("clear_turboquant_prefix is mutually exclusive with turboquant_prefix_seed")
+	}
+	if strings.TrimSpace(cfg.TurboQuantPrefixScoreMode) != "" {
+		return fmt.Errorf("clear_turboquant_prefix is mutually exclusive with turboquant_prefix_score_mode")
+	}
+	return nil
+}
+
 func (t *EmbeddingTrainer) applyTrainRunOverrides(cfg EmbeddingTrainRunConfig) error {
 	if t == nil {
 		return nil
@@ -1928,6 +1960,14 @@ func (t *EmbeddingTrainer) applyTrainRunOverrides(cfg EmbeddingTrainRunConfig) e
 	if len(cfg.MatryoshkaDims) > 0 {
 		next.MatryoshkaDims = append([]int(nil), cfg.MatryoshkaDims...)
 		next.MatryoshkaWeights = append([]float32(nil), cfg.MatryoshkaWeights...)
+		changed = true
+	}
+	if cfg.ClearTurboQuantPrefix {
+		next.TurboQuantPrefixBits = nil
+		next.TurboQuantPrefixObjectives = nil
+		next.TurboQuantPrefixWeight = 0
+		next.TurboQuantPrefixSeed = 0
+		next.TurboQuantPrefixScoreMode = ""
 		changed = true
 	}
 	if len(cfg.TurboQuantPrefixBits) > 0 {
@@ -1988,13 +2028,19 @@ func (t *EmbeddingTrainer) syncTrainRunObjectiveConfig(cfg EmbeddingTrainRunConf
 		cfg.MatryoshkaDims = append([]int(nil), t.config.MatryoshkaDims...)
 		cfg.MatryoshkaWeights = append([]float32(nil), t.config.MatryoshkaWeights...)
 	}
-	if len(cfg.TurboQuantPrefixObjectives) == 0 && len(cfg.TurboQuantPrefixBits) == 0 && len(t.config.TurboQuantPrefixBits) > 0 {
+	if cfg.ClearTurboQuantPrefix {
+		cfg.TurboQuantPrefixBits = nil
+		cfg.TurboQuantPrefixObjectives = nil
+		cfg.TurboQuantPrefixWeight = 0
+		cfg.TurboQuantPrefixSeed = 0
+		cfg.TurboQuantPrefixScoreMode = ""
+	} else if len(cfg.TurboQuantPrefixObjectives) == 0 && len(cfg.TurboQuantPrefixBits) == 0 && len(t.config.TurboQuantPrefixBits) > 0 {
 		cfg.TurboQuantPrefixBits = append([]int(nil), t.config.TurboQuantPrefixBits...)
 		cfg.TurboQuantPrefixWeight = t.config.TurboQuantPrefixWeight
 		cfg.TurboQuantPrefixSeed = t.config.TurboQuantPrefixSeed
 		cfg.TurboQuantPrefixScoreMode = t.config.TurboQuantPrefixScoreMode
 	}
-	if len(cfg.TurboQuantPrefixBits) == 0 && len(cfg.TurboQuantPrefixObjectives) == 0 && len(t.config.TurboQuantPrefixObjectives) > 0 {
+	if !cfg.ClearTurboQuantPrefix && len(cfg.TurboQuantPrefixBits) == 0 && len(cfg.TurboQuantPrefixObjectives) == 0 && len(t.config.TurboQuantPrefixObjectives) > 0 {
 		cfg.TurboQuantPrefixObjectives = append([]TurboQuantPrefixObjective(nil), t.config.TurboQuantPrefixObjectives...)
 		cfg.TurboQuantPrefixWeight = t.config.TurboQuantPrefixWeight
 		cfg.TurboQuantPrefixSeed = t.config.TurboQuantPrefixSeed

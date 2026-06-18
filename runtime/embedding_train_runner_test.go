@@ -2,6 +2,7 @@ package eosruntime
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -671,6 +672,104 @@ func TestEmbeddingTrainerFitContrastiveContinuesExplicitObjectivesWithLegacyTurb
 	}
 	if summary.Config.TurboQuantPrefixWeight != 1 {
 		t.Fatalf("turboquant prefix weight = %f, want legacy default 1", summary.Config.TurboQuantPrefixWeight)
+	}
+}
+
+func TestEmbeddingTrainerFitContrastiveInheritsTurboQuantPrefixObjectivesByDefault(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	trainSet := tinyEmbeddingContrastiveDataset()
+	_, err := trainer.FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:         1,
+		BatchSize:      2,
+		Shuffle:        false,
+		MatryoshkaDims: []int{2},
+		TurboQuantPrefixObjectives: []TurboQuantPrefixObjective{
+			{Dim: 2, BitWidth: 4, Weight: 0.5},
+		},
+		TurboQuantPrefixSeed:      123,
+		TurboQuantPrefixScoreMode: TurboQuantPrefixScoreModePreparedIP,
+	})
+	if err != nil {
+		t.Fatalf("initial explicit turboquant prefix fit: %v", err)
+	}
+	summary, err := trainer.FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:    1,
+		BatchSize: 2,
+		Shuffle:   false,
+	})
+	if err != nil {
+		t.Fatalf("continue without turboquant prefix flags: %v", err)
+	}
+	if got := summary.Config.TurboQuantPrefixObjectives; len(got) != 1 || got[0].Dim != 2 || got[0].BitWidth != 4 || got[0].Weight != 0.5 {
+		t.Fatalf("inherited turboquant prefix objectives = %+v, want 2:4=0.5", got)
+	}
+	if summary.Config.TurboQuantPrefixSeed != 123 {
+		t.Fatalf("inherited turboquant prefix seed = %d, want 123", summary.Config.TurboQuantPrefixSeed)
+	}
+	if summary.Config.TurboQuantPrefixScoreMode != TurboQuantPrefixScoreModePreparedIP {
+		t.Fatalf("inherited turboquant prefix score mode = %q, want %q", summary.Config.TurboQuantPrefixScoreMode, TurboQuantPrefixScoreModePreparedIP)
+	}
+}
+
+func TestEmbeddingTrainerFitContrastiveClearTurboQuantPrefixDisablesInheritedObjectives(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	trainSet := tinyEmbeddingContrastiveDataset()
+	_, err := trainer.FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:                 1,
+		BatchSize:              2,
+		Shuffle:                false,
+		MatryoshkaDims:         []int{2},
+		TurboQuantPrefixBits:   []int{2},
+		TurboQuantPrefixWeight: 0.25,
+		TurboQuantPrefixSeed:   123,
+	})
+	if err != nil {
+		t.Fatalf("initial legacy turboquant prefix fit: %v", err)
+	}
+	summary, err := trainer.FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:                1,
+		BatchSize:             2,
+		Shuffle:               false,
+		ClearTurboQuantPrefix: true,
+	})
+	if err != nil {
+		t.Fatalf("continue with clear turboquant prefix: %v", err)
+	}
+	if len(summary.Config.TurboQuantPrefixBits) != 0 {
+		t.Fatalf("turboquant prefix bits = %v, want cleared", summary.Config.TurboQuantPrefixBits)
+	}
+	if len(summary.Config.TurboQuantPrefixObjectives) != 0 {
+		t.Fatalf("turboquant prefix objectives = %+v, want cleared", summary.Config.TurboQuantPrefixObjectives)
+	}
+	if summary.Config.TurboQuantPrefixWeight != 0 || summary.Config.TurboQuantPrefixSeed != 0 || summary.Config.TurboQuantPrefixScoreMode != "" {
+		t.Fatalf("turboquant prefix associated config = weight:%f seed:%d mode:%q, want cleared", summary.Config.TurboQuantPrefixWeight, summary.Config.TurboQuantPrefixSeed, summary.Config.TurboQuantPrefixScoreMode)
+	}
+	if len(trainer.config.TurboQuantPrefixBits) != 0 || len(trainer.config.TurboQuantPrefixObjectives) != 0 {
+		t.Fatalf("trainer turboquant prefix config = bits:%v objectives:%+v, want cleared", trainer.config.TurboQuantPrefixBits, trainer.config.TurboQuantPrefixObjectives)
+	}
+}
+
+func TestEmbeddingTrainerFitContrastiveRejectsClearTurboQuantPrefixWithNewObjectives(t *testing.T) {
+	trainSet := tinyEmbeddingContrastiveDataset()
+	if _, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:                1,
+		BatchSize:             2,
+		Shuffle:               false,
+		ClearTurboQuantPrefix: true,
+		TurboQuantPrefixBits:  []int{2},
+	}); err == nil || !strings.Contains(err.Error(), "clear_turboquant_prefix") {
+		t.Fatalf("clear with prefix bits error = %v, want clear_turboquant_prefix conflict", err)
+	}
+	if _, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:                1,
+		BatchSize:             2,
+		Shuffle:               false,
+		ClearTurboQuantPrefix: true,
+		TurboQuantPrefixObjectives: []TurboQuantPrefixObjective{
+			{Dim: 2, BitWidth: 4, Weight: 0.5},
+		},
+	}); err == nil || !strings.Contains(err.Error(), "clear_turboquant_prefix") {
+		t.Fatalf("clear with prefix objectives error = %v, want clear_turboquant_prefix conflict", err)
 	}
 }
 

@@ -3816,6 +3816,7 @@ func runTrainEmbed(args []string) error {
 	var teacherScoreNormalization string
 	var matryoshkaDims string
 	var matryoshkaWeights string
+	var clearTurboQuantPrefix bool
 	var turboQuantPrefixBits string
 	var turboQuantPrefixObjectives string
 	var turboQuantPrefixWeight float64
@@ -3859,6 +3860,7 @@ func runTrainEmbed(args []string) error {
 	fs.StringVar(&teacherScoreNormalization, "teacher-score-normalization", "", "normalize hard-negative teacher_scores before distillation: none, source_zscore, family_zscore, or example_zscore")
 	fs.StringVar(&matryoshkaDims, "matryoshka-dims", "", "comma-separated compact prefix dimensions to train with InfoNCE, for example 64,128")
 	fs.StringVar(&matryoshkaWeights, "matryoshka-weights", "", "optional comma-separated positive weights matching --matryoshka-dims")
+	fs.BoolVar(&clearTurboQuantPrefix, "clear-turboquant-prefix", false, "clear inherited TurboQuant compact-prefix objectives for continuation training")
 	fs.StringVar(&turboQuantPrefixBits, "turboquant-prefix-bits", "", "comma-separated TurboQuant bit widths for quantized compact-prefix InfoNCE, supported: 2..8")
 	fs.StringVar(&turboQuantPrefixObjectives, "turboquant-prefix-objectives", "", "comma-separated TurboQuant compact-prefix objectives as dim:bit=weight, for example 128:4=0.5")
 	fs.Float64Var(&turboQuantPrefixWeight, "turboquant-prefix-weight", 0, "optional weight for each TurboQuant compact-prefix objective (default 1 when bits are set)")
@@ -3941,6 +3943,21 @@ func runTrainEmbed(args []string) error {
 	if len(parsedTurboQuantPrefixObjectives) > 0 && len(parsedTurboQuantPrefixBits) > 0 {
 		return fmt.Errorf("--turboquant-prefix-objectives is mutually exclusive with --turboquant-prefix-bits")
 	}
+	if clearTurboQuantPrefix && len(parsedTurboQuantPrefixBits) > 0 {
+		return fmt.Errorf("--clear-turboquant-prefix is mutually exclusive with --turboquant-prefix-bits")
+	}
+	if clearTurboQuantPrefix && len(parsedTurboQuantPrefixObjectives) > 0 {
+		return fmt.Errorf("--clear-turboquant-prefix is mutually exclusive with --turboquant-prefix-objectives")
+	}
+	if clearTurboQuantPrefix && turboQuantPrefixWeight != 0 {
+		return fmt.Errorf("--clear-turboquant-prefix is mutually exclusive with --turboquant-prefix-weight")
+	}
+	if clearTurboQuantPrefix && turboQuantPrefixSeed != 0 {
+		return fmt.Errorf("--clear-turboquant-prefix is mutually exclusive with --turboquant-prefix-seed")
+	}
+	if clearTurboQuantPrefix && strings.TrimSpace(turboQuantPrefixScoreMode) != "" {
+		return fmt.Errorf("--clear-turboquant-prefix is mutually exclusive with --turboquant-prefix-score-mode")
+	}
 	if len(parsedTurboQuantPrefixObjectives) > 0 && turboQuantPrefixWeight != 0 {
 		return fmt.Errorf("--turboquant-prefix-weight must not be set with --turboquant-prefix-objectives")
 	}
@@ -4007,6 +4024,7 @@ func runTrainEmbed(args []string) error {
 		TeacherScoreNormalization:  teacherScoreNormalization,
 		MatryoshkaDims:             parsedMatryoshkaDims,
 		MatryoshkaWeights:          parsedMatryoshkaWeights,
+		ClearTurboQuantPrefix:      clearTurboQuantPrefix,
 		TurboQuantPrefixBits:       parsedTurboQuantPrefixBits,
 		TurboQuantPrefixObjectives: parsedTurboQuantPrefixObjectives,
 		TurboQuantPrefixWeight:     float32(turboQuantPrefixWeight),
@@ -4551,6 +4569,7 @@ func runTrainCorpus(args []string) error {
 	var teacherTemperature float64
 	var matryoshkaDims string
 	var matryoshkaWeights string
+	var clearTurboQuantPrefix bool
 	var turboQuantPrefixBits string
 	var turboQuantPrefixObjectives string
 	var turboQuantPrefixWeight float64
@@ -4585,6 +4604,7 @@ func runTrainCorpus(args []string) error {
 	fs.Float64Var(&teacherTemperature, "teacher-temperature", 0, "teacher score softmax temperature for hard-negative distillation")
 	fs.StringVar(&matryoshkaDims, "matryoshka-dims", "", "comma-separated compact prefix dimensions to train with InfoNCE, for example 64,128")
 	fs.StringVar(&matryoshkaWeights, "matryoshka-weights", "", "optional comma-separated positive weights matching --matryoshka-dims")
+	fs.BoolVar(&clearTurboQuantPrefix, "clear-turboquant-prefix", false, "clear inherited TurboQuant compact-prefix objectives for continuation training")
 	fs.StringVar(&turboQuantPrefixBits, "turboquant-prefix-bits", "", "comma-separated TurboQuant bit widths for quantized compact-prefix InfoNCE, supported: 2..8")
 	fs.StringVar(&turboQuantPrefixObjectives, "turboquant-prefix-objectives", "", "comma-separated TurboQuant compact-prefix objectives as dim:bit=weight, for example 128:4=0.5")
 	fs.Float64Var(&turboQuantPrefixWeight, "turboquant-prefix-weight", 0, "optional weight for each TurboQuant compact-prefix objective (default 1 when bits are set)")
@@ -4643,6 +4663,21 @@ func runTrainCorpus(args []string) error {
 	if len(parsedTurboQuantPrefixObjectives) > 0 && len(parsedTurboQuantPrefixBits) > 0 {
 		return fmt.Errorf("--turboquant-prefix-objectives is mutually exclusive with --turboquant-prefix-bits")
 	}
+	if clearTurboQuantPrefix && len(parsedTurboQuantPrefixBits) > 0 {
+		return fmt.Errorf("--clear-turboquant-prefix is mutually exclusive with --turboquant-prefix-bits")
+	}
+	if clearTurboQuantPrefix && len(parsedTurboQuantPrefixObjectives) > 0 {
+		return fmt.Errorf("--clear-turboquant-prefix is mutually exclusive with --turboquant-prefix-objectives")
+	}
+	if clearTurboQuantPrefix && turboQuantPrefixWeight != 0 {
+		return fmt.Errorf("--clear-turboquant-prefix is mutually exclusive with --turboquant-prefix-weight")
+	}
+	if clearTurboQuantPrefix && turboQuantPrefixSeed != 0 {
+		return fmt.Errorf("--clear-turboquant-prefix is mutually exclusive with --turboquant-prefix-seed")
+	}
+	if clearTurboQuantPrefix && strings.TrimSpace(turboQuantPrefixScoreMode) != "" {
+		return fmt.Errorf("--clear-turboquant-prefix is mutually exclusive with --turboquant-prefix-score-mode")
+	}
 	if len(parsedTurboQuantPrefixObjectives) > 0 && turboQuantPrefixWeight != 0 {
 		return fmt.Errorf("--turboquant-prefix-weight must not be set with --turboquant-prefix-objectives")
 	}
@@ -4677,6 +4712,7 @@ func runTrainCorpus(args []string) error {
 		TeacherTemperature:         float32(teacherTemperature),
 		MatryoshkaDims:             parsedMatryoshkaDims,
 		MatryoshkaWeights:          parsedMatryoshkaWeights,
+		ClearTurboQuantPrefix:      clearTurboQuantPrefix,
 		TurboQuantPrefixBits:       parsedTurboQuantPrefixBits,
 		TurboQuantPrefixObjectives: parsedTurboQuantPrefixObjectives,
 		TurboQuantPrefixWeight:     float32(turboQuantPrefixWeight),

@@ -59,6 +59,7 @@ type candidateConfig struct {
 	TeacherScoreNormalization string
 	MatryoshkaDims      string
 	MatryoshkaWeights   string
+	ClearTurboQuantPrefix string
 	TurboQuantPrefixBits string
 	TurboQuantPrefixObjectives string
 	TurboQuantPrefixWeight string
@@ -515,6 +516,7 @@ func writeManifest(cfg candidateConfig, status string) error {
     "teacher_score_normalization": %s,
     "matryoshka_dims": %s,
     "matryoshka_weights": %s,
+    "clear_turboquant_prefix": %s,
     "turboquant_prefix_bits": %s,
     "turboquant_prefix_objectives": %s,
     "turboquant_prefix_weight": %s,
@@ -582,6 +584,7 @@ func writeManifest(cfg candidateConfig, status string) error {
 		jsonString(cfg.TeacherScoreNormalization),
 		jsonString(cfg.MatryoshkaDims),
 		jsonString(cfg.MatryoshkaWeights),
+		jsonBool(configBool(cfg.ClearTurboQuantPrefix)),
 		jsonString(cfg.TurboQuantPrefixBits),
 		jsonString(cfg.TurboQuantPrefixObjectives),
 		jsonString(cfg.TurboQuantPrefixWeight),
@@ -713,6 +716,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		TeacherScoreNormalization: getenv("EOS_TEACHER_SCORE_NORMALIZATION", ""),
 		MatryoshkaDims:      getenv("EOS_MATRYOSHKA_DIMS", ""),
 		MatryoshkaWeights:   getenv("EOS_MATRYOSHKA_WEIGHTS", ""),
+		ClearTurboQuantPrefix: getenv("EOS_CLEAR_TURBOQUANT_PREFIX", ""),
 		TurboQuantPrefixBits: getenv("EOS_TURBOQUANT_PREFIX_BITS", ""),
 		TurboQuantPrefixObjectives: getenv("EOS_TURBOQUANT_PREFIX_OBJECTIVES", ""),
 		TurboQuantPrefixWeight: getenv("EOS_TURBOQUANT_PREFIX_WEIGHT", ""),
@@ -877,6 +881,9 @@ func trainCommonArgs(cfg candidateConfig) []string {
 	}
 	if cfg.MatryoshkaWeights != "" {
 		args = append(args, "--matryoshka-weights", cfg.MatryoshkaWeights)
+	}
+	if configBool(cfg.ClearTurboQuantPrefix) {
+		args = append(args, "--clear-turboquant-prefix")
 	}
 	if cfg.TurboQuantPrefixBits != "" {
 		args = append(args, "--turboquant-prefix-bits", cfg.TurboQuantPrefixBits)
