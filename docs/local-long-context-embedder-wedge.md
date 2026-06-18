@@ -244,7 +244,26 @@ The `semantic_late_needle` scenario keeps the same synthetic caveat but is now t
 External Qwen3/mxbai native and compact 128d late-needle cache comparisons are summarized in `.tiller/scratch/codex/eos-late-needle-external-baseline-v1-report.md`.
 `scripts/build_repo_docs_longembed_dataset.fw` adds a small non-synthetic local-doc lane at `datasets/longembed/repo-docs`. It is useful for exercising long-document chunking over real repository text, but its qrels are deterministic path/heading heuristics, so results should be treated as repo-specific harness evidence rather than LongEmbed proof; see `.tiller/scratch/codex/eos-repo-docs-longembed-lane-v1-report.md`.
 External embedder baselines can be added without provider API calls by exporting BEIR-aligned vector caches and setting `EOS_SCOREBOARD_EXTERNAL_VECTOR_ROOT`, `EOS_SCOREBOARD_EXTERNAL_VECTOR_DATASETS`, `EOS_SCOREBOARD_EXTERNAL_VECTOR_BASELINE`, and `EOS_SCOREBOARD_EXTERNAL_VECTOR_BACKEND`. The harness expects `<vector-root>/<dataset>/doc-vectors.jsonl` and `query-vectors.jsonl`; each row needs `id` or `_id` plus `vector`, `embedding`, or `values`. These rows use `eos eval-retrieval-vectors` and emit the same retrieval metrics JSON/scoreboard columns as sealed Eos and BM25 rows.
-External child-vector caches can be added to the long-retrieval scoreboard with `EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_ROOT`, `EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_DATASETS`, `EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BASELINE`, `EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BACKEND`, `EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_ARTIFACT`, `EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BITS`, and `EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BASELINE_DIM`. This path expects `<vector-root>/<dataset>/child-doc-vectors.jsonl` plus `query-vectors.jsonl`, calls `eos eval-retrieval-multivector-turboquant`, and emits `<baseline>-dense-child` and `<baseline>-turboquant-child` rows. For repo-docs Qwen3/mxbai 128d child caches, this makes the direct dense/q-bit child-max evidence land in `scoreboard.json`; it is still repo-specific harness evidence, not LongEmbed proof.
+External child-vector caches can be added to the long-retrieval scoreboard with `EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_ROOT`, `EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_DATASETS`, `EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BASELINE`, `EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BACKEND`, `EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_ARTIFACT`, `EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BITS`, and `EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BASELINE_DIM`. This path expects `<vector-root>/<dataset>/child-doc-vectors.jsonl` plus `query-vectors.jsonl`, calls `eos eval-retrieval-multivector-turboquant`, and emits `<baseline>-dense-child` and `<baseline>-turboquant-child` rows. The consolidated repo-docs child-vector evidence is below; all q-bit rows use quantizer seed `5581486560434873699`.
+
+| Row | Method | nDCG@10 | recall@100 |
+| --- | --- | ---: | ---: |
+| BM25 | bm25 | 0.717080 | 1.000000 |
+| Eos default | cuda dense | 0.644872 | 1.000000 |
+| Eos 128d child | dense child-max | 0.597491 | 1.000000 |
+| Eos 128d child | q2 child-max | 0.580548 | 1.000000 |
+| Eos 128d child | q4 child-max | 0.603952 | 1.000000 |
+| Eos 128d child | q8 child-max | 0.600218 | 1.000000 |
+| Qwen3 0.6B 128d child | dense child-max | 0.771170 | 1.000000 |
+| Qwen3 0.6B 128d child | q2 child-max | 0.694290 | 1.000000 |
+| Qwen3 0.6B 128d child | q4 child-max | 0.739269 | 1.000000 |
+| Qwen3 0.6B 128d child | q8 child-max | 0.769390 | 1.000000 |
+| mxbai-large 128d child | dense child-max | 0.713075 | 1.000000 |
+| mxbai-large 128d child | q2 child-max | 0.627584 | 1.000000 |
+| mxbai-large 128d child | q4 child-max | 0.691586 | 1.000000 |
+| mxbai-large 128d child | q8 child-max | 0.708765 | 1.000000 |
+
+For repo-docs Qwen3/mxbai/Eos 128d child caches, this makes the direct dense/q-bit child-max evidence land in `scoreboard.json`; it is still repo-specific harness evidence, not LongEmbed proof. The Eos 128d child cache uses prefix truncation plus L2 renormalization from the default 256d artifact, not a trained Matryoshka head.
 Use `eos eval-retrieval-vectors-turboquant` on those same caches to compare q2/q4/q8 TurboQuant IP document-vector indexes without adding provider SDKs. This is the key CorkScrewDB default-promotion comparison surface because every candidate, including external BGE/Qwen/Jina/Voyage/Cohere/OpenAI caches and sealed local Eos embeddings, can be judged by dense quality plus compressed vector-index quality and cost.
 Enable `EOS_SCOREBOARD_HYBRID_RETRIEVAL=1` to add lexical+dense hybrid rows without removing dense, BM25, or TurboQuant rows. The harness runs `eos eval-retrieval-hybrid` for local Eos rows and `eos eval-retrieval-vectors-hybrid` for external vector caches, using `EOS_SCOREBOARD_HYBRID_METHOD`, `EOS_SCOREBOARD_HYBRID_ALPHA`, `EOS_SCOREBOARD_HYBRID_RRF_K`, and `EOS_SCOREBOARD_HYBRID_RRF_LAMBDA`. Treat the FiQA dev-selected `minmax`/`alpha=0.75` setting as guarded hybrid retrieval evidence only; it does not promote the dense embedder.
 For pairwise `train-embed --eval-only` rows, the harness uses `EOS_SCOREBOARD_PAIRWISE_ARTIFACT` when set; otherwise it infers the sibling trainable package when `EOS_SCOREBOARD_ARTIFACT` points at a sealed `.mll`.

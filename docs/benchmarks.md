@@ -98,7 +98,26 @@ EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BASELINE_DIM=1024 \
 ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
 ```
 
-The external multivector group is opt-in via `EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_DATASETS`. It reuses `eos eval-retrieval-multivector-turboquant`, writes one dense child-max row plus one row per requested bit width, and preserves `quantizer_seed` on q-bit rows for compact-scoreboard provenance gates.
+The external multivector group is opt-in via `EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_DATASETS`. It reuses `eos eval-retrieval-multivector-turboquant`, writes one dense child-max row plus one row per requested bit width, and preserves `quantizer_seed` on q-bit rows for compact-scoreboard provenance gates. The current repo-docs child-vector scoreboard evidence is:
+
+| Row | Method | nDCG@10 | recall@100 |
+| --- | --- | ---: | ---: |
+| BM25 | bm25 | 0.717080 | 1.000000 |
+| Eos default | cuda dense | 0.644872 | 1.000000 |
+| Eos 128d child | dense child-max | 0.597491 | 1.000000 |
+| Eos 128d child | q2 child-max | 0.580548 | 1.000000 |
+| Eos 128d child | q4 child-max | 0.603952 | 1.000000 |
+| Eos 128d child | q8 child-max | 0.600218 | 1.000000 |
+| Qwen3 0.6B 128d child | dense child-max | 0.771170 | 1.000000 |
+| Qwen3 0.6B 128d child | q2 child-max | 0.694290 | 1.000000 |
+| Qwen3 0.6B 128d child | q4 child-max | 0.739269 | 1.000000 |
+| Qwen3 0.6B 128d child | q8 child-max | 0.769390 | 1.000000 |
+| mxbai-large 128d child | dense child-max | 0.713075 | 1.000000 |
+| mxbai-large 128d child | q2 child-max | 0.627584 | 1.000000 |
+| mxbai-large 128d child | q4 child-max | 0.691586 | 1.000000 |
+| mxbai-large 128d child | q8 child-max | 0.708765 | 1.000000 |
+
+The q-bit rows use quantizer seed `5581486560434873699`. Treat the Eos 128d child rows as prefix truncation plus L2 renormalization from the default 256d artifact, not as evidence for a trained Matryoshka head. Treat every repo-docs row as local harness evidence over deterministic repo-specific qrels, not LongEmbed proof.
 
 Calibrate hybrid retrieval before using `eos-hybrid` rows as product evidence:
 
