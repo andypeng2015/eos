@@ -1,0 +1,836 @@
+package main
+
+// build_repo_docs_span_alignment_dataset builds a leak-aware span/chunk
+// training dataset from the local BEIR-shaped repo-docs lane. It aligns
+// positives and negatives to the same child-vector chunk units used by
+// eval-retrieval-multivector-turboquant/export-retrieval-vectors defaults.
+//
+// Usage:
+//   EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/build_repo_docs_span_alignment_dataset.fw
+//
+// Useful overrides:
+//   EOS_REPO_DOCS_SPAN_INPUT=datasets/longembed/repo-docs
+//   EOS_REPO_DOCS_SPAN_RUN_ID=eos-repo-docs-span-alignment-data-v1-YYYYMMDDTHHMMSSZ
+//   EOS_REPO_DOCS_SPAN_OUT=runs/<run-id>/data/repo-docs-span
+//   EOS_REPO_DOCS_SPAN_SEED=eos-repo-docs-span-alignment-data-v1
+//   EOS_REPO_DOCS_SPAN_SPLIT_RATIOS=60,20,20
+//   EOS_REPO_DOCS_SPAN_TRAIN_SPLITS=train
+//   EOS_REPO_DOCS_SPAN_NEGATIVES=4
+//   EOS_REPO_DOCS_SPAN_CHUNK_WORDS=384
+//   EOS_REPO_DOCS_SPAN_CHUNK_OVERLAP=64
+//   EOS_REPO_DOCS_SPAN_CHUNK_MIN_WORDS=64
+
+import (
+	"bufio"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"math"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type corpusRow struct {
+	ID    string `json:"_id"`
+	Title string `json:"title"`
+	Text  string `json:"text"`
+}
+
+type queryRow struct {
+	ID   string `json:"_id"`
+	Text string `json:"text"`
+}
+
+type qrelRow struct {
+	QueryID string
+	DocID   string
+	Score   string
+}
+
+type chunkRow struct {
+	ID     string
+	DocID  string
+	Index  int
+	Start  int
+	End    int
+	Text   string
+	Words  int
+	Tokens []string
+	TF     map[string]int
+}
+
+type scoredChunk struct {
+	Chunk chunkRow
+	Score float64
+}
+
+type hardNegativeRow struct {
+	Source    string   `json:"source"`
+	Query     string   `json:"query"`
+	Positive  string   `json:"positive"`
+	Negatives []string `json:"negatives"`
+}
+
+type splitCounts struct {
+	Queries int `json:"queries"`
+	Qrels   int `json:"qrels"`
+	Rows    int `json:"rows,omitempty"`
+}
+
+type outputHashes struct {
+	Corpus        string `json:"corpus_jsonl"`
+	Queries       string `json:"queries_jsonl"`
+	TrainQrels    string `json:"qrels_train_tsv"`
+	DevQrels      string `json:"qrels_dev_tsv"`
+	TestQrels     string `json:"qrels_test_tsv"`
+	TrainHardNegs string `json:"train_hard_negatives_jsonl"`
+}
+
+type builderManifest struct {
+	Schema              string                 `json:"schema"`
+	GeneratedAt         string                 `json:"generated_at"`
+	RepoRoot            string                 `json:"repo_root"`
+	InputDir            string                 `json:"input_dir"`
+	OutputDir           string                 `json:"output_dir"`
+	Inputs              map[string]string      `json:"inputs"`
+	Outputs             map[string]string      `json:"outputs"`
+	OutputSHA256         outputHashes          `json:"output_sha256"`
+	HashSeed            string                 `json:"hash_seed"`
+	SplitRatios          map[string]int         `json:"split_ratios"`
+	SplitCounts          map[string]splitCounts `json:"split_counts"`
+	TrainSplits          []string               `json:"train_splits"`
+	ChunkConfig          map[string]int         `json:"chunk_config"`
+	Counts               map[string]int         `json:"counts"`
+	PositiveFallbacks    int                    `json:"positive_fallbacks"`
+	NegativeFallbackRows int                    `json:"negative_fallback_rows"`
+	Caveats              []string               `json:"caveats"`
+}
+
+var stopwords = map[string]bool{
+	"a": true, "an": true, "and": true, "are": true, "as": true, "at": true,
+	"be": true, "by": true, "for": true, "from": true, "how": true, "in": true,
+	"into": true, "is": true, "it": true, "local": true, "of": true, "on": true,
+	"or": true, "the": true, "this": true, "to": true, "with": true, "which": true,
+}
+
+func getenv(name string, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func parseIntEnv(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func resolvePath(root string, path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(root, path)
+}
+
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func readJSONL[T any](path string) ([]T, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	rows := []T{}
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 1024*1024), 32*1024*1024)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var row T
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			return nil, fmt.Errorf("%s line %d: %w", path, lineNo, err)
+		}
+		rows = append(rows, row)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func readQrels(path string) ([]qrelRow, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	rows := []qrelRow{}
+	scanner := bufio.NewScanner(f)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if lineNo == 1 && len(fields) >= 2 && fields[0] == "query-id" {
+			continue
+		}
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("%s line %d: malformed qrels row %q", path, lineNo, line)
+		}
+		rows = append(rows, qrelRow{QueryID: fields[0], DocID: fields[1], Score: fields[2]})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("%s has no qrels rows", path)
+	}
+	return rows, nil
+}
+
+func writeJSONL(path string, rows []hardNegativeRow) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	w := bufio.NewWriter(f)
+	defer w.Flush()
+	enc := json.NewEncoder(w)
+	for _, row := range rows {
+		if err := enc.Encode(row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeQrels(path string, rows []qrelRow) error {
+	var b strings.Builder
+	b.WriteString("query-id\tcorpus-id\tscore\n")
+	for _, row := range rows {
+		b.WriteString(row.QueryID)
+		b.WriteByte('\t')
+		b.WriteString(row.DocID)
+		b.WriteByte('\t')
+		b.WriteString(row.Score)
+		b.WriteByte('\n')
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func copyFile(src string, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o644)
+}
+
+func parseRatios(raw string) (int, int, int) {
+	parts := strings.Split(raw, ",")
+	if len(parts) != 3 {
+		return 60, 20, 20
+	}
+	values := []int{0, 0, 0}
+	for i, part := range parts {
+		value, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil || value < 0 {
+			return 60, 20, 20
+		}
+		values[i] = value
+	}
+	if values[0]+values[1]+values[2] <= 0 {
+		return 60, 20, 20
+	}
+	return values[0], values[1], values[2]
+}
+
+func stableHash(seed string, value string) uint64 {
+	sum := sha256.Sum256([]byte(seed + "\x00" + value))
+	return binary.BigEndian.Uint64(sum[:8])
+}
+
+func splitQrels(rows []qrelRow, seed string, trainRatio int, devRatio int, testRatio int) map[string][]qrelRow {
+	querySet := map[string]bool{}
+	for _, row := range rows {
+		querySet[row.QueryID] = true
+	}
+	queryIDs := []string{}
+	for qid := range querySet {
+		queryIDs = append(queryIDs, qid)
+	}
+	sort.Slice(queryIDs, func(i int, j int) bool {
+		hi := stableHash(seed, queryIDs[i])
+		hj := stableHash(seed, queryIDs[j])
+		if hi == hj {
+			return queryIDs[i] < queryIDs[j]
+		}
+		return hi < hj
+	})
+	totalRatio := trainRatio + devRatio + testRatio
+	trainN := int(math.Round(float64(len(queryIDs)*trainRatio) / float64(totalRatio)))
+	devN := int(math.Round(float64(len(queryIDs)*devRatio) / float64(totalRatio)))
+	if trainN < 0 {
+		trainN = 0
+	}
+	if trainN > len(queryIDs) {
+		trainN = len(queryIDs)
+	}
+	if trainN+devN > len(queryIDs) {
+		devN = len(queryIDs) - trainN
+	}
+	querySplit := map[string]string{}
+	for i, qid := range queryIDs {
+		split := "test"
+		if i < trainN {
+			split = "train"
+		} else if i < trainN+devN {
+			split = "dev"
+		}
+		querySplit[qid] = split
+	}
+	out := map[string][]qrelRow{"train": {}, "dev": {}, "test": {}}
+	for _, row := range rows {
+		split := querySplit[row.QueryID]
+		out[split] = append(out[split], row)
+	}
+	for split := range out {
+		sort.Slice(out[split], func(i int, j int) bool {
+			a := out[split][i]
+			b := out[split][j]
+			if a.QueryID == b.QueryID {
+				return a.DocID < b.DocID
+			}
+			return a.QueryID < b.QueryID
+		})
+	}
+	return out
+}
+
+func tokenize(text string) []string {
+	out := []string{}
+	var b strings.Builder
+	flush := func() {
+		if b.Len() == 0 {
+			return
+		}
+		token := b.String()
+		b.Reset()
+		if len(token) < 2 || stopwords[token] {
+			return
+		}
+		out = append(out, token)
+	}
+	for _, r := range strings.ToLower(text) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return out
+}
+
+func termFreq(tokens []string) map[string]int {
+	tf := map[string]int{}
+	for _, token := range tokens {
+		tf[token]++
+	}
+	return tf
+}
+
+func chunkDocument(doc corpusRow, chunkWords int, overlap int, minWords int) []chunkRow {
+	words := strings.Fields(doc.Text)
+	if len(words) == 0 {
+		return nil
+	}
+	if chunkWords <= 0 {
+		chunkWords = 384
+	}
+	if overlap < 0 {
+		overlap = 0
+	}
+	step := chunkWords - overlap
+	if step <= 0 {
+		step = chunkWords
+	}
+	if minWords <= 0 {
+		minWords = 1
+	}
+	chunks := []chunkRow{}
+	for start := 0; start < len(words); start += step {
+		end := start + chunkWords
+		if end > len(words) {
+			end = len(words)
+		}
+		if end-start < minWords && len(chunks) > 0 {
+			break
+		}
+		text := strings.Join(words[start:end], " ")
+		tokens := tokenize(text)
+		chunk := chunkRow{
+			ID:     fmt.Sprintf("%s#chunk-%04d", doc.ID, len(chunks)+1),
+			DocID:  doc.ID,
+			Index:  len(chunks),
+			Start:  start,
+			End:    end,
+			Text:   text,
+			Words:  end - start,
+			Tokens: tokens,
+			TF:     termFreq(tokens),
+		}
+		chunks = append(chunks, chunk)
+		if end == len(words) {
+			break
+		}
+	}
+	return chunks
+}
+
+func buildChunks(corpus []corpusRow, chunkWords int, overlap int, minWords int) ([]chunkRow, map[string][]chunkRow) {
+	all := []chunkRow{}
+	byDoc := map[string][]chunkRow{}
+	for _, doc := range corpus {
+		chunks := chunkDocument(doc, chunkWords, overlap, minWords)
+		byDoc[doc.ID] = chunks
+		all = append(all, chunks...)
+	}
+	return all, byDoc
+}
+
+func documentFrequency(chunks []chunkRow) map[string]int {
+	df := map[string]int{}
+	for _, chunk := range chunks {
+		seen := map[string]bool{}
+		for token := range chunk.TF {
+			if !seen[token] {
+				df[token]++
+				seen[token] = true
+			}
+		}
+	}
+	return df
+}
+
+func averageChunkWords(chunks []chunkRow) float64 {
+	if len(chunks) == 0 {
+		return 1
+	}
+	total := 0
+	for _, chunk := range chunks {
+		total += chunk.Words
+	}
+	return float64(total) / float64(len(chunks))
+}
+
+func scoreChunk(queryTokens []string, chunk chunkRow, df map[string]int, totalChunks int, avgWords float64) float64 {
+	if len(queryTokens) == 0 || totalChunks == 0 {
+		return 0
+	}
+	queryTF := termFreq(queryTokens)
+	score := 0.0
+	k1 := 1.2
+	b := 0.75
+	for token := range queryTF {
+		tf := chunk.TF[token]
+		if tf <= 0 {
+			continue
+		}
+		docFreq := df[token]
+		idf := math.Log(1.0 + (float64(totalChunks-docFreq)+0.5)/(float64(docFreq)+0.5))
+		denom := float64(tf) + k1*(1.0-b+b*float64(chunk.Words)/avgWords)
+		score += idf * (float64(tf) * (k1 + 1.0) / denom)
+	}
+	return score
+}
+
+func sortedScoredChunks(queryText string, chunks []chunkRow, df map[string]int, totalChunks int, avgWords float64) []scoredChunk {
+	queryTokens := tokenize(queryText)
+	out := make([]scoredChunk, 0, len(chunks))
+	for _, chunk := range chunks {
+		out = append(out, scoredChunk{Chunk: chunk, Score: scoreChunk(queryTokens, chunk, df, totalChunks, avgWords)})
+	}
+	sort.Slice(out, func(i int, j int) bool {
+		if out[i].Score != out[j].Score {
+			return out[i].Score > out[j].Score
+		}
+		if out[i].Chunk.Words != out[j].Chunk.Words {
+			return out[i].Chunk.Words > out[j].Chunk.Words
+		}
+		return out[i].Chunk.ID < out[j].Chunk.ID
+	})
+	return out
+}
+
+func choosePositive(queryText string, chunks []chunkRow, df map[string]int, totalChunks int, avgWords float64) (chunkRow, bool, bool) {
+	if len(chunks) == 0 {
+		return chunkRow{}, false, false
+	}
+	scored := sortedScoredChunks(queryText, chunks, df, totalChunks, avgWords)
+	if len(scored) > 0 && scored[0].Score > 0 {
+		return scored[0].Chunk, false, true
+	}
+	fallback := chunks[0]
+	for _, chunk := range chunks[1:] {
+		if chunk.Words > fallback.Words {
+			fallback = chunk
+		}
+	}
+	return fallback, true, true
+}
+
+func chooseNegatives(queryText string, allChunks []chunkRow, positiveDocs map[string]bool, negativesPerRow int, df map[string]int, totalChunks int, avgWords float64) ([]string, bool) {
+	candidates := []chunkRow{}
+	for _, chunk := range allChunks {
+		if positiveDocs[chunk.DocID] {
+			continue
+		}
+		candidates = append(candidates, chunk)
+	}
+	scored := sortedScoredChunks(queryText, candidates, df, totalChunks, avgWords)
+	limit := negativesPerRow
+	if limit <= 0 || limit > len(scored) {
+		limit = len(scored)
+	}
+	out := []string{}
+	zeroScore := true
+	for i := 0; i < limit; i++ {
+		if scored[i].Score > 0 {
+			zeroScore = false
+		}
+		out = append(out, scored[i].Chunk.Text)
+	}
+	return out, zeroScore
+}
+
+func queryMap(queries []queryRow) map[string]string {
+	out := map[string]string{}
+	for _, query := range queries {
+		out[query.ID] = query.Text
+	}
+	return out
+}
+
+func positiveDocsByQuery(rows []qrelRow) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	for _, row := range rows {
+		if out[row.QueryID] == nil {
+			out[row.QueryID] = map[string]bool{}
+		}
+		out[row.QueryID][row.DocID] = true
+	}
+	return out
+}
+
+func splitList(raw string) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.ToLower(strings.TrimSpace(item))
+		if item == "" || seen[item] {
+			continue
+		}
+		out = append(out, item)
+		seen[item] = true
+	}
+	return out
+}
+
+func buildHardNegatives(splits map[string][]qrelRow, trainSplits []string, queries map[string]string, chunksByDoc map[string][]chunkRow, allChunks []chunkRow, negativesPerRow int) ([]hardNegativeRow, int, int, error) {
+	df := documentFrequency(allChunks)
+	avgWords := averageChunkWords(allChunks)
+	totalChunks := len(allChunks)
+	rows := []hardNegativeRow{}
+	positiveFallbacks := 0
+	negativeFallbackRows := 0
+	for _, split := range trainSplits {
+		qrels, ok := splits[split]
+		if !ok {
+			return nil, 0, 0, fmt.Errorf("unknown train split %q", split)
+		}
+		posDocs := positiveDocsByQuery(qrels)
+		for _, qrel := range qrels {
+			queryText := queries[qrel.QueryID]
+			if queryText == "" {
+				return nil, 0, 0, fmt.Errorf("missing query text for %s", qrel.QueryID)
+			}
+			positiveChunk, fallback, ok := choosePositive(queryText, chunksByDoc[qrel.DocID], df, totalChunks, avgWords)
+			if !ok {
+				return nil, 0, 0, fmt.Errorf("positive doc %s has no chunks", qrel.DocID)
+			}
+			if fallback {
+				positiveFallbacks++
+			}
+			negatives, negativeFallback := chooseNegatives(queryText, allChunks, posDocs[qrel.QueryID], negativesPerRow, df, totalChunks, avgWords)
+			if len(negatives) == 0 {
+				return nil, 0, 0, fmt.Errorf("query %s has no negative chunks", qrel.QueryID)
+			}
+			if negativeFallback {
+				negativeFallbackRows++
+			}
+			rows = append(rows, hardNegativeRow{
+				Source:    fmt.Sprintf("repo-docs-span:%s:%s:%s:%s", split, qrel.QueryID, qrel.DocID, positiveChunk.ID),
+				Query:     queryText,
+				Positive:  positiveChunk.Text,
+				Negatives: negatives,
+			})
+		}
+	}
+	return rows, positiveFallbacks, negativeFallbackRows, nil
+}
+
+func uniqueQueryCount(rows []qrelRow) int {
+	seen := map[string]bool{}
+	for _, row := range rows {
+		seen[row.QueryID] = true
+	}
+	return len(seen)
+}
+
+func writeManifest(path string, manifest builderManifest) error {
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+func defaultRunID() string {
+	return "eos-repo-docs-span-alignment-data-v1-" + time.Now().UTC().Format("20060102T150405Z")
+}
+
+func main() {
+	root, err := findRoot()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	inputDir := resolvePath(root, getenv("EOS_REPO_DOCS_SPAN_INPUT", filepath.Join("datasets", "longembed", "repo-docs")))
+	runID := getenv("EOS_REPO_DOCS_SPAN_RUN_ID", defaultRunID())
+	defaultOut := filepath.Join(root, "runs", runID, "data", "repo-docs-span")
+	outDir := resolvePath(root, getenv("EOS_REPO_DOCS_SPAN_OUT", defaultOut))
+	seed := getenv("EOS_REPO_DOCS_SPAN_SEED", "eos-repo-docs-span-alignment-data-v1")
+	trainRatio, devRatio, testRatio := parseRatios(getenv("EOS_REPO_DOCS_SPAN_SPLIT_RATIOS", "60,20,20"))
+	trainSplits := splitList(getenv("EOS_REPO_DOCS_SPAN_TRAIN_SPLITS", "train"))
+	if len(trainSplits) == 0 {
+		trainSplits = []string{"train"}
+	}
+	negativesPerRow := parseIntEnv("EOS_REPO_DOCS_SPAN_NEGATIVES", 4)
+	chunkWords := parseIntEnv("EOS_REPO_DOCS_SPAN_CHUNK_WORDS", 384)
+	chunkOverlap := parseIntEnv("EOS_REPO_DOCS_SPAN_CHUNK_OVERLAP", 64)
+	chunkMinWords := parseIntEnv("EOS_REPO_DOCS_SPAN_CHUNK_MIN_WORDS", 64)
+
+	corpusPath := filepath.Join(inputDir, "corpus.jsonl")
+	queriesPath := filepath.Join(inputDir, "queries.jsonl")
+	qrelsPath := filepath.Join(inputDir, "qrels", "test.tsv")
+	corpus, err := readJSONL[corpusRow](corpusPath)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	queries, err := readJSONL[queryRow](queriesPath)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	qrels, err := readQrels(qrelsPath)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	if len(corpus) == 0 || len(queries) == 0 {
+		fmt.Println("input corpus and queries must be non-empty")
+		os.Exit(1)
+	}
+	allChunks, chunksByDoc := buildChunks(corpus, chunkWords, chunkOverlap, chunkMinWords)
+	if len(allChunks) == 0 {
+		fmt.Println("chunking produced no chunks")
+		os.Exit(1)
+	}
+	splits := splitQrels(qrels, seed, trainRatio, devRatio, testRatio)
+	hardRows, positiveFallbacks, negativeFallbackRows, err := buildHardNegatives(splits, trainSplits, queryMap(queries), chunksByDoc, allChunks, negativesPerRow)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(filepath.Join(outDir, "qrels"), 0o755); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	outCorpus := filepath.Join(outDir, "corpus.jsonl")
+	outQueries := filepath.Join(outDir, "queries.jsonl")
+	outTrainQrels := filepath.Join(outDir, "qrels", "train.tsv")
+	outDevQrels := filepath.Join(outDir, "qrels", "dev.tsv")
+	outTestQrels := filepath.Join(outDir, "qrels", "test.tsv")
+	outHardNegatives := filepath.Join(outDir, "train-hard-negatives.jsonl")
+	outManifest := filepath.Join(outDir, "span-alignment-manifest.json")
+	if err := copyFile(corpusPath, outCorpus); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	if err := copyFile(queriesPath, outQueries); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	if err := writeQrels(outTrainQrels, splits["train"]); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	if err := writeQrels(outDevQrels, splits["dev"]); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	if err := writeQrels(outTestQrels, splits["test"]); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	if err := writeJSONL(outHardNegatives, hardRows); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	hashes := outputHashes{}
+	hashes.Corpus, _ = sha256File(outCorpus)
+	hashes.Queries, _ = sha256File(outQueries)
+	hashes.TrainQrels, _ = sha256File(outTrainQrels)
+	hashes.DevQrels, _ = sha256File(outDevQrels)
+	hashes.TestQrels, _ = sha256File(outTestQrels)
+	hashes.TrainHardNegs, _ = sha256File(outHardNegatives)
+	splitCountsMap := map[string]splitCounts{}
+	for _, split := range []string{"train", "dev", "test"} {
+		rows := splits[split]
+		splitCountsMap[split] = splitCounts{Queries: uniqueQueryCount(rows), Qrels: len(rows)}
+	}
+	trainSplitSet := map[string]bool{}
+	for _, split := range trainSplits {
+		trainSplitSet[split] = true
+	}
+	for split, counts := range splitCountsMap {
+		if trainSplitSet[split] {
+			for _, row := range hardRows {
+				if strings.HasPrefix(row.Source, "repo-docs-span:"+split+":") {
+					counts.Rows++
+				}
+			}
+			splitCountsMap[split] = counts
+		}
+	}
+	manifest := builderManifest{
+		Schema:      "eos.repo_docs_span_alignment_dataset.v1",
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		RepoRoot:    root,
+		InputDir:    inputDir,
+		OutputDir:   outDir,
+		Inputs: map[string]string{
+			"corpus_jsonl": corpusPath,
+			"queries_jsonl": queriesPath,
+			"qrels_source_tsv": qrelsPath,
+		},
+		Outputs: map[string]string{
+			"corpus_jsonl": outCorpus,
+			"queries_jsonl": outQueries,
+			"qrels_train_tsv": outTrainQrels,
+			"qrels_dev_tsv": outDevQrels,
+			"qrels_test_tsv": outTestQrels,
+			"train_hard_negatives_jsonl": outHardNegatives,
+			"manifest_json": outManifest,
+		},
+		OutputSHA256: hashes,
+		HashSeed:    seed,
+		SplitRatios: map[string]int{"train": trainRatio, "dev": devRatio, "test": testRatio},
+		SplitCounts: splitCountsMap,
+		TrainSplits: trainSplits,
+		ChunkConfig: map[string]int{
+			"chunk_words": chunkWords,
+			"chunk_overlap": chunkOverlap,
+			"chunk_min_words": chunkMinWords,
+			"negatives_per_row": negativesPerRow,
+		},
+		Counts: map[string]int{
+			"input_documents": len(corpus),
+			"input_queries": len(queries),
+			"input_qrels": len(qrels),
+			"chunks": len(allChunks),
+			"hard_negative_rows": len(hardRows),
+			"positive_chunks": len(hardRows),
+			"negative_chunks": len(hardRows) * negativesPerRow,
+		},
+		PositiveFallbacks:    positiveFallbacks,
+		NegativeFallbackRows: negativeFallbackRows,
+		Caveats: []string{
+			"Source qrels are deterministic local repo-doc heuristics, not human benchmark labels.",
+			"Training rows are built only from configured non-test train_splits; default is train only.",
+			"Positive and negative texts are child-vector chunks, not full parent documents.",
+		},
+	}
+	if err := writeManifest(outManifest, manifest); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	fmt.Println("wrote " + outDir)
+	fmt.Printf("splits train=%d dev=%d test=%d qrels\n", len(splits["train"]), len(splits["dev"]), len(splits["test"]))
+	fmt.Printf("chunks=%d hard_negative_rows=%d positive_fallbacks=%d negative_fallback_rows=%d\n", len(allChunks), len(hardRows), positiveFallbacks, negativeFallbackRows)
+	fmt.Println("train_hard_negatives=" + outHardNegatives)
+	fmt.Println("manifest=" + outManifest)
+}
