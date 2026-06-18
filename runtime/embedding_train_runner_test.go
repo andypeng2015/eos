@@ -1122,6 +1122,25 @@ func TestEmbeddingTrainerFitContrastiveEvalOnlyDoesNotTrain(t *testing.T) {
 	}
 }
 
+func TestEmbeddingTrainerFitContrastiveEvalOnlySkipsInheritedTurboQuantRankMargin(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	trainer.config.TurboQuantRankMarginObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 2, Weight: 0.25}}
+	trainer.config.TurboQuantRankMargin = 0.02
+	trainer.config.TurboQuantPrefixSeed = 7
+	trainer.config.TurboQuantPrefixScoreMode = TurboQuantPrefixScoreModePreparedIP
+
+	summary, err := trainer.FitContrastive(nil, tinyEmbeddingContrastiveDataset(), EmbeddingTrainRunConfig{EvalOnly: true})
+	if err != nil {
+		t.Fatalf("fit contrastive eval-only with inherited rank-margin config: %v", err)
+	}
+	if len(summary.Config.TurboQuantRankMarginObjectives) != 0 {
+		t.Fatalf("summary inherited rank-margin objectives during eval-only: %+v", summary.Config.TurboQuantRankMarginObjectives)
+	}
+	if summary.Config.TurboQuantRankMargin != 0 {
+		t.Fatalf("summary rank-margin = %f, want 0 for eval-only", summary.Config.TurboQuantRankMargin)
+	}
+}
+
 func TestEmbeddingTrainerFitContrastiveEvaluatesWithinEpoch(t *testing.T) {
 	trainer := newTinyTrainableEmbeddingTrainer(t, 0.05)
 	trainSet := tinyEmbeddingContrastiveDataset()

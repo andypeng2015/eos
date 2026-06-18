@@ -2109,7 +2109,7 @@ func (t *EmbeddingTrainer) syncTrainRunObjectiveConfig(cfg EmbeddingTrainRunConf
 			cfg.TurboQuantPrefixSeed = 0
 			cfg.TurboQuantPrefixScoreMode = ""
 		}
-	} else if len(cfg.TurboQuantRankMarginObjectives) == 0 && len(t.config.TurboQuantRankMarginObjectives) > 0 {
+	} else if !cfg.EvalOnly && len(cfg.TurboQuantRankMarginObjectives) == 0 && len(t.config.TurboQuantRankMarginObjectives) > 0 {
 		cfg.TurboQuantRankMarginObjectives = append([]TurboQuantPrefixObjective(nil), t.config.TurboQuantRankMarginObjectives...)
 		cfg.TurboQuantRankMargin = t.config.TurboQuantRankMargin
 		cfg.TurboQuantPrefixSeed = t.config.TurboQuantPrefixSeed

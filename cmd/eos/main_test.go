@@ -3149,6 +3149,67 @@ func TestRunTrainEmbedAcceptsTurboQuantRankMarginObjectives(t *testing.T) {
 	}
 }
 
+func TestRunTrainEmbedEvalOnlyAllowsInheritedTurboQuantRankMarginCheckpoint(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	dir := t.TempDir()
+	trainPath := filepath.Join(dir, "hard-train.jsonl")
+	evalPath := filepath.Join(dir, "eval.jsonl")
+	trainMetricsPath := filepath.Join(dir, "train.metrics.json")
+	evalMetricsPath := filepath.Join(dir, "eval.metrics.json")
+	trainExamples := []eosruntime.EmbeddingHardNegativeExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}, NegativeTokens: [][]int32{{2, 3}}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}, NegativeMasks: [][]int32{{1, 1}}, TeacherScores: []float32{1, 0}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}, NegativeTokens: [][]int32{{1, 2}}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}, NegativeMasks: [][]int32{{1, 1}}, TeacherScores: []float32{1, 0}},
+	}
+	if err := eosruntime.WriteEmbeddingHardNegativeExamplesFile(trainPath, trainExamples); err != nil {
+		t.Fatalf("write train dataset: %v", err)
+	}
+	evalExamples := []eosruntime.EmbeddingPairExample{
+		{LeftTokens: []int32{1, 2}, RightTokens: []int32{1, 2}, Target: 1},
+		{LeftTokens: []int32{1, 2}, RightTokens: []int32{2, 3}, Target: -1},
+	}
+	if err := eosruntime.WriteEmbeddingPairExamplesFile(evalPath, evalExamples); err != nil {
+		t.Fatalf("write eval dataset: %v", err)
+	}
+	if err := run([]string{"train-embed", "--hard-negative-train", "--epochs", "1", "--batch-size", "2", "--contrastive-loss", "grouped_infonce", "--matryoshka-dims", "2", "--turboquant-rank-margin-objectives", "2:2=0.25", "--turboquant-prefix-score-mode", "prepared-ip", "--metrics-json", trainMetricsPath, path, trainPath}); err != nil {
+		t.Fatalf("run train-embed turboquant rank-margin objectives: %v", err)
+	}
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(eosruntime.DefaultEmbeddingCheckpointPath(path))
+	if err != nil {
+		t.Fatalf("read trained checkpoint: %v", err)
+	}
+	if len(checkpoint.Config.TurboQuantRankMarginObjectives) == 0 {
+		t.Fatal("trained checkpoint missing rank-margin objectives")
+	}
+
+	if err := run([]string{"train-embed", "--eval-only", "--metrics-json", evalMetricsPath, path, evalPath}); err != nil {
+		t.Fatalf("run eval-only with inherited rank-margin checkpoint: %v", err)
+	}
+	data, err := os.ReadFile(evalMetricsPath)
+	if err != nil {
+		t.Fatalf("read eval metrics: %v", err)
+	}
+	var metrics trainMetricsJSON
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		t.Fatalf("unmarshal eval metrics: %v", err)
+	}
+	if len(metrics.Config.TurboQuantRankMarginObjectives) != 0 {
+		t.Fatalf("eval-only metrics inherited rank-margin objectives: %+v", metrics.Config.TurboQuantRankMarginObjectives)
+	}
+	if metrics.Config.TurboQuantRankMargin != 0 {
+		t.Fatalf("eval-only rank margin = %f, want 0", metrics.Config.TurboQuantRankMargin)
+	}
+	checkpoint, err = eosruntime.ReadEmbeddingTrainCheckpointFile(eosruntime.DefaultEmbeddingCheckpointPath(path))
+	if err != nil {
+		t.Fatalf("read checkpoint after eval-only: %v", err)
+	}
+	if got := checkpoint.Config.TurboQuantRankMarginObjectives; len(got) != 1 || got[0].Dim != 2 || got[0].BitWidth != 2 || got[0].Weight != 0.25 {
+		t.Fatalf("checkpoint rank-margin objectives after eval-only = %+v", got)
+	}
+}
+
 func TestRunTrainEmbedRejectsTurboQuantRankMarginWithoutHardNegativeTrain(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
