@@ -198,8 +198,8 @@ func TestSparseRoutingCalibrationMultiprobeRowsAndScoreFractions(t *testing.T) {
 		t.Fatalf("tsv lines = %d, want header plus 10 rows", len(lines))
 	}
 	header := strings.Split(lines[0], "\t")
-	if len(header) < 2 || header[0] != "route_mode" || header[1] != "route_probes" {
-		t.Fatalf("tsv header prefix = %v, want route_mode route_probes", header[:2])
+	if len(header) < 3 || header[0] != "seed" || header[1] != "route_mode" || header[2] != "route_probes" {
+		t.Fatalf("tsv header prefix = %v, want seed route_mode route_probes", header[:3])
 	}
 	headerCols := len(header)
 	for i, line := range lines[1:] {
@@ -367,6 +367,72 @@ func TestSparseRoutingCalibrationMaxNormAndBlendRowsAndBehavior(t *testing.T) {
 	}
 	if _, ok := blendSet[3]; !ok {
 		t.Fatalf("summary_blend_radius alpha=1 missed maxnorm block: candidates=%v", blendSet)
+	}
+}
+
+func TestSparseRoutingCalibrationLearnedBlockLinearRowsAndAccounting(t *testing.T) {
+	runRoot := t.TempDir()
+	if err := runCalibrateSparseRouting([]string{
+		"-run-root", runRoot,
+		"-seq-len", "128",
+		"-query-len", "2",
+		"-dim", "8",
+		"-top-k", "4",
+		"-route-block-size", "16",
+		"-route-top-blocks", "1,2",
+		"-route-modes", "learned_block_linear,oracle_block_max",
+		"-learned-router-train-seeds", "101,202",
+		"-learned-router-eval-seeds", "101,303",
+		"-learned-router-steps", "2",
+		"-learned-router-lr", "0.01",
+		"-learned-router-l2", "0.001",
+		"-max-score-fraction", "1.2",
+		"-min-exact-topk-recall", "0",
+		"-min-output-cosine", "-1",
+	}); err != nil {
+		t.Fatalf("run calibration: %v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(runRoot, "eos-sparse-routing-calibration-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("run dirs = %v, want one", matches)
+	}
+	report := readSparseRoutingCalibrationReport(t, matches[0])
+	if report.LearnedRouter == nil {
+		t.Fatal("missing learned router model in report")
+	}
+	if report.LearnedRouter.TrainExamples == 0 || report.LearnedRouter.TrainPositives == 0 {
+		t.Fatalf("learned router training counts = %+v, want nonzero examples and positives", report.LearnedRouter)
+	}
+	if got, want := joinInt64s(report.Config.LearnedRouterTrainSeeds), "101,202"; got != want {
+		t.Fatalf("train seeds = %s, want %s", got, want)
+	}
+	if got, want := joinInt64s(report.Config.LearnedRouterEvalSeeds), "101,303"; got != want {
+		t.Fatalf("eval seeds = %s, want %s", got, want)
+	}
+	if len(report.Rows) != 8 {
+		t.Fatalf("rows len=%d, want 8", len(report.Rows))
+	}
+	seenSeeds := map[int64]bool{}
+	for _, row := range report.Rows {
+		seenSeeds[row.Seed] = true
+		if row.RouteMode != "learned_block_linear" {
+			continue
+		}
+		if row.TeacherOnly || row.OraclePolicy || row.TeacherScoreCountPerQuery != 0 {
+			t.Fatalf("learned eval row has teacher/oracle labels: %+v", row)
+		}
+		if row.RoutedAnchorScoresPerQuery != row.RouteBlockCount {
+			t.Fatalf("learned route scores = %d, want fused one-dot-per-block accounting %d", row.RoutedAnchorScoresPerQuery, row.RouteBlockCount)
+		}
+		if row.EstimatedScoreCountPerQuery != row.RouteBlockCount+row.CandidateKeyBudget {
+			t.Fatalf("learned estimated score count = %d, want %d + %d", row.EstimatedScoreCountPerQuery, row.RouteBlockCount, row.CandidateKeyBudget)
+		}
+	}
+	if !seenSeeds[101] || !seenSeeds[303] {
+		t.Fatalf("seen eval seeds = %v, want 101 and 303", seenSeeds)
 	}
 }
 
@@ -579,6 +645,14 @@ func joinFloats(values []float64) string {
 	parts := make([]string, 0, len(values))
 	for _, value := range values {
 		parts = append(parts, formatParityFloat(value))
+	}
+	return strings.Join(parts, ",")
+}
+
+func joinInt64s(values []int64) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, strconv.FormatInt(value, 10))
 	}
 	return strings.Join(parts, ",")
 }

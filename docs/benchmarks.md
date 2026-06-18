@@ -39,17 +39,19 @@ go run ./cmd/eos calibrate-sparse-routing \
   --top-k 64 \
   --route-block-size 10 \
   --route-top-blocks 35,36,37,38,39,40 \
-  --route-modes anchor,multiprobe,summary_mean,summary_mean_radius,summary_maxnorm,summary_blend_radius,oracle_block_max \
+  --route-modes anchor,multiprobe,summary_mean,summary_mean_radius,summary_maxnorm,summary_blend_radius,learned_block_linear,oracle_block_max \
   --route-probes 1,2,4,8 \
   --route-summary-alphas 0,0.25,0.5,0.75,1 \
   --route-radius-weights -0.25,0,0.25,0.5 \
+  --learned-router-train-seeds 5581486560434873699 \
+  --learned-router-eval-seeds 5581486560434873699,5581486560434873700 \
   --max-score-fraction 0.2 \
   --min-exact-topk-recall 0.95 \
   --min-exact-topk-recall-min 0.95 \
   --min-output-cosine 0.98
 ```
 
-The command writes `calibration.json` and `calibration.tsv` under the run directory. Use `--route-modes` to compare deployable heuristics with teacher-only `oracle_block_max`; `summary_mean_radius` uses a deployable block mean plus scalar radius upper bound, `summary_maxnorm` scores the largest-L2-norm key representative in each block, and `summary_blend_radius` scores `mean + alpha*(maxnorm_rep-mean)` plus `beta*||query||_2*radius` using `--route-summary-alphas` and `--route-radius-weights`. Treat the output as routing calibration evidence only: it does not prove downstream retrieval quality or learned selector feasibility.
+The command writes `calibration.json` and `calibration.tsv` under the run directory. Use `--route-modes` to compare deployable heuristics with teacher-only `oracle_block_max`; `summary_mean_radius` uses a deployable block mean plus scalar radius upper bound, `summary_maxnorm` scores the largest-L2-norm key representative in each block, and `summary_blend_radius` scores `mean + alpha*(maxnorm_rep-mean)` plus `beta*||query||_2*radius` using `--route-summary-alphas` and `--route-radius-weights`. `learned_block_linear` is a calibration-only learned-summary candidate: it fits a tiny deterministic logistic linear scorer from `oracle_block_max` top-block labels on synthetic training seeds, then evaluates from learned weights and cheap per-block features only. Its route score accounting uses a fused learned representative dot per block plus scalar features and records teacher score work separately from evaluation score work. Treat the output as routing calibration evidence only: it does not prove downstream retrieval quality or runtime selector feasibility.
 
 Run the default-model training smoke from a local asset package:
 
