@@ -115,6 +115,27 @@ func TestRunSmokeSparseEmbeddingEncoderWritesArtifacts(t *testing.T) {
 	if manifest.Runtime.AttentionMetadata["routing"] != "block_anchor" {
 		t.Fatalf("routing metadata = %v, want block_anchor", manifest.Runtime.AttentionMetadata["routing"])
 	}
+	if manifest.Parity.Status != "pass" || !manifest.Parity.StrictGate {
+		t.Fatalf("parity status=%q strict_gate=%v", manifest.Parity.Status, manifest.Parity.StrictGate)
+	}
+	if !manifest.Parity.BackendVsHostTurboQuant.Passed {
+		t.Fatalf("backend parity = %+v, want pass", manifest.Parity.BackendVsHostTurboQuant)
+	}
+	if manifest.Parity.BackendVsHostTurboQuant.MaxAbsError != 0 || manifest.Parity.BackendVsHostTurboQuant.MSE != 0 {
+		t.Fatalf("host backend parity = %+v, want exact self-match", manifest.Parity.BackendVsHostTurboQuant)
+	}
+	if manifest.Parity.BackendVsHostTurboQuant.CosineSimilarity < 0.999999 {
+		t.Fatalf("host backend parity cosine = %.9g, want near 1", manifest.Parity.BackendVsHostTurboQuant.CosineSimilarity)
+	}
+	if manifest.Parity.BackendVsHostTurboQuant.ActualSHA256 == "" || manifest.Parity.BackendVsHostTurboQuant.ExpectedSHA256 == "" {
+		t.Fatalf("backend parity hashes = %+v, want populated", manifest.Parity.BackendVsHostTurboQuant)
+	}
+	if manifest.Parity.Diagnostics.Status != "computed" {
+		t.Fatalf("parity diagnostics status = %q, want computed", manifest.Parity.Diagnostics.Status)
+	}
+	if manifest.Parity.Diagnostics.DenseFullSHA256 == "" || manifest.Parity.Diagnostics.ExactSparseSHA256 == "" || manifest.Parity.Diagnostics.RoutedSparseDenseSHA256 == "" || manifest.Parity.Diagnostics.TurboQuantRoutedHostSHA256 == "" {
+		t.Fatalf("parity diagnostic hashes missing: %+v", manifest.Parity.Diagnostics)
+	}
 	summary, err := os.ReadFile(filepath.Join(matches[0], "summary.tsv"))
 	if err != nil {
 		t.Fatalf("read summary: %v", err)
@@ -125,5 +146,20 @@ func TestRunSmokeSparseEmbeddingEncoderWritesArtifacts(t *testing.T) {
 	}
 	if got, want := len(strings.Split(lines[0], "\t")), len(strings.Split(lines[1], "\t")); got != want {
 		t.Fatalf("summary columns header=%d row=%d", got, want)
+	}
+	header := strings.Split(lines[0], "\t")
+	row := strings.Split(lines[1], "\t")
+	summaryValues := map[string]string{}
+	for i, name := range header {
+		summaryValues[name] = row[i]
+	}
+	if summaryValues["parity_status"] != "pass" || summaryValues["parity_backend_vs_host_passed"] != "true" {
+		t.Fatalf("summary parity status=%q pass=%q", summaryValues["parity_status"], summaryValues["parity_backend_vs_host_passed"])
+	}
+	if summaryValues["parity_backend_vs_host_max_abs_error"] != "0" || summaryValues["parity_backend_vs_host_mse"] != "0" {
+		t.Fatalf("summary backend parity errors max=%q mse=%q", summaryValues["parity_backend_vs_host_max_abs_error"], summaryValues["parity_backend_vs_host_mse"])
+	}
+	if summaryValues["parity_diagnostics_status"] != "computed" {
+		t.Fatalf("summary diagnostics status=%q, want computed", summaryValues["parity_diagnostics_status"])
 	}
 }

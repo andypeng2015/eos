@@ -36,6 +36,7 @@ type sparseEmbeddingSmokeConfig struct {
 	PreflightKeyLens []int   `json:"preflight_key_lens"`
 	MaxScoreFraction float64 `json:"max_score_fraction"`
 	MaxTurboKVMiB    float64 `json:"max_turbo_kv_mib"`
+	MaxParitySeqLen  int     `json:"max_parity_seq_len"`
 	RequireSubq      bool    `json:"require_subquadratic"`
 }
 
@@ -45,6 +46,7 @@ type sparseEmbeddingSmokeManifest struct {
 	Config                  sparseEmbeddingSmokeConfig `json:"config"`
 	Preflight               sparseAttentionPlanReport  `json:"preflight"`
 	Runtime                 sparseEmbeddingRuntime     `json:"runtime"`
+	Parity                  sparseEmbeddingParity      `json:"parity"`
 	Embedding               sparseEmbeddingVector      `json:"embedding"`
 	Artifacts               map[string]string          `json:"artifacts"`
 	ThirtyTwoKPreflight     sparseEmbedding32KStatus   `json:"thirty_two_k_preflight"`
@@ -76,6 +78,40 @@ type sparseEmbeddingRuntime struct {
 	TurboQuantValueCoordShape []int          `json:"turboquant_value_coord_shape"`
 	TurboQuantKeyNormShape    []int          `json:"turboquant_key_norm_shape"`
 	TurboQuantValueNormShape  []int          `json:"turboquant_value_norm_shape"`
+}
+
+type sparseEmbeddingParity struct {
+	Status                    string                       `json:"status"`
+	StrictGate                bool                         `json:"strict_gate"`
+	MaxAbsErrorTolerance      float64                      `json:"max_abs_error_tolerance"`
+	MSETolerance              float64                      `json:"mse_tolerance"`
+	CosineSimilarityTolerance float64                      `json:"cosine_similarity_tolerance"`
+	BackendVsHostTurboQuant   sparseEmbeddingParityCompare `json:"backend_vs_host_turboquant"`
+	Diagnostics               sparseEmbeddingParityDiag    `json:"diagnostics"`
+}
+
+type sparseEmbeddingParityDiag struct {
+	Status                         string                       `json:"status"`
+	SkippedReason                  string                       `json:"skipped_reason,omitempty"`
+	DenseFullVsExactSparse         sparseEmbeddingParityCompare `json:"dense_full_vs_exact_sparse"`
+	ExactSparseVsRoutedSparse      sparseEmbeddingParityCompare `json:"exact_sparse_vs_routed_sparse"`
+	RoutedDenseVsTurboQuantRouted  sparseEmbeddingParityCompare `json:"routed_dense_vs_turboquant_routed"`
+	DenseFullSHA256                string                       `json:"dense_full_sha256,omitempty"`
+	ExactSparseSHA256              string                       `json:"exact_sparse_sha256,omitempty"`
+	RoutedSparseDenseSHA256        string                       `json:"routed_sparse_dense_sha256,omitempty"`
+	TurboQuantRoutedHostSHA256     string                       `json:"turboquant_routed_host_sha256,omitempty"`
+	DenseDiagnosticRuntimeSeqLen   int                          `json:"dense_diagnostic_runtime_seq_len,omitempty"`
+	DenseDiagnosticMaxParitySeqLen int                          `json:"dense_diagnostic_max_parity_seq_len,omitempty"`
+}
+
+type sparseEmbeddingParityCompare struct {
+	Status           string  `json:"status"`
+	Passed           bool    `json:"passed"`
+	MaxAbsError      float64 `json:"max_abs_error"`
+	MSE              float64 `json:"mse"`
+	CosineSimilarity float64 `json:"cosine_similarity"`
+	ActualSHA256     string  `json:"actual_sha256"`
+	ExpectedSHA256   string  `json:"expected_sha256"`
 }
 
 type sparseEmbeddingVector struct {
@@ -171,6 +207,7 @@ func parseSparseEmbeddingSmokeConfig(args []string) (sparseEmbeddingSmokeConfig,
 	preflightRaw := fs.String("preflight-key-lens", smokeEnvString("EOS_SPARSE_EMBED_SMOKE_PREFLIGHT_KEY_LENS", "4096,8192,16384,32768"), "comma-separated sparse-attention preflight key lengths")
 	maxScoreFraction := fs.Float64("max-score-fraction", smokeEnvFloat("EOS_SPARSE_EMBED_SMOKE_MAX_SCORE_FRACTION", 0.2), "fail when preflight score fraction exceeds this value")
 	maxTurboKVMiB := fs.Float64("max-turbo-kv-mib", smokeEnvFloat("EOS_SPARSE_EMBED_SMOKE_MAX_TURBO_KV_MIB", 512), "fail when preflight TurboQuant K/V MiB exceeds this value")
+	maxParitySeqLen := fs.Int("max-parity-seq-len", smokeEnvInt("EOS_SPARSE_EMBED_SMOKE_MAX_PARITY_SEQ_LEN", 4096), "maximum runtime sequence length for dense parity diagnostics; 0 disables dense diagnostics")
 	requireSubq := fs.Bool("require-subquadratic", smokeEnvBool("EOS_SPARSE_EMBED_SMOKE_REQUIRE_SUBQUADRATIC", true), "require preflight rows to reduce score work versus dense scoring")
 	if err := fs.Parse(args); err != nil {
 		return sparseEmbeddingSmokeConfig{}, err
@@ -201,6 +238,7 @@ func parseSparseEmbeddingSmokeConfig(args []string) (sparseEmbeddingSmokeConfig,
 		PreflightKeyLens: keyLens,
 		MaxScoreFraction: *maxScoreFraction,
 		MaxTurboKVMiB:    *maxTurboKVMiB,
+		MaxParitySeqLen:  *maxParitySeqLen,
 		RequireSubq:      *requireSubq,
 	}
 	if cfg.ValueDim == 0 {
@@ -231,6 +269,9 @@ func parseSparseEmbeddingSmokeConfig(args []string) (sparseEmbeddingSmokeConfig,
 	}
 	if cfg.MaxScoreFraction <= 0 || cfg.MaxTurboKVMiB < 0 {
 		return sparseEmbeddingSmokeConfig{}, fmt.Errorf("max-score-fraction must be positive and max-turbo-kv-mib non-negative")
+	}
+	if cfg.MaxParitySeqLen < 0 {
+		return sparseEmbeddingSmokeConfig{}, fmt.Errorf("max-parity-seq-len must be non-negative")
 	}
 	return cfg, nil
 }
@@ -331,6 +372,8 @@ func executeSparseEmbeddingSmoke(cfg sparseEmbeddingSmokeConfig, preflight spars
 	query := backend.NewTensorF16([]int{cfg.QueryLen, cfg.Dim}, syntheticQuery(cfg.QueryLen, cfg.Dim, cfg.Seed))
 	key := backend.NewTensorF16([]int{1, cfg.Dim, cfg.RuntimeSeqLen, 1}, syntheticNCHW(1, cfg.Dim, cfg.RuntimeSeqLen, cfg.Seed, 17))
 	value := backend.NewTensorF16([]int{1, cfg.ValueDim, cfg.RuntimeSeqLen, 1}, syntheticNCHW(1, cfg.ValueDim, cfg.RuntimeSeqLen, cfg.Seed, 53))
+	keySeq := nchwSmokeAttentionSequence(key)
+	valueSeq := nchwSmokeAttentionSequence(value)
 	keyCoords, keyNorms, err := backend.TurboQuantEncodeReference(key, attrs)
 	if err != nil {
 		return sparseEmbeddingSmokeManifest{}, fmt.Errorf("turboquant encode key: %w", err)
@@ -371,6 +414,16 @@ func executeSparseEmbeddingSmoke(cfg sparseEmbeddingSmokeConfig, preflight spars
 	if out == nil {
 		return sparseEmbeddingSmokeManifest{}, fmt.Errorf("sparse embedding smoke produced no output tensor")
 	}
+	parity, err := evaluateSparseEmbeddingParity(cfg, out, query, keySeq, valueSeq, keyCoords, keyNorms, valueCoords, valueNorms, attrs, plan)
+	if err != nil {
+		return sparseEmbeddingSmokeManifest{}, err
+	}
+	if !parity.StrictGate {
+		return sparseEmbeddingSmokeManifest{}, fmt.Errorf("sparse embedding backend parity failed: max_abs_error=%.9g mse=%.9g cosine_similarity=%.9g",
+			parity.BackendVsHostTurboQuant.MaxAbsError,
+			parity.BackendVsHostTurboQuant.MSE,
+			parity.BackendVsHostTurboQuant.CosineSimilarity)
+	}
 	runtimeMeta.OutputShape = append([]int(nil), out.Shape...)
 	runtimeMeta.TurboQuantKeyCoordShape = append([]int(nil), keyCoords.Shape...)
 	runtimeMeta.TurboQuantValueCoordShape = append([]int(nil), valueCoords.Shape...)
@@ -403,6 +456,7 @@ func executeSparseEmbeddingSmoke(cfg sparseEmbeddingSmokeConfig, preflight spars
 		Config:      cfg,
 		Preflight:   preflight,
 		Runtime:     runtimeMeta,
+		Parity:      parity,
 		Embedding: sparseEmbeddingVector{
 			Dimension: len(embedding),
 			L2Norm:    vectorNorm(embedding),
@@ -413,6 +467,167 @@ func executeSparseEmbeddingSmoke(cfg sparseEmbeddingSmokeConfig, preflight spars
 		ThirtyTwoKPreflight:     status32k,
 		ThirtyTwoKPreflightOnly: cfg.RuntimeSeqLen < 32768,
 	}, nil
+}
+
+func evaluateSparseEmbeddingParity(cfg sparseEmbeddingSmokeConfig, backendOut, query, keySeq, valueSeq, keyCoords, keyNorms, valueCoords, valueNorms *backend.Tensor, attrs map[string]string, plan backend.SparseAttentionPlan) (sparseEmbeddingParity, error) {
+	const (
+		maxAbsTol = 1e-4
+		mseTol    = 1e-8
+		cosTol    = 0.999999
+	)
+	hostTurbo, err := backend.TurboSparseAttentionReference(query, keyCoords, keyNorms, valueCoords, valueNorms, attrs)
+	if err != nil {
+		return sparseEmbeddingParity{}, fmt.Errorf("host turboquant parity reference: %w", err)
+	}
+	backendVsHost := compareSparseEmbeddingTensors(backendOut, hostTurbo)
+	backendVsHost.Passed = backendVsHost.MaxAbsError <= maxAbsTol && backendVsHost.MSE <= mseTol && backendVsHost.CosineSimilarity >= cosTol
+	backendVsHost.Status = passFail(backendVsHost.Passed)
+
+	parity := sparseEmbeddingParity{
+		Status:                    backendVsHost.Status,
+		StrictGate:                backendVsHost.Passed,
+		MaxAbsErrorTolerance:      maxAbsTol,
+		MSETolerance:              mseTol,
+		CosineSimilarityTolerance: cosTol,
+		BackendVsHostTurboQuant:   backendVsHost,
+		Diagnostics: sparseEmbeddingParityDiag{
+			Status:                         "skipped",
+			DenseDiagnosticRuntimeSeqLen:   cfg.RuntimeSeqLen,
+			DenseDiagnosticMaxParitySeqLen: cfg.MaxParitySeqLen,
+		},
+	}
+	if cfg.MaxParitySeqLen == 0 {
+		parity.Diagnostics.SkippedReason = "disabled_by_max_parity_seq_len"
+		return parity, nil
+	}
+	if cfg.RuntimeSeqLen > cfg.MaxParitySeqLen {
+		parity.Diagnostics.SkippedReason = fmt.Sprintf("runtime_seq_len %d exceeds max_parity_seq_len %d", cfg.RuntimeSeqLen, cfg.MaxParitySeqLen)
+		return parity, nil
+	}
+
+	denseFullAttrs := cloneStringMap(attrs)
+	denseFullAttrs["top_k"] = strconv.Itoa(cfg.RuntimeSeqLen)
+	delete(denseFullAttrs, "route_block_size")
+	delete(denseFullAttrs, "route_top_blocks")
+	denseFull, err := backend.SparseAttentionReference(query, keySeq, valueSeq, denseFullAttrs)
+	if err != nil {
+		return sparseEmbeddingParity{}, fmt.Errorf("dense full parity reference: %w", err)
+	}
+
+	exactSparseAttrs := cloneStringMap(attrs)
+	exactSparseAttrs["top_k"] = strconv.Itoa(plan.TopK)
+	delete(exactSparseAttrs, "route_block_size")
+	delete(exactSparseAttrs, "route_top_blocks")
+	exactSparse, err := backend.SparseAttentionReference(query, keySeq, valueSeq, exactSparseAttrs)
+	if err != nil {
+		return sparseEmbeddingParity{}, fmt.Errorf("exact sparse parity reference: %w", err)
+	}
+
+	routedSparse, err := backend.SparseAttentionReference(query, keySeq, valueSeq, attrs)
+	if err != nil {
+		return sparseEmbeddingParity{}, fmt.Errorf("routed sparse parity reference: %w", err)
+	}
+
+	parity.Diagnostics.Status = "computed"
+	parity.Diagnostics.SkippedReason = ""
+	parity.Diagnostics.DenseFullVsExactSparse = diagnosticSparseEmbeddingCompare(denseFull, exactSparse)
+	parity.Diagnostics.ExactSparseVsRoutedSparse = diagnosticSparseEmbeddingCompare(exactSparse, routedSparse)
+	parity.Diagnostics.RoutedDenseVsTurboQuantRouted = diagnosticSparseEmbeddingCompare(routedSparse, hostTurbo)
+	parity.Diagnostics.DenseFullSHA256 = tensorSHA256(denseFull)
+	parity.Diagnostics.ExactSparseSHA256 = tensorSHA256(exactSparse)
+	parity.Diagnostics.RoutedSparseDenseSHA256 = tensorSHA256(routedSparse)
+	parity.Diagnostics.TurboQuantRoutedHostSHA256 = tensorSHA256(hostTurbo)
+	return parity, nil
+}
+
+func diagnosticSparseEmbeddingCompare(actual, expected *backend.Tensor) sparseEmbeddingParityCompare {
+	cmp := compareSparseEmbeddingTensors(actual, expected)
+	cmp.Status = "computed"
+	cmp.Passed = actual != nil && expected != nil && len(actual.F32) == len(expected.F32) && sameInts(actual.Shape, expected.Shape)
+	return cmp
+}
+
+func compareSparseEmbeddingTensors(actual, expected *backend.Tensor) sparseEmbeddingParityCompare {
+	cmp := sparseEmbeddingParityCompare{
+		Status:         "fail",
+		ActualSHA256:   tensorSHA256(actual),
+		ExpectedSHA256: tensorSHA256(expected),
+	}
+	if actual == nil || expected == nil || len(actual.F32) != len(expected.F32) || !sameInts(actual.Shape, expected.Shape) {
+		return cmp
+	}
+	var maxAbs, sumSq, dot, actualNorm, expectedNorm float64
+	for i := range actual.F32 {
+		a := float64(actual.F32[i])
+		e := float64(expected.F32[i])
+		diff := math.Abs(a - e)
+		if diff > maxAbs {
+			maxAbs = diff
+		}
+		sumSq += (a - e) * (a - e)
+		dot += a * e
+		actualNorm += a * a
+		expectedNorm += e * e
+	}
+	cmp.MaxAbsError = maxAbs
+	if len(actual.F32) > 0 {
+		cmp.MSE = sumSq / float64(len(actual.F32))
+	}
+	if actualNorm == 0 && expectedNorm == 0 {
+		cmp.CosineSimilarity = 1
+	} else if actualNorm != 0 && expectedNorm != 0 {
+		cmp.CosineSimilarity = dot / (math.Sqrt(actualNorm) * math.Sqrt(expectedNorm))
+	}
+	return cmp
+}
+
+func nchwSmokeAttentionSequence(input *backend.Tensor) *backend.Tensor {
+	if input == nil || len(input.Shape) != 4 {
+		return nil
+	}
+	batches, channels, seqLen, width := input.Shape[0], input.Shape[1], input.Shape[2], input.Shape[3]
+	if batches != 1 || width != 1 {
+		return nil
+	}
+	out := backend.NewTensorF16([]int{seqLen, channels}, make([]float32, seqLen*channels))
+	for t := 0; t < seqLen; t++ {
+		for c := 0; c < channels; c++ {
+			out.F32[t*channels+c] = input.F32[(c*seqLen+t)*width]
+		}
+	}
+	return out
+}
+
+func tensorSHA256(t *backend.Tensor) string {
+	if t == nil {
+		return ""
+	}
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "shape=%v\n", t.Shape)
+	for _, x := range t.F32 {
+		_, _ = fmt.Fprintf(h, "%.9g\n", x)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func sameInts(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func executeSparseEmbeddingHost(cfg sparseEmbeddingSmokeConfig, query, keyCoords, keyNorms, valueCoords, valueNorms *backend.Tensor, attrs map[string]string) (*backend.Tensor, sparseEmbeddingRuntime, error) {
@@ -686,6 +901,23 @@ func writeSparseEmbeddingSummary(path string, manifest sparseEmbeddingSmokeManif
 		"device_execution",
 		"preflight_32768",
 		"embedding_sha256",
+		"parity_status",
+		"parity_backend_vs_host_passed",
+		"parity_backend_vs_host_max_abs_error",
+		"parity_backend_vs_host_mse",
+		"parity_backend_vs_host_cosine_similarity",
+		"parity_backend_actual_sha256",
+		"parity_host_turboquant_sha256",
+		"parity_diagnostics_status",
+		"dense_full_vs_exact_sparse_max_abs_error",
+		"dense_full_vs_exact_sparse_mse",
+		"dense_full_vs_exact_sparse_cosine_similarity",
+		"exact_sparse_vs_routed_sparse_max_abs_error",
+		"exact_sparse_vs_routed_sparse_mse",
+		"exact_sparse_vs_routed_sparse_cosine_similarity",
+		"routed_dense_vs_turboquant_routed_max_abs_error",
+		"routed_dense_vs_turboquant_routed_mse",
+		"routed_dense_vs_turboquant_routed_cosine_similarity",
 	}
 	row := []string{
 		manifest.Runtime.Status,
@@ -712,8 +944,29 @@ func writeSparseEmbeddingSummary(path string, manifest sparseEmbeddingSmokeManif
 		strconv.FormatBool(manifest.Runtime.DeviceExecution),
 		manifest.ThirtyTwoKPreflight.Status,
 		manifest.Embedding.SHA256,
+		manifest.Parity.Status,
+		strconv.FormatBool(manifest.Parity.BackendVsHostTurboQuant.Passed),
+		formatParityFloat(manifest.Parity.BackendVsHostTurboQuant.MaxAbsError),
+		formatParityFloat(manifest.Parity.BackendVsHostTurboQuant.MSE),
+		formatParityFloat(manifest.Parity.BackendVsHostTurboQuant.CosineSimilarity),
+		manifest.Parity.BackendVsHostTurboQuant.ActualSHA256,
+		manifest.Parity.BackendVsHostTurboQuant.ExpectedSHA256,
+		manifest.Parity.Diagnostics.Status,
+		formatParityFloat(manifest.Parity.Diagnostics.DenseFullVsExactSparse.MaxAbsError),
+		formatParityFloat(manifest.Parity.Diagnostics.DenseFullVsExactSparse.MSE),
+		formatParityFloat(manifest.Parity.Diagnostics.DenseFullVsExactSparse.CosineSimilarity),
+		formatParityFloat(manifest.Parity.Diagnostics.ExactSparseVsRoutedSparse.MaxAbsError),
+		formatParityFloat(manifest.Parity.Diagnostics.ExactSparseVsRoutedSparse.MSE),
+		formatParityFloat(manifest.Parity.Diagnostics.ExactSparseVsRoutedSparse.CosineSimilarity),
+		formatParityFloat(manifest.Parity.Diagnostics.RoutedDenseVsTurboQuantRouted.MaxAbsError),
+		formatParityFloat(manifest.Parity.Diagnostics.RoutedDenseVsTurboQuantRouted.MSE),
+		formatParityFloat(manifest.Parity.Diagnostics.RoutedDenseVsTurboQuantRouted.CosineSimilarity),
 	}
 	return os.WriteFile(path, []byte(strings.Join(columns, "\t")+"\n"+strings.Join(row, "\t")+"\n"), 0o644)
+}
+
+func formatParityFloat(v float64) string {
+	return strconv.FormatFloat(v, 'g', 9, 64)
 }
 
 func metaFloat64(v any) float64 {
