@@ -2544,6 +2544,7 @@ func TestRunGateScoreboardPassesTurboQuantStorageMetrics(t *testing.T) {
 			Baseline:              "eos-turboquant-rerank",
 			Method:                method,
 			Bits:                  8,
+			QuantizerSeed:         eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed,
 			RerankStorage:         "fp16",
 			NDCGAt10:              0.486955,
 			RecallAt100:           0.775778,
@@ -2562,6 +2563,7 @@ func TestRunGateScoreboardPassesTurboQuantStorageMetrics(t *testing.T) {
 			Baseline:              "eos-turboquant-rerank",
 			Method:                method,
 			Bits:                  8,
+			QuantizerSeed:         eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed,
 			RerankStorage:         "fp16",
 			NDCGAt10:              0.486955,
 			RecallAt100:           0.775778,
@@ -2591,6 +2593,112 @@ func TestRunGateScoreboardPassesTurboQuantStorageMetrics(t *testing.T) {
 	}
 }
 
+func TestRunGateScoreboardFailsTurboQuantMissingQuantizerSeed(t *testing.T) {
+	dir := t.TempDir()
+	currentPath := filepath.Join(dir, "current.scoreboard.json")
+	anchorPath := filepath.Join(dir, "anchor.scoreboard.json")
+	method := "turboquant_ip_b4_overfetch200_fp16_rerank"
+	writeScoreboardForTest(t, currentPath, []retrievalScoreboardRow{
+		{
+			Category:      "short_retrieval",
+			Dataset:       "fiqa",
+			Baseline:      "eos-turboquant-rerank",
+			Method:        method,
+			Bits:          4,
+			QuantizerSeed: eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed,
+			NDCGAt10:      0.121,
+			RecallAt100:   0.351,
+		},
+	})
+	writeScoreboardForTest(t, anchorPath, []retrievalScoreboardRow{
+		{
+			Category:    "short_retrieval",
+			Dataset:     "fiqa",
+			Baseline:    "eos-turboquant-rerank",
+			Method:      method,
+			Bits:        4,
+			NDCGAt10:    0.121,
+			RecallAt100: 0.351,
+		},
+	})
+
+	output, err := captureRunOutputAndError(t, []string{
+		"gate-scoreboard",
+		"--baseline", "eos-turboquant-rerank",
+		"--method", method,
+		"--bits", "4",
+		"--datasets", "fiqa",
+		currentPath,
+		anchorPath,
+	})
+	if err == nil {
+		t.Fatalf("expected missing quantizer seed failure\noutput:\n%s", output)
+	}
+	for _, want := range []string{
+		"compact scoreboard provenance failed",
+		"dataset=fiqa",
+		"anchor row",
+		"missing quantizer_seed",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("missing quantizer seed error missing %q: %v\noutput:\n%s", want, err, output)
+		}
+	}
+}
+
+func TestRunGateScoreboardFailsTurboQuantMismatchedQuantizerSeed(t *testing.T) {
+	dir := t.TempDir()
+	currentPath := filepath.Join(dir, "current.scoreboard.json")
+	anchorPath := filepath.Join(dir, "anchor.scoreboard.json")
+	method := "turboquant_ip_b4_overfetch200_fp16_rerank"
+	writeScoreboardForTest(t, currentPath, []retrievalScoreboardRow{
+		{
+			Category:      "short_retrieval",
+			Dataset:       "fiqa",
+			Baseline:      "eos-turboquant-rerank",
+			Method:        method,
+			Bits:          4,
+			QuantizerSeed: eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed,
+			NDCGAt10:      0.121,
+			RecallAt100:   0.351,
+		},
+	})
+	writeScoreboardForTest(t, anchorPath, []retrievalScoreboardRow{
+		{
+			Category:      "short_retrieval",
+			Dataset:       "fiqa",
+			Baseline:      "eos-turboquant-rerank",
+			Method:        method,
+			Bits:          4,
+			QuantizerSeed: eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed + 1,
+			NDCGAt10:      0.121,
+			RecallAt100:   0.351,
+		},
+	})
+
+	output, err := captureRunOutputAndError(t, []string{
+		"gate-scoreboard",
+		"--baseline", "eos-turboquant-rerank",
+		"--method", method,
+		"--bits", "4",
+		"--datasets", "fiqa",
+		currentPath,
+		anchorPath,
+	})
+	if err == nil {
+		t.Fatalf("expected mismatched quantizer seed failure\noutput:\n%s", output)
+	}
+	for _, want := range []string{
+		"compact scoreboard provenance failed",
+		"dataset=fiqa",
+		"quantizer_seed mismatch",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("mismatched quantizer seed error missing %q: %v\noutput:\n%s", want, err, output)
+		}
+	}
+}
+
 func TestRunGateScoreboardPassesTurboQuantCrossMethodAnchorSelection(t *testing.T) {
 	dir := t.TempDir()
 	currentPath := filepath.Join(dir, "current.scoreboard.json")
@@ -2604,6 +2712,7 @@ func TestRunGateScoreboardPassesTurboQuantCrossMethodAnchorSelection(t *testing.
 			Baseline:              "eos-turboquant-rerank",
 			Method:                currentMethod,
 			Bits:                  4,
+			QuantizerSeed:         eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed,
 			RerankStorage:         "fp16",
 			NDCGAt10:              0.487,
 			RecallAt100:           0.776,
@@ -2615,6 +2724,7 @@ func TestRunGateScoreboardPassesTurboQuantCrossMethodAnchorSelection(t *testing.
 			Baseline:              "eos-turboquant-rerank",
 			Method:                currentMethod,
 			Bits:                  4,
+			QuantizerSeed:         eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed,
 			RerankStorage:         "fp16",
 			NDCGAt10:              0.357,
 			RecallAt100:           0.282,
@@ -2626,6 +2736,7 @@ func TestRunGateScoreboardPassesTurboQuantCrossMethodAnchorSelection(t *testing.
 			Baseline:              "eos-turboquant-rerank",
 			Method:                currentMethod,
 			Bits:                  4,
+			QuantizerSeed:         eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed,
 			RerankStorage:         "fp16",
 			NDCGAt10:              0.308,
 			RecallAt100:           0.553,
@@ -2639,6 +2750,7 @@ func TestRunGateScoreboardPassesTurboQuantCrossMethodAnchorSelection(t *testing.
 			Baseline:              "eos-turboquant-rerank",
 			Method:                anchorMethod,
 			Bits:                  4,
+			QuantizerSeed:         eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed,
 			RerankStorage:         "fp16",
 			NDCGAt10:              0.486,
 			RecallAt100:           0.775,
@@ -2650,6 +2762,7 @@ func TestRunGateScoreboardPassesTurboQuantCrossMethodAnchorSelection(t *testing.
 			Baseline:              "eos-turboquant-rerank",
 			Method:                anchorMethod,
 			Bits:                  4,
+			QuantizerSeed:         eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed,
 			RerankStorage:         "fp16",
 			NDCGAt10:              0.357,
 			RecallAt100:           0.282,
@@ -2661,6 +2774,7 @@ func TestRunGateScoreboardPassesTurboQuantCrossMethodAnchorSelection(t *testing.
 			Baseline:              "eos-turboquant-rerank",
 			Method:                anchorMethod,
 			Bits:                  4,
+			QuantizerSeed:         eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed,
 			RerankStorage:         "fp16",
 			NDCGAt10:              0.307,
 			RecallAt100:           0.552,

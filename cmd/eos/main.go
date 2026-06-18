@@ -5783,6 +5783,7 @@ type retrievalScoreboardRow struct {
 	Status                string  `json:"status"`
 	Method                string  `json:"method,omitempty"`
 	Bits                  int     `json:"bits,omitempty"`
+	QuantizerSeed         int64   `json:"quantizer_seed,omitempty"`
 	RerankStorage         string  `json:"rerank_storage,omitempty"`
 	NDCGAt10              float64 `json:"ndcg_at_10,omitempty"`
 	NDCGAt100             float64 `json:"ndcg_at_100,omitempty"`
@@ -5916,6 +5917,9 @@ func runGateScoreboard(args []string) error {
 		if err != nil {
 			return fmt.Errorf("anchor scoreboard row selection failed: %w", err)
 		}
+		if err := validateCompactScoreboardProvenance(currentRow, anchorRow, dataset); err != nil {
+			return err
+		}
 		for _, metric := range metrics {
 			currentValue, _ := scoreboardRetrievalMetricValue(currentRow, metric)
 			anchorValue, _ := scoreboardRetrievalMetricValue(anchorRow, metric)
@@ -6021,6 +6025,26 @@ func selectRetrievalScoreboardRows(rows []retrievalScoreboardRow, selection scor
 		matches = append(matches, row)
 	}
 	return matches
+}
+
+func validateCompactScoreboardProvenance(currentRow, anchorRow retrievalScoreboardRow, dataset string) error {
+	if !scoreboardRowRequiresQuantizerSeed(currentRow) && !scoreboardRowRequiresQuantizerSeed(anchorRow) {
+		return nil
+	}
+	if currentRow.QuantizerSeed == 0 {
+		return fmt.Errorf("compact scoreboard provenance failed: dataset=%s current row baseline=%s method=%s is missing quantizer_seed", dataset, currentRow.Baseline, currentRow.Method)
+	}
+	if anchorRow.QuantizerSeed == 0 {
+		return fmt.Errorf("compact scoreboard provenance failed: dataset=%s anchor row baseline=%s method=%s is missing quantizer_seed", dataset, anchorRow.Baseline, anchorRow.Method)
+	}
+	if currentRow.QuantizerSeed != anchorRow.QuantizerSeed {
+		return fmt.Errorf("compact scoreboard provenance failed: dataset=%s quantizer_seed mismatch current=%d anchor=%d", dataset, currentRow.QuantizerSeed, anchorRow.QuantizerSeed)
+	}
+	return nil
+}
+
+func scoreboardRowRequiresQuantizerSeed(row retrievalScoreboardRow) bool {
+	return strings.Contains(row.Baseline, "turboquant") || strings.HasPrefix(row.Method, "turboquant_")
 }
 
 func scoreboardBaselineAliases(baseline string) []string {

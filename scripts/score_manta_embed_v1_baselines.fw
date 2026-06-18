@@ -118,6 +118,9 @@ type retrievalMetrics struct {
 type turboQuantRetrievalMetrics struct {
 	Dataset string `json:"dataset"`
 	Backend string `json:"backend"`
+	Config struct {
+		QuantizerSeed int64 `json:"quantizer_seed"`
+	} `json:"config"`
 	Inputs struct {
 		Documents     int   `json:"documents"`
 		Queries       int   `json:"queries"`
@@ -146,6 +149,7 @@ type turboQuantRetrievalMetrics struct {
 			Rows []struct {
 				Bits             int     `json:"bits"`
 				Method           string  `json:"method"`
+				QuantizerSeed    int64   `json:"quantizer_seed"`
 				RerankOverfetch  int     `json:"rerank_overfetch"`
 				RerankStorage    string  `json:"rerank_storage"`
 				Quality struct {
@@ -185,6 +189,7 @@ type scoreboardRow struct {
 	MetricsPath          string  `json:"metrics_path"`
 	Method               string  `json:"method,omitempty"`
 	Bits                 int     `json:"bits,omitempty"`
+	QuantizerSeed        int64   `json:"quantizer_seed,omitempty"`
 	RerankOverfetch      int     `json:"rerank_overfetch,omitempty"`
 	RerankStorage        string  `json:"rerank_storage,omitempty"`
 	NDCGAt10             float64 `json:"ndcg_at_10,omitempty"`
@@ -634,6 +639,7 @@ func rowsFromTurboQuantRetrievalMetrics(category string, baseline string, rerank
 			MetricsPath:        metricsPath,
 			Method:             bitRow.Method,
 			Bits:               bitRow.Bits,
+			QuantizerSeed:      bitRow.QuantizerSeed,
 			RerankOverfetch:    bitRow.RerankOverfetch,
 			RerankStorage:      bitRow.RerankStorage,
 			NDCGAt10:           bitRow.Quality.NDCGAt10,
@@ -669,6 +675,9 @@ func rowsFromTurboQuantRetrievalMetrics(category string, baseline string, rerank
 		}
 		if row.TotalCompressionRatio == 0 {
 			row.TotalCompressionRatio = row.CompressionRatio
+		}
+		if row.QuantizerSeed == 0 {
+			row.QuantizerSeed = metrics.Config.QuantizerSeed
 		}
 		rows = append(rows, row)
 	}
