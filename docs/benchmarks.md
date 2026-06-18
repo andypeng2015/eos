@@ -39,7 +39,7 @@ go run ./cmd/eos calibrate-sparse-routing \
   --top-k 64 \
   --route-block-size 10 \
   --route-top-blocks 35,36,37,38,39,40 \
-  --route-modes anchor,multiprobe,summary_mean,oracle_block_max \
+  --route-modes anchor,multiprobe,summary_mean,summary_mean_radius,oracle_block_max \
   --route-probes 1,2,4,8 \
   --max-score-fraction 0.2 \
   --min-exact-topk-recall 0.95 \
@@ -47,7 +47,7 @@ go run ./cmd/eos calibrate-sparse-routing \
   --min-output-cosine 0.98
 ```
 
-The command writes `calibration.json` and `calibration.tsv` under the run directory. Use `--route-modes` to compare deployable heuristics with teacher-only `oracle_block_max`, and treat the output as routing calibration evidence only: it does not prove downstream retrieval quality or learned selector feasibility.
+The command writes `calibration.json` and `calibration.tsv` under the run directory. Use `--route-modes` to compare deployable heuristics with teacher-only `oracle_block_max`; `summary_mean_radius` uses a deployable block mean plus scalar radius upper bound. Treat the output as routing calibration evidence only: it does not prove downstream retrieval quality or learned selector feasibility.
 
 Run the default-model training smoke from a local asset package:
 

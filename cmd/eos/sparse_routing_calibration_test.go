@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"m31labs.dev/eos/runtime/backend"
 )
 
 func TestSparseRoutingCalibrationConfigDefaultsAndPaths(t *testing.T) {
@@ -186,6 +188,70 @@ func TestSparseRoutingCalibrationMultiprobeRowsAndScoreFractions(t *testing.T) {
 		if got := len(strings.Split(line, "\t")); got != headerCols {
 			t.Fatalf("tsv row %d columns = %d, want %d", i+1, got, headerCols)
 		}
+	}
+}
+
+func TestSparseRoutingCalibrationSummaryMeanRadiusRowsAndBehavior(t *testing.T) {
+	runRoot := t.TempDir()
+	if err := runCalibrateSparseRouting([]string{
+		"-run-root", runRoot,
+		"-seq-len", "128",
+		"-query-len", "2",
+		"-dim", "8",
+		"-top-k", "4",
+		"-route-block-size", "16",
+		"-route-top-blocks", "1,2",
+		"-route-modes", "summary_mean_radius",
+		"-max-score-fraction", "1.2",
+		"-min-exact-topk-recall", "0",
+		"-min-output-cosine", "-1",
+	}); err != nil {
+		t.Fatalf("run calibration: %v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(runRoot, "eos-sparse-routing-calibration-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("run dirs = %v, want one", matches)
+	}
+	report := readSparseRoutingCalibrationReport(t, matches[0])
+	if len(report.Rows) != 2 {
+		t.Fatalf("rows len=%d, want 2", len(report.Rows))
+	}
+	for _, row := range report.Rows {
+		if row.RouteMode != "summary_mean_radius" {
+			t.Fatalf("route_mode = %q, want summary_mean_radius", row.RouteMode)
+		}
+		if row.TeacherOnly || row.OraclePolicy || row.TeacherScoreCountPerQuery != 0 {
+			t.Fatalf("summary_mean_radius row has teacher/oracle labels: %+v", row)
+		}
+		if row.RoutedAnchorScoresPerQuery != row.RouteBlockCount {
+			t.Fatalf("routed summary scores = %d, want one per block %d", row.RoutedAnchorScoresPerQuery, row.RouteBlockCount)
+		}
+		if row.EstimatedScoreCountPerQuery != row.RouteBlockCount+row.CandidateKeyBudget {
+			t.Fatalf("estimated score count = %d, want block_count + candidate_budget = %d + %d", row.EstimatedScoreCountPerQuery, row.RouteBlockCount, row.CandidateKeyBudget)
+		}
+	}
+
+	query := backend.NewTensorF16([]int{1, 1}, []float32{1})
+	key := backend.NewTensorF16([]int{4, 1}, []float32{
+		5,
+		5,
+		0,
+		10,
+	})
+	scoreAt := func(k int) float32 {
+		return query.F32[0] * key.F32[k]
+	}
+	summaries := sparseRoutingBlockSummariesForKey(key, 2)
+	_, meanSet := sparseRoutingPolicyCandidates(query, key.Shape[0], key.Shape[1], 0, 2, 1, "summary_mean", 1, summaries, scoreAt)
+	_, radiusSet := sparseRoutingPolicyCandidates(query, key.Shape[0], key.Shape[1], 0, 2, 1, "summary_mean_radius", 1, summaries, scoreAt)
+	if _, ok := meanSet[3]; ok {
+		t.Fatalf("summary_mean selected high-radius block unexpectedly: candidates=%v", meanSet)
+	}
+	if _, ok := radiusSet[3]; !ok {
+		t.Fatalf("summary_mean_radius missed high-radius block: candidates=%v", radiusSet)
 	}
 }
 
