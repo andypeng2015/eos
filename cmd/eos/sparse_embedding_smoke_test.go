@@ -28,12 +28,43 @@ func TestSparseEmbeddingSmokeConfigAdds32KPreflight(t *testing.T) {
 	if cfg.ValueDim != cfg.Dim {
 		t.Fatalf("value_dim = %d, want dim %d", cfg.ValueDim, cfg.Dim)
 	}
+	if cfg.Backend != "auto" {
+		t.Fatalf("backend = %q, want auto", cfg.Backend)
+	}
+}
+
+func TestSparseEmbeddingSmokeConfigBackendEnvAndFlag(t *testing.T) {
+	t.Setenv("EOS_SPARSE_EMBED_SMOKE_BACKEND", "cuda")
+	cfg, err := parseSparseEmbeddingSmokeConfig([]string{
+		"-run-root", t.TempDir(),
+		"-seq-len", "16",
+		"-query-len", "2",
+		"-dim", "4",
+		"-top-k", "2",
+		"-route-block-size", "4",
+		"-route-top-blocks", "1",
+		"-preflight-key-lens", "64",
+		"-backend", "host",
+	})
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	if cfg.Backend != "host" {
+		t.Fatalf("backend = %q, want flag override host", cfg.Backend)
+	}
+	if _, err := parseSparseEmbeddingSmokeConfig([]string{
+		"-run-root", t.TempDir(),
+		"-backend", "bogus",
+	}); err == nil {
+		t.Fatal("parse invalid backend succeeded")
+	}
 }
 
 func TestRunSmokeSparseEmbeddingEncoderWritesArtifacts(t *testing.T) {
 	runRoot := t.TempDir()
 	if err := runSmokeSparseEmbeddingEncoder([]string{
 		"-run-root", runRoot,
+		"-backend", "host",
 		"-seq-len", "32",
 		"-query-len", "2",
 		"-dim", "8",
@@ -65,6 +96,15 @@ func TestRunSmokeSparseEmbeddingEncoderWritesArtifacts(t *testing.T) {
 	}
 	if manifest.Runtime.OutputShape[0] != 2 || manifest.Runtime.OutputShape[1] != 8 {
 		t.Fatalf("output shape = %v, want [2 8]", manifest.Runtime.OutputShape)
+	}
+	if manifest.Config.Backend != "host" || manifest.Runtime.RequestedBackend != "host" || manifest.Runtime.ActualBackend != "host_reference" {
+		t.Fatalf("backend metadata config=%q requested=%q actual=%q", manifest.Config.Backend, manifest.Runtime.RequestedBackend, manifest.Runtime.ActualBackend)
+	}
+	if manifest.Runtime.CUDAAvailable || manifest.Runtime.CUDAEvidenceStatus != "not_requested" {
+		t.Fatalf("cuda metadata available=%v evidence=%q", manifest.Runtime.CUDAAvailable, manifest.Runtime.CUDAEvidenceStatus)
+	}
+	if manifest.Runtime.DenseKVMaterialized != true || manifest.Runtime.KVDecode != "host_reference_decode" || manifest.Runtime.DeviceExecution {
+		t.Fatalf("host runtime metadata = %+v", manifest.Runtime)
 	}
 	if !manifest.ThirtyTwoKPreflight.Present || !manifest.ThirtyTwoKPreflight.Passed {
 		t.Fatalf("32k preflight = %+v, want present pass", manifest.ThirtyTwoKPreflight)
