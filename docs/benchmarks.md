@@ -39,9 +39,11 @@ go run ./cmd/eos calibrate-sparse-routing \
   --top-k 64 \
   --route-block-size 10 \
   --route-top-blocks 35,36,37,38,39,40 \
-  --route-modes anchor,multiprobe,summary_mean,summary_mean_radius,summary_maxnorm,summary_blend_radius,summary_multirep,learned_block_linear,oracle_block_max \
+  --route-modes anchor,multiprobe,summary_mean,summary_mean_radius,summary_maxnorm,summary_blend_radius,summary_multirep,summary_hier_multirep,learned_block_linear,oracle_block_max \
   --route-probes 1,2,4,8 \
   --route-summary-counts 1,2,4,8 \
+  --route-hier-group-blocks 4,8 \
+  --route-hier-top-groups 8,10,12,16,20 \
   --route-summary-alphas 0,0.25,0.5,0.75,1 \
   --route-radius-weights -0.25,0,0.25,0.5 \
   --learned-router-train-seeds 5581486560434873699 \
@@ -52,7 +54,7 @@ go run ./cmd/eos calibrate-sparse-routing \
   --min-output-cosine 0.98
 ```
 
-The command writes `calibration.json` and `calibration.tsv` under the run directory. Use `--route-modes` to compare deployable heuristics with teacher-only `oracle_block_max`; `summary_mean_radius` uses a deployable block mean plus scalar radius upper bound, `summary_maxnorm` scores the largest-L2-norm key representative in each block, and `summary_blend_radius` scores `mean + alpha*(maxnorm_rep-mean)` plus `beta*||query||_2*radius` using `--route-summary-alphas` and `--route-radius-weights`. `summary_multirep` is a calibration-only multi-summary probe: it precomputes deterministic farthest-point representatives per block and routes by the max query dot across `--route-summary-counts`; score accounting charges `block_count * route_summary_count` route scores plus candidate-key work. `learned_block_linear` is a calibration-only learned-summary candidate: it fits a tiny deterministic logistic linear scorer from `oracle_block_max` top-block labels on synthetic training seeds, then evaluates from learned weights and cheap per-block features only. Its route score accounting uses a fused learned representative dot per block plus scalar features and records teacher score work separately from evaluation score work. Treat the output as routing calibration evidence only: it does not prove downstream retrieval quality or runtime selector feasibility.
+The command writes `calibration.json` and `calibration.tsv` under the run directory. Use `--route-modes` to compare deployable heuristics with teacher-only `oracle_block_max`; `summary_mean_radius` uses a deployable block mean plus scalar radius upper bound, `summary_maxnorm` scores the largest-L2-norm key representative in each block, and `summary_blend_radius` scores `mean + alpha*(maxnorm_rep-mean)` plus `beta*||query||_2*radius` using `--route-summary-alphas` and `--route-radius-weights`. `summary_multirep` is a calibration-only multi-summary probe: it precomputes deterministic farthest-point representatives per block and routes by the max query dot across `--route-summary-counts`; score accounting charges `block_count * route_summary_count` route scores plus candidate-key work. `summary_hier_multirep` is also calibration-only: it groups fine blocks by `--route-hier-group-blocks`, scores one coarse max-norm representative per group, scores `route_summary_count` fine representatives only inside the selected `--route-hier-top-groups`, then selects final fine blocks from that subset. Its score accounting charges coarse group scores plus selected fine-block summary scores plus candidate-key work. `learned_block_linear` is a calibration-only learned-summary candidate: it fits a tiny deterministic logistic linear scorer from `oracle_block_max` top-block labels on synthetic training seeds, then evaluates from learned weights and cheap per-block features only. Its route score accounting uses a fused learned representative dot per block plus scalar features and records teacher score work separately from evaluation score work. Treat the output as routing calibration evidence only: it does not prove downstream retrieval quality or runtime selector feasibility.
 
 Run the default-model training smoke from a local asset package:
 

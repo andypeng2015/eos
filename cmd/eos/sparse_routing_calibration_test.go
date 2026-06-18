@@ -47,6 +47,12 @@ func TestSparseRoutingCalibrationConfigDefaultsAndPaths(t *testing.T) {
 	if got, want := joinInts(cfg.RouteSummaryCounts), "2,4,8"; got != want {
 		t.Fatalf("route_summary_counts = %s, want %s", got, want)
 	}
+	if got, want := joinInts(cfg.RouteHierGroupBlocks), "4,8"; got != want {
+		t.Fatalf("route_hier_group_blocks = %s, want %s", got, want)
+	}
+	if got, want := joinInts(cfg.RouteHierTopGroups), "8,10,12,16,20"; got != want {
+		t.Fatalf("route_hier_top_groups = %s, want %s", got, want)
+	}
 	if got, want := joinFloats(cfg.RouteSummaryAlphas), "0,0.25,0.5,0.75,1"; got != want {
 		t.Fatalf("route_summary_alphas = %s, want %s", got, want)
 	}
@@ -70,6 +76,12 @@ func TestSparseRoutingCalibrationConfigRejectsInvalidModeAndBlendFloats(t *testi
 	}
 	if _, err := parseSparseRoutingCalibrationConfig([]string{"-route-summary-counts", "2,nope"}); err == nil || !strings.Contains(err.Error(), "route-summary-counts[1]") {
 		t.Fatalf("invalid summary count error = %v, want indexed int context", err)
+	}
+	if _, err := parseSparseRoutingCalibrationConfig([]string{"-route-hier-group-blocks", "0"}); err == nil || !strings.Contains(err.Error(), "route-hier-group-blocks[0]") {
+		t.Fatalf("invalid hier group blocks error = %v, want indexed positive-int context", err)
+	}
+	if _, err := parseSparseRoutingCalibrationConfig([]string{"-route-hier-top-groups", "nope"}); err == nil || !strings.Contains(err.Error(), "route-hier-top-groups[0]") {
+		t.Fatalf("invalid hier top groups error = %v, want indexed positive-int context", err)
 	}
 }
 
@@ -478,6 +490,115 @@ func TestSparseRoutingCalibrationSummaryMultiRepRowsAndAccounting(t *testing.T) 
 	}
 	if _, ok := twoRepSet[1]; !ok {
 		t.Fatalf("summary_multirep K=2 missed second representative block: candidates=%v", twoRepSet)
+	}
+}
+
+func TestSparseRoutingCalibrationSummaryHierMultiRepRowsAndAccounting(t *testing.T) {
+	runRoot := t.TempDir()
+	if err := runCalibrateSparseRouting([]string{
+		"-run-root", runRoot,
+		"-seq-len", "128",
+		"-query-len", "2",
+		"-dim", "8",
+		"-top-k", "4",
+		"-route-block-size", "16",
+		"-route-top-blocks", "1,2",
+		"-route-modes", "summary_hier_multirep",
+		"-route-summary-counts", "1,2",
+		"-route-hier-group-blocks", "2,4",
+		"-route-hier-top-groups", "1,2",
+		"-max-score-fraction", "1.2",
+		"-min-exact-topk-recall", "0",
+		"-min-output-cosine", "-1",
+	}); err != nil {
+		t.Fatalf("run calibration: %v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(runRoot, "eos-sparse-routing-calibration-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("run dirs = %v, want one", matches)
+	}
+	report := readSparseRoutingCalibrationReport(t, matches[0])
+	if got, want := joinInts(report.Config.RouteHierGroupBlocks), "2,4"; got != want {
+		t.Fatalf("route_hier_group_blocks = %s, want %s", got, want)
+	}
+	if got, want := joinInts(report.Config.RouteHierTopGroups), "1,2"; got != want {
+		t.Fatalf("route_hier_top_groups = %s, want %s", got, want)
+	}
+	if len(report.Rows) != 16 {
+		t.Fatalf("rows len=%d, want 16", len(report.Rows))
+	}
+	seen := map[string]bool{}
+	for _, row := range report.Rows {
+		if row.RouteMode != "summary_hier_multirep" {
+			t.Fatalf("route_mode = %q, want summary_hier_multirep", row.RouteMode)
+		}
+		if row.TeacherOnly || row.OraclePolicy || row.TeacherScoreCountPerQuery != 0 {
+			t.Fatalf("summary_hier_multirep row has teacher/oracle labels: %+v", row)
+		}
+		if row.RouteHierGroupBlocks == 0 || row.RouteHierTopGroups == 0 || row.RouteHierCoarseGroups == 0 || row.RouteHierFineScoresPerQuery == 0 {
+			t.Fatalf("summary_hier_multirep row missing hierarchy accounting: %+v", row)
+		}
+		wantRouteScores := row.RouteHierCoarseGroups + row.RouteHierFineScoresPerQuery
+		if row.RoutedAnchorScoresPerQuery != wantRouteScores {
+			t.Fatalf("hier route scores = %d, want coarse+fine = %d", row.RoutedAnchorScoresPerQuery, wantRouteScores)
+		}
+		if row.EstimatedScoreCountPerQuery != wantRouteScores+row.CandidateKeyBudget {
+			t.Fatalf("hier estimated score count = %d, want %d + %d", row.EstimatedScoreCountPerQuery, wantRouteScores, row.CandidateKeyBudget)
+		}
+		if row.RouteSummaryCount == 1 && row.RouteHierGroupBlocks == 2 && row.RouteHierTopGroups == 1 && row.RouteTopBlocks == 1 {
+			seen["budget"] = true
+			if row.RouteHierCoarseGroups != 4 || row.RouteHierFineScoresPerQuery != 2 {
+				t.Fatalf("hier coarse/fine scores = %d/%d, want 4/2", row.RouteHierCoarseGroups, row.RouteHierFineScoresPerQuery)
+			}
+			want := float64(22) / float64(128)
+			if math.Abs(row.ScoreCountFraction-want) > 1e-9 {
+				t.Fatalf("hier score fraction = %.12f, want %.12f", row.ScoreCountFraction, want)
+			}
+		}
+	}
+	if !seen["budget"] {
+		t.Fatal("missing checked hierarchy budget row")
+	}
+	tsv, err := os.ReadFile(filepath.Join(matches[0], "calibration.tsv"))
+	if err != nil {
+		t.Fatalf("read calibration tsv: %v", err)
+	}
+	header := strings.Split(strings.Split(strings.TrimSpace(string(tsv)), "\n")[0], "\t")
+	headerIndex := map[string]int{}
+	for i, col := range header {
+		headerIndex[col] = i
+	}
+	for _, col := range []string{"route_hier_group_blocks", "route_hier_top_groups", "route_hier_coarse_groups", "route_hier_fine_scores_per_query"} {
+		if _, ok := headerIndex[col]; !ok {
+			t.Fatalf("tsv header missing %q: %v", col, header)
+		}
+	}
+
+	query := backend.NewTensorF16([]int{1, 2}, []float32{0, 1})
+	key := backend.NewTensorF16([]int{12, 2}, []float32{
+		10, 0,
+		9, 0,
+		8, 0,
+		1, 1,
+		1, 0,
+		0, 1,
+		0, 9,
+		0, 8,
+		0, 7,
+		2, 0,
+		1, 0,
+		0, 2,
+	})
+	scoreAt := func(k int) float32 {
+		return query.F32[0]*key.F32[k*2] + query.F32[1]*key.F32[k*2+1]
+	}
+	summaries := sparseRoutingBlockSummariesForKey(key, 3, 2)
+	_, hierSet := sparseRoutingPolicyCandidates(query, key.Shape[0], key.Shape[1], 0, 3, 1, sparseRoutingPolicyParams{Mode: "summary_hier_multirep", SummaryCount: 1, HierGroupBlocks: 2, HierTopGroups: 1}, summaries, scoreAt)
+	if _, ok := hierSet[6]; !ok {
+		t.Fatalf("summary_hier_multirep missed selected coarse/fine block: candidates=%v", hierSet)
 	}
 }
 
