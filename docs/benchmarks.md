@@ -58,7 +58,7 @@ EOS_SCOREBOARD_RETRIEVAL_DATASETS=scifact,nfcorpus,fiqa \
 ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
 ```
 
-The scoreboard run writes `scoreboard.tsv`, `scoreboard.json`, per-task metrics JSON, command logs, and a run-local `eos` binary under `runs/<run-id>/`. Dense local rows default to `baseline=eos`; hybrid rows default to `baseline=eos-hybrid`; local TurboQuant rows use `eos-turboquant` for direct quantized scoring and `eos-turboquant-rerank` for quantized candidate overfetch plus rerank storage modes such as fp16; external TurboQuant rows use `<external>-turboquant`. Set `EOS_SCOREBOARD_BASELINE_LABEL=manta` and `EOS_SCOREBOARD_HYBRID_BASELINE_LABEL=manta-hybrid` only when intentionally producing a legacy-labeled scoreboard. Pairwise rows use `EOS_SCOREBOARD_PAIRWISE_ARTIFACT` when set, or infer the sibling trainable package from a sealed artifact path. Add `EOS_SCOREBOARD_LONG_ROOT` and `EOS_SCOREBOARD_LONG_DATASETS` when long-document retrieval datasets are prepared.
+The scoreboard run writes `scoreboard.tsv`, `scoreboard.json`, per-task metrics JSON, command logs, and a run-local `eos` binary under `runs/<run-id>/`. Dense local rows default to `baseline=eos`; hybrid rows default to `baseline=eos-hybrid`; local TurboQuant rows use `eos-turboquant` for direct quantized scoring and `eos-turboquant-rerank` for quantized candidate overfetch plus rerank storage modes such as fp16; external TurboQuant rows use `<external>-turboquant`; external child-vector rows use `<external>-dense-child` for dense child max and `<external>-turboquant-child` for q-bit child max rows. Set `EOS_SCOREBOARD_BASELINE_LABEL=manta` and `EOS_SCOREBOARD_HYBRID_BASELINE_LABEL=manta-hybrid` only when intentionally producing a legacy-labeled scoreboard. Pairwise rows use `EOS_SCOREBOARD_PAIRWISE_ARTIFACT` when set, or infer the sibling trainable package from a sealed artifact path. Add `EOS_SCOREBOARD_LONG_ROOT` and `EOS_SCOREBOARD_LONG_DATASETS` when long-document retrieval datasets are prepared.
 
 For the current synthetic late-needle long-context smoke, run:
 
@@ -81,6 +81,24 @@ EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/build_repo_docs_longembed_dataset.f
 ```
 
 This writes a BEIR-shaped `datasets/longembed/repo-docs` dataset from local repository Markdown and skill docs. The verified lane currently has `11` documents, `80` heuristic qrels, and `6` documents at `>=2048` words. In the checkpoint run summarized at `.tiller/scratch/codex/eos-repo-docs-longembed-lane-v1-report.md`, BM25 reached nDCG@10 `0.717080`, the Eos default single-vector row reached `0.644872`, Qwen3 0.6B 128d dense child-max reached `0.771170`, and Qwen3 q4 child-max reached `0.739269`. Treat this as local harness coverage over real repo text, not LongEmbed proof: qrels are deterministic path/heading heuristics, the dataset is small and repo-specific, and BM25 benefits from path and heading lexical overlap.
+
+To append those repo-docs child-vector cache rows directly into `scoreboard.json`, point the scoreboard at a cache root containing `<root>/repo-docs/child-doc-vectors.jsonl` and `query-vectors.jsonl`:
+
+```bash
+EOS_REPO_ROOT=$PWD \
+EOS_SCOREBOARD_ARTIFACT=/path/to/eos-embed-v1.sealed.mll \
+EOS_SCOREBOARD_LONG_ROOT=$PWD/datasets/longembed \
+EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_ROOT=runs/external-vector-caches/qwen3-0.6b-repo-docs-128d \
+EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_DATASETS=repo-docs \
+EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BASELINE=qwen3-0.6b-128d-child \
+EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BACKEND=qwen3-0.6b-128d-child \
+EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_ARTIFACT=Qwen/Qwen3-Embedding-0.6B \
+EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BITS=4 \
+EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BASELINE_DIM=1024 \
+ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
+```
+
+The external multivector group is opt-in via `EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_DATASETS`. It reuses `eos eval-retrieval-multivector-turboquant`, writes one dense child-max row plus one row per requested bit width, and preserves `quantizer_seed` on q-bit rows for compact-scoreboard provenance gates.
 
 Calibrate hybrid retrieval before using `eos-hybrid` rows as product evidence:
 

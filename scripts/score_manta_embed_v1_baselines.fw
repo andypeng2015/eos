@@ -43,6 +43,14 @@ type scoreboardConfig struct {
 	ExternalVectorTurboQuantBits string
 	ExternalVectorTurboQuantRerankOverfetch string
 	ExternalVectorTurboQuantRerankStorage string
+	ExternalMultiVectorRoot     string
+	ExternalMultiVectorDatasets []string
+	ExternalMultiVectorBaseline string
+	ExternalMultiVectorBackend  string
+	ExternalMultiVectorArtifact string
+	ExternalMultiVectorBits string
+	ExternalMultiVectorBaselineDim string
+	ExternalMultiVectorAllowMissingRelevant string
 	HybridRetrieval string
 	HybridMethod string
 	HybridAlpha string
@@ -181,6 +189,73 @@ type turboQuantRetrievalMetrics struct {
 	} `json:"rows"`
 }
 
+type turboQuantMultiVectorRetrievalMetrics struct {
+	Dataset string `json:"dataset"`
+	Backend string `json:"backend"`
+	Config struct {
+		QuantizerSeed int64 `json:"quantizer_seed"`
+		BaselineDim int `json:"baseline_dim"`
+		AllowMissingRelevant bool `json:"allow_missing_relevant"`
+	} `json:"config"`
+	Inputs struct {
+		Parents int `json:"parents"`
+		ParentCount int `json:"parent_count"`
+		ChildVectors int `json:"child_vectors"`
+		ChildCount int `json:"child_count"`
+		Queries int `json:"queries"`
+		RelevantPairs int `json:"relevant_pairs"`
+		ScoredChildPairs int64 `json:"scored_child_pairs"`
+	} `json:"inputs"`
+	Dense struct {
+		Quality struct {
+			NDCGAt10      float64 `json:"ndcg_at_10"`
+			NDCGAt100     float64 `json:"ndcg_at_100"`
+			MRRAt10       float64 `json:"mrr_at_10"`
+			PrecisionAt1  float64 `json:"precision_at_1"`
+			PrecisionAt5  float64 `json:"precision_at_5"`
+			PrecisionAt10 float64 `json:"precision_at_10"`
+			HitAt1        float64 `json:"hit_at_1"`
+			HitAt5        float64 `json:"hit_at_5"`
+			HitAt10       float64 `json:"hit_at_10"`
+			MAPAt10       float64 `json:"map_at_10"`
+			MAPAt100      float64 `json:"map_at_100"`
+			RecallAt10    float64 `json:"recall_at_10"`
+			RecallAt100   float64 `json:"recall_at_100"`
+		} `json:"quality"`
+		DenseBaselineTotalBytes int64 `json:"dense_baseline_total_bytes"`
+		DenseChildBytes int64 `json:"dense_child_bytes"`
+		StorageMultipleOfDenseBaseline float64 `json:"storage_multiple_of_dense_baseline"`
+		ScoresPerSecond float64 `json:"scores_per_second"`
+	} `json:"dense"`
+	Rows []struct {
+		Bits int `json:"bits"`
+		Method string `json:"method"`
+		QuantizerSeed int64 `json:"quantizer_seed"`
+		Quality struct {
+			NDCGAt10      float64 `json:"ndcg_at_10"`
+			NDCGAt100     float64 `json:"ndcg_at_100"`
+			MRRAt10       float64 `json:"mrr_at_10"`
+			PrecisionAt1  float64 `json:"precision_at_1"`
+			PrecisionAt5  float64 `json:"precision_at_5"`
+			PrecisionAt10 float64 `json:"precision_at_10"`
+			HitAt1        float64 `json:"hit_at_1"`
+			HitAt5        float64 `json:"hit_at_5"`
+			HitAt10       float64 `json:"hit_at_10"`
+			MAPAt10       float64 `json:"map_at_10"`
+			MAPAt100      float64 `json:"map_at_100"`
+			RecallAt10    float64 `json:"recall_at_10"`
+			RecallAt100   float64 `json:"recall_at_100"`
+		} `json:"quality"`
+		NDCGAt10Delta float64 `json:"ndcg_at_10_delta"`
+		RecallAt100Delta float64 `json:"recall_at_100_delta"`
+		QuantizedChildBytes int64 `json:"quantized_child_bytes"`
+		DenseBaselineTotalBytes int64 `json:"dense_baseline_total_bytes"`
+		DenseChildCompression float64 `json:"dense_child_compression_ratio"`
+		StorageMultipleOfDenseBaseline float64 `json:"storage_multiple_of_dense_baseline"`
+		ScoresPerSecond float64 `json:"scores_per_second"`
+	} `json:"rows"`
+}
+
 type scoreboardRow struct {
 	Category             string  `json:"category"`
 	Dataset              string  `json:"dataset"`
@@ -278,6 +353,14 @@ Optional retrieval eval:
   EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT_BITS=2,4,8
   EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT_RERANK_OVERFETCH=200
   EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT_RERANK_STORAGE=fp16
+  EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_ROOT=/data/external-vector-caches
+  EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_DATASETS=repo-docs
+  EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BASELINE=qwen3-128d-child
+  EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BACKEND=qwen3-128d-child
+  EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_ARTIFACT=Qwen/Qwen3-Embedding-0.6B
+  EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BITS=4
+  EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BASELINE_DIM=1024
+  EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_ALLOW_MISSING_RELEVANT=0
   EOS_SCOREBOARD_HYBRID_RETRIEVAL=1
   EOS_SCOREBOARD_HYBRID_METHOD=minmax
   EOS_SCOREBOARD_HYBRID_ALPHA=0.75
@@ -470,9 +553,10 @@ func prepareConfig(root string) (scoreboardConfig, error) {
 
 	retrievalDatasets := splitList(os.Getenv("EOS_SCOREBOARD_RETRIEVAL_DATASETS"))
 	externalVectorDatasets := splitList(os.Getenv("EOS_SCOREBOARD_EXTERNAL_VECTOR_DATASETS"))
+	externalMultiVectorDatasets := splitList(os.Getenv("EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_DATASETS"))
 	longDatasets := splitList(os.Getenv("EOS_SCOREBOARD_LONG_DATASETS"))
-	guard pairwise != "" || hard != "" || len(retrievalDatasets) > 0 || len(externalVectorDatasets) > 0 || len(longDatasets) > 0 else {
-		return scoreboardConfig{}, fmt.Errorf("provide at least one eval source: pairwise JSONL, hard JSONL, retrieval datasets, external vector datasets, or long datasets")
+	guard pairwise != "" || hard != "" || len(retrievalDatasets) > 0 || len(externalVectorDatasets) > 0 || len(externalMultiVectorDatasets) > 0 || len(longDatasets) > 0 else {
+		return scoreboardConfig{}, fmt.Errorf("provide at least one eval source: pairwise JSONL, hard JSONL, retrieval datasets, external vector datasets, external multivector datasets, or long datasets")
 	}
 
 	defaultRetrievalRoot := firstExistingDir([]string{
@@ -482,6 +566,8 @@ func prepareConfig(root string) (scoreboardConfig, error) {
 	retrievalRoot, err := filepath.Abs(getenv("EOS_SCOREBOARD_RETRIEVAL_ROOT", defaultRetrievalRoot))
 	guard err == nil else return scoreboardConfig{}, err
 	externalVectorRoot, err := filepath.Abs(getenv("EOS_SCOREBOARD_EXTERNAL_VECTOR_ROOT", filepath.Join(root, "runs", "external-vector-caches")))
+	guard err == nil else return scoreboardConfig{}, err
+	externalMultiVectorRoot, err := filepath.Abs(getenv("EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_ROOT", externalVectorRoot))
 	guard err == nil else return scoreboardConfig{}, err
 	longRoot, err := filepath.Abs(getenv("EOS_SCOREBOARD_LONG_ROOT", filepath.Join(root, "datasets", "longembed")))
 	guard err == nil else return scoreboardConfig{}, err
@@ -519,6 +605,14 @@ func prepareConfig(root string) (scoreboardConfig, error) {
 		ExternalVectorTurboQuantBits: getenv("EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT_BITS", "2,4,8"),
 		ExternalVectorTurboQuantRerankOverfetch: getenv("EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT_RERANK_OVERFETCH", ""),
 		ExternalVectorTurboQuantRerankStorage: getenv("EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT_RERANK_STORAGE", turboQuantRerankStorage),
+		ExternalMultiVectorRoot:     externalMultiVectorRoot,
+		ExternalMultiVectorDatasets: externalMultiVectorDatasets,
+		ExternalMultiVectorBaseline: getenv("EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BASELINE", getenv("EOS_SCOREBOARD_EXTERNAL_VECTOR_BASELINE", "external-multivectors")),
+		ExternalMultiVectorBackend:  getenv("EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BACKEND", getenv("EOS_SCOREBOARD_EXTERNAL_VECTOR_BACKEND", "external-multivectors")),
+		ExternalMultiVectorArtifact: getenv("EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_ARTIFACT", getenv("EOS_SCOREBOARD_EXTERNAL_VECTOR_ARTIFACT", "")),
+		ExternalMultiVectorBits: getenv("EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BITS", getenv("EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT_BITS", "2,4,8")),
+		ExternalMultiVectorBaselineDim: getenv("EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_BASELINE_DIM", ""),
+		ExternalMultiVectorAllowMissingRelevant: getenv("EOS_SCOREBOARD_EXTERNAL_MULTIVECTOR_ALLOW_MISSING_RELEVANT", "0"),
 		HybridRetrieval: getenv("EOS_SCOREBOARD_HYBRID_RETRIEVAL", "0"),
 		HybridMethod: getenv("EOS_SCOREBOARD_HYBRID_METHOD", "minmax"),
 		HybridAlpha: getenv("EOS_SCOREBOARD_HYBRID_ALPHA", "0.75"),
@@ -568,6 +662,15 @@ func readTurboQuantRetrievalMetrics(path string) (turboQuantRetrievalMetrics, er
 	var metrics turboQuantRetrievalMetrics
 	err = json.Unmarshal(data, &metrics)
 	guard err == nil else return turboQuantRetrievalMetrics{}, err
+	return metrics, nil
+}
+
+func readTurboQuantMultiVectorRetrievalMetrics(path string) (turboQuantMultiVectorRetrievalMetrics, error) {
+	data, err := os.ReadFile(path)
+	guard err == nil else return turboQuantMultiVectorRetrievalMetrics{}, err
+	var metrics turboQuantMultiVectorRetrievalMetrics
+	err = json.Unmarshal(data, &metrics)
+	guard err == nil else return turboQuantMultiVectorRetrievalMetrics{}, err
 	return metrics, nil
 }
 
@@ -678,6 +781,97 @@ func rowsFromTurboQuantRetrievalMetrics(category string, baseline string, rerank
 		}
 		if row.QuantizerSeed == 0 {
 			row.QuantizerSeed = metrics.Config.QuantizerSeed
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+func inverseMultiple(value float64) float64 {
+	if value <= 0 {
+		return 0
+	}
+	return 1.0 / value
+}
+
+func rowsFromTurboQuantMultiVectorRetrievalMetrics(category string, baseline string, metricsPath string, metrics turboQuantMultiVectorRetrievalMetrics) []scoreboardRow {
+	denseBaseline := baseline + "-dense-child"
+	quantizedBaseline := baseline + "-turboquant-child"
+	rows := []scoreboardRow{
+		scoreboardRow{
+			Category:           category,
+			Dataset:            metrics.Dataset,
+			Baseline:           denseBaseline,
+			Status:             "pass",
+			MetricsPath:        metricsPath,
+			Method:             "dense_child_max",
+			NDCGAt10:           metrics.Dense.Quality.NDCGAt10,
+			NDCGAt100:          metrics.Dense.Quality.NDCGAt100,
+			MRRAt10:            metrics.Dense.Quality.MRRAt10,
+			PrecisionAt1:       metrics.Dense.Quality.PrecisionAt1,
+			PrecisionAt5:       metrics.Dense.Quality.PrecisionAt5,
+			PrecisionAt10:      metrics.Dense.Quality.PrecisionAt10,
+			HitAt1:             metrics.Dense.Quality.HitAt1,
+			HitAt5:             metrics.Dense.Quality.HitAt5,
+			HitAt10:            metrics.Dense.Quality.HitAt10,
+			MAPAt10:            metrics.Dense.Quality.MAPAt10,
+			MAPAt100:           metrics.Dense.Quality.MAPAt100,
+			RecallAt10:         metrics.Dense.Quality.RecallAt10,
+			RecallAt100:        metrics.Dense.Quality.RecallAt100,
+			VectorBytes:        metrics.Dense.DenseChildBytes,
+			DenseVectorBytes:   metrics.Dense.DenseBaselineTotalBytes,
+			TotalVectorBytes:   metrics.Dense.DenseChildBytes,
+			TotalCompressionRatio: inverseMultiple(metrics.Dense.StorageMultipleOfDenseBaseline),
+			Documents:          metrics.Inputs.ParentCount,
+			Queries:            metrics.Inputs.Queries,
+			ScoresPerSecond:    metrics.Dense.ScoresPerSecond,
+			ForwardBackend:     metrics.Backend,
+		},
+	}
+	if rows[0].Documents == 0 {
+		rows[0].Documents = metrics.Inputs.Parents
+	}
+	for _, bitRow := range metrics.Rows {
+		quantizerSeed := bitRow.QuantizerSeed
+		if quantizerSeed == 0 {
+			quantizerSeed = metrics.Config.QuantizerSeed
+		}
+		row := scoreboardRow{
+			Category:           category,
+			Dataset:            metrics.Dataset,
+			Baseline:           quantizedBaseline,
+			Status:             "pass",
+			MetricsPath:        metricsPath,
+			Method:             bitRow.Method,
+			Bits:               bitRow.Bits,
+			QuantizerSeed:      quantizerSeed,
+			NDCGAt10:           bitRow.Quality.NDCGAt10,
+			NDCGAt100:          bitRow.Quality.NDCGAt100,
+			MRRAt10:            bitRow.Quality.MRRAt10,
+			PrecisionAt1:       bitRow.Quality.PrecisionAt1,
+			PrecisionAt5:       bitRow.Quality.PrecisionAt5,
+			PrecisionAt10:      bitRow.Quality.PrecisionAt10,
+			HitAt1:             bitRow.Quality.HitAt1,
+			HitAt5:             bitRow.Quality.HitAt5,
+			HitAt10:            bitRow.Quality.HitAt10,
+			MAPAt10:            bitRow.Quality.MAPAt10,
+			MAPAt100:           bitRow.Quality.MAPAt100,
+			RecallAt10:         bitRow.Quality.RecallAt10,
+			RecallAt100:        bitRow.Quality.RecallAt100,
+			NDCGAt10Delta:      bitRow.NDCGAt10Delta,
+			RecallAt100Delta:   bitRow.RecallAt100Delta,
+			VectorBytes:        bitRow.QuantizedChildBytes,
+			DenseVectorBytes:   bitRow.DenseBaselineTotalBytes,
+			TotalVectorBytes:   bitRow.QuantizedChildBytes,
+			CompressionRatio:   bitRow.DenseChildCompression,
+			TotalCompressionRatio: inverseMultiple(bitRow.StorageMultipleOfDenseBaseline),
+			Documents:          metrics.Inputs.ParentCount,
+			Queries:            metrics.Inputs.Queries,
+			ScoresPerSecond:    bitRow.ScoresPerSecond,
+			ForwardBackend:     metrics.Backend,
+		}
+		if row.Documents == 0 {
+			row.Documents = metrics.Inputs.Parents
 		}
 		rows = append(rows, row)
 	}
@@ -835,6 +1029,11 @@ func vectorCachePaths(root string, dataset string) (string, string) {
 	return filepath.Join(dir, "doc-vectors.jsonl"), filepath.Join(dir, "query-vectors.jsonl")
 }
 
+func childVectorCachePaths(root string, dataset string) (string, string) {
+	dir := filepath.Join(root, dataset)
+	return filepath.Join(dir, "child-doc-vectors.jsonl"), filepath.Join(dir, "query-vectors.jsonl")
+}
+
 func retrievalVectorArgs(cfg scoreboardConfig, dataset string, metricsPath string, dir string, docVectors string, queryVectors string) []string {
 	args := []string{
 		"eval-retrieval-vectors",
@@ -935,6 +1134,37 @@ func retrievalTurboQuantArgs(cfg scoreboardConfig, dataset string, metricsPath s
 	return append(args, dir)
 }
 
+func retrievalExternalMultiVectorTurboQuantArgs(cfg scoreboardConfig, dataset string, metricsPath string, metricsTSVPath string, dir string, docVectors string, queryVectors string) []string {
+	args := []string{
+		"eval-retrieval-multivector-turboquant",
+		"--dataset", dataset,
+		"--split", cfg.Split,
+		"--top-k", cfg.TopK,
+		"--backend", cfg.ExternalMultiVectorBackend,
+		"--bits", cfg.ExternalMultiVectorBits,
+		"--doc-vectors", docVectors,
+		"--query-vectors", queryVectors,
+		"--metrics-json", metricsPath,
+		"--metrics-tsv", metricsTSVPath,
+	}
+	if cfg.ExternalMultiVectorArtifact != "" {
+		args = append(args, "--artifact", cfg.ExternalMultiVectorArtifact)
+	}
+	if cfg.ExternalMultiVectorBaselineDim != "" && cfg.ExternalMultiVectorBaselineDim != "0" {
+		args = append(args, "--baseline-dim", cfg.ExternalMultiVectorBaselineDim)
+	}
+	if cfg.ExternalMultiVectorAllowMissingRelevant != "0" {
+		args = append(args, "--allow-missing-relevant")
+	}
+	if cfg.MaxDocs != "" && cfg.MaxDocs != "0" {
+		args = append(args, "--max-docs", cfg.MaxDocs)
+	}
+	if cfg.MaxQueries != "" && cfg.MaxQueries != "0" {
+		args = append(args, "--max-queries", cfg.MaxQueries)
+	}
+	return append(args, dir)
+}
+
 func runExternalVectorRetrievalGroup(cfg scoreboardConfig, category string, dataRoot string, vectorRoot string, datasets []string, rows []scoreboardRow) ([]scoreboardRow, error) {
 	for dataset in datasets {
 		dir := retrievalDatasetDir(dataRoot, dataset)
@@ -984,6 +1214,34 @@ func runExternalVectorRetrievalGroup(cfg scoreboardConfig, category string, data
 				guard err == nil else return rows, err
 				rows = append(rows, turboQuantRow)
 			}
+		}
+	}
+	return rows, nil
+}
+
+func runExternalMultiVectorRetrievalGroup(cfg scoreboardConfig, category string, dataRoot string, vectorRoot string, datasets []string, rows []scoreboardRow) ([]scoreboardRow, error) {
+	for dataset in datasets {
+		dir := retrievalDatasetDir(dataRoot, dataset)
+		info, err := os.Stat(dir)
+		guard err == nil && info.IsDir() else return rows, fmt.Errorf("%s dataset directory missing for %s: %s", category, dataset, dir)
+		docVectors, queryVectors := childVectorCachePaths(vectorRoot, dataset)
+		err = requireExistingFile("external child document vector cache", docVectors)
+		guard err == nil else return rows, err
+		err = requireExistingFile("external query vector cache", queryVectors)
+		guard err == nil else return rows, err
+		metricsBaseline := cfg.ExternalMultiVectorBaseline + "-multivector"
+		metricsPath := filepath.Join(cfg.RunDir, metricsFileName(category, dataset, metricsBaseline))
+		metricsTSVPath := filepath.Join(cfg.RunDir, strings.TrimSuffix(metricsFileName(category, dataset, metricsBaseline), ".json")+".tsv")
+		args := retrievalExternalMultiVectorTurboQuantArgs(cfg, dataset, metricsPath, metricsTSVPath, dir, docVectors, queryVectors)
+		err = runCmd(cfg, "Evaluate "+category+" "+cfg.ExternalMultiVectorBaseline+" child vectors "+dataset, category+"-"+dataset+"-"+metricsBaseline+".log", cfg.MantaBin, args)
+		guard err == nil else return rows, err
+		metrics, err := readTurboQuantMultiVectorRetrievalMetrics(metricsPath)
+		guard err == nil else return rows, err
+		multiVectorRows := rowsFromTurboQuantMultiVectorRetrievalMetrics(category, cfg.ExternalMultiVectorBaseline, metricsPath, metrics)
+		for _, row := range multiVectorRows {
+			err = appendScoreboardRow(cfg.ScoreboardTSV, row)
+			guard err == nil else return rows, err
+			rows = append(rows, row)
 		}
 	}
 	return rows, nil
@@ -1079,6 +1337,8 @@ func runScoreboard(cfg scoreboardConfig) error {
 	rows, err = runExternalVectorRetrievalGroup(cfg, "short_retrieval", cfg.RetrievalRoot, cfg.ExternalVectorRoot, cfg.ExternalVectorDatasets, rows)
 	guard err == nil else return err
 	rows, err = runRetrievalGroup(cfg, "long_retrieval", cfg.LongRoot, cfg.LongDatasets, rows)
+	guard err == nil else return err
+	rows, err = runExternalMultiVectorRetrievalGroup(cfg, "long_retrieval", cfg.LongRoot, cfg.ExternalMultiVectorRoot, cfg.ExternalMultiVectorDatasets, rows)
 	guard err == nil else return err
 	err = writeManifest(cfg, rows)
 	guard err == nil else return err
