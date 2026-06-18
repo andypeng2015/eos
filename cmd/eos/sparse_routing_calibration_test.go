@@ -42,6 +42,9 @@ func TestSparseRoutingCalibrationConfigDefaultsAndPaths(t *testing.T) {
 	if got, want := joinInts(cfg.RouteProbes), "1"; got != want {
 		t.Fatalf("route_probes = %s, want %s", got, want)
 	}
+	if cfg.MinExactTopKRecallMin != 0 {
+		t.Fatalf("min_exact_topk_recall_min = %.6f, want default 0", cfg.MinExactTopKRecallMin)
+	}
 }
 
 func TestRunCalibrateSparseRoutingWritesArtifacts(t *testing.T) {
@@ -319,4 +322,74 @@ func TestSparseRoutingCalibrationRequirePassFailsOnlyWhenRequested(t *testing.T)
 	if err := runCalibrateSparseRouting(withRequire); err == nil {
 		t.Fatal("calibration with require-pass succeeded despite impossible thresholds")
 	}
+}
+
+func TestSparseRoutingCalibrationMinExactTopKRecallMinGate(t *testing.T) {
+	common := []string{
+		"-seq-len", "4096",
+		"-query-len", "8",
+		"-dim", "64",
+		"-top-k", "64",
+		"-route-block-size", "16",
+		"-route-top-blocks", "32",
+		"-route-modes", "oracle_block_max",
+		"-max-score-fraction", "0.2",
+		"-min-exact-topk-recall", "0.95",
+		"-min-output-cosine", "0.98",
+	}
+
+	defaultRunDir := filepath.Join(t.TempDir(), "default")
+	defaultArgs := append([]string{"-run-dir", defaultRunDir, "-require-pass"}, common...)
+	if err := runCalibrateSparseRouting(defaultArgs); err != nil {
+		t.Fatalf("default min recall gate returned error: %v", err)
+	}
+	defaultReport := readSparseRoutingCalibrationReport(t, defaultRunDir)
+	if defaultReport.Config.MinExactTopKRecallMin != 0 {
+		t.Fatalf("default min_exact_topk_recall_min = %.6f, want 0", defaultReport.Config.MinExactTopKRecallMin)
+	}
+	if defaultReport.Summary.PassingRows != 1 {
+		t.Fatalf("default passing rows = %d, want 1", defaultReport.Summary.PassingRows)
+	}
+	if got := defaultReport.Rows[0].ExactTopKRecallMin; got >= 0.95 {
+		t.Fatalf("default row recall_min = %.6f, want below 0.95 to prove average-only pass", got)
+	}
+
+	strictRunDir := filepath.Join(t.TempDir(), "strict")
+	strictArgs := append([]string{"-run-dir", strictRunDir, "-min-exact-topk-recall-min", "0.95"}, common...)
+	if err := runCalibrateSparseRouting(strictArgs); err != nil {
+		t.Fatalf("strict min recall gate without require-pass returned error: %v", err)
+	}
+	strictReport := readSparseRoutingCalibrationReport(t, strictRunDir)
+	if strictReport.Summary.PassingRows != 0 || strictReport.Rows[0].Pass {
+		t.Fatalf("strict min recall gate report summary=%+v row=%+v, want rejected row", strictReport.Summary, strictReport.Rows[0])
+	}
+	if strictReport.Rows[0].ExactTopKRecallAvg < 0.95 {
+		t.Fatalf("strict row recall_avg = %.6f, want average gate pass", strictReport.Rows[0].ExactTopKRecallAvg)
+	}
+	if !strings.Contains(strings.Join(strictReport.Rows[0].FailureReasons, "; "), "exact_topk_recall_min") {
+		t.Fatalf("strict row failure reasons = %v, want exact_topk_recall_min", strictReport.Rows[0].FailureReasons)
+	}
+
+	requireRunDir := filepath.Join(t.TempDir(), "require")
+	requireArgs := append([]string{"-run-dir", requireRunDir, "-min-exact-topk-recall-min", "0.95", "-require-pass"}, common...)
+	err := runCalibrateSparseRouting(requireArgs)
+	if err == nil {
+		t.Fatal("strict min recall gate with require-pass succeeded, want failure")
+	}
+	if !strings.Contains(err.Error(), "per-query recall") {
+		t.Fatalf("require-pass error = %q, want per-query recall failure context", err)
+	}
+}
+
+func readSparseRoutingCalibrationReport(t *testing.T, runDir string) sparseRoutingCalibrationReport {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(runDir, "calibration.json"))
+	if err != nil {
+		t.Fatalf("read calibration json: %v", err)
+	}
+	var report sparseRoutingCalibrationReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("decode calibration json: %v", err)
+	}
+	return report
 }

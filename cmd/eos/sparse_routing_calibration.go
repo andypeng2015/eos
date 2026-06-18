@@ -16,25 +16,26 @@ import (
 )
 
 type sparseRoutingCalibrationConfig struct {
-	RunRoot            string    `json:"run_root"`
-	RunDir             string    `json:"run_dir"`
-	JSONPath           string    `json:"json_path"`
-	TSVPath            string    `json:"tsv_path"`
-	SeqLen             int       `json:"seq_len"`
-	QueryLen           int       `json:"query_len"`
-	Dim                int       `json:"dim"`
-	ValueDim           int       `json:"value_dim"`
-	TopK               int       `json:"top_k"`
-	RouteBlockSize     int       `json:"route_block_size"`
-	RouteTopBlocks     []int     `json:"route_top_blocks"`
-	RouteModes         []string  `json:"route_modes"`
-	RouteProbes        []int     `json:"route_probes"`
-	Seed               int64     `json:"seed"`
-	MaxScoreFraction   float64   `json:"max_score_fraction"`
-	MinExactTopKRecall float64   `json:"min_exact_topk_recall"`
-	MinOutputCosine    float64   `json:"min_output_cosine"`
-	RequirePass        bool      `json:"require_pass"`
-	CreatedUTC         time.Time `json:"-"`
+	RunRoot               string    `json:"run_root"`
+	RunDir                string    `json:"run_dir"`
+	JSONPath              string    `json:"json_path"`
+	TSVPath               string    `json:"tsv_path"`
+	SeqLen                int       `json:"seq_len"`
+	QueryLen              int       `json:"query_len"`
+	Dim                   int       `json:"dim"`
+	ValueDim              int       `json:"value_dim"`
+	TopK                  int       `json:"top_k"`
+	RouteBlockSize        int       `json:"route_block_size"`
+	RouteTopBlocks        []int     `json:"route_top_blocks"`
+	RouteModes            []string  `json:"route_modes"`
+	RouteProbes           []int     `json:"route_probes"`
+	Seed                  int64     `json:"seed"`
+	MaxScoreFraction      float64   `json:"max_score_fraction"`
+	MinExactTopKRecall    float64   `json:"min_exact_topk_recall"`
+	MinExactTopKRecallMin float64   `json:"min_exact_topk_recall_min"`
+	MinOutputCosine       float64   `json:"min_output_cosine"`
+	RequirePass           bool      `json:"require_pass"`
+	CreatedUTC            time.Time `json:"-"`
 }
 
 type sparseRoutingCalibrationReport struct {
@@ -62,6 +63,7 @@ type sparseRoutingCalibrationRowRef struct {
 	RouteProbes        int     `json:"route_probes"`
 	RouteTopBlocks     int     `json:"route_top_blocks"`
 	ExactTopKRecallAvg float64 `json:"exact_topk_recall_avg"`
+	ExactTopKRecallMin float64 `json:"exact_topk_recall_min"`
 	OutputCosine       float64 `json:"output_cosine_similarity"`
 	ScoreCountFraction float64 `json:"score_count_fraction"`
 	Pass               bool    `json:"pass"`
@@ -127,12 +129,12 @@ func runCalibrateSparseRouting(args []string) error {
 	fmt.Printf("summary: rows=%d passing_rows=%d gate=%s\n", report.Summary.Rows, report.Summary.PassingRows, report.Summary.Status)
 	if report.Summary.BestPassing != nil {
 		ref := report.Summary.BestPassing
-		fmt.Printf("best_passing: route_mode=%s route_probes=%d route_top_blocks=%d recall_avg=%.6f cosine=%.9g score_fraction=%.6f\n",
-			ref.RouteMode, ref.RouteProbes, ref.RouteTopBlocks, ref.ExactTopKRecallAvg, ref.OutputCosine, ref.ScoreCountFraction)
+		fmt.Printf("best_passing: route_mode=%s route_probes=%d route_top_blocks=%d recall_avg=%.6f recall_min=%.6f cosine=%.9g score_fraction=%.6f\n",
+			ref.RouteMode, ref.RouteProbes, ref.RouteTopBlocks, ref.ExactTopKRecallAvg, ref.ExactTopKRecallMin, ref.OutputCosine, ref.ScoreCountFraction)
 	} else if report.Summary.BestFallback != nil {
 		ref := report.Summary.BestFallback
-		fmt.Printf("best_fallback: route_mode=%s route_probes=%d route_top_blocks=%d recall_avg=%.6f cosine=%.9g score_fraction=%.6f\n",
-			ref.RouteMode, ref.RouteProbes, ref.RouteTopBlocks, ref.ExactTopKRecallAvg, ref.OutputCosine, ref.ScoreCountFraction)
+		fmt.Printf("best_fallback: route_mode=%s route_probes=%d route_top_blocks=%d recall_avg=%.6f recall_min=%.6f cosine=%.9g score_fraction=%.6f\n",
+			ref.RouteMode, ref.RouteProbes, ref.RouteTopBlocks, ref.ExactTopKRecallAvg, ref.ExactTopKRecallMin, ref.OutputCosine, ref.ScoreCountFraction)
 	}
 	if cfg.RequirePass && report.Summary.PassingRows == 0 {
 		return fmt.Errorf("sparse routing calibration failed: %s", report.Summary.FailureReason)
@@ -161,6 +163,7 @@ func parseSparseRoutingCalibrationConfig(args []string) (sparseRoutingCalibratio
 	seed := fs.Int64("seed", smokeEnvInt64("EOS_SPARSE_ROUTING_CALIBRATION_SEED", 5581486560434873699), "synthetic data seed")
 	maxScoreFraction := fs.Float64("max-score-fraction", smokeEnvFloat("EOS_SPARSE_ROUTING_CALIBRATION_MAX_SCORE_FRACTION", 0.5), "passing row maximum score-work fraction versus exact dense scoring")
 	minExactTopKRecall := fs.Float64("min-exact-topk-recall", smokeEnvFloat("EOS_SPARSE_ROUTING_CALIBRATION_MIN_EXACT_TOPK_RECALL", 0.9), "passing row minimum mean exact top-k recall in routed candidate set")
+	minExactTopKRecallMin := fs.Float64("min-exact-topk-recall-min", smokeEnvFloat("EOS_SPARSE_ROUTING_CALIBRATION_MIN_EXACT_TOPK_RECALL_MIN", 0), "passing row minimum per-query exact top-k recall in routed candidate set")
 	minOutputCosine := fs.Float64("min-output-cosine", smokeEnvFloat("EOS_SPARSE_ROUTING_CALIBRATION_MIN_OUTPUT_COSINE", 0.95), "passing row minimum routed-vs-exact sparse output cosine")
 	requirePass := fs.Bool("require-pass", smokeEnvBool("EOS_SPARSE_ROUTING_CALIBRATION_REQUIRE_PASS", false), "return non-zero when no sweep row meets all thresholds")
 	if err := fs.Parse(args); err != nil {
@@ -182,25 +185,26 @@ func parseSparseRoutingCalibrationConfig(args []string) (sparseRoutingCalibratio
 		return sparseRoutingCalibrationConfig{}, err
 	}
 	cfg := sparseRoutingCalibrationConfig{
-		RunRoot:            *runRoot,
-		RunDir:             *runDir,
-		JSONPath:           *jsonPath,
-		TSVPath:            *tsvPath,
-		SeqLen:             *seqLen,
-		QueryLen:           *queryLen,
-		Dim:                *dim,
-		ValueDim:           *valueDim,
-		TopK:               *topK,
-		RouteBlockSize:     *routeBlockSize,
-		RouteTopBlocks:     routeTopBlocks,
-		RouteModes:         routeModes,
-		RouteProbes:        routeProbes,
-		Seed:               *seed,
-		MaxScoreFraction:   *maxScoreFraction,
-		MinExactTopKRecall: *minExactTopKRecall,
-		MinOutputCosine:    *minOutputCosine,
-		RequirePass:        *requirePass,
-		CreatedUTC:         time.Now().UTC(),
+		RunRoot:               *runRoot,
+		RunDir:                *runDir,
+		JSONPath:              *jsonPath,
+		TSVPath:               *tsvPath,
+		SeqLen:                *seqLen,
+		QueryLen:              *queryLen,
+		Dim:                   *dim,
+		ValueDim:              *valueDim,
+		TopK:                  *topK,
+		RouteBlockSize:        *routeBlockSize,
+		RouteTopBlocks:        routeTopBlocks,
+		RouteModes:            routeModes,
+		RouteProbes:           routeProbes,
+		Seed:                  *seed,
+		MaxScoreFraction:      *maxScoreFraction,
+		MinExactTopKRecall:    *minExactTopKRecall,
+		MinExactTopKRecallMin: *minExactTopKRecallMin,
+		MinOutputCosine:       *minOutputCosine,
+		RequirePass:           *requirePass,
+		CreatedUTC:            time.Now().UTC(),
 	}
 	if cfg.ValueDim == 0 {
 		cfg.ValueDim = cfg.Dim
@@ -225,6 +229,9 @@ func parseSparseRoutingCalibrationConfig(args []string) (sparseRoutingCalibratio
 	}
 	if cfg.MinExactTopKRecall < 0 || cfg.MinExactTopKRecall > 1 {
 		return sparseRoutingCalibrationConfig{}, fmt.Errorf("min-exact-topk-recall must be between 0 and 1")
+	}
+	if cfg.MinExactTopKRecallMin < 0 || cfg.MinExactTopKRecallMin > 1 {
+		return sparseRoutingCalibrationConfig{}, fmt.Errorf("min-exact-topk-recall-min must be between 0 and 1")
 	}
 	if cfg.MinOutputCosine < -1 || cfg.MinOutputCosine > 1 {
 		return sparseRoutingCalibrationConfig{}, fmt.Errorf("min-output-cosine must be between -1 and 1")
@@ -347,6 +354,9 @@ func executeSparseRoutingCalibration(cfg sparseRoutingCalibrationConfig) (sparse
 				}
 				if row.ExactTopKRecallAvg < cfg.MinExactTopKRecall {
 					row.FailureReasons = append(row.FailureReasons, fmt.Sprintf("exact_topk_recall_avg %.6f below %.6f", row.ExactTopKRecallAvg, cfg.MinExactTopKRecall))
+				}
+				if row.ExactTopKRecallMin < cfg.MinExactTopKRecallMin {
+					row.FailureReasons = append(row.FailureReasons, fmt.Sprintf("exact_topk_recall_min %.6f below %.6f", row.ExactTopKRecallMin, cfg.MinExactTopKRecallMin))
 				}
 				if row.OutputCosineSimilarity < cfg.MinOutputCosine {
 					row.FailureReasons = append(row.FailureReasons, fmt.Sprintf("output_cosine_similarity %.9g below %.9g", row.OutputCosineSimilarity, cfg.MinOutputCosine))
@@ -753,7 +763,7 @@ func summarizeSparseRoutingCalibration(rows []sparseRoutingCalibrationRow, requi
 	}
 	if requirePass && summary.PassingRows == 0 {
 		summary.Status = "fail"
-		summary.FailureReason = "no routing policy row met recall, cosine, and score-fraction thresholds"
+		summary.FailureReason = "no routing policy row met recall, per-query recall, cosine, and score-fraction thresholds"
 	}
 	return summary
 }
@@ -783,6 +793,7 @@ func sparseRoutingRowRef(row sparseRoutingCalibrationRow) sparseRoutingCalibrati
 		RouteProbes:        row.RouteProbes,
 		RouteTopBlocks:     row.RouteTopBlocks,
 		ExactTopKRecallAvg: row.ExactTopKRecallAvg,
+		ExactTopKRecallMin: row.ExactTopKRecallMin,
 		OutputCosine:       row.OutputCosineSimilarity,
 		ScoreCountFraction: row.ScoreCountFraction,
 		Pass:               row.Pass,
