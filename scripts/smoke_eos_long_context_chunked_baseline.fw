@@ -178,7 +178,7 @@ func writeJSONL(path string, rows []map[string]interface{}) error {
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
-func generateDataset(datasetDir string, docs int, queries int, prefixWords int) error {
+func generateLateNeedleDataset(datasetDir string, docs int, queries int, prefixWords int) error {
 	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
 		return err
 	}
@@ -237,6 +237,130 @@ func generateDataset(datasetDir string, docs int, queries int, prefixWords int) 
 	return os.WriteFile(filepath.Join(datasetDir, "qrels", "test.tsv"), []byte(qrels.String()), 0o644)
 }
 
+type semanticTopic struct {
+	Doc    string
+	Query  string
+	Decoy  string
+	Anchor string
+}
+
+func semanticTopics() []semanticTopic {
+	return []semanticTopic{
+		{"The closing instruction says night staff should leave the lamp passage usable when the building loses electricity.", "Which record recommends keeping the lit hallway open during an outage?", "A hallway lighting memo discusses outage drills but says nothing about access.", "facility access"},
+		{"The field note says the kitchen should cool soup in shallow pans before storage to prevent unsafe warming.", "Find the document about lowering stew temperature safely before it goes into storage.", "A storage checklist mentions stew labels and refrigerator shelves without cooling advice.", "food safety"},
+		{"The transit bulletin asks dispatchers to send a smaller bus when the bridge has a temporary weight restriction.", "Which entry calls for a lighter vehicle because a crossing cannot carry normal loads?", "A vehicle maintenance note lists tire load ratings but no route substitution.", "route planning"},
+		{"The clinic protocol says reception should offer a quiet room when a visitor appears overwhelmed by noise.", "Which policy tells staff to move a distressed guest away from loud surroundings?", "A guest services card praises quiet decor but gives no escalation step.", "visitor support"},
+		{"The museum log states that watercolor sketches must rest flat while humidity returns to normal.", "Find the note about keeping delicate paintings horizontal until moisture stabilizes.", "A gallery repair ticket mentions wall humidity and framed paintings without handling rules.", "collection care"},
+		{"The farm advisory says seedlings recover better if shade cloth is removed in stages after frost danger passes.", "Which document advises gradually exposing young plants once cold nights are over?", "A planting calendar discusses frost dates and shade purchases but not gradual exposure.", "crop recovery"},
+		{"The marina notice says crews should rinse metal fittings with fresh water after a storm surge.", "Which instruction is about washing hardware after seawater floods the dock?", "A dock cleanup plan lists seawater levels and hardware inventory with no rinse step.", "corrosion control"},
+		{"The archive memo says brittle letters should be photographed before any attempt to unfold them.", "Find the guidance to image fragile correspondence prior to opening it.", "A digitization budget mentions correspondence photography but not unfolding precautions.", "document preservation"},
+		{"The warehouse rule says batteries with swollen cases belong in the outdoor quarantine cabinet.", "Which safety rule moves bulging power cells to an isolated outside container?", "A cabinet inspection form counts outdoor batteries but omits swelling hazards.", "battery safety"},
+		{"The school plan says substitute teachers should receive the seating chart before attendance is taken.", "Which plan gives temporary instructors the room map ahead of roll call?", "A roll call reminder references substitutes and maps but not the order of handoff.", "classroom operations"},
+		{"The canyon guide says hikers should turn back when the dry creek bed begins carrying muddy water.", "Find the warning about leaving a wash once runoff starts appearing.", "A trail brochure describes muddy boots near creeks without flood guidance.", "hiker safety"},
+		{"The bakery note says proofed dough should be covered with linen rather than plastic during the final rest.", "Which note prefers cloth over film for bread dough before baking?", "A supply order includes linen bags and plastic wrap without dough instructions.", "bakery process"},
+		{"The harbor rule says radio checks must use channel nine before the vessel leaves its berth.", "Which rule requires a communications test on the low numbered channel prior to departure?", "A berth assignment list has radio numbers and departure times but no test requirement.", "marine departure"},
+		{"The lab memo says thawed samples should be mixed by slow inversion, not by shaking.", "Find the instruction for gently turning specimens after freezer removal.", "A freezer log mentions sample shaking during transport but no thaw protocol.", "sample handling"},
+		{"The library notice says rare maps should be carried in two hands with a support board beneath them.", "Which notice explains how to move old charts using a backing panel?", "A map catalog advertises display boards and hand delivery without handling detail.", "archive handling"},
+		{"The festival manual says vendors selling hot drinks need lids available at the pickup counter.", "Find the requirement about covers for warm beverages where customers collect orders.", "A vendor menu lists hot drinks and counter staffing but no cover requirement.", "event service"},
+		{"The tunnel bulletin says inspectors should listen for dripping before entering the lower service alcove.", "Which bulletin asks workers to check for water sounds before going into the basement niche?", "An inspection rota names alcove assignments and water meters without entry advice.", "infrastructure inspection"},
+		{"The rescue checklist says blankets should be warmed before wrapping a patient brought in from cold rain.", "Find the care step for heating covers before using them on a chilled person.", "A supply note counts blankets and rain ponchos but not patient warming.", "emergency care"},
+		{"The printing guide says glossy pages must dry overnight before the second side is printed.", "Which guide delays reverse-side printing until shiny sheets have rested until morning?", "A press schedule mentions glossy paper and morning shifts without drying rules.", "print production"},
+		{"The kennel note says anxious dogs should enter through the side gate to avoid the crowded lobby.", "Find the animal intake note routing nervous pets away from the busy front room.", "A lobby cleaning checklist mentions dogs and side gates without intake routing.", "animal care"},
+		{"The observatory memo says lens covers should stay on until the dome fan has cleared dust.", "Which memo keeps optics protected while ventilation removes airborne grit?", "A fan service ticket mentions lens storage and dust filters but no timing rule.", "telescope care"},
+		{"The bakery delivery rule says crates of eggs ride above sacks of flour during transport.", "Find the loading rule that keeps fragile cartons higher than powder bags.", "A truck manifest lists eggs and flour sacks but no stacking order.", "delivery loading"},
+		{"The pool notice says lifeguards should test the shallow end first after a thunderstorm delay.", "Which notice starts water checks in the low-depth area once lightning has passed?", "A storm delay sign mentions shallow swim lanes but not test sequence.", "pool operations"},
+		{"The theater cue sheet says the blue curtain should rise only after the house lights fade completely.", "Find the cue that waits for audience lighting to go dark before opening the backdrop.", "A lighting inventory includes blue curtains and dimmer labels without cue order.", "stage operations"},
+		{"The pharmacy rule says refrigerated medicine must be logged before it is placed in the insulated pouch.", "Which rule records cold prescriptions prior to packing them in a thermal bag?", "A pouch reorder note lists medicine labels and refrigerator shelves without logging order.", "pharmacy delivery"},
+		{"The orchard bulletin says fallen fruit near the fence should be cleared before setting irrigation timers.", "Find the farm note about removing dropped produce before scheduling watering.", "An irrigation invoice references fence rows and fruit bins but not cleanup order.", "orchard maintenance"},
+		{"The aquarium guide says coral fragments should be moved with soft tongs after pumps are paused.", "Which guide handles reef pieces gently once water flow has stopped?", "A pump repair note mentions tongs and coral tanks without transfer instructions.", "aquarium care"},
+		{"The hostel memo says late arrivals should receive earplugs with the room key envelope.", "Find the guest note that pairs noise protection with after-hours check-in packets.", "A room key audit mentions late arrivals and envelope colors without earplugs.", "guest operations"},
+		{"The firehouse checklist says hoses must be drained on the rear apron before being returned to the rack.", "Which checklist empties water lines outside behind the station prior to storage?", "A rack inventory notes hoses and rear doors but not draining steps.", "equipment reset"},
+		{"The market rule says ripe peaches should be moved to shaded bins before noon.", "Find the produce rule about relocating soft stone fruit out of direct sun by midday.", "A market map labels shaded stalls and peach prices but gives no movement rule.", "produce handling"},
+		{"The ferry bulletin says bicycles board after walkers when the ramp is wet.", "Which bulletin changes loading order for bikes because the gangway is slippery?", "A ramp repair ticket mentions bicycles and walkers but no boarding sequence.", "ferry loading"},
+		{"The dental note says impression trays should be warmed in water before fitting a nervous child.", "Find the clinical note about heating a mouth mold before using it with an anxious young patient.", "A pediatric appointment note lists trays and water cups but no warming instruction.", "dental care"},
+		{"The greenhouse memo says vents should open slightly before misting starts on hot afternoons.", "Which memo cracks the air panels ahead of spraying plants in warm weather?", "A misting schedule mentions vents and afternoon heat without ordering.", "greenhouse climate"},
+		{"The hotel rule says luggage for early flights should be staged beside the east exit overnight.", "Find the instruction for placing bags near the sunrise-side door before morning departures.", "A departure board lists east wing luggage tags but no staging rule.", "hotel logistics"},
+		{"The skating notice says rental blades should be dried before size labels are checked.", "Which notice wipes moisture from skates prior to verifying their numbers?", "A rental chart includes blade sizes and towels without process order.", "rink operations"},
+		{"The clinic note says oxygen cylinders should be counted after wheelchairs are returned.", "Find the inventory note that tallies breathing tanks once mobility chairs are back.", "A wheelchair service log mentions oxygen rooms without counting sequence.", "clinic inventory"},
+		{"The radio station memo says backup recordings should start before the guest microphone is unmuted.", "Which broadcast memo begins the safety copy prior to opening the interview mic?", "A guest schedule lists microphones and archive recordings without startup order.", "broadcast operations"},
+		{"The pottery studio rule says clay scraps should be soaked before the pug mill is switched on.", "Find the studio rule about wetting leftover clay before running the recycling machine.", "A machine cleaning note mentions clay scraps and switches but no soaking step.", "ceramic recycling"},
+		{"The campsite notice says lantern fuel should be stored downhill from cooking tents.", "Which notice places lighting fuel lower on the slope than the meal shelters?", "A tent map marks lantern stations and downhill trails without storage guidance.", "camp safety"},
+		{"The ferry kitchen note says soup kettles should be latched before the boat leaves calm water.", "Find the galley instruction to secure hot pots before rougher travel begins.", "A galley menu mentions soup and calm crossings but no latch requirement.", "galley safety"},
+		{"The clinic form says translated discharge papers should be printed before the interpreter leaves.", "Which form prepares patient exit instructions in another language while the language helper is still present?", "A printer queue mentions interpreters and discharge folders without timing.", "patient paperwork"},
+		{"The quarry memo says warning flags should be lowered only after the dust plume has settled.", "Find the site rule that keeps signals raised until airborne powder clears.", "A flag order references quarry dust colors but not lowering criteria.", "site safety"},
+		{"The cafe rule says allergen cards should be checked before the daily pastry tray is labeled.", "Which cafe rule verifies ingredient warnings ahead of naming baked goods on display?", "A pastry sign template mentions allergen ink and tray labels without verification order.", "food labeling"},
+		{"The train depot notice says lost umbrellas should be dried open before tagging.", "Find the depot note about letting found rain gear air out prior to labeling.", "A lost property shelf list includes umbrellas and tags but no drying instruction.", "lost property"},
+		{"The climbing gym memo says chalk buckets should be moved away from mats before youth class.", "Which gym memo clears powder containers from landing pads ahead of children arriving?", "A youth roster notes chalk use and mat colors without relocation guidance.", "gym setup"},
+		{"The mailroom rule says fragile parcels should be scanned after padding is added.", "Find the mailroom rule that records breakable packages once cushioning is in place.", "A scanner manual mentions fragile labels and padding supplies without sequence.", "parcel handling"},
+		{"The ferry engine note says bilge readings should be written down before the pump is tested.", "Which engine note logs lower-hull water levels prior to checking the pump?", "A pump checklist lists bilge gauges and notebooks without ordering.", "engine room"},
+		{"The archive rule says cassette tapes should be rewound before their cases are replaced.", "Find the preservation rule about returning old audio reels to the beginning before boxing.", "A case inventory mentions cassette labels and rewind machines without the final step.", "media archive"},
+	}
+}
+
+func generateSemanticLateNeedleDataset(datasetDir string, docs int, queries int, prefixWords int) error {
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		return err
+	}
+	topics := semanticTopics()
+	if queries > len(topics) {
+		queries = len(topics)
+	}
+	if docs < queries {
+		docs = queries
+	}
+	common := strings.Repeat("shared operational background covering routine schedules budget notes staff updates maintenance context storage reminders and general documentation that is intentionally repeated before the useful evidence ", prefixWords/18+1)
+	commonWords := strings.Fields(common)
+	if len(commonWords) > prefixWords {
+		commonWords = commonWords[:prefixWords]
+	}
+	prefix := strings.Join(commonWords, " ")
+	corpusRows := []map[string]interface{}{}
+	queryRows := []map[string]interface{}{}
+	var qrels strings.Builder
+	qrels.WriteString("query-id\tcorpus-id\tscore\n")
+	for i := 0; i < docs; i++ {
+		topic := topics[i%queries]
+		id := fmt.Sprintf("doc-%03d", i)
+		nearMiss := topics[(i*7+3)%queries]
+		late := topic.Doc
+		if i >= queries {
+			late = fmt.Sprintf("%s Nearby but incorrect cross reference: %s", topic.Decoy, nearMiss.Decoy)
+		}
+		text := fmt.Sprintf("%s Distractor note for %s: %s Late operational evidence. %s This sentence is intentionally near the end of the long document.", prefix, nearMiss.Anchor, nearMiss.Query, late)
+		corpusRows = append(corpusRows, map[string]interface{}{
+			"_id":   id,
+			"title": fmt.Sprintf("Synthetic semantic operations record %03d", i),
+			"text":  text,
+		})
+		if i < queries {
+			qid := fmt.Sprintf("q-%03d", i)
+			queryRows = append(queryRows, map[string]interface{}{
+				"_id":  qid,
+				"text": topic.Query,
+			})
+			qrels.WriteString(fmt.Sprintf("%s\t%s\t1\n", qid, id))
+		}
+	}
+	if err := writeJSONL(filepath.Join(datasetDir, "corpus.jsonl"), corpusRows); err != nil {
+		return err
+	}
+	if err := writeJSONL(filepath.Join(datasetDir, "queries.jsonl"), queryRows); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(datasetDir, "qrels", "test.tsv"), []byte(qrels.String()), 0o644)
+}
+
+func generateDataset(scenario string, datasetDir string, docs int, queries int, prefixWords int) error {
+	switch scenario {
+	case "late_needle":
+		return generateLateNeedleDataset(datasetDir, docs, queries, prefixWords)
+	case "semantic_late_needle":
+		return generateSemanticLateNeedleDataset(datasetDir, docs, queries, prefixWords)
+	default:
+		return fmt.Errorf("unknown EOS_LONG_CONTEXT_SMOKE_SCENARIO %q; expected late_needle or semantic_late_needle", scenario)
+	}
+}
+
 func readJSON(path string, out interface{}) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -268,21 +392,31 @@ func main() {
 	if !filepath.IsAbs(runDir) {
 		runDir = filepath.Join(root, runDir)
 	}
+	scenario := getenv("EOS_LONG_CONTEXT_SMOKE_SCENARIO", "late_needle")
+	datasetName := strings.ReplaceAll(scenario, "_", "-")
 	artifact := getenv("EOS_LONG_CONTEXT_SMOKE_ARTIFACT", filepath.Join(root, "assets", "corkscrewdb-default-embedder", "corkscrewdb-default-embedder.mll"))
 	if _, err := os.Stat(artifact); err != nil {
 		artifact = filepath.Join(root, "runs", "current-release-qwen3-nf005-continuation-20260616T224102Z", "candidate", "eos-embed-v1.sealed.mll")
 	}
-	docs, err := parseIntEnv("EOS_LONG_CONTEXT_SMOKE_DOCS", 24)
+	defaultDocs := 24
+	defaultQueries := 12
+	defaultPrefixWords := 720
+	if scenario == "semantic_late_needle" {
+		defaultDocs = 144
+		defaultQueries = 36
+		defaultPrefixWords = 960
+	}
+	docs, err := parseIntEnv("EOS_LONG_CONTEXT_SMOKE_DOCS", defaultDocs)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	queries, err := parseIntEnv("EOS_LONG_CONTEXT_SMOKE_QUERIES", 12)
+	queries, err := parseIntEnv("EOS_LONG_CONTEXT_SMOKE_QUERIES", defaultQueries)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	prefixWords, err := parseIntEnv("EOS_LONG_CONTEXT_SMOKE_PREFIX_WORDS", 720)
+	prefixWords, err := parseIntEnv("EOS_LONG_CONTEXT_SMOKE_PREFIX_WORDS", defaultPrefixWords)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -291,8 +425,17 @@ func main() {
 	chunkWords, _ := parseIntEnv("EOS_LONG_CONTEXT_SMOKE_CHUNK_WORDS", 96)
 	chunkOverlap, _ := parseIntEnv("EOS_LONG_CONTEXT_SMOKE_CHUNK_OVERLAP", 16)
 	baselineDim, _ := parseIntEnv("EOS_LONG_CONTEXT_SMOKE_BASELINE_DIM", 3072)
+	topK, err := parseIntEnv("EOS_LONG_CONTEXT_SMOKE_TOP_K", 100)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if topK <= 0 {
+		fmt.Fprintln(os.Stderr, "EOS_LONG_CONTEXT_SMOKE_TOP_K must be positive")
+		os.Exit(1)
+	}
 
-	dataDir := filepath.Join(runDir, "data", "late-needle")
+	dataDir := filepath.Join(runDir, "data", datasetName)
 	logDir := filepath.Join(runDir, "logs")
 	cacheDir := filepath.Join(runDir, "vectors")
 	binDir := filepath.Join(runDir, "bin")
@@ -302,7 +445,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	if err := generateDataset(dataDir, docs, queries, prefixWords); err != nil {
+	if err := generateDataset(scenario, dataDir, docs, queries, prefixWords); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
@@ -317,7 +460,7 @@ func main() {
 	}
 
 	directMetrics := filepath.Join(runDir, "direct-eos.metrics.json")
-	rec, err = runCmd(root, "Evaluate direct single-vector Eos", filepath.Join(logDir, "direct-eos.log"), eosBin, []string{"eval-retrieval", "--dataset", "late-needle", "--top-k", "100", "--metrics-json", directMetrics, artifact, dataDir})
+	rec, err = runCmd(root, "Evaluate direct single-vector Eos", filepath.Join(logDir, "direct-eos.log"), eosBin, []string{"eval-retrieval", "--dataset", datasetName, "--top-k", strconv.Itoa(topK), "--metrics-json", directMetrics, artifact, dataDir})
 	commands = append(commands, rec)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -325,7 +468,7 @@ func main() {
 	}
 
 	bm25Metrics := filepath.Join(runDir, "bm25.metrics.json")
-	rec, err = runCmd(root, "Evaluate BM25", filepath.Join(logDir, "bm25.log"), eosBin, []string{"eval-retrieval-bm25", "--dataset", "late-needle", "--top-k", "100", "--metrics-json", bm25Metrics, dataDir})
+	rec, err = runCmd(root, "Evaluate BM25", filepath.Join(logDir, "bm25.log"), eosBin, []string{"eval-retrieval-bm25", "--dataset", datasetName, "--top-k", strconv.Itoa(topK), "--metrics-json", bm25Metrics, dataDir})
 	commands = append(commands, rec)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -334,14 +477,14 @@ func main() {
 
 	singleDir := filepath.Join(cacheDir, "single")
 	singleManifestPath := filepath.Join(singleDir, "manifest.json")
-	rec, err = runCmd(root, "Export single-vector cache", filepath.Join(logDir, "export-single.log"), eosBin, []string{"export-retrieval-vectors", "--dataset", "late-needle", "--batch-size", "64", "--output-dim", strconv.Itoa(outputDim), "--manifest-json", singleManifestPath, artifact, dataDir, singleDir})
+	rec, err = runCmd(root, "Export single-vector cache", filepath.Join(logDir, "export-single.log"), eosBin, []string{"export-retrieval-vectors", "--dataset", datasetName, "--batch-size", "64", "--output-dim", strconv.Itoa(outputDim), "--manifest-json", singleManifestPath, artifact, dataDir, singleDir})
 	commands = append(commands, rec)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	singleMetrics := filepath.Join(runDir, "single-vector-cache.metrics.json")
-	rec, err = runCmd(root, "Evaluate single-vector cache", filepath.Join(logDir, "single-vector-cache.log"), eosBin, []string{"eval-retrieval-vectors", "--dataset", "late-needle", "--backend", "eos-single-cache", "--artifact", filepath.Base(artifact), "--doc-vectors", filepath.Join(singleDir, "doc-vectors.jsonl"), "--query-vectors", filepath.Join(singleDir, "query-vectors.jsonl"), "--top-k", "100", "--metrics-json", singleMetrics, dataDir})
+	rec, err = runCmd(root, "Evaluate single-vector cache", filepath.Join(logDir, "single-vector-cache.log"), eosBin, []string{"eval-retrieval-vectors", "--dataset", datasetName, "--backend", "eos-single-cache", "--artifact", filepath.Base(artifact), "--doc-vectors", filepath.Join(singleDir, "doc-vectors.jsonl"), "--query-vectors", filepath.Join(singleDir, "query-vectors.jsonl"), "--top-k", strconv.Itoa(topK), "--metrics-json", singleMetrics, dataDir})
 	commands = append(commands, rec)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -350,7 +493,7 @@ func main() {
 
 	chunkDir := filepath.Join(cacheDir, "chunked")
 	chunkManifestPath := filepath.Join(chunkDir, "manifest.json")
-	rec, err = runCmd(root, "Export chunked child-vector cache", filepath.Join(logDir, "export-chunked.log"), eosBin, []string{"export-retrieval-vectors", "--dataset", "late-needle", "--batch-size", "64", "--output-dim", strconv.Itoa(outputDim), "--document-chunk-words", strconv.Itoa(chunkWords), "--document-chunk-overlap", strconv.Itoa(chunkOverlap), "--document-chunk-min-words", "16", "--manifest-json", chunkManifestPath, artifact, dataDir, chunkDir})
+	rec, err = runCmd(root, "Export chunked child-vector cache", filepath.Join(logDir, "export-chunked.log"), eosBin, []string{"export-retrieval-vectors", "--dataset", datasetName, "--batch-size", "64", "--output-dim", strconv.Itoa(outputDim), "--document-chunk-words", strconv.Itoa(chunkWords), "--document-chunk-overlap", strconv.Itoa(chunkOverlap), "--document-chunk-min-words", "16", "--manifest-json", chunkManifestPath, artifact, dataDir, chunkDir})
 	commands = append(commands, rec)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -358,7 +501,7 @@ func main() {
 	}
 	mvMetricsPath := filepath.Join(runDir, "chunked-multivector-turboquant.metrics.json")
 	mvTSV := filepath.Join(runDir, "chunked-multivector-turboquant.metrics.tsv")
-	rec, err = runCmd(root, "Evaluate chunked multivector TurboQuant", filepath.Join(logDir, "chunked-multivector-turboquant.log"), eosBin, []string{"eval-retrieval-multivector-turboquant", "--dataset", "late-needle", "--backend", "eos-chunked-child-cache", "--artifact", filepath.Base(artifact), "--doc-vectors", filepath.Join(chunkDir, "child-doc-vectors.jsonl"), "--query-vectors", filepath.Join(chunkDir, "query-vectors.jsonl"), "--bits", "2,4,8", "--baseline-dim", strconv.Itoa(baselineDim), "--metrics-json", mvMetricsPath, "--metrics-tsv", mvTSV, dataDir})
+	rec, err = runCmd(root, "Evaluate chunked multivector TurboQuant", filepath.Join(logDir, "chunked-multivector-turboquant.log"), eosBin, []string{"eval-retrieval-multivector-turboquant", "--dataset", datasetName, "--backend", "eos-chunked-child-cache", "--artifact", filepath.Base(artifact), "--doc-vectors", filepath.Join(chunkDir, "child-doc-vectors.jsonl"), "--query-vectors", filepath.Join(chunkDir, "query-vectors.jsonl"), "--bits", "2,4,8", "--top-k", strconv.Itoa(topK), "--baseline-dim", strconv.Itoa(baselineDim), "--metrics-json", mvMetricsPath, "--metrics-tsv", mvTSV, dataDir})
 	commands = append(commands, rec)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -429,8 +572,11 @@ func main() {
 		RepoRoot:    root,
 		RunDir:      runDir,
 		Inputs: map[string]string{
+			"scenario":               scenario,
 			"artifact":               artifact,
 			"dataset_dir":            dataDir,
+			"dataset_name":           datasetName,
+			"top_k":                  strconv.Itoa(topK),
 			"single_vector_manifest": singleManifestPath,
 			"chunk_manifest":         chunkManifestPath,
 			"summary_tsv":            summaryTSV,
@@ -439,6 +585,7 @@ func main() {
 		Rows:     rows,
 		Caveats: []string{
 			"Synthetic late-needle BEIR-shaped smoke, not LongEmbed proof or a real long-document benchmark.",
+			"The semantic_late_needle scenario uses hand-written paraphrases and distractors; it is harder than the original lexical needle but remains synthetic.",
 			"Uses local checked-in/default Eos asset when present; no network or training path.",
 			"Chunked rows use deterministic word chunks and parent max-child rollup; q2/q4/q8 rows are direct TurboQuant child scoring without fp16 sidecar rerank.",
 			"External Qwen3/mxbai chunked baseline is not run here because this smoke avoids network and no local export cache is assumed.",
