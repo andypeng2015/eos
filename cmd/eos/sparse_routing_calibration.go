@@ -29,6 +29,8 @@ type sparseRoutingCalibrationConfig struct {
 	RouteTopBlocks        []int     `json:"route_top_blocks"`
 	RouteModes            []string  `json:"route_modes"`
 	RouteProbes           []int     `json:"route_probes"`
+	RouteSummaryAlphas    []float64 `json:"route_summary_alphas"`
+	RouteRadiusWeights    []float64 `json:"route_radius_weights"`
 	Seed                  int64     `json:"seed"`
 	MaxScoreFraction      float64   `json:"max_score_fraction"`
 	MinExactTopKRecall    float64   `json:"min_exact_topk_recall"`
@@ -61,6 +63,8 @@ type sparseRoutingCalibrationSummary struct {
 type sparseRoutingCalibrationRowRef struct {
 	RouteMode          string  `json:"route_mode"`
 	RouteProbes        int     `json:"route_probes"`
+	RouteSummaryAlpha  float64 `json:"route_summary_alpha"`
+	RouteRadiusWeight  float64 `json:"route_radius_weight"`
 	RouteTopBlocks     int     `json:"route_top_blocks"`
 	ExactTopKRecallAvg float64 `json:"exact_topk_recall_avg"`
 	ExactTopKRecallMin float64 `json:"exact_topk_recall_min"`
@@ -72,6 +76,8 @@ type sparseRoutingCalibrationRowRef struct {
 type sparseRoutingCalibrationRow struct {
 	RouteMode                   string   `json:"route_mode"`
 	RouteProbes                 int      `json:"route_probes"`
+	RouteSummaryAlpha           float64  `json:"route_summary_alpha"`
+	RouteRadiusWeight           float64  `json:"route_radius_weight"`
 	RouteTopBlocks              int      `json:"route_top_blocks"`
 	RouteBlockSize              int      `json:"route_block_size"`
 	RouteBlockCount             int      `json:"route_block_count"`
@@ -129,12 +135,12 @@ func runCalibrateSparseRouting(args []string) error {
 	fmt.Printf("summary: rows=%d passing_rows=%d gate=%s\n", report.Summary.Rows, report.Summary.PassingRows, report.Summary.Status)
 	if report.Summary.BestPassing != nil {
 		ref := report.Summary.BestPassing
-		fmt.Printf("best_passing: route_mode=%s route_probes=%d route_top_blocks=%d recall_avg=%.6f recall_min=%.6f cosine=%.9g score_fraction=%.6f\n",
-			ref.RouteMode, ref.RouteProbes, ref.RouteTopBlocks, ref.ExactTopKRecallAvg, ref.ExactTopKRecallMin, ref.OutputCosine, ref.ScoreCountFraction)
+		fmt.Printf("best_passing: route_mode=%s route_probes=%d route_summary_alpha=%.6g route_radius_weight=%.6g route_top_blocks=%d recall_avg=%.6f recall_min=%.6f cosine=%.9g score_fraction=%.6f\n",
+			ref.RouteMode, ref.RouteProbes, ref.RouteSummaryAlpha, ref.RouteRadiusWeight, ref.RouteTopBlocks, ref.ExactTopKRecallAvg, ref.ExactTopKRecallMin, ref.OutputCosine, ref.ScoreCountFraction)
 	} else if report.Summary.BestFallback != nil {
 		ref := report.Summary.BestFallback
-		fmt.Printf("best_fallback: route_mode=%s route_probes=%d route_top_blocks=%d recall_avg=%.6f recall_min=%.6f cosine=%.9g score_fraction=%.6f\n",
-			ref.RouteMode, ref.RouteProbes, ref.RouteTopBlocks, ref.ExactTopKRecallAvg, ref.ExactTopKRecallMin, ref.OutputCosine, ref.ScoreCountFraction)
+		fmt.Printf("best_fallback: route_mode=%s route_probes=%d route_summary_alpha=%.6g route_radius_weight=%.6g route_top_blocks=%d recall_avg=%.6f recall_min=%.6f cosine=%.9g score_fraction=%.6f\n",
+			ref.RouteMode, ref.RouteProbes, ref.RouteSummaryAlpha, ref.RouteRadiusWeight, ref.RouteTopBlocks, ref.ExactTopKRecallAvg, ref.ExactTopKRecallMin, ref.OutputCosine, ref.ScoreCountFraction)
 	}
 	if cfg.RequirePass && report.Summary.PassingRows == 0 {
 		return fmt.Errorf("sparse routing calibration failed: %s", report.Summary.FailureReason)
@@ -158,8 +164,10 @@ func parseSparseRoutingCalibrationConfig(args []string) (sparseRoutingCalibratio
 	topK := fs.Int("top-k", smokeEnvInt("EOS_SPARSE_ROUTING_CALIBRATION_TOP_K", 16), "exact sparse top-k selected keys; 0 uses ceil(sqrt(seq_len))")
 	routeBlockSize := fs.Int("route-block-size", smokeEnvInt("EOS_SPARSE_ROUTING_CALIBRATION_ROUTE_BLOCK_SIZE", 32), "route block size; 0 uses ceil(sqrt(seq_len))")
 	routeTopBlocksRaw := fs.String("route-top-blocks", smokeEnvString("EOS_SPARSE_ROUTING_CALIBRATION_ROUTE_TOP_BLOCKS", "1,2,4,8"), "comma-separated route_top_blocks sweep")
-	routeModesRaw := fs.String("route-modes", smokeEnvString("EOS_SPARSE_ROUTING_CALIBRATION_ROUTE_MODES", "anchor"), "comma-separated routing policy sweep: anchor,summary_mean,summary_mean_radius,multiprobe,oracle_block_max")
+	routeModesRaw := fs.String("route-modes", smokeEnvString("EOS_SPARSE_ROUTING_CALIBRATION_ROUTE_MODES", "anchor"), "comma-separated routing policy sweep: anchor,summary_mean,summary_mean_radius,summary_maxnorm,summary_blend_radius,multiprobe,oracle_block_max")
 	routeProbesRaw := fs.String("route-probes", smokeEnvString("EOS_SPARSE_ROUTING_CALIBRATION_ROUTE_PROBES", "1"), "comma-separated multiprobe probe counts")
+	routeSummaryAlphasRaw := fs.String("route-summary-alphas", smokeEnvString("EOS_SPARSE_ROUTING_CALIBRATION_ROUTE_SUMMARY_ALPHAS", "0,0.25,0.5,0.75,1"), "comma-separated summary_blend_radius alpha sweep values; representative = mean + alpha*(maxnorm_rep-mean)")
+	routeRadiusWeightsRaw := fs.String("route-radius-weights", smokeEnvString("EOS_SPARSE_ROUTING_CALIBRATION_ROUTE_RADIUS_WEIGHTS", "-0.25,0,0.25,0.5"), "comma-separated summary_blend_radius beta sweep values for beta*||query||_2*radius")
 	seed := fs.Int64("seed", smokeEnvInt64("EOS_SPARSE_ROUTING_CALIBRATION_SEED", 5581486560434873699), "synthetic data seed")
 	maxScoreFraction := fs.Float64("max-score-fraction", smokeEnvFloat("EOS_SPARSE_ROUTING_CALIBRATION_MAX_SCORE_FRACTION", 0.5), "passing row maximum score-work fraction versus exact dense scoring")
 	minExactTopKRecall := fs.Float64("min-exact-topk-recall", smokeEnvFloat("EOS_SPARSE_ROUTING_CALIBRATION_MIN_EXACT_TOPK_RECALL", 0.9), "passing row minimum mean exact top-k recall in routed candidate set")
@@ -184,6 +192,14 @@ func parseSparseRoutingCalibrationConfig(args []string) (sparseRoutingCalibratio
 	if err != nil {
 		return sparseRoutingCalibrationConfig{}, err
 	}
+	routeSummaryAlphas, err := parseFloatCSV(*routeSummaryAlphasRaw, "route-summary-alphas")
+	if err != nil {
+		return sparseRoutingCalibrationConfig{}, err
+	}
+	routeRadiusWeights, err := parseFloatCSV(*routeRadiusWeightsRaw, "route-radius-weights")
+	if err != nil {
+		return sparseRoutingCalibrationConfig{}, err
+	}
 	cfg := sparseRoutingCalibrationConfig{
 		RunRoot:               *runRoot,
 		RunDir:                *runDir,
@@ -198,6 +214,8 @@ func parseSparseRoutingCalibrationConfig(args []string) (sparseRoutingCalibratio
 		RouteTopBlocks:        routeTopBlocks,
 		RouteModes:            routeModes,
 		RouteProbes:           routeProbes,
+		RouteSummaryAlphas:    routeSummaryAlphas,
+		RouteRadiusWeights:    routeRadiusWeights,
 		Seed:                  *seed,
 		MaxScoreFraction:      *maxScoreFraction,
 		MinExactTopKRecall:    *minExactTopKRecall,
@@ -249,9 +267,9 @@ func parseSparseRoutingRouteModes(raw string) ([]string, error) {
 			continue
 		}
 		switch mode {
-		case "anchor", "summary_mean", "summary_mean_radius", "multiprobe", "oracle_block_max":
+		case "anchor", "summary_mean", "summary_mean_radius", "summary_maxnorm", "summary_blend_radius", "multiprobe", "oracle_block_max":
 		default:
-			return nil, fmt.Errorf("route-modes[%d] %q must be one of anchor, summary_mean, summary_mean_radius, multiprobe, oracle_block_max", i, mode)
+			return nil, fmt.Errorf("route-modes[%d] %q must be one of anchor, summary_mean, summary_mean_radius, summary_maxnorm, summary_blend_radius, multiprobe, oracle_block_max", i, mode)
 		}
 		if _, ok := seen[mode]; ok {
 			continue
@@ -261,6 +279,26 @@ func parseSparseRoutingRouteModes(raw string) ([]string, error) {
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("route-modes must contain at least one routing policy")
+	}
+	return out, nil
+}
+
+func parseFloatCSV(raw, label string) ([]float64, error) {
+	parts := strings.Split(raw, ",")
+	out := make([]float64, 0, len(parts))
+	for i, part := range parts {
+		item := strings.TrimSpace(part)
+		if item == "" {
+			continue
+		}
+		value, err := strconv.ParseFloat(item, 64)
+		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+			return nil, fmt.Errorf("%s[%d] %q must be a finite float", label, i, item)
+		}
+		out = append(out, value)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%s must contain at least one finite float", label)
 	}
 	return out, nil
 }
@@ -306,67 +344,85 @@ func executeSparseRoutingCalibration(cfg sparseRoutingCalibrationConfig) (sparse
 			probesForMode = cfg.RouteProbes
 		}
 		for _, probes := range probesForMode {
-			for _, topBlocks := range cfg.RouteTopBlocks {
-				plan := backend.PlanSparseAttention(backend.SparseAttentionPlanInput{
-					QueryLen:       cfg.QueryLen,
-					KeyLen:         cfg.SeqLen,
-					QueryDim:       cfg.Dim,
-					ValueDim:       cfg.ValueDim,
-					TopK:           cfg.TopK,
-					RouteBlockSize: blockSize,
-					RouteTopBlocks: topBlocks,
-				})
-				routedSparse, candidateSets, err := sparseRoutingPolicyOutput(query, keySeq, valueSeq, plan.RouteBlockSize, plan.RouteTopBlocks, plan.TopK, mode, probes, blockSummaries)
-				if err != nil {
-					return sparseRoutingCalibrationReport{}, fmt.Errorf("routed sparse reference route_mode=%s route_probes=%d route_top_blocks=%d: %w", mode, probes, topBlocks, err)
+			alphaSweep := []float64{0}
+			betaSweep := []float64{0}
+			if mode == "summary_blend_radius" {
+				alphaSweep = cfg.RouteSummaryAlphas
+				betaSweep = cfg.RouteRadiusWeights
+			}
+			for _, alpha := range alphaSweep {
+				for _, beta := range betaSweep {
+					for _, topBlocks := range cfg.RouteTopBlocks {
+						plan := backend.PlanSparseAttention(backend.SparseAttentionPlanInput{
+							QueryLen:       cfg.QueryLen,
+							KeyLen:         cfg.SeqLen,
+							QueryDim:       cfg.Dim,
+							ValueDim:       cfg.ValueDim,
+							TopK:           cfg.TopK,
+							RouteBlockSize: blockSize,
+							RouteTopBlocks: topBlocks,
+						})
+						params := sparseRoutingPolicyParams{
+							Mode:         mode,
+							Probes:       probes,
+							SummaryAlpha: alpha,
+							RadiusWeight: beta,
+						}
+						routedSparse, candidateSets, err := sparseRoutingPolicyOutput(query, keySeq, valueSeq, plan.RouteBlockSize, plan.RouteTopBlocks, plan.TopK, params, blockSummaries)
+						if err != nil {
+							return sparseRoutingCalibrationReport{}, fmt.Errorf("routed sparse reference route_mode=%s route_probes=%d route_summary_alpha=%g route_radius_weight=%g route_top_blocks=%d: %w", mode, probes, alpha, beta, topBlocks, err)
+						}
+						recallAvg, recallMin := sparseRoutingCandidateRecall(exactSelections, candidateSets)
+						cmp := compareSparseEmbeddingTensors(routedSparse, exactSparse)
+						row := sparseRoutingCalibrationRow{
+							RouteMode:                   mode,
+							RouteProbes:                 probes,
+							RouteSummaryAlpha:           alpha,
+							RouteRadiusWeight:           beta,
+							RouteTopBlocks:              plan.RouteTopBlocks,
+							RouteBlockSize:              plan.RouteBlockSize,
+							RouteBlockCount:             plan.RouteBlockCount,
+							SelectedRouteBlocks:         plan.SelectedRouteBlocks,
+							TopK:                        plan.TopK,
+							SelectedKeyCount:            plan.SelectedKeyCount,
+							CandidateKeyBudget:          plan.CandidateKeyBudget,
+							DenseScoreCountPerQuery:     plan.DenseScoreCountPerQuery,
+							RoutedAnchorScoresPerQuery:  sparseRoutingRouteScoreCount(plan.RouteBlockCount, mode, probes),
+							EstimatedScoreCountPerQuery: sparseRoutingEstimatedScoreCount(plan.RouteBlockCount, plan.CandidateKeyBudget, mode, probes),
+							TeacherOnly:                 sparseRoutingTeacherOnlyPolicy(mode),
+							OraclePolicy:                sparseRoutingOraclePolicy(mode),
+							TeacherScoreCountPerQuery:   sparseRoutingTeacherScoreCount(plan.DenseScoreCountPerQuery, mode),
+							CandidateKeyFraction:        plan.CandidateKeyFraction,
+							SubquadraticScorePlan:       plan.SubquadraticScorePlan,
+							ExactTopKRecallAvg:          recallAvg,
+							ExactTopKRecallMin:          recallMin,
+							MaxAbsError:                 cmp.MaxAbsError,
+							MSE:                         cmp.MSE,
+							OutputCosineSimilarity:      cmp.CosineSimilarity,
+							ExactSparseSHA256:           tensorSHA256(exactSparse),
+							RoutedSparseSHA256:          tensorSHA256(routedSparse),
+						}
+						if row.DenseScoreCountPerQuery > 0 {
+							row.ScoreCountFraction = float64(row.EstimatedScoreCountPerQuery) / float64(row.DenseScoreCountPerQuery)
+							row.SubquadraticScorePlan = row.EstimatedScoreCountPerQuery < row.DenseScoreCountPerQuery
+						}
+						if row.ExactTopKRecallAvg < cfg.MinExactTopKRecall {
+							row.FailureReasons = append(row.FailureReasons, fmt.Sprintf("exact_topk_recall_avg %.6f below %.6f", row.ExactTopKRecallAvg, cfg.MinExactTopKRecall))
+						}
+						if row.ExactTopKRecallMin < cfg.MinExactTopKRecallMin {
+							row.FailureReasons = append(row.FailureReasons, fmt.Sprintf("exact_topk_recall_min %.6f below %.6f", row.ExactTopKRecallMin, cfg.MinExactTopKRecallMin))
+						}
+						if row.OutputCosineSimilarity < cfg.MinOutputCosine {
+							row.FailureReasons = append(row.FailureReasons, fmt.Sprintf("output_cosine_similarity %.9g below %.9g", row.OutputCosineSimilarity, cfg.MinOutputCosine))
+						}
+						if row.ScoreCountFraction > cfg.MaxScoreFraction {
+							row.FailureReasons = append(row.FailureReasons, fmt.Sprintf("score_count_fraction %.6f exceeds %.6f", row.ScoreCountFraction, cfg.MaxScoreFraction))
+						}
+						row.Pass = len(row.FailureReasons) == 0
+						row.Status = passFail(row.Pass)
+						report.Rows = append(report.Rows, row)
+					}
 				}
-				recallAvg, recallMin := sparseRoutingCandidateRecall(exactSelections, candidateSets)
-				cmp := compareSparseEmbeddingTensors(routedSparse, exactSparse)
-				row := sparseRoutingCalibrationRow{
-					RouteMode:                   mode,
-					RouteProbes:                 probes,
-					RouteTopBlocks:              plan.RouteTopBlocks,
-					RouteBlockSize:              plan.RouteBlockSize,
-					RouteBlockCount:             plan.RouteBlockCount,
-					SelectedRouteBlocks:         plan.SelectedRouteBlocks,
-					TopK:                        plan.TopK,
-					SelectedKeyCount:            plan.SelectedKeyCount,
-					CandidateKeyBudget:          plan.CandidateKeyBudget,
-					DenseScoreCountPerQuery:     plan.DenseScoreCountPerQuery,
-					RoutedAnchorScoresPerQuery:  sparseRoutingRouteScoreCount(plan.RouteBlockCount, mode, probes),
-					EstimatedScoreCountPerQuery: sparseRoutingEstimatedScoreCount(plan.RouteBlockCount, plan.CandidateKeyBudget, mode, probes),
-					TeacherOnly:                 sparseRoutingTeacherOnlyPolicy(mode),
-					OraclePolicy:                sparseRoutingOraclePolicy(mode),
-					TeacherScoreCountPerQuery:   sparseRoutingTeacherScoreCount(plan.DenseScoreCountPerQuery, mode),
-					CandidateKeyFraction:        plan.CandidateKeyFraction,
-					SubquadraticScorePlan:       plan.SubquadraticScorePlan,
-					ExactTopKRecallAvg:          recallAvg,
-					ExactTopKRecallMin:          recallMin,
-					MaxAbsError:                 cmp.MaxAbsError,
-					MSE:                         cmp.MSE,
-					OutputCosineSimilarity:      cmp.CosineSimilarity,
-					ExactSparseSHA256:           tensorSHA256(exactSparse),
-					RoutedSparseSHA256:          tensorSHA256(routedSparse),
-				}
-				if row.DenseScoreCountPerQuery > 0 {
-					row.ScoreCountFraction = float64(row.EstimatedScoreCountPerQuery) / float64(row.DenseScoreCountPerQuery)
-					row.SubquadraticScorePlan = row.EstimatedScoreCountPerQuery < row.DenseScoreCountPerQuery
-				}
-				if row.ExactTopKRecallAvg < cfg.MinExactTopKRecall {
-					row.FailureReasons = append(row.FailureReasons, fmt.Sprintf("exact_topk_recall_avg %.6f below %.6f", row.ExactTopKRecallAvg, cfg.MinExactTopKRecall))
-				}
-				if row.ExactTopKRecallMin < cfg.MinExactTopKRecallMin {
-					row.FailureReasons = append(row.FailureReasons, fmt.Sprintf("exact_topk_recall_min %.6f below %.6f", row.ExactTopKRecallMin, cfg.MinExactTopKRecallMin))
-				}
-				if row.OutputCosineSimilarity < cfg.MinOutputCosine {
-					row.FailureReasons = append(row.FailureReasons, fmt.Sprintf("output_cosine_similarity %.9g below %.9g", row.OutputCosineSimilarity, cfg.MinOutputCosine))
-				}
-				if row.ScoreCountFraction > cfg.MaxScoreFraction {
-					row.FailureReasons = append(row.FailureReasons, fmt.Sprintf("score_count_fraction %.6f exceeds %.6f", row.ScoreCountFraction, cfg.MaxScoreFraction))
-				}
-				row.Pass = len(row.FailureReasons) == 0
-				row.Status = passFail(row.Pass)
-				report.Rows = append(report.Rows, row)
 			}
 		}
 	}
@@ -394,8 +450,16 @@ func exactTopKSelections(query, key *backend.Tensor, topK int) [][]int {
 }
 
 type sparseRoutingBlockSummaries struct {
-	Mean   [][]float32
-	Radius []float32
+	Mean       [][]float32
+	MaxNormRep [][]float32
+	Radius     []float32
+}
+
+type sparseRoutingPolicyParams struct {
+	Mode         string
+	Probes       int
+	SummaryAlpha float64
+	RadiusWeight float64
 }
 
 func sparseRoutingBlockSummariesForKey(key *backend.Tensor, blockSize int) sparseRoutingBlockSummaries {
@@ -408,8 +472,9 @@ func sparseRoutingBlockSummariesForKey(key *backend.Tensor, blockSize int) spars
 	}
 	blockCount := (keyLen + blockSize - 1) / blockSize
 	out := sparseRoutingBlockSummaries{
-		Mean:   make([][]float32, blockCount),
-		Radius: make([]float32, blockCount),
+		Mean:       make([][]float32, blockCount),
+		MaxNormRep: make([][]float32, blockCount),
+		Radius:     make([]float32, blockCount),
 	}
 	for block := 0; block < blockCount; block++ {
 		start := block * blockSize
@@ -428,6 +493,19 @@ func sparseRoutingBlockSummariesForKey(key *backend.Tensor, blockSize int) spars
 			mean[d] *= scale
 		}
 		var radiusSq float32
+		maxNormSq := float32(math.Inf(-1))
+		maxNormIndex := start
+		for k := start; k < end; k++ {
+			var normSq float32
+			for d := 0; d < dim; d++ {
+				v := key.F32[k*dim+d]
+				normSq += v * v
+			}
+			if normSq > maxNormSq {
+				maxNormSq = normSq
+				maxNormIndex = k
+			}
+		}
 		for k := start; k < end; k++ {
 			var distSq float32
 			for d := 0; d < dim; d++ {
@@ -438,7 +516,10 @@ func sparseRoutingBlockSummariesForKey(key *backend.Tensor, blockSize int) spars
 				radiusSq = distSq
 			}
 		}
+		maxNormRep := make([]float32, dim)
+		copy(maxNormRep, key.F32[maxNormIndex*dim:(maxNormIndex+1)*dim])
 		out.Mean[block] = mean
+		out.MaxNormRep[block] = maxNormRep
 		out.Radius[block] = float32(math.Sqrt(float64(radiusSq)))
 	}
 	return out
@@ -470,7 +551,7 @@ func sparseRoutingTeacherScoreCount(denseScoreCount int, mode string) int {
 	return 0
 }
 
-func sparseRoutingPolicyOutput(query, key, value *backend.Tensor, blockSize, topBlocks, topK int, mode string, probes int, blockSummaries sparseRoutingBlockSummaries) (*backend.Tensor, []map[int]struct{}, error) {
+func sparseRoutingPolicyOutput(query, key, value *backend.Tensor, blockSize, topBlocks, topK int, params sparseRoutingPolicyParams, blockSummaries sparseRoutingBlockSummaries) (*backend.Tensor, []map[int]struct{}, error) {
 	if query == nil || key == nil || value == nil {
 		return nil, nil, fmt.Errorf("policy sparse attention expects query, key, and value")
 	}
@@ -496,7 +577,7 @@ func sparseRoutingPolicyOutput(query, key, value *backend.Tensor, blockSize, top
 			}
 			return sum
 		}
-		candidates, candidateSet := sparseRoutingPolicyCandidates(query, keyLen, dim, q, blockSize, topBlocks, mode, probes, blockSummaries, scoreAt)
+		candidates, candidateSet := sparseRoutingPolicyCandidates(query, keyLen, dim, q, blockSize, topBlocks, params, blockSummaries, scoreAt)
 		selected := sparseRoutingSelectTopCandidates(candidates, topK)
 		sparseRoutingWriteValue(out.F32[q*valueDim:(q+1)*valueDim], selected, valueDim, func(k, d int) float32 {
 			return value.F32[k*valueDim+d]
@@ -506,7 +587,7 @@ func sparseRoutingPolicyOutput(query, key, value *backend.Tensor, blockSize, top
 	return out, candidateSets, nil
 }
 
-func sparseRoutingPolicyCandidates(query *backend.Tensor, keyLen, dim, queryRow, blockSize, topBlocks int, mode string, probes int, blockSummaries sparseRoutingBlockSummaries, scoreAt func(int) float32) ([]sparseRoutingCandidate, map[int]struct{}) {
+func sparseRoutingPolicyCandidates(query *backend.Tensor, keyLen, dim, queryRow, blockSize, topBlocks int, params sparseRoutingPolicyParams, blockSummaries sparseRoutingBlockSummaries, scoreAt func(int) float32) ([]sparseRoutingCandidate, map[int]struct{}) {
 	candidateSet := map[int]struct{}{}
 	if keyLen <= 0 || blockSize <= 0 || topBlocks <= 0 {
 		candidates := sparseRoutingSelectTop(keyLen, keyLen, scoreAt)
@@ -532,7 +613,7 @@ func sparseRoutingPolicyCandidates(query *backend.Tensor, keyLen, dim, queryRow,
 		blocks = append(blocks, sparseRoutingCandidate{
 			index: block,
 			score: sparseRoutingBlockScore(query, queryRow, dim, start, end, block,
-				mode, probes, blockSummaries, scoreAt),
+				params, blockSummaries, scoreAt),
 		})
 	}
 	blocks = sparseRoutingSelectTopCandidates(blocks, topBlocks)
@@ -551,8 +632,8 @@ func sparseRoutingPolicyCandidates(query *backend.Tensor, keyLen, dim, queryRow,
 	return candidates, candidateSet
 }
 
-func sparseRoutingBlockScore(query *backend.Tensor, queryRow, dim, start, end, block int, mode string, probes int, blockSummaries sparseRoutingBlockSummaries, scoreAt func(int) float32) float32 {
-	switch mode {
+func sparseRoutingBlockScore(query *backend.Tensor, queryRow, dim, start, end, block int, params sparseRoutingPolicyParams, blockSummaries sparseRoutingBlockSummaries, scoreAt func(int) float32) float32 {
+	switch params.Mode {
 	case "summary_mean":
 		if mean, ok := sparseRoutingBlockMean(blockSummaries, block, dim); ok {
 			return sparseRoutingDotQuerySummary(query, queryRow, dim, mean)
@@ -569,9 +650,23 @@ func sparseRoutingBlockScore(query *backend.Tensor, queryRow, dim, start, end, b
 			}
 			return score
 		}
+	case "summary_maxnorm":
+		if rep, ok := sparseRoutingBlockMaxNormRep(blockSummaries, block, dim); ok {
+			return sparseRoutingDotQuerySummary(query, queryRow, dim, rep)
+		}
+	case "summary_blend_radius":
+		if mean, ok := sparseRoutingBlockMean(blockSummaries, block, dim); ok {
+			if maxNormRep, ok := sparseRoutingBlockMaxNormRep(blockSummaries, block, dim); ok {
+				score := sparseRoutingDotQueryBlendedSummary(query, queryRow, dim, mean, maxNormRep, float32(params.SummaryAlpha))
+				if block < len(blockSummaries.Radius) && params.RadiusWeight != 0 {
+					score += float32(params.RadiusWeight) * sparseRoutingQueryNorm(query, queryRow, dim) * blockSummaries.Radius[block]
+				}
+				return score
+			}
+		}
 	case "multiprobe":
 		best := float32(math.Inf(-1))
-		for _, k := range sparseRoutingProbeIndices(start, end, probes) {
+		for _, k := range sparseRoutingProbeIndices(start, end, params.Probes) {
 			if score := scoreAt(k); score > best {
 				best = score
 			}
@@ -597,10 +692,26 @@ func sparseRoutingBlockMean(blockSummaries sparseRoutingBlockSummaries, block, d
 	return nil, false
 }
 
+func sparseRoutingBlockMaxNormRep(blockSummaries sparseRoutingBlockSummaries, block, dim int) ([]float32, bool) {
+	if block < len(blockSummaries.MaxNormRep) && len(blockSummaries.MaxNormRep[block]) == dim {
+		return blockSummaries.MaxNormRep[block], true
+	}
+	return nil, false
+}
+
 func sparseRoutingDotQuerySummary(query *backend.Tensor, queryRow, dim int, summary []float32) float32 {
 	var sum float32
 	for d := 0; d < dim; d++ {
 		sum += query.F32[queryRow*dim+d] * summary[d]
+	}
+	return sum
+}
+
+func sparseRoutingDotQueryBlendedSummary(query *backend.Tensor, queryRow, dim int, mean, maxNormRep []float32, alpha float32) float32 {
+	var sum float32
+	for d := 0; d < dim; d++ {
+		rep := mean[d] + alpha*(maxNormRep[d]-mean[d])
+		sum += query.F32[queryRow*dim+d] * rep
 	}
 	return sum
 }
@@ -843,6 +954,8 @@ func sparseRoutingRowRef(row sparseRoutingCalibrationRow) sparseRoutingCalibrati
 	return sparseRoutingCalibrationRowRef{
 		RouteMode:          row.RouteMode,
 		RouteProbes:        row.RouteProbes,
+		RouteSummaryAlpha:  row.RouteSummaryAlpha,
+		RouteRadiusWeight:  row.RouteRadiusWeight,
 		RouteTopBlocks:     row.RouteTopBlocks,
 		ExactTopKRecallAvg: row.ExactTopKRecallAvg,
 		ExactTopKRecallMin: row.ExactTopKRecallMin,
@@ -870,6 +983,8 @@ func writeSparseRoutingCalibrationTSV(path string, report sparseRoutingCalibrati
 	columns := []string{
 		"route_mode",
 		"route_probes",
+		"route_summary_alpha",
+		"route_radius_weight",
 		"route_top_blocks",
 		"route_block_size",
 		"route_block_count",
@@ -906,6 +1021,8 @@ func writeSparseRoutingCalibrationTSV(path string, report sparseRoutingCalibrati
 		fields := []string{
 			row.RouteMode,
 			strconv.Itoa(row.RouteProbes),
+			formatParityFloat(row.RouteSummaryAlpha),
+			formatParityFloat(row.RouteRadiusWeight),
 			strconv.Itoa(row.RouteTopBlocks),
 			strconv.Itoa(row.RouteBlockSize),
 			strconv.Itoa(row.RouteBlockCount),

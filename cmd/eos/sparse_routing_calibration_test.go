@@ -44,8 +44,26 @@ func TestSparseRoutingCalibrationConfigDefaultsAndPaths(t *testing.T) {
 	if got, want := joinInts(cfg.RouteProbes), "1"; got != want {
 		t.Fatalf("route_probes = %s, want %s", got, want)
 	}
+	if got, want := joinFloats(cfg.RouteSummaryAlphas), "0,0.25,0.5,0.75,1"; got != want {
+		t.Fatalf("route_summary_alphas = %s, want %s", got, want)
+	}
+	if got, want := joinFloats(cfg.RouteRadiusWeights), "-0.25,0,0.25,0.5"; got != want {
+		t.Fatalf("route_radius_weights = %s, want %s", got, want)
+	}
 	if cfg.MinExactTopKRecallMin != 0 {
 		t.Fatalf("min_exact_topk_recall_min = %.6f, want default 0", cfg.MinExactTopKRecallMin)
+	}
+}
+
+func TestSparseRoutingCalibrationConfigRejectsInvalidModeAndBlendFloats(t *testing.T) {
+	if _, err := parseSparseRoutingCalibrationConfig([]string{"-route-modes", "summary_max"}); err == nil || !strings.Contains(err.Error(), "summary_maxnorm") {
+		t.Fatalf("invalid route mode error = %v, want allowed mode list", err)
+	}
+	if _, err := parseSparseRoutingCalibrationConfig([]string{"-route-summary-alphas", "0,nope"}); err == nil || !strings.Contains(err.Error(), "route-summary-alphas[1]") {
+		t.Fatalf("invalid alpha error = %v, want indexed finite-float context", err)
+	}
+	if _, err := parseSparseRoutingCalibrationConfig([]string{"-route-radius-weights", ""}); err == nil || !strings.Contains(err.Error(), "route-radius-weights must contain") {
+		t.Fatalf("empty radius weights error = %v, want empty-list context", err)
 	}
 }
 
@@ -245,13 +263,110 @@ func TestSparseRoutingCalibrationSummaryMeanRadiusRowsAndBehavior(t *testing.T) 
 		return query.F32[0] * key.F32[k]
 	}
 	summaries := sparseRoutingBlockSummariesForKey(key, 2)
-	_, meanSet := sparseRoutingPolicyCandidates(query, key.Shape[0], key.Shape[1], 0, 2, 1, "summary_mean", 1, summaries, scoreAt)
-	_, radiusSet := sparseRoutingPolicyCandidates(query, key.Shape[0], key.Shape[1], 0, 2, 1, "summary_mean_radius", 1, summaries, scoreAt)
+	_, meanSet := sparseRoutingPolicyCandidates(query, key.Shape[0], key.Shape[1], 0, 2, 1, sparseRoutingPolicyParams{Mode: "summary_mean", Probes: 1}, summaries, scoreAt)
+	_, radiusSet := sparseRoutingPolicyCandidates(query, key.Shape[0], key.Shape[1], 0, 2, 1, sparseRoutingPolicyParams{Mode: "summary_mean_radius", Probes: 1}, summaries, scoreAt)
 	if _, ok := meanSet[3]; ok {
 		t.Fatalf("summary_mean selected high-radius block unexpectedly: candidates=%v", meanSet)
 	}
 	if _, ok := radiusSet[3]; !ok {
 		t.Fatalf("summary_mean_radius missed high-radius block: candidates=%v", radiusSet)
+	}
+}
+
+func TestSparseRoutingCalibrationMaxNormAndBlendRowsAndBehavior(t *testing.T) {
+	runRoot := t.TempDir()
+	if err := runCalibrateSparseRouting([]string{
+		"-run-root", runRoot,
+		"-seq-len", "128",
+		"-query-len", "2",
+		"-dim", "8",
+		"-top-k", "4",
+		"-route-block-size", "16",
+		"-route-top-blocks", "1,2",
+		"-route-modes", "summary_maxnorm,summary_blend_radius",
+		"-route-summary-alphas", "0,1",
+		"-route-radius-weights", "0,0.5",
+		"-max-score-fraction", "1.2",
+		"-min-exact-topk-recall", "0",
+		"-min-output-cosine", "-1",
+	}); err != nil {
+		t.Fatalf("run calibration: %v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(runRoot, "eos-sparse-routing-calibration-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("run dirs = %v, want one", matches)
+	}
+	report := readSparseRoutingCalibrationReport(t, matches[0])
+	if len(report.Rows) != 10 {
+		t.Fatalf("rows len=%d, want 10", len(report.Rows))
+	}
+	seenBlend := map[string]bool{}
+	for _, row := range report.Rows {
+		if row.TeacherOnly || row.OraclePolicy || row.TeacherScoreCountPerQuery != 0 {
+			t.Fatalf("deployable summary row has teacher/oracle labels: %+v", row)
+		}
+		if row.RoutedAnchorScoresPerQuery != row.RouteBlockCount {
+			t.Fatalf("%s routed scores = %d, want one per block %d", row.RouteMode, row.RoutedAnchorScoresPerQuery, row.RouteBlockCount)
+		}
+		if row.EstimatedScoreCountPerQuery != row.RouteBlockCount+row.CandidateKeyBudget {
+			t.Fatalf("%s estimated score count = %d, want %d + %d", row.RouteMode, row.EstimatedScoreCountPerQuery, row.RouteBlockCount, row.CandidateKeyBudget)
+		}
+		switch row.RouteMode {
+		case "summary_maxnorm":
+			if row.RouteSummaryAlpha != 0 || row.RouteRadiusWeight != 0 {
+				t.Fatalf("summary_maxnorm alpha/beta = %.6f/%.6f, want 0/0", row.RouteSummaryAlpha, row.RouteRadiusWeight)
+			}
+		case "summary_blend_radius":
+			seenBlend[formatParityFloat(row.RouteSummaryAlpha)+"/"+formatParityFloat(row.RouteRadiusWeight)] = true
+		default:
+			t.Fatalf("unexpected route mode %q", row.RouteMode)
+		}
+	}
+	for _, key := range []string{"0/0", "0/0.5", "1/0", "1/0.5"} {
+		if !seenBlend[key] {
+			t.Fatalf("missing summary_blend_radius alpha/beta %s rows; seen=%v", key, seenBlend)
+		}
+	}
+	tsv, err := os.ReadFile(filepath.Join(matches[0], "calibration.tsv"))
+	if err != nil {
+		t.Fatalf("read calibration tsv: %v", err)
+	}
+	header := strings.Split(strings.Split(strings.TrimSpace(string(tsv)), "\n")[0], "\t")
+	headerIndex := map[string]int{}
+	for i, col := range header {
+		headerIndex[col] = i
+	}
+	for _, col := range []string{"route_summary_alpha", "route_radius_weight"} {
+		if _, ok := headerIndex[col]; !ok {
+			t.Fatalf("tsv header missing %q: %v", col, header)
+		}
+	}
+
+	query := backend.NewTensorF16([]int{1, 1}, []float32{1})
+	key := backend.NewTensorF16([]int{4, 1}, []float32{
+		5,
+		5,
+		0,
+		10,
+	})
+	scoreAt := func(k int) float32 {
+		return query.F32[0] * key.F32[k]
+	}
+	summaries := sparseRoutingBlockSummariesForKey(key, 2)
+	_, meanSet := sparseRoutingPolicyCandidates(query, key.Shape[0], key.Shape[1], 0, 2, 1, sparseRoutingPolicyParams{Mode: "summary_mean", Probes: 1}, summaries, scoreAt)
+	_, maxNormSet := sparseRoutingPolicyCandidates(query, key.Shape[0], key.Shape[1], 0, 2, 1, sparseRoutingPolicyParams{Mode: "summary_maxnorm", Probes: 1}, summaries, scoreAt)
+	_, blendSet := sparseRoutingPolicyCandidates(query, key.Shape[0], key.Shape[1], 0, 2, 1, sparseRoutingPolicyParams{Mode: "summary_blend_radius", Probes: 1, SummaryAlpha: 1}, summaries, scoreAt)
+	if _, ok := meanSet[3]; ok {
+		t.Fatalf("summary_mean selected maxnorm block unexpectedly: candidates=%v", meanSet)
+	}
+	if _, ok := maxNormSet[3]; !ok {
+		t.Fatalf("summary_maxnorm missed maxnorm block: candidates=%v", maxNormSet)
+	}
+	if _, ok := blendSet[3]; !ok {
+		t.Fatalf("summary_blend_radius alpha=1 missed maxnorm block: candidates=%v", blendSet)
 	}
 }
 
@@ -458,4 +573,12 @@ func readSparseRoutingCalibrationReport(t *testing.T, runDir string) sparseRouti
 		t.Fatalf("decode calibration json: %v", err)
 	}
 	return report
+}
+
+func joinFloats(values []float64) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, formatParityFloat(value))
+	}
+	return strings.Join(parts, ",")
 }
