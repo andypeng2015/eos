@@ -80,6 +80,9 @@ type sparseRoutingCalibrationRow struct {
 	DenseScoreCountPerQuery     int      `json:"dense_score_count_per_query"`
 	RoutedAnchorScoresPerQuery  int      `json:"routed_anchor_scores_per_query"`
 	EstimatedScoreCountPerQuery int      `json:"estimated_score_count_per_query"`
+	TeacherOnly                 bool     `json:"teacher_only"`
+	OraclePolicy                bool     `json:"oracle_policy"`
+	TeacherScoreCountPerQuery   int      `json:"teacher_score_count_per_query"`
 	CandidateKeyFraction        float64  `json:"candidate_key_fraction"`
 	ScoreCountFraction          float64  `json:"score_count_fraction"`
 	SubquadraticScorePlan       bool     `json:"subquadratic_score_plan"`
@@ -153,7 +156,7 @@ func parseSparseRoutingCalibrationConfig(args []string) (sparseRoutingCalibratio
 	topK := fs.Int("top-k", smokeEnvInt("EOS_SPARSE_ROUTING_CALIBRATION_TOP_K", 16), "exact sparse top-k selected keys; 0 uses ceil(sqrt(seq_len))")
 	routeBlockSize := fs.Int("route-block-size", smokeEnvInt("EOS_SPARSE_ROUTING_CALIBRATION_ROUTE_BLOCK_SIZE", 32), "route block size; 0 uses ceil(sqrt(seq_len))")
 	routeTopBlocksRaw := fs.String("route-top-blocks", smokeEnvString("EOS_SPARSE_ROUTING_CALIBRATION_ROUTE_TOP_BLOCKS", "1,2,4,8"), "comma-separated route_top_blocks sweep")
-	routeModesRaw := fs.String("route-modes", smokeEnvString("EOS_SPARSE_ROUTING_CALIBRATION_ROUTE_MODES", "anchor"), "comma-separated routing policy sweep: anchor,summary_mean,multiprobe")
+	routeModesRaw := fs.String("route-modes", smokeEnvString("EOS_SPARSE_ROUTING_CALIBRATION_ROUTE_MODES", "anchor"), "comma-separated routing policy sweep: anchor,summary_mean,multiprobe,oracle_block_max")
 	routeProbesRaw := fs.String("route-probes", smokeEnvString("EOS_SPARSE_ROUTING_CALIBRATION_ROUTE_PROBES", "1"), "comma-separated multiprobe probe counts")
 	seed := fs.Int64("seed", smokeEnvInt64("EOS_SPARSE_ROUTING_CALIBRATION_SEED", 5581486560434873699), "synthetic data seed")
 	maxScoreFraction := fs.Float64("max-score-fraction", smokeEnvFloat("EOS_SPARSE_ROUTING_CALIBRATION_MAX_SCORE_FRACTION", 0.5), "passing row maximum score-work fraction versus exact dense scoring")
@@ -239,9 +242,9 @@ func parseSparseRoutingRouteModes(raw string) ([]string, error) {
 			continue
 		}
 		switch mode {
-		case "anchor", "summary_mean", "multiprobe":
+		case "anchor", "summary_mean", "multiprobe", "oracle_block_max":
 		default:
-			return nil, fmt.Errorf("route-modes[%d] %q must be one of anchor, summary_mean, multiprobe", i, mode)
+			return nil, fmt.Errorf("route-modes[%d] %q must be one of anchor, summary_mean, multiprobe, oracle_block_max", i, mode)
 		}
 		if _, ok := seen[mode]; ok {
 			continue
@@ -325,6 +328,9 @@ func executeSparseRoutingCalibration(cfg sparseRoutingCalibrationConfig) (sparse
 					DenseScoreCountPerQuery:     plan.DenseScoreCountPerQuery,
 					RoutedAnchorScoresPerQuery:  sparseRoutingRouteScoreCount(plan.RouteBlockCount, mode, probes),
 					EstimatedScoreCountPerQuery: sparseRoutingEstimatedScoreCount(plan.RouteBlockCount, plan.CandidateKeyBudget, mode, probes),
+					TeacherOnly:                 sparseRoutingTeacherOnlyPolicy(mode),
+					OraclePolicy:                sparseRoutingOraclePolicy(mode),
+					TeacherScoreCountPerQuery:   sparseRoutingTeacherScoreCount(plan.DenseScoreCountPerQuery, mode),
 					CandidateKeyFraction:        plan.CandidateKeyFraction,
 					SubquadraticScorePlan:       plan.SubquadraticScorePlan,
 					ExactTopKRecallAvg:          recallAvg,
@@ -417,6 +423,21 @@ func sparseRoutingRouteScoreCount(blockCount int, mode string, probes int) int {
 
 func sparseRoutingEstimatedScoreCount(blockCount, candidateBudget int, mode string, probes int) int {
 	return sparseRoutingRouteScoreCount(blockCount, mode, probes) + candidateBudget
+}
+
+func sparseRoutingTeacherOnlyPolicy(mode string) bool {
+	return mode == "oracle_block_max"
+}
+
+func sparseRoutingOraclePolicy(mode string) bool {
+	return mode == "oracle_block_max"
+}
+
+func sparseRoutingTeacherScoreCount(denseScoreCount int, mode string) int {
+	if sparseRoutingTeacherOnlyPolicy(mode) {
+		return denseScoreCount
+	}
+	return 0
 }
 
 func sparseRoutingPolicyOutput(query, key, value *backend.Tensor, blockSize, topBlocks, topK int, mode string, probes int, blockSummaries [][]float32) (*backend.Tensor, []map[int]struct{}, error) {
@@ -513,6 +534,14 @@ func sparseRoutingBlockScore(query *backend.Tensor, queryRow, dim, start, end, b
 	case "multiprobe":
 		best := float32(math.Inf(-1))
 		for _, k := range sparseRoutingProbeIndices(start, end, probes) {
+			if score := scoreAt(k); score > best {
+				best = score
+			}
+		}
+		return best
+	case "oracle_block_max":
+		best := float32(math.Inf(-1))
+		for k := start; k < end; k++ {
 			if score := scoreAt(k); score > best {
 				best = score
 			}
@@ -788,6 +817,9 @@ func writeSparseRoutingCalibrationTSV(path string, report sparseRoutingCalibrati
 		"dense_score_count_per_query",
 		"routed_anchor_scores_per_query",
 		"estimated_score_count_per_query",
+		"teacher_only",
+		"oracle_policy",
+		"teacher_score_count_per_query",
 		"candidate_key_fraction",
 		"score_count_fraction",
 		"subquadratic_score_plan",
@@ -821,6 +853,9 @@ func writeSparseRoutingCalibrationTSV(path string, report sparseRoutingCalibrati
 			strconv.Itoa(row.DenseScoreCountPerQuery),
 			strconv.Itoa(row.RoutedAnchorScoresPerQuery),
 			strconv.Itoa(row.EstimatedScoreCountPerQuery),
+			strconv.FormatBool(row.TeacherOnly),
+			strconv.FormatBool(row.OraclePolicy),
+			strconv.Itoa(row.TeacherScoreCountPerQuery),
 			fmt.Sprintf("%.6f", row.CandidateKeyFraction),
 			fmt.Sprintf("%.6f", row.ScoreCountFraction),
 			strconv.FormatBool(row.SubquadraticScorePlan),

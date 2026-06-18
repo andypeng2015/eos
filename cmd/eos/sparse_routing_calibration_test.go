@@ -186,6 +186,119 @@ func TestSparseRoutingCalibrationMultiprobeRowsAndScoreFractions(t *testing.T) {
 	}
 }
 
+func TestSparseRoutingCalibrationOracleBlockMaxRowsAndTSVFields(t *testing.T) {
+	runRoot := t.TempDir()
+	if err := runCalibrateSparseRouting([]string{
+		"-run-root", runRoot,
+		"-seq-len", "128",
+		"-query-len", "2",
+		"-dim", "8",
+		"-top-k", "4",
+		"-route-block-size", "16",
+		"-route-top-blocks", "1,8",
+		"-route-modes", "anchor,oracle_block_max",
+		"-route-probes", "1,2,4",
+		"-max-score-fraction", "1.2",
+		"-min-exact-topk-recall", "0",
+		"-min-output-cosine", "-1",
+	}); err != nil {
+		t.Fatalf("run calibration: %v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(runRoot, "eos-sparse-routing-calibration-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("run dirs = %v, want one", matches)
+	}
+	data, err := os.ReadFile(filepath.Join(matches[0], "calibration.json"))
+	if err != nil {
+		t.Fatalf("read calibration json: %v", err)
+	}
+	var report sparseRoutingCalibrationReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("decode calibration json: %v", err)
+	}
+	if len(report.Rows) != 4 {
+		t.Fatalf("rows len=%d, want 4", len(report.Rows))
+	}
+	var oracleOne, oracleFull *sparseRoutingCalibrationRow
+	for i := range report.Rows {
+		row := &report.Rows[i]
+		if row.RouteMode != "oracle_block_max" {
+			if row.TeacherOnly || row.OraclePolicy || row.TeacherScoreCountPerQuery != 0 {
+				t.Fatalf("non-oracle row has teacher/oracle labels: %+v", row)
+			}
+			continue
+		}
+		if !row.TeacherOnly || !row.OraclePolicy {
+			t.Fatalf("oracle row missing teacher/oracle labels: %+v", row)
+		}
+		if row.RouteProbes != 1 {
+			t.Fatalf("oracle route_probes = %d, want 1", row.RouteProbes)
+		}
+		if row.TeacherScoreCountPerQuery != row.DenseScoreCountPerQuery || row.TeacherScoreCountPerQuery != 128 {
+			t.Fatalf("teacher_score_count_per_query = %d dense=%d, want 128", row.TeacherScoreCountPerQuery, row.DenseScoreCountPerQuery)
+		}
+		if row.EstimatedScoreCountPerQuery != row.RouteBlockCount+row.CandidateKeyBudget {
+			t.Fatalf("oracle deploy estimate = %d, want block_count + candidate_budget = %d + %d", row.EstimatedScoreCountPerQuery, row.RouteBlockCount, row.CandidateKeyBudget)
+		}
+		if row.RouteTopBlocks == 1 {
+			oracleOne = row
+		}
+		if row.RouteTopBlocks == 8 {
+			oracleFull = row
+		}
+	}
+	if oracleOne == nil || oracleFull == nil {
+		t.Fatalf("missing oracle rows: one=%v full=%v", oracleOne, oracleFull)
+	}
+	if want := float64(24) / float64(128); math.Abs(oracleOne.ScoreCountFraction-want) > 1e-9 {
+		t.Fatalf("oracle top_blocks=1 score fraction = %.12f, want %.12f", oracleOne.ScoreCountFraction, want)
+	}
+	if oracleFull.ExactTopKRecallAvg != 1 || oracleFull.OutputCosineSimilarity < 0.999 {
+		t.Fatalf("full oracle row recall/cosine = %.6f %.9g, want exact recovery", oracleFull.ExactTopKRecallAvg, oracleFull.OutputCosineSimilarity)
+	}
+	tsv, err := os.ReadFile(filepath.Join(matches[0], "calibration.tsv"))
+	if err != nil {
+		t.Fatalf("read calibration tsv: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(tsv)), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("tsv lines = %d, want header plus 4 rows", len(lines))
+	}
+	header := strings.Split(lines[0], "\t")
+	headerIndex := map[string]int{}
+	for i, col := range header {
+		headerIndex[col] = i
+	}
+	for _, col := range []string{"teacher_only", "oracle_policy", "teacher_score_count_per_query"} {
+		if _, ok := headerIndex[col]; !ok {
+			t.Fatalf("tsv header missing %q: %v", col, header)
+		}
+	}
+	headerCols := len(header)
+	foundOracleTSV := false
+	for i, line := range lines[1:] {
+		fields := strings.Split(line, "\t")
+		if len(fields) != headerCols {
+			t.Fatalf("tsv row %d columns = %d, want %d", i+1, len(fields), headerCols)
+		}
+		if fields[headerIndex["route_mode"]] == "oracle_block_max" {
+			foundOracleTSV = true
+			if fields[headerIndex["teacher_only"]] != "true" || fields[headerIndex["oracle_policy"]] != "true" {
+				t.Fatalf("oracle TSV row missing labels: %v", fields)
+			}
+			if fields[headerIndex["teacher_score_count_per_query"]] != "128" {
+				t.Fatalf("oracle TSV teacher score count = %s, want 128", fields[headerIndex["teacher_score_count_per_query"]])
+			}
+		}
+	}
+	if !foundOracleTSV {
+		t.Fatal("missing oracle TSV row")
+	}
+}
+
 func TestSparseRoutingCalibrationRequirePassFailsOnlyWhenRequested(t *testing.T) {
 	common := []string{
 		"-run-root", t.TempDir(),
