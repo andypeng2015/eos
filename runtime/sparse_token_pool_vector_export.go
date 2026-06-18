@@ -45,6 +45,8 @@ type SparseTokenPoolRetrievalVectorExportConfig struct {
 	RouteBlockSize        int
 	RouteTopBlocks        int
 	Bits                  int
+	KeyBits               int
+	ValueBits             int
 	Seed                  int64
 	MaxTokens             int
 	AttentionMode         string
@@ -85,6 +87,8 @@ type SparseTokenPoolRetrievalVectorExportSummary struct {
 	RouteBlockSize          int       `json:"route_block_size,omitempty"`
 	RouteTopBlocks          int       `json:"route_top_blocks,omitempty"`
 	Bits                    int       `json:"bits"`
+	KeyBits                 int       `json:"key_bits"`
+	ValueBits               int       `json:"value_bits"`
 	QuantizerSeed           int64     `json:"quantizer_seed"`
 	AttentionMode           string    `json:"attention_mode"`
 	TurboQuantKVApplied     bool      `json:"turboquant_kv_applied"`
@@ -255,6 +259,8 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 		RouteBlockSize:          cfg.RouteBlockSize,
 		RouteTopBlocks:          cfg.RouteTopBlocks,
 		Bits:                    cfg.Bits,
+		KeyBits:                 cfg.KeyBits,
+		ValueBits:               cfg.ValueBits,
 		QuantizerSeed:           cfg.Seed,
 		AttentionMode:           cfg.AttentionMode,
 		TurboQuantKVApplied:     cfg.AttentionMode == SparseTokenPoolAttentionModeTurboQuantSparse,
@@ -320,6 +326,12 @@ func normalizeSparseTokenPoolExportConfig(cfg SparseTokenPoolRetrievalVectorExpo
 	if cfg.Bits == 0 {
 		cfg.Bits = 4
 	}
+	if cfg.KeyBits == 0 {
+		cfg.KeyBits = cfg.Bits
+	}
+	if cfg.ValueBits == 0 {
+		cfg.ValueBits = cfg.Bits
+	}
 	if cfg.Seed == 0 {
 		cfg.Seed = 0x4d697261
 	}
@@ -343,6 +355,12 @@ func validateSparseTokenPoolExportConfig(cfg SparseTokenPoolRetrievalVectorExpor
 	}
 	if cfg.Bits != 2 && cfg.Bits != 4 && cfg.Bits != 8 {
 		return fmt.Errorf("bits must be 2, 4, or 8")
+	}
+	if cfg.KeyBits != 2 && cfg.KeyBits != 4 && cfg.KeyBits != 8 {
+		return fmt.Errorf("key-bits must be 0, 2, 4, or 8")
+	}
+	if cfg.ValueBits != 2 && cfg.ValueBits != 4 && cfg.ValueBits != 8 {
+		return fmt.Errorf("value-bits must be 0, 2, 4, or 8")
 	}
 	if cfg.TopK < 0 || cfg.RouteBlockSize < 0 || cfg.RouteTopBlocks < 0 || cfg.MaxTokens < 0 {
 		return fmt.Errorf("top-k, route-block-size, route-top-blocks, and max-tokens must be non-negative")
@@ -557,7 +575,14 @@ func (e *sparseTokenPoolEncoder) embedText(text string) ([]float32, error) {
 	keyNCHW := attentionRowsToNCHW(keyRows, len(tokens), dim)
 	valueNCHW := attentionRowsToNCHW(valueRows, len(tokens), dim)
 	attrs := map[string]string{
-		"bits": strconv.Itoa(e.cfg.Bits),
+		"seed": strconv.FormatInt(e.cfg.Seed, 10),
+	}
+	encodeKeyAttrs := map[string]string{
+		"bits": strconv.Itoa(e.cfg.KeyBits),
+		"seed": strconv.FormatInt(e.cfg.Seed, 10),
+	}
+	encodeValueAttrs := map[string]string{
+		"bits": strconv.Itoa(e.cfg.ValueBits),
 		"seed": strconv.FormatInt(e.cfg.Seed, 10),
 	}
 	if e.cfg.TopK > 0 {
@@ -569,15 +594,15 @@ func (e *sparseTokenPoolEncoder) embedText(text string) ([]float32, error) {
 	if e.cfg.RouteTopBlocks > 0 {
 		attrs["route_top_blocks"] = strconv.Itoa(e.cfg.RouteTopBlocks)
 	}
-	keyCoords, keyNorms, err := backend.TurboQuantEncodeReference(keyNCHW, attrs)
+	keyCoords, keyNorms, err := backend.TurboQuantEncodeReference(keyNCHW, encodeKeyAttrs)
 	if err != nil {
 		return nil, fmt.Errorf("encode key rows: %w", err)
 	}
-	valueCoords, valueNorms, err := backend.TurboQuantEncodeReference(valueNCHW, attrs)
+	valueCoords, valueNorms, err := backend.TurboQuantEncodeReference(valueNCHW, encodeValueAttrs)
 	if err != nil {
 		return nil, fmt.Errorf("encode value rows: %w", err)
 	}
-	attended, err := backend.TurboSparseAttentionReference(query, keyCoords, keyNorms, valueCoords, valueNorms, attrs)
+	attended, err := e.attendCompressed(query, keyCoords, keyNorms, valueCoords, valueNorms, attrs)
 	if err != nil {
 		return nil, fmt.Errorf("turbo sparse attention: %w", err)
 	}
@@ -656,7 +681,6 @@ func (e *sparseTokenPoolEncoder) gatherTokenRows(tokens []int32) []float32 {
 
 func (e *sparseTokenPoolEncoder) sparseAttentionAttrs() map[string]string {
 	attrs := map[string]string{
-		"bits": strconv.Itoa(e.cfg.Bits),
 		"seed": strconv.FormatInt(e.cfg.Seed, 10),
 	}
 	if e.cfg.TopK > 0 {
@@ -676,15 +700,23 @@ func (e *sparseTokenPoolEncoder) attendRows(q, k, v []float32, seqLen, dim int, 
 	case SparseTokenPoolAttentionModeDense:
 		return denseSoftmaxAttentionRows(q, k, v, seqLen, dim), nil
 	case SparseTokenPoolAttentionModeTurboQuantSparse:
-		keyCoords, keyNorms, err := backend.TurboQuantEncodeReference(attentionRowsToNCHW(k, seqLen, dim), attrs)
+		encodeKeyAttrs := map[string]string{
+			"bits": strconv.Itoa(e.cfg.KeyBits),
+			"seed": strconv.FormatInt(e.cfg.Seed, 10),
+		}
+		encodeValueAttrs := map[string]string{
+			"bits": strconv.Itoa(e.cfg.ValueBits),
+			"seed": strconv.FormatInt(e.cfg.Seed, 10),
+		}
+		keyCoords, keyNorms, err := backend.TurboQuantEncodeReference(attentionRowsToNCHW(k, seqLen, dim), encodeKeyAttrs)
 		if err != nil {
 			return nil, fmt.Errorf("encode key rows: %w", err)
 		}
-		valueCoords, valueNorms, err := backend.TurboQuantEncodeReference(attentionRowsToNCHW(v, seqLen, dim), attrs)
+		valueCoords, valueNorms, err := backend.TurboQuantEncodeReference(attentionRowsToNCHW(v, seqLen, dim), encodeValueAttrs)
 		if err != nil {
 			return nil, fmt.Errorf("encode value rows: %w", err)
 		}
-		attended, err := backend.TurboSparseAttentionReference(backend.NewTensorF16([]int{seqLen, dim}, q), keyCoords, keyNorms, valueCoords, valueNorms, attrs)
+		attended, err := e.attendCompressed(backend.NewTensorF16([]int{seqLen, dim}, q), keyCoords, keyNorms, valueCoords, valueNorms, attrs)
 		if err != nil {
 			return nil, fmt.Errorf("turbo sparse attention: %w", err)
 		}
@@ -695,6 +727,33 @@ func (e *sparseTokenPoolEncoder) attendRows(q, k, v []float32, seqLen, dim int, 
 	default:
 		return nil, fmt.Errorf("unsupported attention mode %q", e.cfg.AttentionMode)
 	}
+}
+
+func (e *sparseTokenPoolEncoder) attendCompressed(query, keyCoords, keyNorms, valueCoords, valueNorms *backend.Tensor, attrs map[string]string) (*backend.Tensor, error) {
+	if e.cfg.KeyBits == e.cfg.ValueBits {
+		equalAttrs := cloneStringMap(attrs)
+		equalAttrs["bits"] = strconv.Itoa(e.cfg.KeyBits)
+		return backend.TurboSparseAttentionReference(query, keyCoords, keyNorms, valueCoords, valueNorms, equalAttrs)
+	}
+	decodeAttrs := map[string]string{"seed": strconv.FormatInt(e.cfg.Seed, 10)}
+	keyDense, err := backend.TurboQuantDecodeReference(keyCoords, keyNorms, decodeAttrs)
+	if err != nil {
+		return nil, fmt.Errorf("key decode: %w", err)
+	}
+	valueDense, err := backend.TurboQuantDecodeReference(valueCoords, valueNorms, decodeAttrs)
+	if err != nil {
+		return nil, fmt.Errorf("value decode: %w", err)
+	}
+	queryRank := len(query.Shape)
+	keyRows, err := attentionNCHWToRows(keyDense, queryRank)
+	if err != nil {
+		return nil, fmt.Errorf("key layout: %w", err)
+	}
+	valueRows, err := attentionNCHWToRows(valueDense, queryRank)
+	if err != nil {
+		return nil, fmt.Errorf("value layout: %w", err)
+	}
+	return backend.SparseAttentionReference(query, keyRows, valueRows, attrs)
 }
 
 func denseSoftmaxAttentionRows(q, k, v []float32, seqLen, dim int) []float32 {
@@ -864,4 +923,50 @@ func attentionRowsToNCHW(rows []float32, seqLen, dim int) *backend.Tensor {
 		}
 	}
 	return backend.NewTensorF16([]int{1, dim, seqLen, 1}, data)
+}
+
+func attentionNCHWToRows(input *backend.Tensor, queryRank int) (*backend.Tensor, error) {
+	if input == nil {
+		return nil, fmt.Errorf("nil tensor")
+	}
+	if len(input.Shape) != 4 {
+		return nil, fmt.Errorf("expected NCHW tensor, got shape %v", input.Shape)
+	}
+	batches, channels, seqLen, width := input.Shape[0], input.Shape[1], input.Shape[2], input.Shape[3]
+	if width != 1 {
+		return nil, fmt.Errorf("expected width 1 for attention sequence layout, got %d", width)
+	}
+	switch queryRank {
+	case 2:
+		if batches != 1 {
+			return nil, fmt.Errorf("rank-2 query expects compressed batch 1, got %d", batches)
+		}
+		out := backend.NewTensorF16([]int{seqLen, channels}, make([]float32, seqLen*channels))
+		for t := 0; t < seqLen; t++ {
+			for c := 0; c < channels; c++ {
+				out.F32[t*channels+c] = input.F32[(c*seqLen+t)*width]
+			}
+		}
+		return out, nil
+	case 3:
+		out := backend.NewTensorF16([]int{batches, seqLen, channels}, make([]float32, batches*seqLen*channels))
+		for b := 0; b < batches; b++ {
+			for t := 0; t < seqLen; t++ {
+				for c := 0; c < channels; c++ {
+					out.F32[(b*seqLen+t)*channels+c] = input.F32[((b*channels+c)*seqLen+t)*width]
+				}
+			}
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("query rank must be 2 or 3, got %d", queryRank)
+	}
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }

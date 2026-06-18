@@ -184,7 +184,7 @@ func TestSparseTokenPoolRetrievalVectorExportWritesPrototypeManifest(t *testing.
 	if !summary.AttentionWeightsApplied || !summary.AttentionOutputApplied || !summary.ProjectionApplied || summary.HiddenProjectionApplied || summary.EncoderRepeatsApplied != 0 {
 		t.Fatalf("expected attention/projection weights applied: %+v", summary)
 	}
-	if !summary.DenseKVMaterialized || summary.KVDecode != "host_reference_decode" || summary.Bits != 2 || summary.QuantizerSeed != 17 || summary.TopK != 1 {
+	if !summary.DenseKVMaterialized || summary.KVDecode != "host_reference_decode" || summary.Bits != 2 || summary.KeyBits != 2 || summary.ValueBits != 2 || summary.QuantizerSeed != 17 || summary.TopK != 1 {
 		t.Fatalf("summary sparse metadata = %+v", summary)
 	}
 	if summary.AttentionMode != SparseTokenPoolAttentionModeTurboQuantSparse || !summary.TurboQuantKVApplied {
@@ -234,6 +234,9 @@ func TestSparseTokenPoolRetrievalVectorExportWritesPrototypeManifest(t *testing.
 	}
 	if manifest.Schema != summary.Schema || manifest.Method != summary.Method || manifest.QualityClaim || !manifest.AttentionWeightsApplied || manifest.ClaimBoundary == "" || len(manifest.Caveats) == 0 {
 		t.Fatalf("manifest = %+v", manifest)
+	}
+	if manifest.Bits != 2 || manifest.KeyBits != 2 || manifest.ValueBits != 2 {
+		t.Fatalf("manifest bits = bits:%d key:%d value:%d, want 2/2/2", manifest.Bits, manifest.KeyBits, manifest.ValueBits)
 	}
 }
 
@@ -371,6 +374,61 @@ func TestSparseTokenPoolRetrievalVectorExportDenseAttentionMode(t *testing.T) {
 	}
 }
 
+func TestSparseTokenPoolRetrievalVectorExportMixedKeyValueBits(t *testing.T) {
+	model, artifactPath := loadTinySparseTokenPoolFFNExportModel(t)
+	dir := t.TempDir()
+	datasetDir := writeTinyRetrievalExportDataset(t, dir)
+	outputDir := filepath.Join(dir, "mixed-kv-vectors")
+	manifestPath := filepath.Join(dir, "mixed-kv.manifest.json")
+	corpusPath, queriesPath, qrelsPath := BEIRRetrievalPaths(datasetDir, "test")
+
+	summary, err := ExportSparseTokenPoolRetrievalVectors(context.Background(), model, SparseTokenPoolRetrievalVectorExportConfig{
+		DatasetName:      "tiny-sparse-mixed-kv",
+		ArtifactPath:     artifactPath,
+		CorpusPath:       corpusPath,
+		QueriesPath:      queriesPath,
+		QrelsPath:        qrelsPath,
+		OutputDir:        outputDir,
+		BatchSize:        1,
+		MaxDocs:          1,
+		MaxQueries:       1,
+		OutputDim:        2,
+		ManifestJSONPath: manifestPath,
+		TopK:             2,
+		Bits:             4,
+		KeyBits:          4,
+		ValueBits:        8,
+		Seed:             29,
+		MaxTokens:        4,
+	})
+	if err != nil {
+		t.Fatalf("export sparse token pool mixed K/V vectors: %v", err)
+	}
+	if summary.Bits != 4 || summary.KeyBits != 4 || summary.ValueBits != 8 || summary.AttentionMode != SparseTokenPoolAttentionModeTurboQuantSparse || !summary.TurboQuantKVApplied {
+		t.Fatalf("summary mixed K/V metadata = %+v", summary)
+	}
+	rows := readJSONLRows(t, summary.DocVectorPath)
+	if len(rows) != 1 {
+		t.Fatalf("doc rows = %d, want 1", len(rows))
+	}
+	embedding, ok := rows[0]["embedding"].([]any)
+	if !ok || len(embedding) != 2 {
+		t.Fatalf("doc embedding = %+v", rows[0]["embedding"])
+	}
+
+	var manifest SparseTokenPoolRetrievalVectorExportSummary
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if manifest.Bits != 4 || manifest.KeyBits != 4 || manifest.ValueBits != 8 || !manifest.TurboQuantKVApplied || manifest.KVDecode != "host_reference_decode" {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+}
+
 func TestSparseTokenPoolRetrievalVectorExportInvalidAttentionMode(t *testing.T) {
 	model, artifactPath := loadTinySparseTokenPoolExportModel(t)
 	dir := t.TempDir()
@@ -388,6 +446,35 @@ func TestSparseTokenPoolRetrievalVectorExportInvalidAttentionMode(t *testing.T) 
 	})
 	if err == nil || !strings.Contains(err.Error(), "attention-mode must be") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSparseTokenPoolRetrievalVectorExportInvalidKeyValueBits(t *testing.T) {
+	model, artifactPath := loadTinySparseTokenPoolExportModel(t)
+	dir := t.TempDir()
+	datasetDir := writeTinyRetrievalExportDataset(t, dir)
+	corpusPath, queriesPath, qrelsPath := BEIRRetrievalPaths(datasetDir, "test")
+	base := SparseTokenPoolRetrievalVectorExportConfig{
+		DatasetName:  "tiny-invalid-kv-bits",
+		ArtifactPath: artifactPath,
+		CorpusPath:   corpusPath,
+		QueriesPath:  queriesPath,
+		QrelsPath:    qrelsPath,
+		OutputDir:    filepath.Join(dir, "invalid-kv-bits"),
+	}
+
+	keyCfg := base
+	keyCfg.KeyBits = 3
+	_, err := ExportSparseTokenPoolRetrievalVectors(context.Background(), model, keyCfg)
+	if err == nil || !strings.Contains(err.Error(), "key-bits must be 0, 2, 4, or 8") {
+		t.Fatalf("key-bits error = %v", err)
+	}
+
+	valueCfg := base
+	valueCfg.ValueBits = 6
+	_, err = ExportSparseTokenPoolRetrievalVectors(context.Background(), model, valueCfg)
+	if err == nil || !strings.Contains(err.Error(), "value-bits must be 0, 2, 4, or 8") {
+		t.Fatalf("value-bits error = %v", err)
 	}
 }
 

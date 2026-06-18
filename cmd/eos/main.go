@@ -576,6 +576,8 @@ func runExportSparseTokenPoolVectors(args []string) error {
 	routeBlockSize := fs.Int("route-block-size", 0, "route block size; 0 disables routed block-anchor preselection")
 	routeTopBlocks := fs.Int("route-top-blocks", 0, "route blocks selected per query; 0 disables routed block-anchor preselection")
 	bits := fs.Int("bits", 4, "TurboQuant K/V bits: 2, 4, or 8")
+	keyBits := fs.Int("key-bits", 0, "TurboQuant key bits override: 0 inherits --bits; supported: 2, 4, or 8")
+	valueBits := fs.Int("value-bits", 0, "TurboQuant value bits override: 0 inherits --bits; supported: 2, 4, or 8")
 	seed := fs.Int64("seed", 0x4d697261, "TurboQuant Hadamard seed")
 	maxTokens := fs.Int("max-tokens", 0, "truncate tokenized text to at most this many tokens after tokenizer limits; 0 keeps tokenizer output")
 	attentionMode := fs.String("attention-mode", eosruntime.SparseTokenPoolAttentionModeTurboQuantSparse, "attention implementation: turboquant_sparse or dense")
@@ -624,6 +626,8 @@ func runExportSparseTokenPoolVectors(args []string) error {
 		RouteBlockSize:        *routeBlockSize,
 		RouteTopBlocks:        *routeTopBlocks,
 		Bits:                  *bits,
+		KeyBits:               *keyBits,
+		ValueBits:             *valueBits,
 		Seed:                  *seed,
 		MaxTokens:             *maxTokens,
 		AttentionMode:         *attentionMode,
@@ -637,7 +641,7 @@ func runExportSparseTokenPoolVectors(args []string) error {
 	}
 	fmt.Printf(" dim=%d quality_claim=%t\n", summary.Dimension, summary.QualityClaim)
 	fmt.Printf("method: %s\n", summary.Method)
-	fmt.Printf("attention: mode=%s turboquant_kv_applied=%t kv_decode=%s top_k=%d route_block_size=%d route_top_blocks=%d bits=%d seed=%d\n", summary.AttentionMode, summary.TurboQuantKVApplied, summary.KVDecode, summary.TopK, summary.RouteBlockSize, summary.RouteTopBlocks, summary.Bits, summary.QuantizerSeed)
+	fmt.Printf("attention: mode=%s turboquant_kv_applied=%t kv_decode=%s top_k=%d route_block_size=%d route_top_blocks=%d bits=%d key_bits=%d value_bits=%d seed=%d\n", summary.AttentionMode, summary.TurboQuantKVApplied, summary.KVDecode, summary.TopK, summary.RouteBlockSize, summary.RouteTopBlocks, summary.Bits, summary.KeyBits, summary.ValueBits, summary.QuantizerSeed)
 	fmt.Printf("weights: attention=%t attention_output=%t hidden_projection=%t projection=%t dense_kv_materialized=%t\n", summary.AttentionWeightsApplied, summary.AttentionOutputApplied, summary.HiddenProjectionApplied, summary.ProjectionApplied, summary.DenseKVMaterialized)
 	if summary.DocVectorPath != "" {
 		fmt.Printf("doc_vectors: %s\n", summary.DocVectorPath)
