@@ -181,7 +181,7 @@ func TestSparseTokenPoolRetrievalVectorExportWritesPrototypeManifest(t *testing.
 	if summary.Documents != 1 || summary.Queries != 1 || summary.Dimension != 2 || summary.ModelDimension != 2 || summary.OutputDimension != 2 {
 		t.Fatalf("summary counts/dims = %+v", summary)
 	}
-	if !summary.AttentionWeightsApplied || !summary.AttentionOutputApplied || !summary.ProjectionApplied {
+	if !summary.AttentionWeightsApplied || !summary.AttentionOutputApplied || !summary.ProjectionApplied || summary.HiddenProjectionApplied || summary.EncoderRepeatsApplied != 0 {
 		t.Fatalf("expected attention/projection weights applied: %+v", summary)
 	}
 	if !summary.DenseKVMaterialized || summary.KVDecode != "host_reference_decode" || summary.Bits != 2 || summary.QuantizerSeed != 17 || summary.TopK != 1 {
@@ -230,6 +230,75 @@ func TestSparseTokenPoolRetrievalVectorExportWritesPrototypeManifest(t *testing.
 		t.Fatalf("decode manifest: %v", err)
 	}
 	if manifest.Schema != summary.Schema || manifest.Method != summary.Method || manifest.QualityClaim || !manifest.AttentionWeightsApplied || manifest.ClaimBoundary == "" || len(manifest.Caveats) == 0 {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+}
+
+func TestSparseTokenPoolRetrievalVectorExportAppliesManifestEncoderFFN(t *testing.T) {
+	model, artifactPath := loadTinySparseTokenPoolFFNExportModel(t)
+	dir := t.TempDir()
+	datasetDir := writeTinyRetrievalExportDataset(t, dir)
+	outputDir := filepath.Join(dir, "sparse-ffn-vectors")
+	manifestPath := filepath.Join(dir, "sparse-ffn.manifest.json")
+	corpusPath, queriesPath, qrelsPath := BEIRRetrievalPaths(datasetDir, "test")
+
+	summary, err := ExportSparseTokenPoolRetrievalVectors(context.Background(), model, SparseTokenPoolRetrievalVectorExportConfig{
+		DatasetName:      "tiny-sparse-ffn",
+		ArtifactPath:     artifactPath,
+		CorpusPath:       corpusPath,
+		QueriesPath:      queriesPath,
+		QrelsPath:        qrelsPath,
+		OutputDir:        outputDir,
+		BatchSize:        1,
+		MaxDocs:          1,
+		MaxQueries:       1,
+		OutputDim:        2,
+		ManifestJSONPath: manifestPath,
+		TopK:             2,
+		RouteBlockSize:   2,
+		RouteTopBlocks:   1,
+		Bits:             4,
+		Seed:             19,
+		MaxTokens:        4,
+	})
+	if err != nil {
+		t.Fatalf("export sparse token pool FFN vectors: %v", err)
+	}
+	if !summary.AttentionWeightsApplied || !summary.AttentionOutputApplied || !summary.HiddenProjectionApplied || !summary.ProjectionApplied {
+		t.Fatalf("expected full encoder weights applied: %+v", summary)
+	}
+	if summary.EncoderRepeatsApplied != 2 || !summary.AttentionResidual || !summary.AttentionLayerNorm || !summary.FFNResidual || !summary.FFNLayerNorm {
+		t.Fatalf("expected manifest encoder structure applied: %+v", summary)
+	}
+	if summary.HiddenProjectionParam != "ffn_up" || summary.ProjectionParam != "projection" || len(summary.SkippedWeights) != 0 {
+		t.Fatalf("unexpected params/skips: %+v", summary)
+	}
+	rows := readJSONLRows(t, summary.DocVectorPath)
+	if len(rows) != 1 {
+		t.Fatalf("doc rows = %d, want 1", len(rows))
+	}
+	embedding, ok := rows[0]["embedding"].([]any)
+	if !ok || len(embedding) != 2 {
+		t.Fatalf("doc embedding = %+v", rows[0]["embedding"])
+	}
+	var norm float64
+	for _, value := range embedding {
+		v := value.(float64)
+		norm += v * v
+	}
+	if math.Abs(math.Sqrt(norm)-1) > 1e-5 {
+		t.Fatalf("doc embedding norm = %.8f, want normalized", math.Sqrt(norm))
+	}
+
+	var manifest SparseTokenPoolRetrievalVectorExportSummary
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if !manifest.HiddenProjectionApplied || manifest.EncoderRepeatsApplied != 2 || manifest.HiddenProjectionParam != "ffn_up" {
 		t.Fatalf("manifest = %+v", manifest)
 	}
 }
@@ -360,6 +429,163 @@ pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16
 		"attn_v":     identity,
 		"attn_o":     identity,
 		"projection": identity,
+	})
+	if err := weights.WriteFile(DefaultWeightFilePath(artifactPath)); err != nil {
+		t.Fatalf("write weights: %v", err)
+	}
+	tokenizer := TokenizerFile{
+		Version:      TokenizerFileVersion,
+		Tokens:       []string{"[PAD]", "[UNK]", "one", "alpha", "beta"},
+		UnknownToken: "[UNK]",
+	}
+	if err := tokenizer.WriteFile(DefaultTokenizerPath(artifactPath)); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	rt := New(cuda.New(), metal.New())
+	model, err := rt.LoadEmbeddingPackage(context.Background(), artifactPath)
+	if err != nil {
+		t.Fatalf("load package: %v", err)
+	}
+	return model, artifactPath
+}
+
+func loadTinySparseTokenPoolFFNExportModel(t *testing.T) (*EmbeddingModel, string) {
+	t.Helper()
+	src := []byte(`
+param token_embedding: f16[V, D] @weight("weights/token_embedding")
+param attn_q: f16[D, D] @weight("weights/attn_q")
+param attn_k: f16[D, D] @weight("weights/attn_k")
+param attn_v: f16[D, D] @weight("weights/attn_v")
+param attn_o: f16[D, D] @weight("weights/attn_o")
+param ffn_up: f16[D, H] @weight("weights/ffn_up")
+param projection: f16[H, D] @weight("weights/projection")
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[D] {
+    let hidden = gather(token_embedding, tokens)
+    let q1 = @matmul(hidden, attn_q)
+    let k1 = @matmul(hidden, attn_k)
+    let v1 = @matmul(hidden, attn_v)
+    let kt1 = transpose(k1)
+    let scores1 = @matmul(q1, kt1)
+    let probs1 = softmax(scores1)
+    let mixed1 = @matmul(probs1, v1)
+    let attended1 = @matmul(mixed1, attn_o)
+    let attn_hidden1 = layernorm(attended1 + hidden)
+    let ffn_hidden1 = @matmul(attn_hidden1, ffn_up)
+    let activated1 = gelu(ffn_hidden1)
+    let projected1 = @matmul(activated1, projection)
+    let encoded1 = layernorm(projected1 + attn_hidden1)
+    let q2 = @matmul(encoded1, attn_q)
+    let k2 = @matmul(encoded1, attn_k)
+    let v2 = @matmul(encoded1, attn_v)
+    let kt2 = transpose(k2)
+    let scores2 = @matmul(q2, kt2)
+    let probs2 = softmax(scores2)
+    let mixed2 = @matmul(probs2, v2)
+    let attended2 = @matmul(mixed2, attn_o)
+    let attn_hidden2 = layernorm(attended2 + encoded1)
+    let ffn_hidden2 = @matmul(attn_hidden2, ffn_up)
+    let activated2 = gelu(ffn_hidden2)
+    let projected2 = @matmul(activated2, projection)
+    let encoded2 = layernorm(projected2 + attn_hidden2)
+    let normalized = normalize(encoded2)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, D] {
+    let hidden = gather(token_embedding, tokens)
+    let q1 = @matmul(hidden, attn_q)
+    let k1 = @matmul(hidden, attn_k)
+    let v1 = @matmul(hidden, attn_v)
+    let kt1 = transpose(k1)
+    let scores1 = @matmul(q1, kt1)
+    let probs1 = softmax(scores1)
+    let mixed1 = @matmul(probs1, v1)
+    let attended1 = @matmul(mixed1, attn_o)
+    let attn_hidden1 = layernorm(attended1 + hidden)
+    let ffn_hidden1 = @matmul(attn_hidden1, ffn_up)
+    let activated1 = gelu(ffn_hidden1)
+    let projected1 = @matmul(activated1, projection)
+    let encoded1 = layernorm(projected1 + attn_hidden1)
+    let q2 = @matmul(encoded1, attn_q)
+    let k2 = @matmul(encoded1, attn_k)
+    let v2 = @matmul(encoded1, attn_v)
+    let kt2 = transpose(k2)
+    let scores2 = @matmul(q2, kt2)
+    let probs2 = softmax(scores2)
+    let mixed2 = @matmul(probs2, v2)
+    let attended2 = @matmul(mixed2, attn_o)
+    let attn_hidden2 = layernorm(attended2 + encoded1)
+    let ffn_hidden2 = @matmul(attn_hidden2, ffn_up)
+    let activated2 = gelu(ffn_hidden2)
+    let projected2 = @matmul(activated2, projection)
+    let encoded2 = layernorm(projected2 + attn_hidden2)
+    let normalized = normalize(encoded2)
+    return mean_pool(normalized, attention_mask)
+}
+`)
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "tiny_sparse_token_pool_ffn_embed"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	dir := t.TempDir()
+	artifactPath := filepath.Join(dir, "tiny_sparse_token_pool_ffn_embed.mll")
+	if err := eosartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	manifest := EmbeddingManifest{
+		Name:                  "tiny_sparse_token_pool_ffn_embed",
+		PooledEntry:           "embed_pooled",
+		BatchEntry:            "embed_pooled_batch",
+		EncoderRepeats:        2,
+		TokenInput:            "tokens",
+		MaskInput:             "attention_mask",
+		OutputName:            "result",
+		OutputDType:           "f16",
+		TokenEmbeddingParam:   "token_embedding",
+		AttentionQueryParam:   "attn_q",
+		AttentionKeyParam:     "attn_k",
+		AttentionValueParam:   "attn_v",
+		AttentionOutputParam:  "attn_o",
+		AttentionResidual:     true,
+		AttentionLayerNorm:    true,
+		HiddenProjectionParam: "ffn_up",
+		FFNResidual:           true,
+		FFNLayerNorm:          true,
+		ProjectionParam:       "projection",
+		Tokenizer: TokenizerManifest{
+			VocabSize:   5,
+			MaxSequence: 8,
+			PadID:       0,
+			UnknownID:   1,
+		},
+	}
+	if err := manifest.WriteFile(DefaultEmbeddingManifestPath(artifactPath)); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	identity := backend.NewTensorF16([]int{2, 2}, []float32{1, 0, 0, 1})
+	weights := NewWeightFile(map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF16([]int{5, 2}, []float32{
+			0, 0,
+			1, 0,
+			0, 1,
+			1, 1,
+			1, -1,
+		}),
+		"attn_q": identity,
+		"attn_k": identity,
+		"attn_v": identity,
+		"attn_o": identity,
+		"ffn_up": backend.NewTensorF16([]int{2, 4}, []float32{
+			1, 0, 0.5, -0.5,
+			0, 1, -0.25, 0.75,
+		}),
+		"projection": backend.NewTensorF16([]int{4, 2}, []float32{
+			1, 0,
+			0, 1,
+			0.5, 0.25,
+			-0.25, 0.5,
+		}),
 	})
 	if err := weights.WriteFile(DefaultWeightFilePath(artifactPath)); err != nil {
 		t.Fatalf("write weights: %v", err)

@@ -84,12 +84,19 @@ type SparseTokenPoolRetrievalVectorExportSummary struct {
 	KVDecode                string    `json:"kv_decode"`
 	AttentionWeightsApplied bool      `json:"attention_weights_applied"`
 	AttentionOutputApplied  bool      `json:"attention_output_applied"`
+	HiddenProjectionApplied bool      `json:"hidden_projection_applied"`
 	ProjectionApplied       bool      `json:"projection_applied"`
+	EncoderRepeatsApplied   int       `json:"encoder_repeats_applied,omitempty"`
+	AttentionResidual       bool      `json:"attention_residual,omitempty"`
+	AttentionLayerNorm      bool      `json:"attention_layernorm,omitempty"`
+	FFNResidual             bool      `json:"ffn_residual,omitempty"`
+	FFNLayerNorm            bool      `json:"ffn_layernorm,omitempty"`
 	TokenEmbeddingParam     string    `json:"token_embedding_param"`
 	AttentionQueryParam     string    `json:"attention_query_param,omitempty"`
 	AttentionKeyParam       string    `json:"attention_key_param,omitempty"`
 	AttentionValueParam     string    `json:"attention_value_param,omitempty"`
 	AttentionOutputParam    string    `json:"attention_output_param,omitempty"`
+	HiddenProjectionParam   string    `json:"hidden_projection_param,omitempty"`
 	ProjectionParam         string    `json:"projection_param,omitempty"`
 	SkippedWeights          []string  `json:"skipped_weights,omitempty"`
 	Caveats                 []string  `json:"caveats"`
@@ -105,12 +112,15 @@ type sparseTokenPoolEncoder struct {
 	attentionKey       *backend.Tensor
 	attentionValue     *backend.Tensor
 	attentionOutput    *backend.Tensor
+	hiddenProjection   *backend.Tensor
 	projection         *backend.Tensor
 	cfg                SparseTokenPoolRetrievalVectorExportConfig
 	manifest           EmbeddingManifest
 	attentionWeightsOK bool
 	attentionOutputOK  bool
+	hiddenProjectionOK bool
 	projectionOK       bool
+	fullEncoderOK      bool
 	skippedWeights     []string
 	modelDimension     int
 	projectedDimension int
@@ -242,21 +252,30 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 		KVDecode:                "host_reference_decode",
 		AttentionWeightsApplied: encoder.attentionWeightsOK,
 		AttentionOutputApplied:  encoder.attentionOutputOK,
+		HiddenProjectionApplied: encoder.hiddenProjectionOK,
 		ProjectionApplied:       encoder.projectionOK,
+		EncoderRepeatsApplied:   encoder.encoderRepeatsApplied(),
+		AttentionResidual:       encoder.manifest.AttentionResidual,
+		AttentionLayerNorm:      encoder.manifest.AttentionLayerNorm,
+		FFNResidual:             encoder.manifest.FFNResidual,
+		FFNLayerNorm:            encoder.manifest.FFNLayerNorm,
 		TokenEmbeddingParam:     encoder.manifest.TokenEmbeddingParam,
 		AttentionQueryParam:     encoder.manifest.AttentionQueryParam,
 		AttentionKeyParam:       encoder.manifest.AttentionKeyParam,
 		AttentionValueParam:     encoder.manifest.AttentionValueParam,
 		AttentionOutputParam:    encoder.manifest.AttentionOutputParam,
+		HiddenProjectionParam:   encoder.manifest.HiddenProjectionParam,
 		ProjectionParam:         encoder.manifest.ProjectionParam,
 		SkippedWeights:          encoder.skippedWeights,
-		Caveats: []string{
-			"experimental_sparse_token_pool uses one mean-derived global query row over token embeddings",
+		Caveats:                 encoder.caveats(),
+		ElapsedSeconds:          time.Since(start).Seconds(),
+		CreatedAt:               time.Now().UTC(),
+	}
+	if len(summary.Caveats) == 0 {
+		summary.Caveats = []string{
 			"TurboSparseAttentionReference decodes quantized K/V on host in this prototype",
 			"quality_claim=false; score generated caches before comparing and do not promote as a trained sparse encoder",
-		},
-		ElapsedSeconds: time.Since(start).Seconds(),
-		CreatedAt:      time.Now().UTC(),
+		}
 	}
 	if cfg.ManifestJSONPath != "" {
 		if err := WriteSparseTokenPoolRetrievalVectorExportSummaryFile(cfg.ManifestJSONPath, summary); err != nil {
@@ -345,8 +364,17 @@ func newSparseTokenPoolEncoder(model *EmbeddingModel, weights WeightFile, cfg Sp
 		enc.attentionOutput = enc.optionalMatrix(manifest.AttentionOutputParam, token.Shape[1], token.Shape[1])
 		enc.attentionOutputOK = enc.attentionOutput != nil
 	}
-	enc.projection = enc.optionalProjection(manifest.ProjectionParam, token.Shape[1])
+	if manifest.HiddenProjectionParam != "" {
+		enc.hiddenProjection = enc.optionalProjection(manifest.HiddenProjectionParam, token.Shape[1])
+		enc.hiddenProjectionOK = enc.hiddenProjection != nil
+	}
+	projectionInput := token.Shape[1]
+	if enc.hiddenProjectionOK {
+		projectionInput = enc.hiddenProjection.Shape[1]
+	}
+	enc.projection = enc.optionalProjection(manifest.ProjectionParam, projectionInput)
 	enc.projectionOK = enc.projection != nil
+	enc.fullEncoderOK = enc.attentionWeightsOK && enc.attentionOutputOK && enc.hiddenProjectionOK && enc.projectionOK
 	if enc.projectionOK {
 		enc.projectedDimension = enc.projection.Shape[1]
 	} else {
@@ -478,15 +506,21 @@ func writeSparseTokenPoolChildVectorCache(ctx context.Context, encoder *sparseTo
 }
 
 func (e *sparseTokenPoolEncoder) embedText(text string) ([]float32, error) {
-	tokens, _, err := e.model.TokenizeText(text)
+	tokens, mask, err := e.model.TokenizeText(text)
 	if err != nil {
 		return nil, err
 	}
 	if e.cfg.MaxTokens > 0 && len(tokens) > e.cfg.MaxTokens {
 		tokens = tokens[:e.cfg.MaxTokens]
+		if len(mask) > e.cfg.MaxTokens {
+			mask = mask[:e.cfg.MaxTokens]
+		}
 	}
 	if len(tokens) == 0 {
 		return nil, fmt.Errorf("tokenizer produced no tokens")
+	}
+	if e.fullEncoderOK {
+		return e.embedTextFullEncoder(tokens, mask)
 	}
 	hidden := e.gatherTokenRows(tokens)
 	dim := e.tokenEmbedding.Shape[1]
@@ -533,10 +567,67 @@ func (e *sparseTokenPoolEncoder) embedText(text string) ([]float32, error) {
 	if e.attentionOutputOK {
 		vector = matmulVectorRight(vector, e.attentionOutput)
 	}
+	if e.hiddenProjectionOK && e.projectionOK {
+		vector = matmulVectorRight(vector, e.hiddenProjection)
+		for i, value := range vector {
+			vector[i] = geluForward(value)
+		}
+		vector = matmulVectorRight(vector, e.projection)
+		return normalizeRetrievalVector(vector), nil
+	}
 	if e.projectionOK {
 		vector = matmulVectorRight(vector, e.projection)
 	}
 	return normalizeRetrievalVector(vector), nil
+}
+
+func (e *sparseTokenPoolEncoder) embedTextFullEncoder(tokens []int32, mask []int32) ([]float32, error) {
+	current := e.gatherTokenRows(tokens)
+	seqLen := len(tokens)
+	dim := e.tokenEmbedding.Shape[1]
+	attrs := e.sparseAttentionAttrs()
+	for layer := 0; layer < e.manifest.EncoderRepeats; layer++ {
+		q := matmulRowsRight(current, seqLen, dim, e.attentionQuery)
+		k := matmulRowsRight(current, seqLen, dim, e.attentionKey)
+		v := matmulRowsRight(current, seqLen, dim, e.attentionValue)
+		keyCoords, keyNorms, err := backend.TurboQuantEncodeReference(attentionRowsToNCHW(k, seqLen, dim), attrs)
+		if err != nil {
+			return nil, fmt.Errorf("encode key rows: %w", err)
+		}
+		valueCoords, valueNorms, err := backend.TurboQuantEncodeReference(attentionRowsToNCHW(v, seqLen, dim), attrs)
+		if err != nil {
+			return nil, fmt.Errorf("encode value rows: %w", err)
+		}
+		attended, err := backend.TurboSparseAttentionReference(backend.NewTensorF16([]int{seqLen, dim}, q), keyCoords, keyNorms, valueCoords, valueNorms, attrs)
+		if err != nil {
+			return nil, fmt.Errorf("turbo sparse attention: %w", err)
+		}
+		if len(attended.Shape) != 2 || attended.Shape[0] != seqLen || attended.Shape[1] != dim || len(attended.F32) < seqLen*dim {
+			return nil, fmt.Errorf("unexpected sparse attention output shape %v", attended.Shape)
+		}
+		attnOutput := matmulRowsRight(attended.F32[:seqLen*dim], seqLen, dim, e.attentionOutput)
+		hidden := attnOutput
+		if e.manifest.AttentionResidual {
+			hidden = addRows(hidden, current)
+		}
+		if e.manifest.AttentionLayerNorm {
+			hidden = layerNormRows(hidden, seqLen, dim)
+		}
+		ffnHidden := matmulRowsRight(hidden, seqLen, dim, e.hiddenProjection)
+		for i, value := range ffnHidden {
+			ffnHidden[i] = geluForward(value)
+		}
+		ffnOut := matmulRowsRight(ffnHidden, seqLen, e.hiddenProjection.Shape[1], e.projection)
+		if e.manifest.FFNResidual {
+			ffnOut = addRows(ffnOut, hidden)
+		}
+		if e.manifest.FFNLayerNorm {
+			ffnOut = layerNormRows(ffnOut, seqLen, dim)
+		}
+		current = ffnOut
+	}
+	normalizeRowsInPlace(current, seqLen, dim)
+	return maskedMeanPoolNormalized(current, mask, seqLen, dim), nil
 }
 
 func (e *sparseTokenPoolEncoder) gatherTokenRows(tokens []int32) []float32 {
@@ -551,6 +642,41 @@ func (e *sparseTokenPoolEncoder) gatherTokenRows(tokens []int32) []float32 {
 		copy(out[i*dim:(i+1)*dim], e.tokenEmbedding.F32[row*dim:(row+1)*dim])
 	}
 	return out
+}
+
+func (e *sparseTokenPoolEncoder) sparseAttentionAttrs() map[string]string {
+	attrs := map[string]string{
+		"bits": strconv.Itoa(e.cfg.Bits),
+		"seed": strconv.FormatInt(e.cfg.Seed, 10),
+	}
+	if e.cfg.TopK > 0 {
+		attrs["top_k"] = strconv.Itoa(e.cfg.TopK)
+	}
+	if e.cfg.RouteBlockSize > 0 {
+		attrs["route_block_size"] = strconv.Itoa(e.cfg.RouteBlockSize)
+	}
+	if e.cfg.RouteTopBlocks > 0 {
+		attrs["route_top_blocks"] = strconv.Itoa(e.cfg.RouteTopBlocks)
+	}
+	return attrs
+}
+
+func (e *sparseTokenPoolEncoder) encoderRepeatsApplied() int {
+	if e.fullEncoderOK {
+		return e.manifest.EncoderRepeats
+	}
+	return 0
+}
+
+func (e *sparseTokenPoolEncoder) caveats() []string {
+	caveats := []string{
+		"TurboSparseAttentionReference decodes quantized K/V on host in this prototype",
+		"quality_claim=false; score generated caches before comparing and do not promote as a trained sparse encoder",
+	}
+	if !e.fullEncoderOK {
+		caveats = append([]string{"experimental_sparse_token_pool used legacy fallback path because full encoder weights were unavailable"}, caveats...)
+	}
+	return caveats
 }
 
 func meanRows(rows []float32, count, dim int) []float32 {
@@ -568,6 +694,57 @@ func meanRows(rows []float32, count, dim int) []float32 {
 		out[d] *= scale
 	}
 	return out
+}
+
+func addRows(left, right []float32) []float32 {
+	out := make([]float32, len(left))
+	for i := range left {
+		out[i] = left[i] + right[i]
+	}
+	return out
+}
+
+func layerNormRows(rows []float32, rowCount, dim int) []float32 {
+	out := make([]float32, len(rows))
+	for r := 0; r < rowCount; r++ {
+		layerNormRow(out[r*dim:(r+1)*dim], rows[r*dim:(r+1)*dim])
+	}
+	return out
+}
+
+func normalizeRowsInPlace(rows []float32, rowCount, dim int) {
+	for r := 0; r < rowCount; r++ {
+		base := r * dim
+		normalized := normalizeRetrievalVector(rows[base : base+dim])
+		copy(rows[base:base+dim], normalized)
+	}
+}
+
+func maskedMeanPoolNormalized(rows []float32, mask []int32, rowCount, dim int) []float32 {
+	out := make([]float32, dim)
+	active := 0
+	for r := 0; r < rowCount; r++ {
+		if r < len(mask) && mask[r] == 0 {
+			continue
+		}
+		active++
+		for d := 0; d < dim; d++ {
+			out[d] += rows[r*dim+d]
+		}
+	}
+	if active == 0 {
+		active = rowCount
+		for r := 0; r < rowCount; r++ {
+			for d := 0; d < dim; d++ {
+				out[d] += rows[r*dim+d]
+			}
+		}
+	}
+	scale := float32(1.0 / float64(active))
+	for d := range out {
+		out[d] *= scale
+	}
+	return normalizeRetrievalVector(out)
 }
 
 func matmulRowsRight(rows []float32, rowCount, inDim int, weight *backend.Tensor) []float32 {
