@@ -67,6 +67,26 @@ go run ./cmd/eos export-sparse-token-pool-vectors \
 
 This writes `child-doc-vectors.jsonl` or `doc-vectors.jsonl`, `query-vectors.jsonl`, and a manifest with `method=experimental_sparse_token_pool` and `quality_claim=false`. It loads the tokenizer and sibling weights, gathers actual token_embedding rows, applies Q/K/V/O/projection weights only when manifest names and tensor shapes line up, and runs host-reference routed `TurboSparseAttentionReference` over TurboQuant-encoded K/V. Score the cache with `eos eval-retrieval-vectors` or `eos eval-retrieval-vectors-turboquant` before comparing it to dense or external baselines. This is a bridge row for retrieval evaluation only, not production embedder output, not a trained sparse encoder, and not LongEmbed proof.
 
+Export the distinct sparse encoder host-reference parent-vector row with:
+
+```bash
+go run ./cmd/eos export-sparse-encoder-vectors \
+  --dataset repo-docs-sparse-encoder-host \
+  --split test \
+  --manifest-json runs/eos-sparse-encoder-entrypoint/repo-docs/manifest.json \
+  --max-tokens 4096 \
+  --top-k 224 \
+  --route-block-size 128 \
+  --route-top-blocks 8 \
+  --bits 4 \
+  --seed 5581486560434873699 \
+  /path/to/eos-embed-trainable.mll \
+  datasets/longembed/repo-docs \
+  runs/eos-sparse-encoder-entrypoint/repo-docs/vectors
+```
+
+This command writes parent `doc-vectors.jsonl` plus `query-vectors.jsonl` and requires full manifest encoder weights. Its manifest uses `method=experimental_sparse_encoder_host_reference`, `evidence_level=retrieval_cache_host_reference_sparse_encoder`, `quality_claim=false`, `require_full_encoder=true`, `full_encoder_applied=true`, and host-reference sparse-plan audit fields for the maximum observed document token length. It also records that this TurboQuant sparse path materializes dense K/V and decodes K/V on host. Treat this row as retrieval-cache prototype evidence only, not trained LongEmbed evidence, sealed runtime sparse inference, or production quality. Score q-bit rows with `eos eval-retrieval-vectors-turboquant --quantizer-seed <seed>` so cache provenance matches the export seed.
+
 Calibrate sparse routing policy quality separately from kernel timing:
 
 ```bash

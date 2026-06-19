@@ -283,6 +283,171 @@ func TestSparseTokenPoolRetrievalVectorExportMinObservedDocTokensGuard(t *testin
 	}
 }
 
+func TestSparseTokenPoolRetrievalVectorExportSparseEncoderManifest(t *testing.T) {
+	model, artifactPath := loadTinySparseTokenPoolFFNExportModel(t)
+	dir := t.TempDir()
+	datasetDir := writeTinyRetrievalExportDataset(t, dir)
+	outputDir := filepath.Join(dir, "sparse-encoder-vectors")
+	manifestPath := filepath.Join(dir, "sparse-encoder.manifest.json")
+	corpusPath, queriesPath, qrelsPath := BEIRRetrievalPaths(datasetDir, "test")
+
+	summary, err := ExportSparseTokenPoolRetrievalVectors(context.Background(), model, SparseTokenPoolRetrievalVectorExportConfig{
+		DatasetName:        "tiny-sparse-encoder",
+		ArtifactPath:       artifactPath,
+		CorpusPath:         corpusPath,
+		QueriesPath:        queriesPath,
+		QrelsPath:          qrelsPath,
+		OutputDir:          outputDir,
+		BatchSize:          1,
+		MaxDocs:            1,
+		MaxQueries:         1,
+		OutputDim:          2,
+		ManifestJSONPath:   manifestPath,
+		TopK:               1,
+		RouteBlockSize:     1,
+		RouteTopBlocks:     1,
+		Bits:               4,
+		KeyBits:            4,
+		ValueBits:          8,
+		Seed:               99,
+		MaxTokens:          4,
+		RequireFullEncoder: true,
+		Method:             "experimental_sparse_encoder_host_reference",
+		EvidenceLevel:      "retrieval_cache_host_reference_sparse_encoder",
+		ClaimBoundary:      "Prototype host-reference sparse encoder retrieval-cache evidence only; not a trained sparse/LongEmbed encoder, not sealed runtime inference, and not production quality evidence.",
+	})
+	if err != nil {
+		t.Fatalf("export sparse encoder vectors: %v", err)
+	}
+	if summary.Method != "experimental_sparse_encoder_host_reference" || summary.EvidenceLevel != "retrieval_cache_host_reference_sparse_encoder" || summary.QualityClaim {
+		t.Fatalf("summary identity = %+v", summary)
+	}
+	if !summary.RequireFullEncoder || !summary.FullEncoderApplied || !summary.AttentionWeightsApplied || !summary.AttentionOutputApplied || !summary.HiddenProjectionApplied || !summary.ProjectionApplied {
+		t.Fatalf("summary full encoder metadata = %+v", summary)
+	}
+	if summary.ChildVectors != 0 || summary.ChildDocVectorPath != "" || summary.DocVectorPath != filepath.Join(outputDir, "doc-vectors.jsonl") || summary.QueryVectorPath != filepath.Join(outputDir, "query-vectors.jsonl") {
+		t.Fatalf("summary parent-vector paths = %+v", summary)
+	}
+	if !summary.DenseKVMaterialized || summary.KVDecode != "host_reference_decode" || summary.TopK != 1 || summary.SparseTopK != 1 || summary.Bits != 4 || summary.KeyBits != 4 || summary.ValueBits != 8 || summary.QuantizerSeed != 99 {
+		t.Fatalf("summary sparse audit metadata = %+v", summary)
+	}
+	if summary.TopKConfigured != 1 || summary.SparseTopKConfigured != 1 || summary.SparseTopKEffectiveMaxObservedDoc != 1 {
+		t.Fatalf("summary sparse top-k provenance = %+v", summary)
+	}
+	if summary.MaxObservedDocPlan == nil || summary.MaxObservedDocPlan.KeyLen != summary.DocumentTokenizerOutput.MaxObservedTokens || summary.MaxObservedDocPlan.CandidateKeyBudget <= 0 || summary.MaxObservedDocPlan.ScoreCountFraction <= 0 {
+		t.Fatalf("summary sparse plan = %+v for token stats %+v", summary.MaxObservedDocPlan, summary.DocumentTokenizerOutput)
+	}
+	if summary.CandidateKeyBudgetMaxObservedDoc != summary.MaxObservedDocPlan.CandidateKeyBudget || summary.ScoreFractionMaxObservedDoc != summary.MaxObservedDocPlan.ScoreCountFraction {
+		t.Fatalf("summary sparse plan top-level fields = %+v plan=%+v", summary, summary.MaxObservedDocPlan)
+	}
+	if !strings.Contains(summary.ClaimBoundary, "not a trained sparse/LongEmbed encoder") {
+		t.Fatalf("claim boundary = %q", summary.ClaimBoundary)
+	}
+
+	var manifest SparseTokenPoolRetrievalVectorExportSummary
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if manifest.Method != summary.Method || manifest.EvidenceLevel != summary.EvidenceLevel || !manifest.RequireFullEncoder || !manifest.FullEncoderApplied || manifest.MaxObservedDocPlan == nil {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+}
+
+func TestSparseTokenPoolRetrievalVectorExportSparseEncoderDefaultTopKProvenance(t *testing.T) {
+	model, artifactPath := loadTinySparseTokenPoolFFNExportModel(t)
+	dir := t.TempDir()
+	datasetDir := writeTinyRetrievalExportDataset(t, dir)
+	outputDir := filepath.Join(dir, "sparse-encoder-default-topk-vectors")
+	manifestPath := filepath.Join(dir, "sparse-encoder-default-topk.manifest.json")
+	corpusPath, queriesPath, qrelsPath := BEIRRetrievalPaths(datasetDir, "test")
+
+	summary, err := ExportSparseTokenPoolRetrievalVectors(context.Background(), model, SparseTokenPoolRetrievalVectorExportConfig{
+		DatasetName:        "tiny-sparse-encoder-default-topk",
+		ArtifactPath:       artifactPath,
+		CorpusPath:         corpusPath,
+		QueriesPath:        queriesPath,
+		QrelsPath:          qrelsPath,
+		OutputDir:          outputDir,
+		BatchSize:          1,
+		MaxDocs:            1,
+		MaxQueries:         1,
+		OutputDim:          2,
+		ManifestJSONPath:   manifestPath,
+		RouteBlockSize:     1,
+		RouteTopBlocks:     1,
+		Bits:               4,
+		Seed:               101,
+		MaxTokens:          4,
+		RequireFullEncoder: true,
+		Method:             "experimental_sparse_encoder_host_reference",
+		EvidenceLevel:      "retrieval_cache_host_reference_sparse_encoder",
+		ClaimBoundary:      "Prototype host-reference sparse encoder retrieval-cache evidence only; not a trained sparse/LongEmbed encoder, not sealed runtime inference, and not production quality evidence.",
+	})
+	if err != nil {
+		t.Fatalf("export sparse encoder vectors: %v", err)
+	}
+	if summary.MaxObservedDocPlan == nil {
+		t.Fatalf("summary missing sparse plan: %+v", summary)
+	}
+	wantTopK := backend.PlanSparseAttention(backend.SparseAttentionPlanInput{
+		QueryLen:       summary.DocumentTokenizerOutput.MaxObservedTokens,
+		KeyLen:         summary.DocumentTokenizerOutput.MaxObservedTokens,
+		QueryDim:       summary.ModelDimension,
+		ValueDim:       summary.ModelDimension,
+		RouteBlockSize: summary.RouteBlockSize,
+		RouteTopBlocks: summary.RouteTopBlocks,
+	}).TopK
+	if wantTopK <= 0 {
+		t.Fatalf("want effective top-k = %d", wantTopK)
+	}
+	if summary.TopKConfigured != 0 || summary.SparseTopKConfigured != 0 {
+		t.Fatalf("summary configured top-k provenance = %+v", summary)
+	}
+	if summary.TopK != wantTopK || summary.SparseTopK != wantTopK || summary.SparseTopKEffectiveMaxObservedDoc != wantTopK || summary.MaxObservedDocPlan.TopK != wantTopK {
+		t.Fatalf("summary effective top-k provenance = %+v want %d", summary, wantTopK)
+	}
+
+	var manifest SparseTokenPoolRetrievalVectorExportSummary
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if manifest.TopKConfigured != 0 || manifest.SparseTopKConfigured != 0 || manifest.TopK != wantTopK || manifest.SparseTopK != wantTopK || manifest.SparseTopKEffectiveMaxObservedDoc != wantTopK {
+		t.Fatalf("manifest sparse top-k provenance = %+v want %d", manifest, wantTopK)
+	}
+}
+
+func TestSparseTokenPoolRetrievalVectorExportRequireFullEncoderRejectsFallback(t *testing.T) {
+	model, artifactPath := loadTinySparseTokenPoolExportModel(t)
+	dir := t.TempDir()
+	datasetDir := writeTinyRetrievalExportDataset(t, dir)
+	corpusPath, queriesPath, qrelsPath := BEIRRetrievalPaths(datasetDir, "test")
+
+	_, err := ExportSparseTokenPoolRetrievalVectors(context.Background(), model, SparseTokenPoolRetrievalVectorExportConfig{
+		DatasetName:        "tiny-sparse-encoder-requires-full",
+		ArtifactPath:       artifactPath,
+		CorpusPath:         corpusPath,
+		QueriesPath:        queriesPath,
+		QrelsPath:          qrelsPath,
+		OutputDir:          filepath.Join(dir, "sparse-encoder-requires-full"),
+		TopK:               1,
+		Bits:               2,
+		Seed:               17,
+		RequireFullEncoder: true,
+		Method:             "experimental_sparse_encoder_host_reference",
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires full encoder weights") {
+		t.Fatalf("error = %v, want full encoder failure", err)
+	}
+}
+
 func TestSparseTokenPoolRetrievalVectorExportAppliesManifestEncoderFFN(t *testing.T) {
 	model, artifactPath := loadTinySparseTokenPoolFFNExportModel(t)
 	dir := t.TempDir()

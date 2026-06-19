@@ -113,6 +113,8 @@ func run(args []string) error {
 		return runExportRetrievalVectors(args[1:])
 	case "export-sparse-token-pool-vectors":
 		return runExportSparseTokenPoolVectors(args[1:])
+	case "export-sparse-encoder-vectors":
+		return runExportSparseEncoderVectors(args[1:])
 	case "export-timeseries-vectors":
 		return runExportTimeSeriesVectors(args[1:])
 	case "export-event-trace-vectors":
@@ -661,6 +663,102 @@ func runExportSparseTokenPoolVectors(args []string) error {
 	if summary.ChildDocVectorPath != "" {
 		fmt.Printf("child_doc_vectors: %s\n", summary.ChildDocVectorPath)
 	}
+	fmt.Printf("query_vectors: %s\n", summary.QueryVectorPath)
+	if *manifestPath != "" {
+		fmt.Printf("manifest: %s\n", *manifestPath)
+	}
+	return nil
+}
+
+func runExportSparseEncoderVectors(args []string) error {
+	fs := flag.NewFlagSet("export-sparse-encoder-vectors", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	datasetName := fs.String("dataset", "", "dataset name for manifest/status output")
+	split := fs.String("split", "test", "qrels split under <dataset-dir>/qrels")
+	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path; when present, export keeps qrels-relevant docs/queries under caps")
+	batchSize := fs.Int("batch-size", 1, "reserved batch size metadata for sparse encoder prototype exports")
+	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke exports")
+	maxQueries := fs.Int("max-queries", 0, "limit queries for smoke exports")
+	outputDim := fs.Int("output-dim", 0, "when positive, prefix-truncate embeddings to this dimension and L2-renormalize before writing")
+	documentPrefix := fs.String("document-prefix", "", "prefix prepended to document text before embedding")
+	queryPrefix := fs.String("query-prefix", "", "prefix prepended to query text before embedding")
+	manifestPath := fs.String("manifest-json", "", "write export summary JSON manifest")
+	topK := fs.Int("top-k", 0, "sparse selected keys per query; 0 uses sparse attention reference default")
+	routeBlockSize := fs.Int("route-block-size", 0, "route block size; 0 disables routed block-anchor preselection")
+	routeTopBlocks := fs.Int("route-top-blocks", 0, "route blocks selected per query; 0 disables routed block-anchor preselection")
+	bits := fs.Int("bits", 4, "TurboQuant K/V bits: 2, 4, or 8")
+	keyBits := fs.Int("key-bits", 0, "TurboQuant key bits override: 0 inherits --bits; supported: 2, 4, or 8")
+	valueBits := fs.Int("value-bits", 0, "TurboQuant value bits override: 0 inherits --bits; supported: 2, 4, or 8")
+	seed := fs.Int64("seed", 0x4d697261, "TurboQuant Hadamard seed")
+	maxTokens := fs.Int("max-tokens", 0, "truncate tokenized text to at most this many tokens after tokenizer limits; 0 keeps tokenizer output")
+	minObservedDocTokens := fs.Int("min-observed-doc-tokens", 0, "fail when max observed document tokenizer-output tokens consumed by the sparse encoder is below this threshold; 0 disables")
+	attentionMode := fs.String("attention-mode", eosruntime.SparseTokenPoolAttentionModeTurboQuantSparse, "attention implementation: turboquant_sparse or dense")
+	weightPath := fs.String("weights", "", "explicit sibling weight file path; default is <artifact>.weights.mll")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 3 || fs.Arg(0) == "" || fs.Arg(1) == "" || fs.Arg(2) == "" {
+		return fmt.Errorf("usage: eos export-sparse-encoder-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
+	}
+	artifactPath := fs.Arg(0)
+	datasetDir := fs.Arg(1)
+	outputDir := fs.Arg(2)
+	corpusPath, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
+	if *qrelsPath == "" {
+		*qrelsPath = defaultQrelsPath
+	}
+	if *datasetName == "" {
+		*datasetName = filepath.Base(datasetDir)
+	}
+
+	rt := eosruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
+	model, err := rt.LoadEmbeddingPackage(context.Background(), artifactPath)
+	if err != nil {
+		return err
+	}
+	summary, err := eosruntime.ExportSparseTokenPoolRetrievalVectors(context.Background(), model, eosruntime.SparseTokenPoolRetrievalVectorExportConfig{
+		DatasetName:          *datasetName,
+		ArtifactPath:         artifactPath,
+		WeightFilePath:       *weightPath,
+		CorpusPath:           corpusPath,
+		QueriesPath:          queriesPath,
+		QrelsPath:            *qrelsPath,
+		OutputDir:            outputDir,
+		BatchSize:            *batchSize,
+		MaxDocs:              *maxDocs,
+		MaxQueries:           *maxQueries,
+		OutputDim:            *outputDim,
+		DocumentPrefix:       *documentPrefix,
+		QueryPrefix:          *queryPrefix,
+		ManifestJSONPath:     *manifestPath,
+		TopK:                 *topK,
+		RouteBlockSize:       *routeBlockSize,
+		RouteTopBlocks:       *routeTopBlocks,
+		Bits:                 *bits,
+		KeyBits:              *keyBits,
+		ValueBits:            *valueBits,
+		Seed:                 *seed,
+		MaxTokens:            *maxTokens,
+		MinObservedDocTokens: *minObservedDocTokens,
+		AttentionMode:        *attentionMode,
+		RequireFullEncoder:   true,
+		Method:               "experimental_sparse_encoder_host_reference",
+		EvidenceLevel:        "retrieval_cache_host_reference_sparse_encoder",
+		ClaimBoundary:        "Prototype host-reference sparse encoder retrieval-cache evidence only; not a trained sparse/LongEmbed encoder, not sealed runtime inference, and not production quality evidence.",
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("exported experimental sparse encoder vectors: dataset=%s docs=%d queries=%d dim=%d quality_claim=%t\n", summary.Dataset, summary.Documents, summary.Queries, summary.Dimension, summary.QualityClaim)
+	fmt.Printf("method: %s\n", summary.Method)
+	fmt.Printf("evidence_level: %s\n", summary.EvidenceLevel)
+	fmt.Printf("full_encoder: require=%t applied=%t\n", summary.RequireFullEncoder, summary.FullEncoderApplied)
+	fmt.Printf("attention: mode=%s turboquant_kv_applied=%t dense_kv_materialized=%t kv_decode=%s top_k=%d route_block_size=%d route_top_blocks=%d bits=%d key_bits=%d value_bits=%d seed=%d\n", summary.AttentionMode, summary.TurboQuantKVApplied, summary.DenseKVMaterialized, summary.KVDecode, summary.TopK, summary.RouteBlockSize, summary.RouteTopBlocks, summary.Bits, summary.KeyBits, summary.ValueBits, summary.QuantizerSeed)
+	if summary.MaxObservedDocPlan != nil {
+		fmt.Printf("sparse_plan_max_doc: key_len=%d candidate_key_budget=%d score_fraction=%.6f subquadratic=%t\n", summary.MaxObservedDocPlan.KeyLen, summary.MaxObservedDocPlan.CandidateKeyBudget, summary.MaxObservedDocPlan.ScoreCountFraction, summary.MaxObservedDocPlan.SubquadraticScorePlan)
+	}
+	fmt.Printf("tokenizer_output: doc_records=%d doc_max_tokens=%d doc_mean_tokens=%.2f doc_total_tokens=%d doc_truncated_by_max_tokens=%d query_records=%d query_max_tokens=%d query_mean_tokens=%.2f query_total_tokens=%d query_truncated_by_max_tokens=%d\n", summary.DocumentTokenizerOutput.RecordCount, summary.DocumentTokenizerOutput.MaxObservedTokens, summary.DocumentTokenizerOutput.MeanObservedTokens, summary.DocumentTokenizerOutput.TotalTokens, summary.DocumentTokenizerOutput.TruncatedByMaxTokensCount, summary.QueryTokenizerOutput.RecordCount, summary.QueryTokenizerOutput.MaxObservedTokens, summary.QueryTokenizerOutput.MeanObservedTokens, summary.QueryTokenizerOutput.TotalTokens, summary.QueryTokenizerOutput.TruncatedByMaxTokensCount)
+	fmt.Printf("doc_vectors: %s\n", summary.DocVectorPath)
 	fmt.Printf("query_vectors: %s\n", summary.QueryVectorPath)
 	if *manifestPath != "" {
 		fmt.Printf("manifest: %s\n", *manifestPath)
@@ -1250,6 +1348,7 @@ func runEvalRetrievalVectorsTurboQuant(args []string) error {
 	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks")
 	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
 	bitsRaw := fs.String("bits", "2,4,8", "comma-separated TurboQuant IP bit widths; supported: 2..8")
+	quantizerSeed := fs.Int64("quantizer-seed", eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed, "TurboQuant IP quantizer seed for deterministic rows")
 	rerankOverfetchRaw := fs.String("rerank-overfetch", "", "optional comma-separated TurboQuant candidate depths to rerank, e.g. 200,500")
 	rerankStorage := fs.String("rerank-storage", eosruntime.TurboQuantRerankStorageDense, "rerank storage for --rerank-overfetch: dense, compact-reconstruct, or fp16")
 	metricsPath := fs.String("metrics-json", "", "write TurboQuant retrieval metrics JSON")
@@ -1288,6 +1387,7 @@ func runEvalRetrievalVectorsTurboQuant(args []string) error {
 		TopK:            *topK,
 		MaxDocs:         *maxDocs,
 		MaxQueries:      *maxQueries,
+		QuantizerSeed:   *quantizerSeed,
 	}, bits, rerankOverfetch, *rerankStorage)
 	if err != nil {
 		return err
@@ -6596,6 +6696,7 @@ func printUsage() {
 	fmt.Println("  eos default-embedder [--root dir] [--path-only] [--verify] [--json]")
 	fmt.Println("  eos export-retrieval-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
 	fmt.Println("  eos export-sparse-token-pool-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
+	fmt.Println("  eos export-sparse-encoder-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
 	fmt.Println("  eos export-timeseries-vectors [flags] <artifact.mll> <series.jsonl> <queries.jsonl> <output-dir>")
 	fmt.Println("  eos export-event-trace-vectors [flags] <artifact.mll> <traces.jsonl> <queries.jsonl> <output-dir>")
 	fmt.Println("  eos eval-retrieval [flags] <artifact.mll> <beir-dataset-dir>")
@@ -6646,6 +6747,7 @@ func printUsage() {
 	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
 	fmt.Println("export-retrieval-vectors writes BEIR document/query vector caches from a packaged or sealed Eos embedding .mll, optionally as parent-child document chunks.")
 	fmt.Println("export-sparse-token-pool-vectors writes experimental_sparse_token_pool BEIR vector caches from tokenizer ids, token_embedding rows, and host-reference attention (--attention-mode turboquant_sparse|dense); --token-span-tokens emits child vectors from one encoded document pass; quality_claim=false; --min-observed-doc-tokens can fail runs that never consume the requested document token length.")
+	fmt.Println("export-sparse-encoder-vectors writes parent doc/query vector caches as experimental_sparse_encoder_host_reference; it requires full manifest encoder weights, records retrieval_cache_host_reference_sparse_encoder evidence, and keeps quality_claim=false.")
 	fmt.Println("export-timeseries-vectors writes text-rendered time-series window child-vector caches plus query vectors for the multivector TurboQuant quality harness.")
 	fmt.Println("export-event-trace-vectors writes text-rendered event/trace child-vector caches plus query vectors for the multivector TurboQuant quality harness.")
 	fmt.Println("eval-retrieval scores a sealed embedding .mll on BEIR-style corpus/query/qrels files with nDCG/MRR/Recall metrics.")

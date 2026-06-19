@@ -54,76 +54,114 @@ type SparseTokenPoolRetrievalVectorExportConfig struct {
 	MaxTokens             int
 	MinObservedDocTokens  int
 	AttentionMode         string
+	RequireFullEncoder    bool
+	Method                string
+	EvidenceLevel         string
+	ClaimBoundary         string
 }
 
 // SparseTokenPoolRetrievalVectorExportSummary is the manifest written beside
 // experimental sparse-token pooled vector caches.
 type SparseTokenPoolRetrievalVectorExportSummary struct {
-	Schema                  string                    `json:"schema"`
-	Method                  string                    `json:"method"`
-	Experimental            bool                      `json:"experimental"`
-	QualityClaim            bool                      `json:"quality_claim"`
-	ClaimBoundary           string                    `json:"claim_boundary"`
-	Dataset                 string                    `json:"dataset"`
-	Artifact                string                    `json:"artifact,omitempty"`
-	WeightFile              string                    `json:"weight_file,omitempty"`
-	TokenizerPresent        bool                      `json:"tokenizer_present"`
-	Documents               int                       `json:"documents"`
-	Queries                 int                       `json:"queries"`
-	ChildVectors            int                       `json:"child_vectors,omitempty"`
-	Dimension               int                       `json:"dimension"`
-	ModelDimension          int                       `json:"model_dimension,omitempty"`
-	OutputDimension         int                       `json:"output_dimension,omitempty"`
-	DocVectorPath           string                    `json:"doc_vector_path,omitempty"`
-	ChildDocVectorPath      string                    `json:"child_doc_vector_path,omitempty"`
-	QueryVectorPath         string                    `json:"query_vector_path"`
-	DocumentChunkWords      int                       `json:"document_chunk_words,omitempty"`
-	DocumentChunkOverlap    int                       `json:"document_chunk_overlap,omitempty"`
-	DocumentChunkMinWords   int                       `json:"document_chunk_min_words,omitempty"`
-	TokenSpanTokens         int                       `json:"token_span_tokens,omitempty"`
-	TokenSpanOverlap        int                       `json:"token_span_overlap,omitempty"`
-	TokenSpanMinTokens      int                       `json:"token_span_min_tokens,omitempty"`
-	BatchSize               int                       `json:"batch_size"`
-	MaxDocs                 int                       `json:"max_docs,omitempty"`
-	MaxQueries              int                       `json:"max_queries,omitempty"`
-	MaxTokens               int                       `json:"max_tokens,omitempty"`
-	MinObservedDocTokens    int                       `json:"min_observed_doc_tokens,omitempty"`
-	CorpusPath              string                    `json:"corpus_path,omitempty"`
-	QueriesPath             string                    `json:"queries_path,omitempty"`
-	QrelsPath               string                    `json:"qrels_path,omitempty"`
-	TopK                    int                       `json:"top_k"`
-	RouteBlockSize          int                       `json:"route_block_size,omitempty"`
-	RouteTopBlocks          int                       `json:"route_top_blocks,omitempty"`
-	Bits                    int                       `json:"bits"`
-	KeyBits                 int                       `json:"key_bits"`
-	ValueBits               int                       `json:"value_bits"`
-	QuantizerSeed           int64                     `json:"quantizer_seed"`
-	AttentionMode           string                    `json:"attention_mode"`
-	TurboQuantKVApplied     bool                      `json:"turboquant_kv_applied"`
-	DenseKVMaterialized     bool                      `json:"dense_kv_materialized"`
-	KVDecode                string                    `json:"kv_decode"`
-	AttentionWeightsApplied bool                      `json:"attention_weights_applied"`
-	AttentionOutputApplied  bool                      `json:"attention_output_applied"`
-	HiddenProjectionApplied bool                      `json:"hidden_projection_applied"`
-	ProjectionApplied       bool                      `json:"projection_applied"`
-	EncoderRepeatsApplied   int                       `json:"encoder_repeats_applied,omitempty"`
-	AttentionResidual       bool                      `json:"attention_residual,omitempty"`
-	AttentionLayerNorm      bool                      `json:"attention_layernorm,omitempty"`
-	FFNResidual             bool                      `json:"ffn_residual,omitempty"`
-	FFNLayerNorm            bool                      `json:"ffn_layernorm,omitempty"`
-	TokenEmbeddingParam     string                    `json:"token_embedding_param"`
-	AttentionQueryParam     string                    `json:"attention_query_param,omitempty"`
-	AttentionKeyParam       string                    `json:"attention_key_param,omitempty"`
-	AttentionValueParam     string                    `json:"attention_value_param,omitempty"`
-	AttentionOutputParam    string                    `json:"attention_output_param,omitempty"`
-	HiddenProjectionParam   string                    `json:"hidden_projection_param,omitempty"`
-	ProjectionParam         string                    `json:"projection_param,omitempty"`
-	SkippedWeights          []string                  `json:"skipped_weights,omitempty"`
-	DocumentTokenizerOutput TokenizerOutputTokenStats `json:"document_tokenizer_output"`
-	QueryTokenizerOutput    TokenizerOutputTokenStats `json:"query_tokenizer_output"`
-	Caveats                 []string                  `json:"caveats"`
-	ElapsedSeconds          float64                   `json:"elapsed_seconds"`
-	CreatedAt               time.Time                 `json:"created_at"`
+	Schema                              string                    `json:"schema"`
+	Method                              string                    `json:"method"`
+	Experimental                        bool                      `json:"experimental"`
+	QualityClaim                        bool                      `json:"quality_claim"`
+	EvidenceLevel                       string                    `json:"evidence_level,omitempty"`
+	ClaimBoundary                       string                    `json:"claim_boundary"`
+	Dataset                             string                    `json:"dataset"`
+	Artifact                            string                    `json:"artifact,omitempty"`
+	WeightFile                          string                    `json:"weight_file,omitempty"`
+	TokenizerPresent                    bool                      `json:"tokenizer_present"`
+	Documents                           int                       `json:"documents"`
+	Queries                             int                       `json:"queries"`
+	ChildVectors                        int                       `json:"child_vectors,omitempty"`
+	Dimension                           int                       `json:"dimension"`
+	ModelDimension                      int                       `json:"model_dimension,omitempty"`
+	OutputDimension                     int                       `json:"output_dimension,omitempty"`
+	DocVectorPath                       string                    `json:"doc_vector_path,omitempty"`
+	ChildDocVectorPath                  string                    `json:"child_doc_vector_path,omitempty"`
+	QueryVectorPath                     string                    `json:"query_vector_path"`
+	DocumentChunkWords                  int                       `json:"document_chunk_words,omitempty"`
+	DocumentChunkOverlap                int                       `json:"document_chunk_overlap,omitempty"`
+	DocumentChunkMinWords               int                       `json:"document_chunk_min_words,omitempty"`
+	TokenSpanTokens                     int                       `json:"token_span_tokens,omitempty"`
+	TokenSpanOverlap                    int                       `json:"token_span_overlap,omitempty"`
+	TokenSpanMinTokens                  int                       `json:"token_span_min_tokens,omitempty"`
+	BatchSize                           int                       `json:"batch_size"`
+	MaxDocs                             int                       `json:"max_docs,omitempty"`
+	MaxQueries                          int                       `json:"max_queries,omitempty"`
+	MaxTokens                           int                       `json:"max_tokens,omitempty"`
+	MinObservedDocTokens                int                       `json:"min_observed_doc_tokens,omitempty"`
+	CorpusPath                          string                    `json:"corpus_path,omitempty"`
+	QueriesPath                         string                    `json:"queries_path,omitempty"`
+	QrelsPath                           string                    `json:"qrels_path,omitempty"`
+	TopKConfigured                      int                       `json:"top_k_configured"`
+	TopK                                int                       `json:"top_k"`
+	RouteBlockSize                      int                       `json:"route_block_size,omitempty"`
+	RouteTopBlocks                      int                       `json:"route_top_blocks,omitempty"`
+	Bits                                int                       `json:"bits"`
+	KeyBits                             int                       `json:"key_bits"`
+	ValueBits                           int                       `json:"value_bits"`
+	QuantizerSeed                       int64                     `json:"quantizer_seed"`
+	AttentionMode                       string                    `json:"attention_mode"`
+	SparseTopKConfigured                int                       `json:"sparse_top_k_configured"`
+	SparseTopK                          int                       `json:"sparse_top_k"`
+	SparseTopKEffectiveMaxObservedDoc   int                       `json:"sparse_top_k_effective_max_observed_doc,omitempty"`
+	TurboQuantKVApplied                 bool                      `json:"turboquant_kv_applied"`
+	DenseKVMaterialized                 bool                      `json:"dense_kv_materialized"`
+	KVDecode                            string                    `json:"kv_decode"`
+	RequireFullEncoder                  bool                      `json:"require_full_encoder"`
+	FullEncoderApplied                  bool                      `json:"full_encoder_applied"`
+	MaxObservedDocPlan                  *SparseAttentionPlanAudit `json:"max_observed_doc_sparse_plan,omitempty"`
+	ScoreFractionMaxObservedDoc         float64                   `json:"score_fraction_max_observed_doc,omitempty"`
+	CandidateKeyBudgetMaxObservedDoc    int                       `json:"candidate_key_budget_max_observed_doc,omitempty"`
+	SubquadraticScorePlanMaxObservedDoc bool                      `json:"subquadratic_score_plan_max_observed_doc"`
+	AttentionWeightsApplied             bool                      `json:"attention_weights_applied"`
+	AttentionOutputApplied              bool                      `json:"attention_output_applied"`
+	HiddenProjectionApplied             bool                      `json:"hidden_projection_applied"`
+	ProjectionApplied                   bool                      `json:"projection_applied"`
+	EncoderRepeatsApplied               int                       `json:"encoder_repeats_applied,omitempty"`
+	AttentionResidual                   bool                      `json:"attention_residual,omitempty"`
+	AttentionLayerNorm                  bool                      `json:"attention_layernorm,omitempty"`
+	FFNResidual                         bool                      `json:"ffn_residual,omitempty"`
+	FFNLayerNorm                        bool                      `json:"ffn_layernorm,omitempty"`
+	TokenEmbeddingParam                 string                    `json:"token_embedding_param"`
+	AttentionQueryParam                 string                    `json:"attention_query_param,omitempty"`
+	AttentionKeyParam                   string                    `json:"attention_key_param,omitempty"`
+	AttentionValueParam                 string                    `json:"attention_value_param,omitempty"`
+	AttentionOutputParam                string                    `json:"attention_output_param,omitempty"`
+	HiddenProjectionParam               string                    `json:"hidden_projection_param,omitempty"`
+	ProjectionParam                     string                    `json:"projection_param,omitempty"`
+	SkippedWeights                      []string                  `json:"skipped_weights,omitempty"`
+	DocumentTokenizerOutput             TokenizerOutputTokenStats `json:"document_tokenizer_output"`
+	QueryTokenizerOutput                TokenizerOutputTokenStats `json:"query_tokenizer_output"`
+	Caveats                             []string                  `json:"caveats"`
+	ElapsedSeconds                      float64                   `json:"elapsed_seconds"`
+	CreatedAt                           time.Time                 `json:"created_at"`
+}
+
+// SparseAttentionPlanAudit records the sparse score-work estimate for the
+// longest document sequence observed by the exporter.
+type SparseAttentionPlanAudit struct {
+	QueryLen                    int     `json:"query_len"`
+	KeyLen                      int     `json:"key_len"`
+	QueryDim                    int     `json:"query_dim"`
+	ValueDim                    int     `json:"value_dim"`
+	TopK                        int     `json:"top_k"`
+	Routing                     string  `json:"routing"`
+	RouteBlockSize              int     `json:"route_block_size,omitempty"`
+	RouteTopBlocks              int     `json:"route_top_blocks,omitempty"`
+	RouteBlockCount             int     `json:"route_block_count,omitempty"`
+	SelectedRouteBlocks         int     `json:"selected_route_blocks,omitempty"`
+	SelectedKeyCount            int     `json:"selected_key_count"`
+	CandidateKeyBudget          int     `json:"candidate_key_budget"`
+	DenseScoreCountPerQuery     int     `json:"dense_score_count_per_query"`
+	RoutedAnchorScoresPerQuery  int     `json:"routed_anchor_scores_per_query,omitempty"`
+	EstimatedScoreCountPerQuery int     `json:"estimated_score_count_per_query"`
+	CandidateKeyFraction        float64 `json:"candidate_key_fraction"`
+	ScoreCountFraction          float64 `json:"score_count_fraction"`
+	SubquadraticScorePlan       bool    `json:"subquadratic_score_plan"`
 }
 
 // TokenizerOutputTokenStats records token lengths after the packaged
@@ -205,6 +243,9 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 	if err != nil {
 		return SparseTokenPoolRetrievalVectorExportSummary{}, err
 	}
+	if cfg.RequireFullEncoder && !encoder.fullEncoderOK {
+		return SparseTokenPoolRetrievalVectorExportSummary{}, fmt.Errorf("sparse encoder export requires full encoder weights, but full encoder weights were not applied; skipped weights: %v", encoder.skippedWeights)
+	}
 
 	start := time.Now()
 	var qrels retrievalQrels
@@ -274,12 +315,26 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 		return SparseTokenPoolRetrievalVectorExportSummary{}, fmt.Errorf("document vectors have encoded dimension %d but query vectors have encoded dimension %d", modelDim, queryModelDim)
 	}
 
+	method := cfg.Method
+	if method == "" {
+		method = "experimental_sparse_token_pool"
+	}
+	claimBoundary := cfg.ClaimBoundary
+	if claimBoundary == "" {
+		claimBoundary = "Prototype sparse-token pooling retrieval cache. Not production dense embedder output, not trained sparse encoder evidence, and not LongEmbed proof."
+	}
+	maxObservedDocPlan := sparseAttentionPlanAuditForMaxObservedDoc(docTokenStats.MaxObservedTokens, modelDim, cfg)
+	effectiveTopK := cfg.TopK
+	if cfg.AttentionMode == SparseTokenPoolAttentionModeTurboQuantSparse && maxObservedDocPlan != nil {
+		effectiveTopK = maxObservedDocPlan.TopK
+	}
 	summary := SparseTokenPoolRetrievalVectorExportSummary{
 		Schema:                  SparseTokenPoolRetrievalVectorExportManifestSchema,
-		Method:                  "experimental_sparse_token_pool",
+		Method:                  method,
 		Experimental:            true,
 		QualityClaim:            false,
-		ClaimBoundary:           "Prototype sparse-token pooling retrieval cache. Not production dense embedder output, not trained sparse encoder evidence, and not LongEmbed proof.",
+		EvidenceLevel:           cfg.EvidenceLevel,
+		ClaimBoundary:           claimBoundary,
 		Dataset:                 cfg.DatasetName,
 		Artifact:                cfg.ArtifactPath,
 		WeightFile:              cfg.WeightFilePath,
@@ -307,7 +362,8 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 		CorpusPath:              cfg.CorpusPath,
 		QueriesPath:             cfg.QueriesPath,
 		QrelsPath:               cfg.QrelsPath,
-		TopK:                    cfg.TopK,
+		TopKConfigured:          cfg.TopK,
+		TopK:                    effectiveTopK,
 		RouteBlockSize:          cfg.RouteBlockSize,
 		RouteTopBlocks:          cfg.RouteTopBlocks,
 		Bits:                    cfg.Bits,
@@ -315,9 +371,14 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 		ValueBits:               cfg.ValueBits,
 		QuantizerSeed:           cfg.Seed,
 		AttentionMode:           cfg.AttentionMode,
+		SparseTopKConfigured:    cfg.TopK,
+		SparseTopK:              effectiveTopK,
 		TurboQuantKVApplied:     cfg.AttentionMode == SparseTokenPoolAttentionModeTurboQuantSparse,
 		DenseKVMaterialized:     true,
 		KVDecode:                encoder.kvDecode(),
+		RequireFullEncoder:      cfg.RequireFullEncoder,
+		FullEncoderApplied:      encoder.fullEncoderOK,
+		MaxObservedDocPlan:      maxObservedDocPlan,
 		AttentionWeightsApplied: encoder.attentionWeightsOK,
 		AttentionOutputApplied:  encoder.attentionOutputOK,
 		HiddenProjectionApplied: encoder.hiddenProjectionOK,
@@ -341,6 +402,14 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 		ElapsedSeconds:          time.Since(start).Seconds(),
 		CreatedAt:               time.Now().UTC(),
 	}
+	if maxObservedDocPlan != nil {
+		summary.ScoreFractionMaxObservedDoc = maxObservedDocPlan.ScoreCountFraction
+		summary.CandidateKeyBudgetMaxObservedDoc = maxObservedDocPlan.CandidateKeyBudget
+		summary.SubquadraticScorePlanMaxObservedDoc = maxObservedDocPlan.SubquadraticScorePlan
+		if cfg.AttentionMode == SparseTokenPoolAttentionModeTurboQuantSparse {
+			summary.SparseTopKEffectiveMaxObservedDoc = maxObservedDocPlan.TopK
+		}
+	}
 	if len(summary.Caveats) == 0 {
 		summary.Caveats = []string{
 			"TurboSparseAttentionReference decodes quantized K/V on host in this prototype",
@@ -353,6 +422,41 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 		}
 	}
 	return summary, nil
+}
+
+func sparseAttentionPlanAuditForMaxObservedDoc(maxTokens, dim int, cfg SparseTokenPoolRetrievalVectorExportConfig) *SparseAttentionPlanAudit {
+	if maxTokens <= 0 || dim <= 0 {
+		return nil
+	}
+	plan := backend.PlanSparseAttention(backend.SparseAttentionPlanInput{
+		QueryLen:       maxTokens,
+		KeyLen:         maxTokens,
+		QueryDim:       dim,
+		ValueDim:       dim,
+		TopK:           cfg.TopK,
+		RouteBlockSize: cfg.RouteBlockSize,
+		RouteTopBlocks: cfg.RouteTopBlocks,
+	})
+	return &SparseAttentionPlanAudit{
+		QueryLen:                    plan.QueryLen,
+		KeyLen:                      plan.KeyLen,
+		QueryDim:                    plan.QueryDim,
+		ValueDim:                    plan.ValueDim,
+		TopK:                        plan.TopK,
+		Routing:                     plan.Routing,
+		RouteBlockSize:              plan.RouteBlockSize,
+		RouteTopBlocks:              plan.RouteTopBlocks,
+		RouteBlockCount:             plan.RouteBlockCount,
+		SelectedRouteBlocks:         plan.SelectedRouteBlocks,
+		SelectedKeyCount:            plan.SelectedKeyCount,
+		CandidateKeyBudget:          plan.CandidateKeyBudget,
+		DenseScoreCountPerQuery:     plan.DenseScoreCountPerQuery,
+		RoutedAnchorScoresPerQuery:  plan.RoutedAnchorScoresPerQuery,
+		EstimatedScoreCountPerQuery: plan.EstimatedScoreCountPerQuery,
+		CandidateKeyFraction:        plan.CandidateKeyFraction,
+		ScoreCountFraction:          plan.ScoreCountFraction,
+		SubquadraticScorePlan:       plan.SubquadraticScorePlan,
+	}
 }
 
 func WriteSparseTokenPoolRetrievalVectorExportSummaryFile(path string, summary SparseTokenPoolRetrievalVectorExportSummary) error {

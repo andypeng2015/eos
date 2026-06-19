@@ -1801,6 +1801,7 @@ func TestRunEvalRetrievalVectorsTurboQuantWritesMetricsJSONAndTSV(t *testing.T) 
 		"--doc-vectors", docVectorsPath,
 		"--query-vectors", queryVectorsPath,
 		"--bits", "8",
+		"--quantizer-seed", "123",
 		"--metrics-json", metricsPath,
 		"--metrics-tsv", metricsTSVPath,
 		datasetDir,
@@ -1829,6 +1830,9 @@ func TestRunEvalRetrievalVectorsTurboQuantWritesMetricsJSONAndTSV(t *testing.T) 
 	}
 	if metrics.Inputs.DocVectorPath != docVectorsPath || metrics.Inputs.QueryVectorPath != queryVectorsPath {
 		t.Fatalf("vector paths = %+v", metrics.Inputs)
+	}
+	if metrics.Config.QuantizerSeed != 123 {
+		t.Fatalf("quantizer seed metadata = config:%+v rows:%+v", metrics.Config, metrics.Rows)
 	}
 	if metrics.Dense.Quality.NDCGAt10 != 1 || len(metrics.Rows) != 1 || metrics.Rows[0].Bits != 8 {
 		t.Fatalf("metrics = %+v", metrics)
