@@ -149,6 +149,18 @@ EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/build_repo_docs_longembed_dataset.f
 
 This writes a BEIR-shaped `datasets/longembed/repo-docs` dataset from local repository Markdown and skill docs. The verified lane currently has `11` documents, `80` heuristic qrels, and `6` documents at `>=2048` words. In the checkpoint run summarized at `.tiller/scratch/codex/eos-repo-docs-longembed-lane-v1-report.md`, BM25 reached nDCG@10 `0.717080`, the Eos default single-vector row reached `0.644872`, Qwen3 0.6B 128d dense child-max reached `0.771170`, and Qwen3 q4 child-max reached `0.739269`. Treat this as local harness coverage over real repo text, not LongEmbed proof: qrels are deterministic path/heading heuristics, the dataset is small and repo-specific, and BM25 benefits from path and heading lexical overlap.
 
+Convert official LongEmbed Hugging Face configs into the same BEIR-shaped layout with:
+
+```bash
+python3 scripts/convert_longembed_to_beir.py \
+  --dataset needle,passkey \
+  --output-root datasets/longembed-official \
+  --max-docs 200 \
+  --max-queries 50
+```
+
+The adapter supports the official `dwzhu/LongEmbed` configs `narrativeqa`, `qmsum`, `2wikimqa`, `summ_screen_fd`, `passkey`, and `needle`, reading the `corpus`, `queries`, and `qrels` splits and writing `<output-root>/<dataset>/{corpus.jsonl,queries.jsonl,qrels/test.tsv,dataset-manifest.json}`. It lazily imports Hugging Face `datasets` only for online acquisition; no-network fixture conversion uses `--input-root <root>` with `<root>/<dataset>/{corpus,queries,qrels}.jsonl`. Use `--context-length 4096` for synthetic `needle`/`passkey` slices when source rows expose a recognized length field or an ID marker; otherwise the manifest records that no length filter was applied. These files are acquisition/conversion artifacts only. LongEmbed proof still requires actual wedge or scoreboard eval rows over the converted datasets.
+
 To append those repo-docs child-vector cache rows directly into `scoreboard.json`, point the scoreboard at a cache root containing `<root>/repo-docs/child-doc-vectors.jsonl` and `query-vectors.jsonl`:
 
 ```bash
