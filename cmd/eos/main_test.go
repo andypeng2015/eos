@@ -4439,6 +4439,44 @@ func TestRunTrainEmbedFitsTextHardNegativePackage(t *testing.T) {
 	}
 }
 
+func TestRunTrainEmbedPlanOnlyCountsGroupedTextHardNegativeEvalPairs(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	tokenizer := eosruntime.TokenizerFile{
+		Version: eosruntime.TokenizerFileVersion,
+		Tokens:  []string{"[PAD]", "[UNK]", "[CLS]", "[SEP]", "a", "b", "c", "d"},
+	}
+	tokenizerPath := filepath.Join(t.TempDir(), "tokenizer.mll")
+	if err := tokenizer.WriteFile(tokenizerPath); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	trainPath := filepath.Join(t.TempDir(), "train-hard.jsonl")
+	evalPath := filepath.Join(t.TempDir(), "eval-hard.jsonl")
+	if err := eosruntime.WriteEmbeddingTextHardNegativeExamplesFile(trainPath, []eosruntime.EmbeddingTextHardNegativeExample{
+		{Query: "ab", Positive: "ab", Negatives: []string{"cd", "a"}},
+	}); err != nil {
+		t.Fatalf("write grouped train hard negatives: %v", err)
+	}
+	if err := eosruntime.WriteEmbeddingTextHardNegativeExamplesFile(evalPath, []eosruntime.EmbeddingTextHardNegativeExample{
+		{Query: "ab", Positive: "ab", Negatives: []string{"cd", "a"}},
+	}); err != nil {
+		t.Fatalf("write grouped eval hard negatives: %v", err)
+	}
+
+	output := captureRunOutput(t, []string{"train-embed", "--plan-only", "--tokenizer", tokenizerPath, "--hard-negative-train", "--hard-negatives-per-query", "2", "--epochs", "1", "--batch-size", "2", path, trainPath, evalPath})
+	for _, want := range []string{
+		"train=1 hard_negative_contrastive examples",
+		"eval=4 pairwise examples",
+		"eval_pairs/pass=4",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("hard-negative plan-only output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
 func TestRunTokenizeEmbedHardNegativeMode(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	tokenizer := eosruntime.TokenizerFile{

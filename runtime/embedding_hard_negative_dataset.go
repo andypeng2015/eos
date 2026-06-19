@@ -1,7 +1,6 @@
 package eosruntime
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -58,25 +57,18 @@ func ReadEmbeddingHardNegativeExamplesFile(path string) ([]EmbeddingHardNegative
 	defer f.Close()
 
 	var out []EmbeddingHardNegativeExample
-	scanner := bufio.NewScanner(f)
-	lineNo := 0
-	for scanner.Scan() {
-		lineNo++
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
+	if err := scanEmbeddingJSONLLines(f, func(lineNo int, line string) error {
 		var record embeddingHardNegativeRecord
 		if err := json.Unmarshal([]byte(line), &record); err != nil {
-			return nil, fmt.Errorf("line %d: %w", lineNo, err)
+			return fmt.Errorf("line %d: %w", lineNo, err)
 		}
 		example, err := record.example()
 		if err != nil {
-			return nil, fmt.Errorf("line %d: %w", lineNo, err)
+			return fmt.Errorf("line %d: %w", lineNo, err)
 		}
 		out = append(out, example)
-	}
-	if err := scanner.Err(); err != nil {
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	if len(out) == 0 {
@@ -191,25 +183,18 @@ func ReadEmbeddingTextHardNegativeExamplesFile(path string) ([]EmbeddingTextHard
 	defer f.Close()
 
 	var out []EmbeddingTextHardNegativeExample
-	scanner := bufio.NewScanner(f)
-	lineNo := 0
-	for scanner.Scan() {
-		lineNo++
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
+	if err := scanEmbeddingJSONLLines(f, func(lineNo int, line string) error {
 		var record embeddingTextHardNegativeRecord
 		if err := json.Unmarshal([]byte(line), &record); err != nil {
-			return nil, fmt.Errorf("line %d: %w", lineNo, err)
+			return fmt.Errorf("line %d: %w", lineNo, err)
 		}
 		example, err := record.example()
 		if err != nil {
-			return nil, fmt.Errorf("line %d: %w", lineNo, err)
+			return fmt.Errorf("line %d: %w", lineNo, err)
 		}
 		out = append(out, example)
-	}
-	if err := scanner.Err(); err != nil {
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	if len(out) == 0 {
@@ -295,6 +280,103 @@ func BuildEmbeddingTextHardNegativeExamplesFromPairs(pairs []EmbeddingTextPairEx
 		return nil, fmt.Errorf("text hard-negative dataset has no positive query groups with negatives")
 	}
 	return out, nil
+}
+
+func ReadEmbeddingHardNegativeEvalPairsFile(path string, maxNegatives int) ([]EmbeddingPairExample, error) {
+	grouped, err := ReadEmbeddingHardNegativeExamplesFile(path)
+	if err == nil {
+		return BuildEmbeddingHardNegativeEvalPairs(grouped, maxNegatives)
+	}
+	pairs, pairErr := ReadEmbeddingPairExamplesFile(path)
+	if pairErr != nil {
+		return nil, fmt.Errorf("read eval hard-negative or pair dataset: %w", err)
+	}
+	return pairs, nil
+}
+
+func ReadEmbeddingTextHardNegativeEvalPairsFile(path string, maxNegatives int) ([]EmbeddingTextPairExample, error) {
+	grouped, err := ReadEmbeddingTextHardNegativeExamplesFile(path)
+	if err == nil {
+		return BuildEmbeddingTextHardNegativeEvalPairs(grouped, maxNegatives)
+	}
+	pairs, pairErr := ReadEmbeddingTextPairExamplesFile(path)
+	if pairErr != nil {
+		return nil, fmt.Errorf("read eval text hard-negative or pair dataset: %w", err)
+	}
+	return pairs, nil
+}
+
+func BuildEmbeddingHardNegativeEvalPairs(examples []EmbeddingHardNegativeExample, maxNegatives int) ([]EmbeddingPairExample, error) {
+	if len(examples) == 0 {
+		return nil, fmt.Errorf("hard-negative eval dataset is empty")
+	}
+	out := []EmbeddingPairExample{}
+	for _, example := range examples {
+		limit := hardNegativeEvalNegativeLimit(len(example.NegativeTokens), maxNegatives)
+		for i := 0; i < limit; i++ {
+			pair := EmbeddingPairExample{
+				Source:      example.Source,
+				LeftTokens:  append([]int32(nil), example.QueryTokens...),
+				LeftMask:    append([]int32(nil), example.QueryMask...),
+				RightTokens: append([]int32(nil), example.PositiveTokens...),
+				RightMask:   append([]int32(nil), example.PositiveMask...),
+				Target:      1,
+			}
+			out = append(out, pair)
+			negative := EmbeddingPairExample{
+				Source:      example.Source,
+				LeftTokens:  append([]int32(nil), example.QueryTokens...),
+				LeftMask:    append([]int32(nil), example.QueryMask...),
+				RightTokens: append([]int32(nil), example.NegativeTokens[i]...),
+				Target:      0,
+			}
+			if len(example.NegativeMasks) > i {
+				negative.RightMask = append([]int32(nil), example.NegativeMasks[i]...)
+			}
+			out = append(out, negative)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("hard-negative eval dataset has no negatives")
+	}
+	return out, nil
+}
+
+func BuildEmbeddingTextHardNegativeEvalPairs(examples []EmbeddingTextHardNegativeExample, maxNegatives int) ([]EmbeddingTextPairExample, error) {
+	if len(examples) == 0 {
+		return nil, fmt.Errorf("text hard-negative eval dataset is empty")
+	}
+	out := []EmbeddingTextPairExample{}
+	for _, example := range examples {
+		limit := hardNegativeEvalNegativeLimit(len(example.Negatives), maxNegatives)
+		for i := 0; i < limit; i++ {
+			out = append(out,
+				EmbeddingTextPairExample{
+					Source: example.Source,
+					Query:  example.Query,
+					Right:  example.Positive,
+					Target: 1,
+				},
+				EmbeddingTextPairExample{
+					Source: example.Source,
+					Query:  example.Query,
+					Right:  example.Negatives[i],
+					Target: 0,
+				},
+			)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("text hard-negative eval dataset has no negatives")
+	}
+	return out, nil
+}
+
+func hardNegativeEvalNegativeLimit(total, maxNegatives int) int {
+	if maxNegatives <= 0 || maxNegatives > total {
+		return total
+	}
+	return maxNegatives
 }
 
 func TokenizeEmbeddingTextHardNegativeExamples(examples []EmbeddingTextHardNegativeExample, tokenizer *BPETokenizer) ([]EmbeddingHardNegativeExample, error) {

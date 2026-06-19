@@ -49,7 +49,7 @@ func TrainEmbeddingPackageFromContrastiveFiles(artifactPath, trainPath, evalPath
 		}
 		var evalPairs []EmbeddingPairExample
 		if evalPath != "" {
-			evalPairs, err = ReadEmbeddingPairExamplesFile(evalPath)
+			evalPairs, err = ReadEmbeddingHardNegativeEvalPairsFile(evalPath, cfg.HardNegativesPerQuery)
 			if err != nil {
 				evalSet, contrastiveErr := ReadEmbeddingContrastiveExamplesFile(evalPath)
 				if contrastiveErr != nil {
@@ -183,7 +183,7 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(artifactPath, tokenizerPath, 
 		}
 		var evalPairs []EmbeddingPairExample
 		if evalPath != "" {
-			evalText, err := ReadEmbeddingTextPairExamplesFile(evalPath)
+			evalText, err := ReadEmbeddingTextHardNegativeEvalPairsFile(evalPath, cfg.HardNegativesPerQuery)
 			if err != nil {
 				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read eval text pair dataset: %w", err)
 			}

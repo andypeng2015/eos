@@ -4528,7 +4528,7 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg e
 			}
 			evalCount := 0
 			if evalPath != "" {
-				evalPairs, err := eosruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
+				evalPairs, err := eosruntime.ReadEmbeddingTextHardNegativeEvalPairsFile(evalPath, cfg.HardNegativesPerQuery)
 				if err != nil {
 					return eosruntime.EmbeddingTrainWorkload{}, err
 				}
@@ -4604,7 +4604,7 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg e
 		}
 		evalCount := 0
 		if evalPath != "" {
-			evalPairs, err := eosruntime.ReadEmbeddingPairExamplesFile(evalPath)
+			evalPairs, err := eosruntime.ReadEmbeddingHardNegativeEvalPairsFile(evalPath, cfg.HardNegativesPerQuery)
 			if err != nil {
 				return eosruntime.EmbeddingTrainWorkload{}, err
 			}

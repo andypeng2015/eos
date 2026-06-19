@@ -465,19 +465,16 @@ func TestTrainEmbeddingPackageFromTextContrastiveFilesHardNegativeTrain(t *testi
 
 	trainPath := path[:len(path)-len(".mll")] + ".text-hard-pairs.jsonl"
 	evalPath := path[:len(path)-len(".mll")] + ".text-hard-eval.jsonl"
-	trainData := "" +
-		"{\"query\":\"a\",\"document\":\"a\",\"label\":1}\n" +
-		"{\"query\":\"a\",\"document\":\"b\",\"label\":-1}\n" +
-		"{\"query\":\"b\",\"document\":\"b\",\"label\":1}\n" +
-		"{\"query\":\"b\",\"document\":\"a\",\"label\":-1}\n"
-	evalData := "" +
-		"{\"query\":\"a\",\"document\":\"a\",\"label\":1}\n" +
-		"{\"left\":\"a\",\"right\":\"b\",\"label\":0}\n"
-	if err := os.WriteFile(trainPath, []byte(trainData), 0o644); err != nil {
-		t.Fatalf("write train text pairs: %v", err)
+	if err := WriteEmbeddingTextHardNegativeExamplesFile(trainPath, []EmbeddingTextHardNegativeExample{
+		{Query: "a", Positive: "a", Negatives: []string{"b"}},
+		{Query: "b", Positive: "b", Negatives: []string{"a"}},
+	}); err != nil {
+		t.Fatalf("write train text hard negatives: %v", err)
 	}
-	if err := os.WriteFile(evalPath, []byte(evalData), 0o644); err != nil {
-		t.Fatalf("write eval text pairs: %v", err)
+	if err := WriteEmbeddingTextHardNegativeExamplesFile(evalPath, []EmbeddingTextHardNegativeExample{
+		{Query: "a", Positive: "a", Negatives: []string{"b", "a"}},
+	}); err != nil {
+		t.Fatalf("write eval text hard negatives: %v", err)
 	}
 
 	summary, _, err := TrainEmbeddingPackageFromTextContrastiveFiles(path, tokenizerPath, trainPath, evalPath, EmbeddingTrainRunConfig{
@@ -487,7 +484,7 @@ func TestTrainEmbeddingPackageFromTextContrastiveFilesHardNegativeTrain(t *testi
 		Seed:                  7,
 		RestoreBest:           true,
 		HardNegativeTrain:     true,
-		HardNegativesPerQuery: 1,
+		HardNegativesPerQuery: 2,
 	})
 	if err != nil {
 		t.Fatalf("train text package hard negative: %v", err)
@@ -495,8 +492,8 @@ func TestTrainEmbeddingPackageFromTextContrastiveFilesHardNegativeTrain(t *testi
 	if summary.Workload.TrainMode != "hard_negative_contrastive" || summary.Workload.TrainExamples != 2 {
 		t.Fatalf("workload = %+v, want hard-negative train with 2 examples", summary.Workload)
 	}
-	if summary.FinalEval == nil || summary.FinalEval.PairCount != 2 {
-		t.Fatalf("final eval = %+v, want 2 pair eval examples", summary.FinalEval)
+	if summary.FinalEval == nil || summary.FinalEval.PairCount != 4 {
+		t.Fatalf("final eval = %+v, want 4 expanded pair eval examples", summary.FinalEval)
 	}
 }
 

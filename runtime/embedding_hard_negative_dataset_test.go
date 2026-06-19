@@ -1,7 +1,9 @@
 package eosruntime
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -121,6 +123,82 @@ func TestEmbeddingTextHardNegativeExamplesFileRoundTripPreservesSource(t *testin
 	if len(got[0].TeacherScores) != 3 || got[0].TeacherScores[1] != 0.8 {
 		t.Fatalf("teacher scores = %+v, want preserved", got[0].TeacherScores)
 	}
+}
+
+func TestReadEmbeddingTextHardNegativeExamplesFileAcceptsLongJSONLRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "text-hard-negatives.jsonl")
+	longPositive := strings.Repeat("p", embeddingJSONLScannerInitialBuffer+4096)
+	data := `{"source":"longembed","query":"q","positive":"` + longPositive + `","negatives":["n"]}` + "\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write long text hard-negative dataset: %v", err)
+	}
+	got, err := ReadEmbeddingTextHardNegativeExamplesFile(path)
+	if err != nil {
+		t.Fatalf("read long text hard-negative dataset: %v", err)
+	}
+	if len(got) != 1 || len(got[0].Positive) != len(longPositive) {
+		t.Fatalf("long record = %+v, want one preserved positive of length %d", got, len(longPositive))
+	}
+}
+
+func TestBuildEmbeddingTextHardNegativeEvalPairsExpandsPositiveAndNegatives(t *testing.T) {
+	got, err := BuildEmbeddingTextHardNegativeEvalPairs([]EmbeddingTextHardNegativeExample{
+		{Source: "longembed", Query: "q", Positive: "p", Negatives: []string{"n1", "n2"}},
+	}, 1)
+	if err != nil {
+		t.Fatalf("build text hard-negative eval pairs: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("eval pairs = %d, want 2", len(got))
+	}
+	if got[0].Query != "q" || got[0].Right != "p" || got[0].Target != 1 {
+		t.Fatalf("positive pair = %+v", got[0])
+	}
+	if got[1].Query != "q" || got[1].Right != "n1" || got[1].Target != 0 {
+		t.Fatalf("negative pair = %+v", got[1])
+	}
+}
+
+func TestReadEmbeddingTextHardNegativeEvalPairsFileKeepsOrdinaryPairEval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "eval-pairs.jsonl")
+	data := "" +
+		"{\"query\":\"q\",\"document\":\"p\",\"label\":1}\n" +
+		"{\"left\":\"q\",\"right\":\"n\",\"label\":0}\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write eval pairs: %v", err)
+	}
+	got, err := ReadEmbeddingTextHardNegativeEvalPairsFile(path, 1)
+	if err != nil {
+		t.Fatalf("read hard-negative eval pairs: %v", err)
+	}
+	if len(got) != 2 || got[0].Target != 1 || got[1].Target != 0 {
+		t.Fatalf("eval pairs = %+v, want ordinary pair eval preserved", got)
+	}
+}
+
+func TestBuildEmbeddingHardNegativeEvalPairsExpandsTokenizedGroupedRows(t *testing.T) {
+	got, err := BuildEmbeddingHardNegativeEvalPairs([]EmbeddingHardNegativeExample{
+		{
+			Source:         "tokenized",
+			QueryTokens:    []int32{1},
+			PositiveTokens: []int32{2},
+			NegativeTokens: [][]int32{{3}, {4}},
+			QueryMask:      []int32{1},
+			PositiveMask:   []int32{1},
+			NegativeMasks:  [][]int32{{1}, {1}},
+		},
+	}, 2)
+	if err != nil {
+		t.Fatalf("build hard-negative eval pairs: %v", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("eval pairs = %d, want 4", len(got))
+	}
+	if got[0].Target != 1 || got[1].Target != 0 || got[2].Target != 1 || got[3].Target != 0 {
+		t.Fatalf("targets = %v %v %v %v, want positive/negative pairs", got[0].Target, got[1].Target, got[2].Target, got[3].Target)
+	}
+	assertInt32SliceEqual(t, got[1].RightTokens, []int32{3})
+	assertInt32SliceEqual(t, got[3].RightTokens, []int32{4})
 }
 
 func TestTokenizeEmbeddingTextHardNegativeExamplesPreservesSource(t *testing.T) {

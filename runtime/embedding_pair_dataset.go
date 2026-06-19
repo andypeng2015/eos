@@ -1,11 +1,9 @@
 package eosruntime
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 )
 
 type embeddingPairRecord struct {
@@ -26,25 +24,18 @@ func ReadEmbeddingPairExamplesFile(path string) ([]EmbeddingPairExample, error) 
 	defer f.Close()
 
 	var out []EmbeddingPairExample
-	scanner := bufio.NewScanner(f)
-	lineNo := 0
-	for scanner.Scan() {
-		lineNo++
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
+	if err := scanEmbeddingJSONLLines(f, func(lineNo int, line string) error {
 		var record embeddingPairRecord
 		if err := json.Unmarshal([]byte(line), &record); err != nil {
-			return nil, fmt.Errorf("line %d: %w", lineNo, err)
+			return fmt.Errorf("line %d: %w", lineNo, err)
 		}
 		example, err := record.example()
 		if err != nil {
-			return nil, fmt.Errorf("line %d: %w", lineNo, err)
+			return fmt.Errorf("line %d: %w", lineNo, err)
 		}
 		out = append(out, example)
-	}
-	if err := scanner.Err(); err != nil {
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	if len(out) == 0 {

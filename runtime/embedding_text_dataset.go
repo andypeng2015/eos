@@ -1,7 +1,6 @@
 package eosruntime
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -61,25 +60,18 @@ func ReadEmbeddingTextPairExamplesFile(path string) ([]EmbeddingTextPairExample,
 	defer f.Close()
 
 	var out []EmbeddingTextPairExample
-	scanner := bufio.NewScanner(f)
-	lineNo := 0
-	for scanner.Scan() {
-		lineNo++
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
+	if err := scanEmbeddingJSONLLines(f, func(lineNo int, line string) error {
 		var record embeddingTextContrastiveRecord
 		if err := json.Unmarshal([]byte(line), &record); err != nil {
-			return nil, fmt.Errorf("line %d: %w", lineNo, err)
+			return fmt.Errorf("line %d: %w", lineNo, err)
 		}
 		example, err := record.pairExample()
 		if err != nil {
-			return nil, fmt.Errorf("line %d: %w", lineNo, err)
+			return fmt.Errorf("line %d: %w", lineNo, err)
 		}
 		out = append(out, example)
-	}
-	if err := scanner.Err(); err != nil {
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	if len(out) == 0 {

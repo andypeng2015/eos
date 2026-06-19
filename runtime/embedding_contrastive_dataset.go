@@ -1,11 +1,9 @@
 package eosruntime
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 )
 
 // EmbeddingContrastiveExample is one query-positive training example.
@@ -34,25 +32,18 @@ func ReadEmbeddingContrastiveExamplesFile(path string) ([]EmbeddingContrastiveEx
 	defer f.Close()
 
 	var out []EmbeddingContrastiveExample
-	scanner := bufio.NewScanner(f)
-	lineNo := 0
-	for scanner.Scan() {
-		lineNo++
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
+	if err := scanEmbeddingJSONLLines(f, func(lineNo int, line string) error {
 		var record embeddingContrastiveRecord
 		if err := json.Unmarshal([]byte(line), &record); err != nil {
-			return nil, fmt.Errorf("line %d: %w", lineNo, err)
+			return fmt.Errorf("line %d: %w", lineNo, err)
 		}
 		example, err := record.example()
 		if err != nil {
-			return nil, fmt.Errorf("line %d: %w", lineNo, err)
+			return fmt.Errorf("line %d: %w", lineNo, err)
 		}
 		out = append(out, example)
-	}
-	if err := scanner.Err(); err != nil {
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	if len(out) == 0 {
