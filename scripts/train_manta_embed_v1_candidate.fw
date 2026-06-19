@@ -940,6 +940,16 @@ func retrievalQualityTarget(cfg candidateConfig) bool {
 	return cfg.QualityTarget == "retrieval" || cfg.QualityTarget == "both"
 }
 
+func appendEvalModeArgs(args []string, cfg candidateConfig) []string {
+	if pairwiseTrainEnabled(cfg) {
+		return append(args, "--pairwise-train")
+	}
+	if hardNegativeTrainEnabled(cfg) {
+		return append(args, "--hard-negative-train", "--hard-negatives-per-query", cfg.HardNegativesPerQuery)
+	}
+	return args
+}
+
 func applyCandidateRuntimeEnv(cfg candidateConfig) {
 	if !envEnabled("EOS_TRAIN_DISABLE_ACTIVATION_ACCEL") && cfg.ActivationAccel != "" {
 		os.Setenv("EOS_TRAIN_ENABLE_ACTIVATION_ACCEL", cfg.ActivationAccel)
@@ -1145,6 +1155,7 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	evalCandidate, err := copyPackageForEval(cfg, "validation")
 	guard err == nil else return cfg, err
 	evalArgs := []string{"train-embed", "--eval-only", "--metrics-json", cfg.FinalEvalMetricsJSON}
+	evalArgs = appendEvalModeArgs(evalArgs, cfg)
 	if evalTokenizer != "" {
 		evalArgs = append(evalArgs, "--tokenizer", evalTokenizer)
 	} else if tokenJSONLForRun {
@@ -1163,6 +1174,7 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		hardCandidate, err := copyPackageForEval(cfg, "hard")
 		guard err == nil else return cfg, err
 		hardArgs := []string{"train-embed", "--eval-only", "--metrics-json", cfg.HardEvalMetricsJSON}
+		hardArgs = appendEvalModeArgs(hardArgs, cfg)
 		if evalTokenizer != "" {
 			hardArgs = append(hardArgs, "--tokenizer", evalTokenizer)
 		} else if tokenJSONLForRun {
