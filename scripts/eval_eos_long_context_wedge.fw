@@ -1,0 +1,698 @@
+package main
+
+// eval_eos_long_context_wedge builds a repeatable local long-context wedge
+// comparison over the repo-docs BEIR-shaped lane. It keeps external model
+// exporters opt-in so CI-style smoke runs need no network/provider deps.
+//
+// Usage:
+//   EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/eval_eos_long_context_wedge.fw
+//
+// Useful overrides:
+//   EOS_LC_WEDGE_RUN_DIR=runs/eos-long-context-wedge-harness-v1-smoke
+//   EOS_LC_WEDGE_DATASET_DIR=datasets/longembed/repo-docs
+//   EOS_LC_WEDGE_ARTIFACT=runs/current-release-qwen3-nf005-continuation-20260616T224102Z/candidate/eos-embed-v1.sealed.mll
+//   EOS_LC_WEDGE_RETARGET_MAX_SEQ=1024
+//   EOS_LC_WEDGE_TOKEN_SPAN=48
+//   EOS_LC_WEDGE_TOKEN_OVERLAP=12
+//   EOS_LC_WEDGE_BITS=2,4,8
+//   EOS_LC_WEDGE_EXTERNAL_MODE=off|cache|export
+//   EOS_LC_WEDGE_MAX_DOCS=0
+//   EOS_LC_WEDGE_MAX_QUERIES=0
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const defaultQuantizerSeed int64 = 5581486560434873699
+
+type quality struct {
+	NDCGAt10    float64 `json:"ndcg_at_10"`
+	RecallAt100 float64 `json:"recall_at_100"`
+}
+
+type retrievalMetrics struct {
+	Dataset string `json:"dataset"`
+	Backend string `json:"backend"`
+	Quality quality `json:"quality"`
+	Inputs  struct {
+		Documents int `json:"documents"`
+		Queries   int `json:"queries"`
+	} `json:"inputs"`
+}
+
+type sparseExportManifest struct {
+	Schema          string   `json:"schema"`
+	Method          string   `json:"method"`
+	QualityClaim    bool     `json:"quality_claim"`
+	ClaimBoundary   string   `json:"claim_boundary"`
+	Dataset         string   `json:"dataset"`
+	Artifact        string   `json:"artifact"`
+	Documents       int      `json:"documents"`
+	Queries         int      `json:"queries"`
+	ChildVectors    int      `json:"child_vectors"`
+	Dimension       int      `json:"dimension"`
+	ModelDimension  int      `json:"model_dimension"`
+	OutputDimension int      `json:"output_dimension"`
+	TokenSpanTokens int      `json:"token_span_tokens"`
+	TokenSpanOverlap int     `json:"token_span_overlap"`
+	MaxTokens       int      `json:"max_tokens"`
+	Caveats         []string `json:"caveats"`
+}
+
+type externalExportManifest struct {
+	ModelName            string `json:"model_name"`
+	NativeDim            int    `json:"native_dim"`
+	OutputDim            int    `json:"output_dim"`
+	RequestedOutputDim   int    `json:"requested_output_dim"`
+	DocumentCount        int    `json:"document_count"`
+	QueryCount           int    `json:"query_count"`
+	DocumentVectorRows   int    `json:"document_vector_rows"`
+	DocumentChunkWords   int    `json:"document_chunk_words"`
+	DocumentChunkOverlap int    `json:"document_chunk_overlap"`
+	ChildChunkCount      int    `json:"child_chunk_count"`
+}
+
+type mvMetrics struct {
+	Dataset string `json:"dataset"`
+	Backend string `json:"backend"`
+	Artifact string `json:"artifact"`
+	Inputs  struct {
+		ParentCount          int     `json:"parent_count"`
+		ChildCount           int     `json:"child_count"`
+		AvgChildrenPerParent float64 `json:"avg_children_per_parent"`
+		MaxChildrenPerParent int     `json:"max_children_per_parent"`
+		Queries              int     `json:"queries"`
+	} `json:"inputs"`
+	Config struct {
+		QuantizerSeed int64 `json:"quantizer_seed"`
+		BaselineDim   int   `json:"baseline_dim"`
+	} `json:"config"`
+	Dense struct {
+		Quality                        quality `json:"quality"`
+		ChildVectorBytes               int64   `json:"child_vector_bytes"`
+		DenseChildBytes                int64   `json:"dense_child_bytes"`
+		DenseBaselineBytes             int64   `json:"dense_baseline_bytes"`
+		StorageMultipleOfDenseBaseline float64 `json:"storage_multiple_of_dense_baseline"`
+	} `json:"dense"`
+	Rows []struct {
+		Bits                           int     `json:"bits"`
+		Method                         string  `json:"method"`
+		Quality                        quality `json:"quality"`
+		QuantizerSeed                  int64   `json:"quantizer_seed"`
+		QuantizedVectorBytes           int64   `json:"quantized_vector_bytes"`
+		QuantizedChildBytes            int64   `json:"quantized_child_bytes"`
+		StorageMultipleOfDenseBaseline float64 `json:"storage_multiple_of_dense_baseline"`
+	} `json:"rows"`
+}
+
+type commandRecord struct {
+	Label string   `json:"label"`
+	Args  []string `json:"args"`
+	Log   string   `json:"log"`
+}
+
+type comparisonRow struct {
+	Baseline          string  `json:"baseline"`
+	Model             string  `json:"model"`
+	Method            string  `json:"method"`
+	Dim               int     `json:"dim"`
+	Bits              int     `json:"bits"`
+	NDCGAt10          float64 `json:"ndcg_at_10"`
+	RecallAt100       float64 `json:"recall_at_100"`
+	ChildCount        int     `json:"child_count"`
+	StorageMultiple   float64 `json:"storage_multiple"`
+	CompressionRatio  float64 `json:"compression_ratio"`
+	MetricsPath       string  `json:"metrics_path"`
+	Artifact          string  `json:"artifact"`
+	ModelID           string  `json:"model_id"`
+	QualityClaim      bool    `json:"quality_claim"`
+	Caveats           string  `json:"caveats"`
+}
+
+type manifest struct {
+	Schema                 string            `json:"schema"`
+	GeneratedAt            string            `json:"generated_at"`
+	RepoRoot               string            `json:"repo_root"`
+	RunDir                 string            `json:"run_dir"`
+	QualityClaim           bool              `json:"quality_claim"`
+	DatasetName            string            `json:"dataset_name"`
+	DatasetDir             string            `json:"dataset_dir"`
+	DatasetManifestPath     string            `json:"dataset_manifest_path"`
+	LongEmbedFraming        map[string]string `json:"longembed_framing"`
+	QuantizerSeed          int64             `json:"quantizer_seed"`
+	BaselineDim            int               `json:"baseline_dim"`
+	Artifact               string            `json:"artifact"`
+	EvaluationArtifact      string            `json:"evaluation_artifact"`
+	ComparisonTSV          string            `json:"comparison_tsv"`
+	ComparisonJSON         string            `json:"comparison_json"`
+	Commands               []commandRecord   `json:"commands"`
+	Rows                   []comparisonRow   `json:"rows"`
+	Caveats                []string          `json:"caveats"`
+	SkippedExternalRows    []string          `json:"skipped_external_rows"`
+}
+
+func getenv(name string, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func parseIntEnv(name string, fallback int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parseInt64Env(name string, fallback int64) (int64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func absUnder(root string, path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(root, path)
+}
+
+func runCmd(root string, label string, logPath string, name string, args []string) (commandRecord, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	_ = os.WriteFile(logPath, out, 0o644)
+	record := commandRecord{Label: label, Args: append([]string{name}, args...), Log: logPath}
+	if err != nil {
+		return record, fmt.Errorf("%s failed: %w; see %s", label, err, logPath)
+	}
+	return record, nil
+}
+
+func readJSON(path string, out interface{}) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, out)
+}
+
+func defaultArtifact(root string) string {
+	candidate := filepath.Join(root, "runs", "current-release-qwen3-nf005-continuation-20260616T224102Z", "candidate", "eos-embed-v1.mll")
+	if fileExists(candidate) && fileExists(siblingWeightPath(candidate)) {
+		return candidate
+	}
+	return filepath.Join(root, "assets", "corkscrewdb-default-embedder", "corkscrewdb-default-embedder.mll")
+}
+
+func siblingWeightPath(artifact string) string {
+	base := strings.TrimSuffix(artifact, ".sealed.mll")
+	if base == artifact {
+		base = strings.TrimSuffix(artifact, ".mll")
+	}
+	return base + ".weights.mll"
+}
+
+func writeComparisonTSV(path string, rows []comparisonRow) error {
+	var b strings.Builder
+	b.WriteString("baseline\tmodel\tmethod\tdim\tbits\tndcg_at_10\trecall_at_100\tchild_count\tstorage_multiple\tcompression_ratio\tmetrics_path\tartifact\tmodel_id\tquality_claim\tcaveats\n")
+	for _, row := range rows {
+		b.WriteString(fmt.Sprintf("%s\t%s\t%s\t%d\t%d\t%.9f\t%.9f\t%d\t%.9f\t%.9f\t%s\t%s\t%s\t%t\t%s\n",
+			row.Baseline, row.Model, row.Method, row.Dim, row.Bits, row.NDCGAt10, row.RecallAt100,
+			row.ChildCount, row.StorageMultiple, row.CompressionRatio, row.MetricsPath, row.Artifact,
+			row.ModelID, row.QualityClaim, strings.ReplaceAll(row.Caveats, "\t", " ")))
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func writeJSON(path string, value interface{}) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+func appendMultiVectorRows(rows []comparisonRow, baseline string, model string, modelID string, methodPrefix string, artifact string, metricsPath string, mv mvMetrics, dim int, caveat string) []comparisonRow {
+	rows = append(rows, comparisonRow{
+		Baseline:        baseline,
+		Model:           model,
+		Method:          methodPrefix + "_dense_child_max",
+		Dim:             dim,
+		Bits:            0,
+		NDCGAt10:        mv.Dense.Quality.NDCGAt10,
+		RecallAt100:     mv.Dense.Quality.RecallAt100,
+		ChildCount:      mv.Inputs.ChildCount,
+		StorageMultiple: mv.Dense.StorageMultipleOfDenseBaseline,
+		MetricsPath:     metricsPath,
+		Artifact:        artifact,
+		ModelID:         modelID,
+		QualityClaim:    false,
+		Caveats:         caveat,
+	})
+	for _, bitRow := range mv.Rows {
+		compression := 0.0
+		if bitRow.StorageMultipleOfDenseBaseline > 0 {
+			compression = 1.0 / bitRow.StorageMultipleOfDenseBaseline
+		}
+		rows = append(rows, comparisonRow{
+			Baseline:         baseline,
+			Model:            model,
+			Method:           methodPrefix + "_" + bitRow.Method,
+			Dim:              dim,
+			Bits:             bitRow.Bits,
+			NDCGAt10:         bitRow.Quality.NDCGAt10,
+			RecallAt100:      bitRow.Quality.RecallAt100,
+			ChildCount:       mv.Inputs.ChildCount,
+			StorageMultiple:  bitRow.StorageMultipleOfDenseBaseline,
+			CompressionRatio: compression,
+			MetricsPath:      metricsPath,
+			Artifact:         artifact,
+			ModelID:          modelID,
+			QualityClaim:     false,
+			Caveats:          caveat,
+		})
+	}
+	return rows
+}
+
+func appendCaps(args []string, maxDocs int, maxQueries int) []string {
+	if maxDocs > 0 {
+		args = append(args, "--max-docs", strconv.Itoa(maxDocs))
+	}
+	if maxQueries > 0 {
+		args = append(args, "--max-queries", strconv.Itoa(maxQueries))
+	}
+	return args
+}
+
+func directModelDimension(sparseManifest sparseExportManifest, fallback int) int {
+	if sparseManifest.ModelDimension > 0 {
+		return sparseManifest.ModelDimension
+	}
+	if fallback > 0 {
+		return fallback
+	}
+	if sparseManifest.OutputDimension > 0 {
+		return sparseManifest.OutputDimension
+	}
+	return sparseManifest.Dimension
+}
+
+func evaluateExternal(root string, eosBin string, datasetName string, datasetDir string, runDir string, logDir string, commands []commandRecord, rows []comparisonRow, skipped []string, preset string, modelID string, cacheRoot string, externalMode string, bits string, baselineDim int, outputDim int, chunkWords int, chunkOverlap int, topK int, python string, maxDocs int, maxQueries int) ([]commandRecord, []comparisonRow, []string, error) {
+	cacheRoot = absUnder(root, cacheRoot)
+	cacheDir := filepath.Join(cacheRoot, datasetName)
+	childVectors := filepath.Join(cacheDir, "child-doc-vectors.jsonl")
+	queryVectors := filepath.Join(cacheDir, "query-vectors.jsonl")
+	manifestPath := filepath.Join(cacheDir, "manifest.json")
+	if externalMode == "export" {
+		exportArgs := []string{
+			filepath.Join(root, "scripts", "export_retrieval_vectors.py"),
+			"--preset", preset,
+			"--dataset-dir", datasetDir,
+			"--dataset-name", datasetName,
+			"--output-root", cacheRoot,
+			"--output-dim", strconv.Itoa(outputDim),
+			"--document-chunk-words", strconv.Itoa(chunkWords),
+			"--document-chunk-overlap", strconv.Itoa(chunkOverlap),
+			"--document-chunk-min-words", "16",
+			"--batch-size", getenv("EOS_LC_WEDGE_EXTERNAL_BATCH_SIZE", "8"),
+		}
+		exportArgs = appendCaps(exportArgs, maxDocs, maxQueries)
+		rec, err := runCmd(root, "Export external "+preset+" child vectors", filepath.Join(logDir, "export-external-"+preset+".log"), python, exportArgs)
+		commands = append(commands, rec)
+		if err != nil {
+			return commands, rows, skipped, err
+		}
+	}
+	if !fileExists(childVectors) || !fileExists(queryVectors) {
+		skipped = append(skipped, preset+": cache missing and external export disabled")
+		return commands, rows, skipped, nil
+	}
+	dim := outputDim
+	if fileExists(manifestPath) {
+		var ext externalExportManifest
+		if err := readJSON(manifestPath, &ext); err == nil && ext.OutputDim > 0 {
+			dim = ext.OutputDim
+		}
+	}
+	metricsPath := filepath.Join(runDir, "external-"+preset+"-multivector-turboquant.metrics.json")
+	metricsTSV := filepath.Join(runDir, "external-"+preset+"-multivector-turboquant.metrics.tsv")
+	evalArgs := []string{
+		"eval-retrieval-multivector-turboquant",
+		"--dataset", datasetName,
+		"--backend", preset+"-128d-child",
+		"--artifact", modelID,
+		"--doc-vectors", childVectors,
+		"--query-vectors", queryVectors,
+		"--bits", bits,
+		"--top-k", strconv.Itoa(topK),
+		"--baseline-dim", strconv.Itoa(baselineDim),
+		"--metrics-json", metricsPath,
+		"--metrics-tsv", metricsTSV,
+	}
+	evalArgs = appendCaps(evalArgs, maxDocs, maxQueries)
+	evalArgs = append(evalArgs, datasetDir)
+	rec, err := runCmd(root, "Evaluate external "+preset+" multivector TurboQuant", filepath.Join(logDir, "eval-external-"+preset+".log"), eosBin, evalArgs)
+	commands = append(commands, rec)
+	if err != nil {
+		return commands, rows, skipped, err
+	}
+	var mv mvMetrics
+	if err := readJSON(metricsPath, &mv); err != nil {
+		return commands, rows, skipped, err
+	}
+	caveat := "External chunked child-vector baseline; opt-in cache/export row, not LongEmbed proof."
+	rows = appendMultiVectorRows(rows, "external_chunked", preset, modelID, "chunk96_overlap16", modelID, metricsPath, mv, dim, caveat)
+	return commands, rows, skipped, nil
+}
+
+func main() {
+	root, err := findRoot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	timestamp := time.Now().UTC().Format("20060102T150405Z")
+	runDir := absUnder(root, getenv("EOS_LC_WEDGE_RUN_DIR", filepath.Join("runs", "eos-long-context-wedge-harness-v1-"+timestamp)))
+	logDir := filepath.Join(runDir, "logs")
+	binDir := filepath.Join(runDir, "bin")
+	vectorDir := filepath.Join(runDir, "vectors")
+	for _, dir := range []string{runDir, logDir, binDir, vectorDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+
+	datasetName := getenv("EOS_LC_WEDGE_DATASET_NAME", "repo-docs")
+	datasetDir := absUnder(root, getenv("EOS_LC_WEDGE_DATASET_DIR", filepath.Join("datasets", "longembed", datasetName)))
+	datasetManifestPath := filepath.Join(datasetDir, "dataset-manifest.json")
+	commands := []commandRecord{}
+	if !fileExists(filepath.Join(datasetDir, "corpus.jsonl")) || !fileExists(filepath.Join(datasetDir, "queries.jsonl")) || !fileExists(filepath.Join(datasetDir, "qrels", "test.tsv")) {
+		rec, err := runCmd(root, "Build repo-docs long dataset", filepath.Join(logDir, "build-repo-docs-dataset.log"), "ferrous-wheel", []string{"run", filepath.Join(root, "scripts", "build_repo_docs_longembed_dataset.fw")})
+		commands = append(commands, rec)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	if !fileExists(filepath.Join(datasetDir, "corpus.jsonl")) || !fileExists(filepath.Join(datasetDir, "queries.jsonl")) || !fileExists(filepath.Join(datasetDir, "qrels", "test.tsv")) {
+		fmt.Fprintf(os.Stderr, "required BEIR-shaped dataset files missing under %s\n", datasetDir)
+		os.Exit(1)
+	}
+
+	eosBin := filepath.Join(binDir, "eos")
+	rec, err := runCmd(root, "Build eos CLI", filepath.Join(logDir, "go-build-eos.log"), "go", []string{"build", "-trimpath", "-o", eosBin, "./cmd/eos"})
+	commands = append(commands, rec)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	artifact := absUnder(root, getenv("EOS_LC_WEDGE_ARTIFACT", defaultArtifact(root)))
+	if !fileExists(artifact) {
+		fmt.Fprintf(os.Stderr, "required Eos artifact missing: %s\n", artifact)
+		os.Exit(1)
+	}
+	evalArtifact := artifact
+	retargetMaxSeq, err := parseIntEnv("EOS_LC_WEDGE_RETARGET_MAX_SEQ", 1024)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if retargetMaxSeq > 0 {
+		evalArtifact = filepath.Join(runDir, "eos-long-context-wedge-maxseq"+strconv.Itoa(retargetMaxSeq)+".mll")
+		rec, err = runCmd(root, "Retarget Eos artifact max-seq", filepath.Join(logDir, "rename-embed.log"), eosBin, []string{
+			"rename-embed",
+			"--name", "eos-long-context-wedge-maxseq" + strconv.Itoa(retargetMaxSeq),
+			"--max-seq", strconv.Itoa(retargetMaxSeq),
+			artifact,
+			evalArtifact,
+		})
+		commands = append(commands, rec)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	if !fileExists(siblingWeightPath(evalArtifact)) {
+		fmt.Fprintf(os.Stderr, "required sibling weights for sparse-token-span export are missing: %s\n", siblingWeightPath(evalArtifact))
+		os.Exit(1)
+	}
+
+	topK, _ := parseIntEnv("EOS_LC_WEDGE_TOP_K", 100)
+	maxDocs, _ := parseIntEnv("EOS_LC_WEDGE_MAX_DOCS", 0)
+	maxQueries, _ := parseIntEnv("EOS_LC_WEDGE_MAX_QUERIES", 0)
+	outputDim, _ := parseIntEnv("EOS_LC_WEDGE_OUTPUT_DIM", 128)
+	baselineDim, _ := parseIntEnv("EOS_LC_WEDGE_BASELINE_DIM", 1024)
+	tokenSpan, _ := parseIntEnv("EOS_LC_WEDGE_TOKEN_SPAN", 48)
+	tokenOverlap, _ := parseIntEnv("EOS_LC_WEDGE_TOKEN_OVERLAP", 12)
+	maxTokens, _ := parseIntEnv("EOS_LC_WEDGE_MAX_TOKENS", retargetMaxSeq)
+	minObservedTokens, _ := parseIntEnv("EOS_LC_WEDGE_MIN_OBSERVED_DOC_TOKENS", 512)
+	sparseTopK, _ := parseIntEnv("EOS_LC_WEDGE_SPARSE_TOP_K", 256)
+	quantizerSeed, err := parseInt64Env("EOS_LC_WEDGE_QUANTIZER_SEED", defaultQuantizerSeed)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	bits := getenv("EOS_LC_WEDGE_BITS", "2,4,8")
+
+	directMetrics := filepath.Join(runDir, "direct-eos.metrics.json")
+	directArgs := []string{
+		"eval-retrieval",
+		"--dataset", datasetName,
+		"--top-k", strconv.Itoa(topK),
+		"--metrics-json", directMetrics,
+	}
+	directArgs = appendCaps(directArgs, maxDocs, maxQueries)
+	directArgs = append(directArgs, evalArtifact, datasetDir)
+	rec, err = runCmd(root, "Evaluate direct single-vector Eos", filepath.Join(logDir, "direct-eos.log"), eosBin, directArgs)
+	commands = append(commands, rec)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	var direct retrievalMetrics
+	if err := readJSON(directMetrics, &direct); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	sparseDir := filepath.Join(vectorDir, "eos-token-span")
+	sparseManifestPath := filepath.Join(sparseDir, "manifest.json")
+	exportSparseArgs := []string{
+		"export-sparse-token-pool-vectors",
+		"--dataset", datasetName,
+		"--output-dim", strconv.Itoa(outputDim),
+		"--token-span-tokens", strconv.Itoa(tokenSpan),
+		"--token-span-overlap", strconv.Itoa(tokenOverlap),
+		"--token-span-min-tokens", "1",
+		"--max-tokens", strconv.Itoa(maxTokens),
+		"--min-observed-doc-tokens", strconv.Itoa(minObservedTokens),
+		"--top-k", strconv.Itoa(sparseTopK),
+		"--bits", "4",
+		"--seed", strconv.FormatInt(quantizerSeed, 10),
+		"--manifest-json", sparseManifestPath,
+	}
+	exportSparseArgs = appendCaps(exportSparseArgs, maxDocs, maxQueries)
+	exportSparseArgs = append(exportSparseArgs, evalArtifact, datasetDir, sparseDir)
+	rec, err = runCmd(root, "Export Eos sparse-token-span child vectors", filepath.Join(logDir, "export-eos-token-span.log"), eosBin, exportSparseArgs)
+	commands = append(commands, rec)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	var sparseManifest sparseExportManifest
+	if err := readJSON(sparseManifestPath, &sparseManifest); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if sparseManifest.QualityClaim {
+		fmt.Fprintln(os.Stderr, "sparse export manifest unexpectedly has quality_claim=true")
+		os.Exit(1)
+	}
+
+	sparseMetrics := filepath.Join(runDir, "eos-token-span-multivector-turboquant.metrics.json")
+	sparseTSV := filepath.Join(runDir, "eos-token-span-multivector-turboquant.metrics.tsv")
+	evalSparseArgs := []string{
+		"eval-retrieval-multivector-turboquant",
+		"--dataset", datasetName,
+		"--backend", "eos-sparse-token-span-128d",
+		"--artifact", filepath.Base(evalArtifact),
+		"--doc-vectors", filepath.Join(sparseDir, "child-doc-vectors.jsonl"),
+		"--query-vectors", filepath.Join(sparseDir, "query-vectors.jsonl"),
+		"--bits", bits,
+		"--quantizer-seed", strconv.FormatInt(quantizerSeed, 10),
+		"--top-k", strconv.Itoa(topK),
+		"--baseline-dim", strconv.Itoa(baselineDim),
+		"--metrics-json", sparseMetrics,
+		"--metrics-tsv", sparseTSV,
+	}
+	evalSparseArgs = appendCaps(evalSparseArgs, maxDocs, maxQueries)
+	evalSparseArgs = append(evalSparseArgs, datasetDir)
+	rec, err = runCmd(root, "Evaluate Eos sparse-token-span multivector TurboQuant", filepath.Join(logDir, "eval-eos-token-span.log"), eosBin, evalSparseArgs)
+	commands = append(commands, rec)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	var sparseMV mvMetrics
+	if err := readJSON(sparseMetrics, &sparseMV); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	rows := []comparisonRow{{
+		Baseline:     "eos",
+		Model:        "eos",
+		Method:       "direct_single_vector",
+		Dim:          directModelDimension(sparseManifest, baselineDim),
+		Bits:         0,
+		NDCGAt10:     direct.Quality.NDCGAt10,
+		RecallAt100:  direct.Quality.RecallAt100,
+		ChildCount:   direct.Inputs.Documents,
+		MetricsPath:  directMetrics,
+		Artifact:     evalArtifact,
+		ModelID:      filepath.Base(evalArtifact),
+		QualityClaim: false,
+		Caveats:      "Direct Eos single-vector row over local repo-docs heuristic qrels; not LongEmbed proof.",
+	}}
+	rows = appendMultiVectorRows(rows, "eos", "eos", filepath.Base(evalArtifact), fmt.Sprintf("sparse_token_span_%d_%d", tokenSpan, tokenOverlap), evalArtifact, sparseMetrics, sparseMV, sparseManifest.OutputDimension, "Experimental sparse-token-pool token-span child vectors; quality_claim=false; not trained long-context encoder evidence.")
+
+	externalMode := strings.ToLower(getenv("EOS_LC_WEDGE_EXTERNAL_MODE", "off"))
+	skipped := []string{}
+	switch externalMode {
+	case "off":
+		skipped = append(skipped, "external baselines disabled by EOS_LC_WEDGE_EXTERNAL_MODE=off")
+	case "cache", "export":
+		python := getenv("EOS_LC_WEDGE_EXTERNAL_PYTHON", "python3")
+		chunkWords, _ := parseIntEnv("EOS_LC_WEDGE_EXTERNAL_CHUNK_WORDS", 96)
+		chunkOverlap, _ := parseIntEnv("EOS_LC_WEDGE_EXTERNAL_CHUNK_OVERLAP", 16)
+		commands, rows, skipped, err = evaluateExternal(root, eosBin, datasetName, datasetDir, runDir, logDir, commands, rows, skipped, "qwen3-0.6b", "Qwen/Qwen3-Embedding-0.6B", getenv("EOS_LC_WEDGE_QWEN3_CACHE_ROOT", filepath.Join("runs", "external-vector-caches", "qwen3-0.6b-repo-docs-128d")), externalMode, bits, baselineDim, outputDim, chunkWords, chunkOverlap, topK, python, maxDocs, maxQueries)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		commands, rows, skipped, err = evaluateExternal(root, eosBin, datasetName, datasetDir, runDir, logDir, commands, rows, skipped, "mxbai-large", "mixedbread-ai/mxbai-embed-large-v1", getenv("EOS_LC_WEDGE_MXBAI_CACHE_ROOT", filepath.Join("runs", "external-vector-caches", "mxbai-large-repo-docs-128d")), externalMode, bits, baselineDim, outputDim, chunkWords, chunkOverlap, topK, python, maxDocs, maxQueries)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "EOS_LC_WEDGE_EXTERNAL_MODE must be off, cache, or export; got %q\n", externalMode)
+		os.Exit(1)
+	}
+
+	comparisonTSV := filepath.Join(runDir, "comparison.tsv")
+	comparisonJSON := filepath.Join(runDir, "comparison.json")
+	if err := writeComparisonTSV(comparisonTSV, rows); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := writeJSON(comparisonJSON, rows); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	out := manifest{
+		Schema:              "eos.long_context_wedge_comparison.v1",
+		GeneratedAt:         time.Now().UTC().Format(time.RFC3339),
+		RepoRoot:            root,
+		RunDir:              runDir,
+		QualityClaim:        false,
+		DatasetName:         datasetName,
+		DatasetDir:          datasetDir,
+		DatasetManifestPath: datasetManifestPath,
+		LongEmbedFraming: map[string]string{
+			"official_synthetic_tasks": "needle, passkey over 0.25x-32x1024 token ranges",
+			"official_real_tasks":      "NarrativeQA, 2WikiMultihopQA, QMSum, SummScreenFD",
+			"paper_target_length":      "up to 32768 input tokens with dispersed target information",
+			"this_lane":                "local repo-docs heuristic-qrels wedge proxy; no official LongEmbed dataset acquisition",
+		},
+		QuantizerSeed:       quantizerSeed,
+		BaselineDim:         baselineDim,
+		Artifact:            artifact,
+		EvaluationArtifact:  evalArtifact,
+		ComparisonTSV:       comparisonTSV,
+		ComparisonJSON:      comparisonJSON,
+		Commands:            commands,
+		Rows:                rows,
+		SkippedExternalRows: skipped,
+		Caveats: []string{
+			"quality_claim=false for every row; this harness is a reproducible long-context wedge comparison artifact, not a product-quality claim.",
+			"repo-docs uses deterministic local path/heading qrels and is not an official LongEmbed task.",
+			"Official LongEmbed framing includes synthetic needle/passkey tasks across 0.25x-32x1024 token ranges and real NarrativeQA, 2WikiMultihopQA, QMSum, and SummScreenFD tasks; this harness records that framing but does not acquire those datasets.",
+			"Eos sparse-token-span rows use experimental sparse-token-pool child vectors and max-child rollup; they are not trained sparse long-context encoder proof.",
+			"External Qwen3 0.6B and mxbai-large 128d chunked baselines are explicit but opt-in via EOS_LC_WEDGE_EXTERNAL_MODE=cache or export.",
+		},
+	}
+	manifestPath := filepath.Join(runDir, "manifest.json")
+	if err := writeJSON(manifestPath, out); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Printf("run_dir=%s\n", runDir)
+	fmt.Printf("comparison_tsv=%s\n", comparisonTSV)
+	fmt.Printf("comparison_json=%s\n", comparisonJSON)
+	fmt.Printf("manifest=%s\n", manifestPath)
+	for _, row := range rows {
+		fmt.Printf("%s/%s %s bits=%d ndcg@10=%.6f recall@100=%.6f children=%d storage=%.6f quality_claim=%t\n",
+			row.Baseline, row.Model, row.Method, row.Bits, row.NDCGAt10, row.RecallAt100, row.ChildCount, row.StorageMultiple, row.QualityClaim)
+	}
+	for _, item := range skipped {
+		fmt.Printf("skipped: %s\n", item)
+	}
+}
