@@ -19,6 +19,7 @@ package main
 //   EOS_LC_WEDGE_BITS=2,4,8
 //   EOS_LC_WEDGE_PER_QUERY=1
 //   EOS_LC_WEDGE_EXTERNAL_MODE=off|cache|export
+//   EOS_LC_WEDGE_SPARSE_ENCODER=0
 //   EOS_LC_WEDGE_MAX_DOCS=0
 //   EOS_LC_WEDGE_MAX_QUERIES=0
 
@@ -70,6 +71,36 @@ type sparseExportManifest struct {
 	Caveats         []string `json:"caveats"`
 }
 
+type sparseEncoderExportManifest struct {
+	Schema                              string   `json:"schema"`
+	Method                              string   `json:"method"`
+	QualityClaim                        bool     `json:"quality_claim"`
+	EvidenceLevel                       string   `json:"evidence_level"`
+	ClaimBoundary                       string   `json:"claim_boundary"`
+	Dataset                             string   `json:"dataset"`
+	Artifact                            string   `json:"artifact"`
+	Documents                           int      `json:"documents"`
+	Queries                             int      `json:"queries"`
+	Dimension                           int      `json:"dimension"`
+	ModelDimension                      int      `json:"model_dimension"`
+	OutputDimension                     int      `json:"output_dimension"`
+	DocVectorPath                       string   `json:"doc_vector_path"`
+	QueryVectorPath                     string   `json:"query_vector_path"`
+	MaxTokens                           int      `json:"max_tokens"`
+	MinObservedDocTokens                int      `json:"min_observed_doc_tokens"`
+	TopKConfigured                      int      `json:"top_k_configured"`
+	TopK                                int      `json:"top_k"`
+	SparseTopKConfigured                int      `json:"sparse_top_k_configured"`
+	SparseTopK                          int      `json:"sparse_top_k"`
+	SparseTopKEffectiveMaxObservedDoc   int      `json:"sparse_top_k_effective_max_observed_doc"`
+	ScoreFractionMaxObservedDoc         float64  `json:"score_fraction_max_observed_doc"`
+	CandidateKeyBudgetMaxObservedDoc    int      `json:"candidate_key_budget_max_observed_doc"`
+	SubquadraticScorePlanMaxObservedDoc bool     `json:"subquadratic_score_plan_max_observed_doc"`
+	RequireFullEncoder                  bool     `json:"require_full_encoder"`
+	FullEncoderApplied                  bool     `json:"full_encoder_applied"`
+	Caveats                             []string `json:"caveats"`
+}
+
 type externalExportManifest struct {
 	ModelName            string `json:"model_name"`
 	NativeDim            int    `json:"native_dim"`
@@ -113,6 +144,31 @@ type mvMetrics struct {
 		QuantizedVectorBytes           int64   `json:"quantized_vector_bytes"`
 		QuantizedChildBytes            int64   `json:"quantized_child_bytes"`
 		StorageMultipleOfDenseBaseline float64 `json:"storage_multiple_of_dense_baseline"`
+	} `json:"rows"`
+}
+
+type tqVectorMetrics struct {
+	Dataset string `json:"dataset"`
+	Backend string `json:"backend"`
+	Artifact string `json:"artifact"`
+	Inputs  struct {
+		Documents int `json:"documents"`
+		Queries   int `json:"queries"`
+	} `json:"inputs"`
+	Config struct {
+		QuantizerSeed int64 `json:"quantizer_seed"`
+	} `json:"config"`
+	Dense struct {
+		Quality     quality `json:"quality"`
+		VectorBytes int64   `json:"vector_bytes"`
+	} `json:"dense"`
+	Rows []struct {
+		Bits             int     `json:"bits"`
+		Method           string  `json:"method"`
+		Quality          quality `json:"quality"`
+		VectorBytes      int64   `json:"vector_bytes"`
+		DenseVectorBytes int64   `json:"dense_vector_bytes"`
+		CompressionRatio float64 `json:"compression_ratio"`
 	} `json:"rows"`
 }
 
@@ -169,6 +225,8 @@ type manifest struct {
 	ComparisonTSV          string            `json:"comparison_tsv"`
 	ComparisonJSON         string            `json:"comparison_json"`
 	PerQueryJSONL          map[string]string `json:"per_query_jsonl,omitempty"`
+	SparseEncoderExport    string            `json:"sparse_encoder_export,omitempty"`
+	SparseEncoderAudit     map[string]string `json:"sparse_encoder_audit,omitempty"`
 	Commands               []commandRecord   `json:"commands"`
 	Rows                   []comparisonRow   `json:"rows"`
 	Caveats                []string          `json:"caveats"`
@@ -254,6 +312,26 @@ func parseBoolEnv(name string) bool {
 	default:
 		return false
 	}
+}
+
+func enabledByDefaultEnv(name string) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	switch value {
+	case "", "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+func sparseEncoderEnabled() bool {
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("EOS_LC_WEDGE_SPARSE_ENCODER_MODE")))
+	if mode == "off" || mode == "0" || mode == "false" || mode == "no" {
+		return false
+	}
+	return enabledByDefaultEnv("EOS_LC_WEDGE_SPARSE_ENCODER")
 }
 
 func perQueryEnabled() bool {
@@ -423,6 +501,92 @@ func appendMultiVectorRows(rows []comparisonRow, baseline string, model string, 
 		})
 	}
 	return rows
+}
+
+func appendSparseEncoderRows(rows []comparisonRow, modelID string, artifact string, denseMetricsPath string, dense retrievalMetrics, tqMetricsPath string, tq tqVectorMetrics, dim int, baselineDim int, caveat string) []comparisonRow {
+	baselineBytes := int64(dense.Inputs.Documents * baselineDim * 4)
+	denseStorageMultiple := 0.0
+	if baselineBytes > 0 {
+		denseStorageMultiple = float64(tq.Dense.VectorBytes) / float64(baselineBytes)
+	}
+	rows = append(rows, comparisonRow{
+		Baseline:        "eos",
+		Model:           "eos",
+		Method:          "sparse_encoder_parent_dense",
+		Dim:             dim,
+		Bits:            0,
+		NDCGAt10:        dense.Quality.NDCGAt10,
+		RecallAt100:     dense.Quality.RecallAt100,
+		ChildCount:      dense.Inputs.Documents,
+		StorageMultiple: denseStorageMultiple,
+		MetricsPath:     denseMetricsPath,
+		Artifact:        artifact,
+		ModelID:         modelID,
+		QualityClaim:    false,
+		Caveats:         caveat,
+	})
+	for _, bitRow := range tq.Rows {
+		storageMultiple := 0.0
+		if baselineBytes > 0 {
+			storageMultiple = float64(bitRow.VectorBytes) / float64(baselineBytes)
+		}
+		rows = append(rows, comparisonRow{
+			Baseline:         "eos",
+			Model:            "eos",
+			Method:           "sparse_encoder_parent_" + bitRow.Method,
+			Dim:              dim,
+			Bits:             bitRow.Bits,
+			NDCGAt10:         bitRow.Quality.NDCGAt10,
+			RecallAt100:      bitRow.Quality.RecallAt100,
+			ChildCount:       tq.Inputs.Documents,
+			StorageMultiple:  storageMultiple,
+			CompressionRatio: bitRow.CompressionRatio,
+			MetricsPath:      tqMetricsPath,
+			Artifact:         artifact,
+			ModelID:          modelID,
+			QualityClaim:     false,
+			Caveats:          caveat,
+		})
+	}
+	return rows
+}
+
+func validateSparseEncoderManifest(path string, m sparseEncoderExportManifest) error {
+	if m.Method != "experimental_sparse_encoder_host_reference" {
+		return fmt.Errorf("sparse encoder manifest method=%q, want experimental_sparse_encoder_host_reference", m.Method)
+	}
+	if m.EvidenceLevel != "retrieval_cache_host_reference_sparse_encoder" {
+		return fmt.Errorf("sparse encoder manifest evidence_level=%q, want retrieval_cache_host_reference_sparse_encoder", m.EvidenceLevel)
+	}
+	if m.QualityClaim {
+		return fmt.Errorf("sparse encoder manifest quality_claim=true, want false")
+	}
+	if !m.RequireFullEncoder {
+		return fmt.Errorf("sparse encoder manifest require_full_encoder=false, want true")
+	}
+	if !m.FullEncoderApplied {
+		return fmt.Errorf("sparse encoder manifest full_encoder_applied=false, want true")
+	}
+	if m.DocVectorPath == "" {
+		return fmt.Errorf("sparse encoder manifest missing doc_vector_path: %s", path)
+	}
+	if m.QueryVectorPath == "" {
+		return fmt.Errorf("sparse encoder manifest missing query_vector_path: %s", path)
+	}
+	return nil
+}
+
+func sparseEncoderAuditFields(path string, m sparseEncoderExportManifest) map[string]string {
+	return map[string]string{
+		"manifest":                                  path,
+		"sparse_top_k_configured":                   strconv.Itoa(m.SparseTopKConfigured),
+		"sparse_top_k":                              strconv.Itoa(m.SparseTopK),
+		"sparse_top_k_effective_max_observed_doc":   strconv.Itoa(m.SparseTopKEffectiveMaxObservedDoc),
+		"score_fraction_max_observed_doc":           strconv.FormatFloat(m.ScoreFractionMaxObservedDoc, 'g', -1, 64),
+		"subquadratic_score_plan_max_observed_doc":  strconv.FormatBool(m.SubquadraticScorePlanMaxObservedDoc),
+		"candidate_key_budget_max_observed_doc":     strconv.Itoa(m.CandidateKeyBudgetMaxObservedDoc),
+		"source_manifest_carries_sparse_plan_audit": "true",
+	}
 }
 
 func appendCaps(args []string, maxDocs int, maxQueries int) []string {
@@ -723,6 +887,112 @@ func main() {
 		os.Exit(1)
 	}
 
+	sparseEncoderManifestPath := ""
+	sparseEncoderAudit := map[string]string(nil)
+	var sparseEncoderDense retrievalMetrics
+	var sparseEncoderTQ tqVectorMetrics
+	sparseEncoderDenseMetrics := ""
+	sparseEncoderTQMetrics := ""
+	sparseEncoderDim := 0
+	if sparseEncoderEnabled() {
+		sparseEncoderDir := filepath.Join(vectorDir, "eos-sparse-encoder-parent")
+		sparseEncoderManifestPath = filepath.Join(sparseEncoderDir, "manifest.json")
+		exportSparseEncoderArgs := []string{
+			"export-sparse-encoder-vectors",
+			"--dataset", datasetName,
+			"--output-dim", strconv.Itoa(outputDim),
+			"--max-tokens", strconv.Itoa(maxTokens),
+			"--min-observed-doc-tokens", strconv.Itoa(minObservedTokens),
+			"--top-k", strconv.Itoa(sparseTopK),
+			"--bits", "4",
+			"--seed", strconv.FormatInt(quantizerSeed, 10),
+			"--manifest-json", sparseEncoderManifestPath,
+		}
+		exportSparseEncoderArgs = appendCaps(exportSparseEncoderArgs, maxDocs, maxQueries)
+		exportSparseEncoderArgs = append(exportSparseEncoderArgs, evalArtifact, datasetDir, sparseEncoderDir)
+		rec, err = runCmd(root, "Export Eos sparse-encoder parent vectors", filepath.Join(logDir, "export-eos-sparse-encoder-parent.log"), eosBin, exportSparseEncoderArgs)
+		commands = append(commands, rec)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		var sparseEncoderManifest sparseEncoderExportManifest
+		if err := readJSON(sparseEncoderManifestPath, &sparseEncoderManifest); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := validateSparseEncoderManifest(sparseEncoderManifestPath, sparseEncoderManifest); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		sparseEncoderAudit = sparseEncoderAuditFields(sparseEncoderManifestPath, sparseEncoderManifest)
+		sparseEncoderDim = sparseEncoderManifest.OutputDimension
+		if sparseEncoderDim <= 0 {
+			sparseEncoderDim = sparseEncoderManifest.Dimension
+		}
+
+		sparseEncoderDenseMetrics = filepath.Join(runDir, "eos-sparse-encoder-parent-dense.metrics.json")
+		evalSparseEncoderDenseArgs := []string{
+			"eval-retrieval-vectors",
+			"--dataset", datasetName,
+			"--backend", "eos-sparse-encoder-parent-128d",
+			"--artifact", filepath.Base(evalArtifact),
+			"--doc-vectors", filepath.Join(sparseEncoderDir, "doc-vectors.jsonl"),
+			"--query-vectors", filepath.Join(sparseEncoderDir, "query-vectors.jsonl"),
+			"--top-k", strconv.Itoa(topK),
+			"--metrics-json", sparseEncoderDenseMetrics,
+		}
+		if emitPerQuery {
+			perQueryPath := filepath.Join(runDir, "eos-sparse-encoder-parent-dense.per-query.jsonl")
+			evalSparseEncoderDenseArgs = append(evalSparseEncoderDenseArgs, "--per-query-jsonl", perQueryPath)
+			perQueryPaths["eos-sparse-encoder-parent-dense"] = perQueryPath
+		}
+		evalSparseEncoderDenseArgs = appendCaps(evalSparseEncoderDenseArgs, maxDocs, maxQueries)
+		evalSparseEncoderDenseArgs = append(evalSparseEncoderDenseArgs, datasetDir)
+		rec, err = runCmd(root, "Evaluate Eos sparse-encoder parent dense vectors", filepath.Join(logDir, "eval-eos-sparse-encoder-parent-dense.log"), eosBin, evalSparseEncoderDenseArgs)
+		commands = append(commands, rec)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := readJSON(sparseEncoderDenseMetrics, &sparseEncoderDense); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+
+		sparseEncoderTQMetrics = filepath.Join(runDir, "eos-sparse-encoder-parent-turboquant.metrics.json")
+		sparseEncoderTQTSV := filepath.Join(runDir, "eos-sparse-encoder-parent-turboquant.metrics.tsv")
+		evalSparseEncoderTQArgs := []string{
+			"eval-retrieval-vectors-turboquant",
+			"--dataset", datasetName,
+			"--backend", "eos-sparse-encoder-parent-128d",
+			"--artifact", filepath.Base(evalArtifact),
+			"--doc-vectors", filepath.Join(sparseEncoderDir, "doc-vectors.jsonl"),
+			"--query-vectors", filepath.Join(sparseEncoderDir, "query-vectors.jsonl"),
+			"--bits", bits,
+			"--quantizer-seed", strconv.FormatInt(quantizerSeed, 10),
+			"--top-k", strconv.Itoa(topK),
+			"--metrics-json", sparseEncoderTQMetrics,
+			"--metrics-tsv", sparseEncoderTQTSV,
+		}
+		evalSparseEncoderTQArgs = appendCaps(evalSparseEncoderTQArgs, maxDocs, maxQueries)
+		evalSparseEncoderTQArgs = append(evalSparseEncoderTQArgs, datasetDir)
+		rec, err = runCmd(root, "Evaluate Eos sparse-encoder parent TurboQuant", filepath.Join(logDir, "eval-eos-sparse-encoder-parent-turboquant.log"), eosBin, evalSparseEncoderTQArgs)
+		commands = append(commands, rec)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := readJSON(sparseEncoderTQMetrics, &sparseEncoderTQ); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if sparseEncoderTQ.Config.QuantizerSeed != quantizerSeed {
+			fmt.Fprintf(os.Stderr, "sparse encoder TurboQuant quantizer_seed=%d, want %d\n", sparseEncoderTQ.Config.QuantizerSeed, quantizerSeed)
+			os.Exit(1)
+		}
+	}
+
 	rows := []comparisonRow{{
 		Baseline:     "eos",
 		Model:        "eos",
@@ -739,6 +1009,9 @@ func main() {
 		Caveats:      datasetFraming.DirectRowCaveat,
 	}}
 	rows = appendMultiVectorRows(rows, "eos", "eos", filepath.Base(evalArtifact), fmt.Sprintf("sparse_token_span_%d_%d", tokenSpan, tokenOverlap), evalArtifact, sparseMetrics, sparseMV, sparseManifest.OutputDimension, "Experimental sparse-token-pool token-span child vectors; quality_claim=false; not trained long-context encoder evidence.", parentAggregation, childCountPenalty)
+	if sparseEncoderEnabled() {
+		rows = appendSparseEncoderRows(rows, filepath.Base(evalArtifact), evalArtifact, sparseEncoderDenseMetrics, sparseEncoderDense, sparseEncoderTQMetrics, sparseEncoderTQ, sparseEncoderDim, baselineDim, "Experimental sparse-encoder parent vectors from host-reference retrieval cache; quality_claim=false; not trained LongEmbed proof, sealed sparse runtime inference, or production quality.")
+	}
 
 	externalMode := strings.ToLower(getenv("EOS_LC_WEDGE_EXTERNAL_MODE", "off"))
 	skipped := []string{}
@@ -799,12 +1072,15 @@ func main() {
 		ComparisonTSV:       comparisonTSV,
 		ComparisonJSON:      comparisonJSON,
 		PerQueryJSONL:       perQueryPaths,
+		SparseEncoderExport: sparseEncoderManifestPath,
+		SparseEncoderAudit:  sparseEncoderAudit,
 		Commands:            commands,
 		Rows:                rows,
 		SkippedExternalRows: skipped,
 		Caveats: append([]string{
 			"quality_claim=false for every row; this harness is a reproducible long-context wedge comparison artifact, not a product-quality claim.",
 			"Eos sparse-token-span rows use experimental sparse-token-pool child vectors and max-child rollup; they are not trained sparse long-context encoder proof.",
+			"Eos sparse-encoder parent rows use host-reference retrieval-cache vectors; they are not trained LongEmbed proof, sealed sparse runtime inference, or production quality.",
 			"External Qwen3 0.6B and mxbai-large 128d chunked baselines are explicit but opt-in via EOS_LC_WEDGE_EXTERNAL_MODE=cache or export.",
 		}, datasetFraming.TopLevelCaveats...),
 	}
