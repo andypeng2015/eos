@@ -18,6 +18,7 @@ package main
 //   EOS_LC_WEDGE_CHILD_COUNT_PENALTY=0
 //   EOS_LC_WEDGE_BITS=2,4,8
 //   EOS_LC_WEDGE_PER_QUERY=1
+//   EOS_LC_WEDGE_PARENT_SPAN_FUSION=1
 //   EOS_LC_WEDGE_EXTERNAL_MODE=off|cache|export
 //   EOS_LC_WEDGE_SPARSE_ENCODER=0
 //   EOS_LC_WEDGE_MAX_DOCS=0
@@ -196,6 +197,54 @@ type comparisonRow struct {
 	Caveats           string  `json:"caveats"`
 }
 
+type perQueryTopDoc struct {
+	Rank      int     `json:"rank"`
+	DocID     string  `json:"doc_id"`
+	Score     float64 `json:"score"`
+	Relevance float64 `json:"relevance"`
+}
+
+type directPerQueryRow struct {
+	QueryID string           `json:"query_id"`
+	TopK    []perQueryTopDoc `json:"top_k"`
+}
+
+type tokenSpanPerQueryRow struct {
+	QueryID string           `json:"query_id"`
+	Method  string           `json:"method"`
+	TopK    []perQueryTopDoc `json:"top_k"`
+}
+
+type fusionQuality struct {
+	NDCGAt10    float64 `json:"ndcg_at_10"`
+	RecallAt100 float64 `json:"recall_at_100"`
+	MRRAt10     float64 `json:"mrr_at_10"`
+	HitAt1      float64 `json:"hit_at_1"`
+}
+
+type fusionMetricsRow struct {
+	Method           string        `json:"method"`
+	DirectMethod     string        `json:"direct_method"`
+	TokenSpanMethod  string        `json:"token_span_method"`
+	RRFK             float64       `json:"rrf_k"`
+	RRFLambda        float64       `json:"rrf_lambda"`
+	DenseProtectTopK int           `json:"dense_protect_top_k"`
+	Quality          fusionQuality `json:"quality"`
+	QueryCount       int           `json:"query_count"`
+	Caveats          []string      `json:"caveats"`
+}
+
+type fusionMetricsFile struct {
+	Schema             string             `json:"schema"`
+	Dataset            string             `json:"dataset"`
+	QualityClaim       bool               `json:"quality_claim"`
+	DirectPerQuery     string             `json:"direct_per_query_jsonl"`
+	TokenSpanPerQuery  string             `json:"token_span_per_query_jsonl"`
+	TokenSpanMethod    string             `json:"token_span_method"`
+	Rows               []fusionMetricsRow `json:"rows"`
+	Caveats            []string           `json:"caveats"`
+}
+
 type datasetManifestSummary struct {
 	Schema string `json:"schema"`
 }
@@ -338,6 +387,16 @@ func perQueryEnabled() bool {
 	return parseBoolEnv("EOS_LC_WEDGE_PER_QUERY") || parseBoolEnv("EOS_LC_WEDGE_PER_QUERY_JSONL")
 }
 
+func parentSpanFusionEnabled() bool {
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("EOS_LC_WEDGE_PARENT_SPAN_FUSION")))
+	switch mode {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
+}
+
 func parseParentAggregationEnv() (string, error) {
 	value := getenv("EOS_LC_WEDGE_PARENT_AGGREGATION", "max")
 	switch value {
@@ -414,6 +473,345 @@ func writeJSON(path string, value interface{}) error {
 		return err
 	}
 	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	out := []string{}
+	for _, part := range parts {
+		item := strings.TrimSpace(part)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func bitsIncludeQ4(bits string) bool {
+	for _, part := range splitCSV(bits) {
+		if part == "4" {
+			return true
+		}
+	}
+	return false
+}
+
+func multiVectorStorageMultipleForBits(mv mvMetrics, bits int) (float64, bool) {
+	for _, row := range mv.Rows {
+		if row.Bits == bits && row.StorageMultipleOfDenseBaseline > 0 {
+			return row.StorageMultipleOfDenseBaseline, true
+		}
+	}
+	return 0, false
+}
+
+func directParentDenseStorageMultiple(directDim int, baselineDim int) float64 {
+	if directDim <= 0 || baselineDim <= 0 {
+		return 0
+	}
+	return float64(directDim) / float64(baselineDim)
+}
+
+func readQrels(path string) (map[string]map[string]float64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(string(data), "\n")
+	if len(lines) == 0 {
+		return nil, fmt.Errorf("empty qrels file: %s", path)
+	}
+	header := strings.Split(strings.TrimSpace(lines[0]), "\t")
+	queryIdx, corpusIdx, scoreIdx := -1, -1, -1
+	for i, name := range header {
+		switch name {
+		case "query-id":
+			queryIdx = i
+		case "corpus-id":
+			corpusIdx = i
+		case "score":
+			scoreIdx = i
+		}
+	}
+	if queryIdx < 0 || corpusIdx < 0 || scoreIdx < 0 {
+		return nil, fmt.Errorf("qrels header must contain query-id, corpus-id, and score: %s", path)
+	}
+	qrels := map[string]map[string]float64{}
+	for _, line := range lines[1:] {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) <= queryIdx || len(parts) <= corpusIdx || len(parts) <= scoreIdx {
+			continue
+		}
+		score, err := strconv.ParseFloat(parts[scoreIdx], 64)
+		if err != nil || score <= 0 {
+			continue
+		}
+		if qrels[parts[queryIdx]] == nil {
+			qrels[parts[queryIdx]] = map[string]float64{}
+		}
+		qrels[parts[queryIdx]][parts[corpusIdx]] = score
+	}
+	return qrels, nil
+}
+
+func readDirectPerQuery(path string) (map[string][]perQueryTopDoc, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]perQueryTopDoc{}
+	for lineNo, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var row directPerQueryRow
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			return nil, fmt.Errorf("%s:%d: %w", path, lineNo+1, err)
+		}
+		if row.QueryID == "" {
+			return nil, fmt.Errorf("%s:%d: missing query_id", path, lineNo+1)
+		}
+		out[row.QueryID] = dedupeRanking(row.TopK)
+	}
+	return out, nil
+}
+
+func readTokenSpanPerQuery(path string, method string) (map[string][]perQueryTopDoc, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]perQueryTopDoc{}
+	for lineNo, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var row tokenSpanPerQueryRow
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			return nil, fmt.Errorf("%s:%d: %w", path, lineNo+1, err)
+		}
+		if row.Method != method {
+			continue
+		}
+		if row.QueryID == "" {
+			return nil, fmt.Errorf("%s:%d: missing query_id", path, lineNo+1)
+		}
+		out[row.QueryID] = dedupeRanking(row.TopK)
+	}
+	return out, nil
+}
+
+func dedupeRanking(items []perQueryTopDoc) []perQueryTopDoc {
+	seen := map[string]bool{}
+	out := make([]perQueryTopDoc, 0, len(items))
+	for _, item := range items {
+		if item.DocID == "" || seen[item.DocID] {
+			continue
+		}
+		seen[item.DocID] = true
+		if item.Rank == 0 {
+			item.Rank = len(out) + 1
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func dcgAt(ranking []perQueryTopDoc, rels map[string]float64, k int) float64 {
+	total := 0.0
+	for i, item := range ranking {
+		if i >= k {
+			break
+		}
+		rel := rels[item.DocID]
+		if rel > 0 {
+			total += (math.Pow(2, rel) - 1) / math.Log2(float64(i+2))
+		}
+	}
+	return total
+}
+
+func idcgAt(rels map[string]float64, k int) float64 {
+	values := []float64{}
+	for _, rel := range rels {
+		if rel > 0 {
+			values = append(values, rel)
+		}
+	}
+	for i := 0; i < len(values); i++ {
+		for j := i + 1; j < len(values); j++ {
+			if values[j] > values[i] {
+				values[i], values[j] = values[j], values[i]
+			}
+		}
+	}
+	total := 0.0
+	for i, rel := range values {
+		if i >= k {
+			break
+		}
+		total += (math.Pow(2, rel) - 1) / math.Log2(float64(i+2))
+	}
+	return total
+}
+
+func rankingQuality(ranking []perQueryTopDoc, rels map[string]float64) fusionQuality {
+	relCount := 0
+	for _, rel := range rels {
+		if rel > 0 {
+			relCount++
+		}
+	}
+	idcg10 := idcgAt(rels, 10)
+	firstRelevantRank := 0
+	hits100 := 0
+	for i, item := range ranking {
+		if i >= 100 {
+			break
+		}
+		if rels[item.DocID] > 0 {
+			hits100++
+			if firstRelevantRank == 0 {
+				firstRelevantRank = i + 1
+			}
+		}
+	}
+	q := fusionQuality{}
+	if idcg10 > 0 {
+		q.NDCGAt10 = dcgAt(ranking, rels, 10) / idcg10
+	}
+	if relCount > 0 {
+		q.RecallAt100 = float64(hits100) / float64(relCount)
+	}
+	if firstRelevantRank > 0 && firstRelevantRank <= 10 {
+		q.MRRAt10 = 1.0 / float64(firstRelevantRank)
+	}
+	if len(ranking) > 0 && rels[ranking[0].DocID] > 0 {
+		q.HitAt1 = 1
+	}
+	return q
+}
+
+func aggregateFusionQuality(rankings map[string][]perQueryTopDoc, qrels map[string]map[string]float64) (fusionQuality, int, error) {
+	total := fusionQuality{}
+	count := 0
+	for queryID, rels := range qrels {
+		ranking, ok := rankings[queryID]
+		if !ok {
+			return total, count, fmt.Errorf("missing per-query ranking for query %s", queryID)
+		}
+		q := rankingQuality(ranking, rels)
+		total.NDCGAt10 += q.NDCGAt10
+		total.RecallAt100 += q.RecallAt100
+		total.MRRAt10 += q.MRRAt10
+		total.HitAt1 += q.HitAt1
+		count++
+	}
+	if count > 0 {
+		denom := float64(count)
+		total.NDCGAt10 /= denom
+		total.RecallAt100 /= denom
+		total.MRRAt10 /= denom
+		total.HitAt1 /= denom
+	}
+	return total, count, nil
+}
+
+func rrfFuse(direct []perQueryTopDoc, tokenSpan []perQueryTopDoc, k float64, lambda float64) []perQueryTopDoc {
+	scores := map[string]float64{}
+	directRank := map[string]int{}
+	tokenRank := map[string]int{}
+	add := func(ranking []perQueryTopDoc, weight float64, ranks map[string]int) {
+		for i, item := range ranking {
+			if _, ok := ranks[item.DocID]; ok {
+				continue
+			}
+			rank := i + 1
+			ranks[item.DocID] = rank
+			scores[item.DocID] += weight / (k + float64(rank))
+		}
+	}
+	add(direct, 1, directRank)
+	add(tokenSpan, lambda, tokenRank)
+	docs := []string{}
+	for docID := range scores {
+		docs = append(docs, docID)
+	}
+	const missingRank = int(^uint(0)>>1) / 4
+	for i := 0; i < len(docs); i++ {
+		for j := i + 1; j < len(docs); j++ {
+			a, b := docs[i], docs[j]
+			if fusionLess(b, a, scores, directRank, tokenRank, missingRank) {
+				docs[i], docs[j] = docs[j], docs[i]
+			}
+		}
+	}
+	out := make([]perQueryTopDoc, 0, len(docs))
+	for i, docID := range docs {
+		out = append(out, perQueryTopDoc{Rank: i + 1, DocID: docID, Score: scores[docID]})
+	}
+	return out
+}
+
+func fusionLess(a string, b string, scores map[string]float64, directRank map[string]int, tokenRank map[string]int, missingRank int) bool {
+	if scores[a] != scores[b] {
+		return scores[a] > scores[b]
+	}
+	ar := rankOrDefault(directRank, a, missingRank)
+	br := rankOrDefault(directRank, b, missingRank)
+	if ar != br {
+		return ar < br
+	}
+	ar = rankOrDefault(tokenRank, a, missingRank)
+	br = rankOrDefault(tokenRank, b, missingRank)
+	if ar != br {
+		return ar < br
+	}
+	return a < b
+}
+
+func rankOrDefault(ranks map[string]int, id string, fallback int) int {
+	if rank, ok := ranks[id]; ok {
+		return rank
+	}
+	return fallback
+}
+
+func protectDirectPrefix(direct []perQueryTopDoc, fused []perQueryTopDoc, protectTopK int) []perQueryTopDoc {
+	if protectTopK <= 0 {
+		return fused
+	}
+	scoreByDoc := map[string]float64{}
+	for _, item := range fused {
+		scoreByDoc[item.DocID] = item.Score
+	}
+	seen := map[string]bool{}
+	out := []perQueryTopDoc{}
+	for _, item := range direct {
+		if len(out) >= protectTopK {
+			break
+		}
+		if seen[item.DocID] {
+			continue
+		}
+		seen[item.DocID] = true
+		out = append(out, perQueryTopDoc{Rank: len(out) + 1, DocID: item.DocID, Score: scoreByDoc[item.DocID]})
+	}
+	for _, item := range fused {
+		if seen[item.DocID] {
+			continue
+		}
+		seen[item.DocID] = true
+		item.Rank = len(out) + 1
+		out = append(out, item)
+	}
+	return out
 }
 
 func classifyDatasetFraming(datasetManifestPath string) datasetFraming {
@@ -549,6 +947,144 @@ func appendSparseEncoderRows(rows []comparisonRow, modelID string, artifact stri
 		})
 	}
 	return rows
+}
+
+func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQueryPaths map[string]string, datasetName string, datasetDir string, runDir string, directPerQueryPath string, tokenSpanPerQueryPath string, tokenSpanMethod string, dim int, artifact string, modelID string, tokenSpanChildCount int, directParentCount int, tokenSpanQ4StorageMultiple float64, directParentDenseStorageMultiple float64, bits string, fusionEnabled bool) ([]comparisonRow, []string, error) {
+	if !fusionEnabled {
+		skipped = append(skipped, "direct+token-span diagnostic fusion disabled by EOS_LC_WEDGE_PARENT_SPAN_FUSION=0")
+		return rows, skipped, nil
+	}
+	if !bitsIncludeQ4(bits) {
+		skipped = append(skipped, "direct+token-span diagnostic fusion skipped: EOS_LC_WEDGE_BITS does not include q4")
+		return rows, skipped, nil
+	}
+	if tokenSpanQ4StorageMultiple <= 0 {
+		skipped = append(skipped, "direct+token-span diagnostic fusion skipped: token-span q4 storage_multiple_of_dense_baseline missing")
+		return rows, skipped, nil
+	}
+	if directParentDenseStorageMultiple <= 0 || directParentCount <= 0 {
+		skipped = append(skipped, "direct+token-span diagnostic fusion skipped: direct parent dense storage context missing")
+		return rows, skipped, nil
+	}
+	if !fileExists(directPerQueryPath) {
+		skipped = append(skipped, "direct+token-span diagnostic fusion skipped: direct Eos per-query JSONL missing")
+		return rows, skipped, nil
+	}
+	if !fileExists(tokenSpanPerQueryPath) {
+		skipped = append(skipped, "direct+token-span diagnostic fusion skipped: token-span q4 per-query JSONL missing")
+		return rows, skipped, nil
+	}
+	qrels, err := readQrels(filepath.Join(datasetDir, "qrels", "test.tsv"))
+	if err != nil {
+		return rows, skipped, err
+	}
+	directRows, err := readDirectPerQuery(directPerQueryPath)
+	if err != nil {
+		return rows, skipped, err
+	}
+	tokenSpanRows, err := readTokenSpanPerQuery(tokenSpanPerQueryPath, tokenSpanMethod)
+	if err != nil {
+		return rows, skipped, err
+	}
+	if len(tokenSpanRows) == 0 {
+		skipped = append(skipped, "direct+token-span diagnostic fusion skipped: token-span q4 method "+tokenSpanMethod+" not found in per-query JSONL")
+		return rows, skipped, nil
+	}
+	fusionQrels := map[string]map[string]float64{}
+	for queryID, rels := range qrels {
+		if _, ok := directRows[queryID]; !ok {
+			continue
+		}
+		if _, ok := tokenSpanRows[queryID]; !ok {
+			continue
+		}
+		fusionQrels[queryID] = rels
+	}
+	if len(fusionQrels) == 0 {
+		skipped = append(skipped, "direct+token-span diagnostic fusion skipped: no overlapping qrels/direct/token-span per-query rows")
+		return rows, skipped, nil
+	}
+	fusionDefs := []struct {
+		Method           string
+		RRFK             float64
+		RRFLambda        float64
+		DenseProtectTopK int
+	}{
+		{Method: "direct_token_span_fusion_rrf_k10_lambda025", RRFK: 10, RRFLambda: 0.25, DenseProtectTopK: 0},
+		{Method: "direct_token_span_fusion_dense_protect_n1_rrf_k10_lambda05", RRFK: 10, RRFLambda: 0.5, DenseProtectTopK: 1},
+	}
+	metricsRows := []fusionMetricsRow{}
+	caveats := []string{
+		"Diagnostic fusion only; not product default.",
+		"Fuses direct Eos single-vector per-query top-k with Eos token-span q4 multivector per-query top-k.",
+		"Storage estimates q4 token-span child cache plus one dense direct parent vector per parent against baseline_dim; excludes live encoder/runtime cost.",
+		"quality_claim=false; row is harness evidence only.",
+	}
+	storageMultiple := tokenSpanQ4StorageMultiple + directParentDenseStorageMultiple
+	compressionRatio := 0.0
+	if storageMultiple > 0 {
+		compressionRatio = 1.0 / storageMultiple
+	}
+	fusionChildCount := tokenSpanChildCount + directParentCount
+	for _, def := range fusionDefs {
+		fusedByQuery := map[string][]perQueryTopDoc{}
+		for queryID := range fusionQrels {
+			directRanking := directRows[queryID]
+			tokenRanking := tokenSpanRows[queryID]
+			fused := rrfFuse(directRanking, tokenRanking, def.RRFK, def.RRFLambda)
+			if def.DenseProtectTopK > 0 {
+				fused = protectDirectPrefix(directRanking, fused, def.DenseProtectTopK)
+			}
+			fusedByQuery[queryID] = fused
+		}
+		quality, queryCount, err := aggregateFusionQuality(fusedByQuery, fusionQrels)
+		if err != nil {
+			return rows, skipped, err
+		}
+		rows = append(rows, comparisonRow{
+			Baseline:        "eos",
+			Model:           "eos",
+			Method:          def.Method,
+			Dim:             dim,
+			Bits:            4,
+			NDCGAt10:        quality.NDCGAt10,
+			RecallAt100:     quality.RecallAt100,
+			ChildCount:      fusionChildCount,
+			StorageMultiple: storageMultiple,
+			CompressionRatio: compressionRatio,
+			MetricsPath:     filepath.Join(runDir, "direct-token-span-fusion.metrics.json"),
+			Artifact:        artifact,
+			ModelID:         modelID,
+			QualityClaim:    false,
+			Caveats:         strings.Join(caveats, " "),
+		})
+		metricsRows = append(metricsRows, fusionMetricsRow{
+			Method:           def.Method,
+			DirectMethod:     "direct_single_vector",
+			TokenSpanMethod:  tokenSpanMethod,
+			RRFK:             def.RRFK,
+			RRFLambda:        def.RRFLambda,
+			DenseProtectTopK: def.DenseProtectTopK,
+			Quality:          quality,
+			QueryCount:       queryCount,
+			Caveats:          caveats,
+		})
+	}
+	metricsPath := filepath.Join(runDir, "direct-token-span-fusion.metrics.json")
+	if err := writeJSON(metricsPath, fusionMetricsFile{
+		Schema:            "eos.long_context_wedge_parent_span_fusion_metrics.v1",
+		Dataset:           datasetName,
+		QualityClaim:      false,
+		DirectPerQuery:    directPerQueryPath,
+		TokenSpanPerQuery: tokenSpanPerQueryPath,
+		TokenSpanMethod:   tokenSpanMethod,
+		Rows:              metricsRows,
+		Caveats:           caveats,
+	}); err != nil {
+		return rows, skipped, err
+	}
+	perQueryPaths["direct-token-span-fusion-metrics"] = metricsPath
+	return rows, skipped, nil
 }
 
 func validateSparseEncoderManifest(path string, m sparseEncoderExportManifest) error {
@@ -779,6 +1315,7 @@ func main() {
 		os.Exit(1)
 	}
 	bits := getenv("EOS_LC_WEDGE_BITS", "2,4,8")
+	fusionEnabled := parentSpanFusionEnabled()
 	parentAggregation, err := parseParentAggregationEnv()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -790,17 +1327,23 @@ func main() {
 		os.Exit(1)
 	}
 	emitPerQuery := perQueryEnabled()
+	emitFusionPerQuery := fusionEnabled && bitsIncludeQ4(bits)
 	if math.IsNaN(childCountPenalty) || math.IsInf(childCountPenalty, 0) || childCountPenalty < 0 {
 		fmt.Fprintln(os.Stderr, "EOS_LC_WEDGE_CHILD_COUNT_PENALTY must be a finite non-negative float")
 		os.Exit(1)
 	}
 
 	directMetrics := filepath.Join(runDir, "direct-eos.metrics.json")
+	directPerQueryPath := filepath.Join(runDir, "direct-eos.per-query.jsonl")
 	directArgs := []string{
 		"eval-retrieval",
 		"--dataset", datasetName,
 		"--top-k", strconv.Itoa(topK),
 		"--metrics-json", directMetrics,
+	}
+	if emitPerQuery || emitFusionPerQuery {
+		directArgs = append(directArgs, "--per-query-jsonl", directPerQueryPath)
+		perQueryPaths["direct-eos"] = directPerQueryPath
 	}
 	directArgs = appendCaps(directArgs, maxDocs, maxQueries)
 	directArgs = append(directArgs, evalArtifact, datasetDir)
@@ -852,6 +1395,7 @@ func main() {
 
 	sparseMetrics := filepath.Join(runDir, "eos-token-span-multivector-turboquant.metrics.json")
 	sparseTSV := filepath.Join(runDir, "eos-token-span-multivector-turboquant.metrics.tsv")
+	tokenSpanPerQueryPath := filepath.Join(runDir, "eos-token-span-multivector-turboquant.per-query.jsonl")
 	evalSparseArgs := []string{
 		"eval-retrieval-multivector-turboquant",
 		"--dataset", datasetName,
@@ -868,10 +1412,9 @@ func main() {
 		"--metrics-json", sparseMetrics,
 		"--metrics-tsv", sparseTSV,
 	}
-	if emitPerQuery {
-		perQueryPath := filepath.Join(runDir, "eos-token-span-multivector-turboquant.per-query.jsonl")
-		evalSparseArgs = append(evalSparseArgs, "--per-query-jsonl", perQueryPath)
-		perQueryPaths["eos-token-span-multivector-turboquant"] = perQueryPath
+	if emitPerQuery || emitFusionPerQuery {
+		evalSparseArgs = append(evalSparseArgs, "--per-query-jsonl", tokenSpanPerQueryPath)
+		perQueryPaths["eos-token-span-multivector-turboquant"] = tokenSpanPerQueryPath
 	}
 	evalSparseArgs = appendCaps(evalSparseArgs, maxDocs, maxQueries)
 	evalSparseArgs = append(evalSparseArgs, datasetDir)
@@ -1015,6 +1558,18 @@ func main() {
 
 	externalMode := strings.ToLower(getenv("EOS_LC_WEDGE_EXTERNAL_MODE", "off"))
 	skipped := []string{}
+	tokenSpanQ4Method := "turboquant_ip_b4_child_" + multiVectorAggregationLabel(parentAggregation, childCountPenalty)
+	tokenSpanQ4StorageMultiple, _ := multiVectorStorageMultipleForBits(sparseMV, 4)
+	directStorageBaselineDim := sparseMV.Config.BaselineDim
+	if directStorageBaselineDim <= 0 {
+		directStorageBaselineDim = baselineDim
+	}
+	directStorageMultiple := directParentDenseStorageMultiple(directModelDimension(sparseManifest, baselineDim), directStorageBaselineDim)
+	rows, skipped, err = appendParentSpanFusionRows(rows, skipped, perQueryPaths, datasetName, datasetDir, runDir, directPerQueryPath, tokenSpanPerQueryPath, tokenSpanQ4Method, sparseManifest.OutputDimension, evalArtifact, filepath.Base(evalArtifact), sparseMV.Inputs.ChildCount, direct.Inputs.Documents, tokenSpanQ4StorageMultiple, directStorageMultiple, bits, fusionEnabled)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	switch externalMode {
 	case "off":
 		skipped = append(skipped, "external baselines disabled by EOS_LC_WEDGE_EXTERNAL_MODE=off")
