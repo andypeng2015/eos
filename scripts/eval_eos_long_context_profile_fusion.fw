@@ -1,0 +1,992 @@
+package main
+
+// eval_eos_long_context_profile_fusion evaluates diagnostic sparse-profile
+// fusion/oracle baselines over existing long-context wedge run directories.
+// It never exports vectors or promotes quality claims.
+//
+// Usage:
+//   EOS_REPO_ROOT=$PWD \
+//   EOS_LC_PROFILE_FUSION_DATASET_NAME=needle \
+//   EOS_LC_PROFILE_FUSION_DATASET_DIR=datasets/longembed-official/needle \
+//   EOS_LC_PROFILE_FUSION_INPUTS='topk256:runs/.../needle-topk256;topk320:runs/.../needle-topk320' \
+//     ferrous-wheel run scripts/eval_eos_long_context_profile_fusion.fw
+
+import (
+	"encoding/json"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const inputsEnv = "EOS_LC_PROFILE_FUSION_INPUTS"
+
+type quality struct {
+	NDCGAt10    float64 `json:"ndcg_at_10"`
+	RecallAt100 float64 `json:"recall_at_100"`
+	MRRAt10     float64 `json:"mrr_at_10"`
+	HitAt1      float64 `json:"hit_at_1"`
+}
+
+type perQueryTopDoc struct {
+	Rank      int     `json:"rank"`
+	DocID     string  `json:"doc_id"`
+	Score     float64 `json:"score"`
+	Relevance float64 `json:"relevance"`
+}
+
+type directPerQueryRow struct {
+	QueryID string           `json:"query_id"`
+	TopK    []perQueryTopDoc `json:"top_k"`
+}
+
+type tokenSpanPerQueryRow struct {
+	QueryID string           `json:"query_id"`
+	Method  string           `json:"method"`
+	TopK    []perQueryTopDoc `json:"top_k"`
+}
+
+type comparisonRow struct {
+	Method       string  `json:"method"`
+	Bits         int     `json:"bits"`
+	NDCGAt10     float64 `json:"ndcg_at_10"`
+	RecallAt100  float64 `json:"recall_at_100"`
+	QualityClaim bool    `json:"quality_claim"`
+	Caveats      string  `json:"caveats"`
+}
+
+type profileInput struct {
+	Name              string               `json:"name"`
+	RunDir            string               `json:"run_dir"`
+	TokenSpanMethod   string               `json:"token_span_method"`
+	PerQueryPath      string               `json:"per_query_jsonl"`
+	ComparisonPath    string               `json:"comparison_json"`
+	ComparisonQuality *comparisonRow       `json:"comparison_quality,omitempty"`
+	AggregateQuality  quality              `json:"aggregate_quality"`
+	QueryCount        int                  `json:"query_count"`
+	Rankings          map[string][]perQueryTopDoc `json:"-"`
+}
+
+type metricsRow struct {
+	Method       string  `json:"method"`
+	Profile      string  `json:"profile,omitempty"`
+	Quality      quality `json:"quality"`
+	QueryCount   int     `json:"query_count"`
+	QualityClaim bool    `json:"quality_claim"`
+	Diagnostic   bool    `json:"diagnostic"`
+	Oracle       bool    `json:"oracle"`
+	Caveats      []string `json:"caveats"`
+}
+
+type perQueryOutputRow struct {
+	Schema                         string             `json:"schema"`
+	Dataset                        string             `json:"dataset"`
+	QueryID                        string             `json:"query_id"`
+	QualityClaim                   bool               `json:"quality_claim"`
+	Profiles                       map[string]quality `json:"profiles"`
+	ProfileTopDocs                 map[string]string  `json:"profile_top_docs"`
+	SparseProfileFusionQuality      quality            `json:"sparse_profile_fusion_quality"`
+	SparseProfileFusionTopDoc       string             `json:"sparse_profile_fusion_top_doc"`
+	DirectQuality                  *quality            `json:"direct_quality,omitempty"`
+	DirectTopDoc                   string             `json:"direct_top_doc,omitempty"`
+	DirectProfileFusionQuality      *quality            `json:"direct_profile_fusion_quality,omitempty"`
+	DirectProfileFusionTopDoc       string             `json:"direct_profile_fusion_top_doc,omitempty"`
+	OracleBestProfile              string             `json:"oracle_best_profile"`
+	OracleBestProfileQuality        quality            `json:"oracle_best_profile_quality"`
+	OracleBestDirectProfileFusion   string             `json:"oracle_best_direct_profile_fusion,omitempty"`
+	OracleBestDirectProfileQuality  *quality            `json:"oracle_best_direct_profile_quality,omitempty"`
+	Caveats                        []string           `json:"caveats"`
+}
+
+type metricsFile struct {
+	Schema             string         `json:"schema"`
+	GeneratedAt        string         `json:"generated_at"`
+	DatasetName        string         `json:"dataset_name"`
+	DatasetDir         string         `json:"dataset_dir"`
+	QualityClaim       bool           `json:"quality_claim"`
+	RRFK               float64        `json:"rrf_k"`
+	DirectLambda       float64        `json:"direct_lambda"`
+	DenseProtectTopK   int            `json:"dense_protect_top_k"`
+	DirectPerQueryPath string         `json:"direct_per_query_jsonl,omitempty"`
+	Profiles           []profileInput `json:"profiles"`
+	Rows               []metricsRow   `json:"rows"`
+	Caveats            []string       `json:"caveats"`
+}
+
+type manifestFile struct {
+	Schema           string            `json:"schema"`
+	GeneratedAt      string            `json:"generated_at"`
+	RunDir           string            `json:"run_dir"`
+	DatasetName      string            `json:"dataset_name"`
+	DatasetDir       string            `json:"dataset_dir"`
+	QualityClaim     bool              `json:"quality_claim"`
+	InputsEnv        string            `json:"inputs_env"`
+	Settings         map[string]string `json:"settings"`
+	OutputFiles      map[string]string `json:"output_files"`
+	Caveats          []string          `json:"caveats"`
+}
+
+func getenv(name string, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for {
+		if hasRepoRoot(cwd) {
+			return filepath.Abs(cwd)
+		}
+		next := filepath.Dir(cwd)
+		if next == cwd {
+			break
+		}
+		cwd = next
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func resolvePath(root string, path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(root, path)
+}
+
+func absPath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	return abs
+}
+
+func parseFloatEnv(name string, fallback float64) (float64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return fallback, fmt.Errorf("%s must be a finite number", name)
+	}
+	return parsed, nil
+}
+
+func parseIntEnv(name string, fallback int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback, fmt.Errorf("%s must be an integer", name)
+	}
+	return parsed, nil
+}
+
+func readJSON(path string, value interface{}) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, value)
+}
+
+func writeJSON(path string, value interface{}) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+func readQrels(path string) (map[string]map[string]float64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(string(data), "\n")
+	if len(lines) == 0 {
+		return nil, fmt.Errorf("empty qrels file: %s", path)
+	}
+	header := strings.Split(strings.TrimSpace(lines[0]), "\t")
+	queryIdx, corpusIdx, scoreIdx := -1, -1, -1
+	for i, name := range header {
+		switch name {
+		case "query-id":
+			queryIdx = i
+		case "corpus-id":
+			corpusIdx = i
+		case "score":
+			scoreIdx = i
+		}
+	}
+	if queryIdx < 0 || corpusIdx < 0 || scoreIdx < 0 {
+		return nil, fmt.Errorf("qrels header must contain query-id, corpus-id, and score: %s", path)
+	}
+	qrels := map[string]map[string]float64{}
+	for _, line := range lines[1:] {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) <= queryIdx || len(parts) <= corpusIdx || len(parts) <= scoreIdx {
+			continue
+		}
+		score, err := strconv.ParseFloat(parts[scoreIdx], 64)
+		if err != nil || score <= 0 {
+			continue
+		}
+		if qrels[parts[queryIdx]] == nil {
+			qrels[parts[queryIdx]] = map[string]float64{}
+		}
+		qrels[parts[queryIdx]][parts[corpusIdx]] = score
+	}
+	return qrels, nil
+}
+
+func readDirectPerQuery(path string) (map[string][]perQueryTopDoc, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]perQueryTopDoc{}
+	for lineNo, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var row directPerQueryRow
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			return nil, fmt.Errorf("%s:%d: %w", path, lineNo+1, err)
+		}
+		if row.QueryID == "" {
+			return nil, fmt.Errorf("%s:%d: missing query_id", path, lineNo+1)
+		}
+		out[row.QueryID] = dedupeRanking(row.TopK)
+	}
+	return out, nil
+}
+
+func readTokenSpanPerQuery(path string, method string) (map[string][]perQueryTopDoc, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string][]perQueryTopDoc{}
+	for lineNo, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var row tokenSpanPerQueryRow
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			return nil, fmt.Errorf("%s:%d: %w", path, lineNo+1, err)
+		}
+		if row.Method != method {
+			continue
+		}
+		if row.QueryID == "" {
+			return nil, fmt.Errorf("%s:%d: missing query_id", path, lineNo+1)
+		}
+		out[row.QueryID] = dedupeRanking(row.TopK)
+	}
+	return out, nil
+}
+
+func dedupeRanking(items []perQueryTopDoc) []perQueryTopDoc {
+	seen := map[string]bool{}
+	out := make([]perQueryTopDoc, 0, len(items))
+	for _, item := range items {
+		if item.DocID == "" || seen[item.DocID] {
+			continue
+		}
+		seen[item.DocID] = true
+		if item.Rank == 0 {
+			item.Rank = len(out) + 1
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func dcgAt(ranking []perQueryTopDoc, rels map[string]float64, k int) float64 {
+	total := 0.0
+	for i, item := range ranking {
+		if i >= k {
+			break
+		}
+		rel := rels[item.DocID]
+		if rel > 0 {
+			total += (math.Pow(2, rel) - 1) / math.Log2(float64(i+2))
+		}
+	}
+	return total
+}
+
+func idcgAt(rels map[string]float64, k int) float64 {
+	values := []float64{}
+	for _, rel := range rels {
+		if rel > 0 {
+			values = append(values, rel)
+		}
+	}
+	for i := 0; i < len(values); i++ {
+		for j := i + 1; j < len(values); j++ {
+			if values[j] > values[i] {
+				values[i], values[j] = values[j], values[i]
+			}
+		}
+	}
+	total := 0.0
+	for i, rel := range values {
+		if i >= k {
+			break
+		}
+		total += (math.Pow(2, rel) - 1) / math.Log2(float64(i+2))
+	}
+	return total
+}
+
+func rankingQuality(ranking []perQueryTopDoc, rels map[string]float64) quality {
+	relCount := 0
+	for _, rel := range rels {
+		if rel > 0 {
+			relCount++
+		}
+	}
+	idcg10 := idcgAt(rels, 10)
+	firstRelevantRank := 0
+	hits100 := 0
+	for i, item := range ranking {
+		if i >= 100 {
+			break
+		}
+		if rels[item.DocID] > 0 {
+			hits100++
+			if firstRelevantRank == 0 {
+				firstRelevantRank = i + 1
+			}
+		}
+	}
+	q := quality{}
+	if idcg10 > 0 {
+		q.NDCGAt10 = dcgAt(ranking, rels, 10) / idcg10
+	}
+	if relCount > 0 {
+		q.RecallAt100 = float64(hits100) / float64(relCount)
+	}
+	if firstRelevantRank > 0 && firstRelevantRank <= 10 {
+		q.MRRAt10 = 1.0 / float64(firstRelevantRank)
+	}
+	if len(ranking) > 0 && rels[ranking[0].DocID] > 0 {
+		q.HitAt1 = 1
+	}
+	return q
+}
+
+func addQuality(a quality, b quality) quality {
+	a.NDCGAt10 += b.NDCGAt10
+	a.RecallAt100 += b.RecallAt100
+	a.MRRAt10 += b.MRRAt10
+	a.HitAt1 += b.HitAt1
+	return a
+}
+
+func divideQuality(q quality, denom float64) quality {
+	if denom <= 0 {
+		return q
+	}
+	q.NDCGAt10 /= denom
+	q.RecallAt100 /= denom
+	q.MRRAt10 /= denom
+	q.HitAt1 /= denom
+	return q
+}
+
+func aggregateQuality(rankings map[string][]perQueryTopDoc, qrels map[string]map[string]float64) (quality, int, error) {
+	total := quality{}
+	count := 0
+	for queryID, rels := range qrels {
+		ranking, ok := rankings[queryID]
+		if !ok {
+			continue
+		}
+		total = addQuality(total, rankingQuality(ranking, rels))
+		count++
+	}
+	if count == 0 {
+		return total, 0, fmt.Errorf("no overlapping per-query rows and qrels")
+	}
+	return divideQuality(total, float64(count)), count, nil
+}
+
+func sortedQueryIDs(qrels map[string]map[string]float64) []string {
+	ids := []string{}
+	for queryID := range qrels {
+		ids = append(ids, queryID)
+	}
+	for i := 0; i < len(ids); i++ {
+		for j := i + 1; j < len(ids); j++ {
+			if ids[j] < ids[i] {
+				ids[i], ids[j] = ids[j], ids[i]
+			}
+		}
+	}
+	return ids
+}
+
+func topDocID(ranking []perQueryTopDoc) string {
+	if len(ranking) == 0 {
+		return ""
+	}
+	return ranking[0].DocID
+}
+
+func discoverQ4Method(runDir string) (string, *comparisonRow, error) {
+	path := filepath.Join(runDir, "comparison.json")
+	var rows []comparisonRow
+	if err := readJSON(path, &rows); err != nil {
+		return "", nil, err
+	}
+	for _, row := range rows {
+		if row.Bits == 4 && strings.HasPrefix(row.Method, "sparse_token_span_") && strings.Contains(row.Method, "_turboquant_ip_b4_") {
+			r := row
+			return perQueryTokenSpanMethod(row.Method), &r, nil
+		}
+	}
+	return "", nil, fmt.Errorf("no q4 sparse_token_span_*_turboquant_ip_b4_* row in %s", path)
+}
+
+func perQueryTokenSpanMethod(method string) string {
+	marker := "_turboquant_ip_b4_"
+	if idx := strings.Index(method, marker); idx >= 0 {
+		return "turboquant_ip_b4_" + method[idx+len(marker):]
+	}
+	return method
+}
+
+func findComparisonRow(runDir string, method string) (*comparisonRow, error) {
+	path := filepath.Join(runDir, "comparison.json")
+	var rows []comparisonRow
+	if err := readJSON(path, &rows); err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		if row.Method == method || perQueryTokenSpanMethod(row.Method) == method {
+			r := row
+			return &r, nil
+		}
+	}
+	return nil, nil
+}
+
+func parseInputs(root string, raw string, qrels map[string]map[string]float64) ([]profileInput, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, fmt.Errorf("%s is required: profile_name:run_dir[:token_span_method];...", inputsEnv)
+	}
+	inputs := []profileInput{}
+	for _, item := range strings.Split(raw, ";") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		parts := strings.SplitN(item, ":", 3)
+		if len(parts) < 2 {
+			return nil, fmt.Errorf("bad %s entry %q, want profile_name:run_dir[:token_span_method]", inputsEnv, item)
+		}
+		name := strings.TrimSpace(parts[0])
+		runDir := resolvePath(root, strings.TrimSpace(parts[1]))
+		method := ""
+		var comparison *comparisonRow
+		var err error
+		if len(parts) == 3 {
+			method = strings.TrimSpace(parts[2])
+			comparison, err = findComparisonRow(runDir, method)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			method, comparison, err = discoverQ4Method(runDir)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if name == "" || runDir == "" || method == "" {
+			return nil, fmt.Errorf("bad %s entry %q, empty profile/run/method", inputsEnv, item)
+		}
+		perQueryPath := filepath.Join(runDir, "eos-token-span-multivector-turboquant.per-query.jsonl")
+		rankings, err := readTokenSpanPerQuery(perQueryPath, method)
+		if err != nil {
+			return nil, err
+		}
+		if len(rankings) == 0 {
+			return nil, fmt.Errorf("method %s not found in %s", method, perQueryPath)
+		}
+		agg, count, err := aggregateQuality(rankings, qrels)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		inputs = append(inputs, profileInput{
+			Name:              name,
+			RunDir:            absPath(runDir),
+			TokenSpanMethod:   method,
+			PerQueryPath:      absPath(perQueryPath),
+			ComparisonPath:    absPath(filepath.Join(runDir, "comparison.json")),
+			ComparisonQuality: comparison,
+			AggregateQuality:  agg,
+			QueryCount:        count,
+			Rankings:          rankings,
+		})
+	}
+	if len(inputs) < 2 {
+		return nil, fmt.Errorf("need at least two profile inputs, got %d", len(inputs))
+	}
+	return inputs, nil
+}
+
+func multiRRF(rankings [][]perQueryTopDoc, weights []float64, k float64) []perQueryTopDoc {
+	scores := map[string]float64{}
+	ranks := []map[string]int{}
+	for idx, ranking := range rankings {
+		weight := 1.0
+		if idx < len(weights) && weights[idx] > 0 {
+			weight = weights[idx]
+		}
+		rankMap := map[string]int{}
+		for i, item := range ranking {
+			if _, ok := rankMap[item.DocID]; ok {
+				continue
+			}
+			rank := i + 1
+			rankMap[item.DocID] = rank
+			scores[item.DocID] += weight / (k + float64(rank))
+		}
+		ranks = append(ranks, rankMap)
+	}
+	docs := []string{}
+	for docID := range scores {
+		docs = append(docs, docID)
+	}
+	const missingRank = int(^uint(0)>>1) / 4
+	for i := 0; i < len(docs); i++ {
+		for j := i + 1; j < len(docs); j++ {
+			a, b := docs[i], docs[j]
+			if rrfLess(b, a, scores, ranks, missingRank) {
+				docs[i], docs[j] = docs[j], docs[i]
+			}
+		}
+	}
+	out := make([]perQueryTopDoc, 0, len(docs))
+	for i, docID := range docs {
+		out = append(out, perQueryTopDoc{Rank: i + 1, DocID: docID, Score: scores[docID]})
+	}
+	return out
+}
+
+func rrfLess(a string, b string, scores map[string]float64, ranks []map[string]int, missingRank int) bool {
+	if scores[a] != scores[b] {
+		return scores[a] > scores[b]
+	}
+	for _, rankMap := range ranks {
+		ar := rankOrDefault(rankMap, a, missingRank)
+		br := rankOrDefault(rankMap, b, missingRank)
+		if ar != br {
+			return ar < br
+		}
+	}
+	return a < b
+}
+
+func rankOrDefault(ranks map[string]int, id string, fallback int) int {
+	if rank, ok := ranks[id]; ok {
+		return rank
+	}
+	return fallback
+}
+
+func protectDirectPrefix(direct []perQueryTopDoc, fused []perQueryTopDoc, protectTopK int) []perQueryTopDoc {
+	if protectTopK <= 0 {
+		return fused
+	}
+	scoreByDoc := map[string]float64{}
+	for _, item := range fused {
+		scoreByDoc[item.DocID] = item.Score
+	}
+	seen := map[string]bool{}
+	out := []perQueryTopDoc{}
+	for _, item := range direct {
+		if len(out) >= protectTopK {
+			break
+		}
+		if seen[item.DocID] {
+			continue
+		}
+		seen[item.DocID] = true
+		out = append(out, perQueryTopDoc{Rank: len(out) + 1, DocID: item.DocID, Score: scoreByDoc[item.DocID]})
+	}
+	for _, item := range fused {
+		if seen[item.DocID] {
+			continue
+		}
+		seen[item.DocID] = true
+		item.Rank = len(out) + 1
+		out = append(out, item)
+	}
+	return out
+}
+
+func betterByNDCG(name string, candidate quality, bestName string, best quality, haveBest bool) (string, quality, bool) {
+	if !haveBest || candidate.NDCGAt10 > best.NDCGAt10 || (candidate.NDCGAt10 == best.NDCGAt10 && name < bestName) {
+		return name, candidate, true
+	}
+	return bestName, best, haveBest
+}
+
+func writePerQueryJSONL(path string, rows []perQueryOutputRow) error {
+	var b strings.Builder
+	for _, row := range rows {
+		data, err := json.Marshal(row)
+		if err != nil {
+			return err
+		}
+		b.Write(data)
+		b.WriteByte('\n')
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func writeSummaryTSV(path string, rows []metricsRow) error {
+	var b strings.Builder
+	b.WriteString("method\tprofile\tquery_count\tndcg_at_10\trecall_at_100\tmrr_at_10\thit_at_1\tquality_claim\tdiagnostic\toracle\tcaveats\n")
+	for _, row := range rows {
+		b.WriteString(fmt.Sprintf("%s\t%s\t%d\t%.9f\t%.9f\t%.9f\t%.9f\t%t\t%t\t%t\t%s\n",
+			row.Method, row.Profile, row.QueryCount, row.Quality.NDCGAt10, row.Quality.RecallAt100,
+			row.Quality.MRRAt10, row.Quality.HitAt1, row.QualityClaim, row.Diagnostic, row.Oracle,
+			strings.ReplaceAll(strings.Join(row.Caveats, " "), "\t", " ")))
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	root, err := findRoot()
+	if err != nil {
+		return err
+	}
+	timestamp := time.Now().UTC().Format("20060102T150405Z")
+	runDir := resolvePath(root, getenv("EOS_LC_PROFILE_FUSION_RUN_DIR", filepath.Join("runs", "eos-longembed-profile-fusion-v1-"+timestamp)))
+	datasetName := getenv("EOS_LC_PROFILE_FUSION_DATASET_NAME", "longembed-official")
+	datasetDir := resolvePath(root, getenv("EOS_LC_PROFILE_FUSION_DATASET_DIR", filepath.Join("datasets", "longembed-official", datasetName)))
+	rrfK, err := parseFloatEnv("EOS_LC_PROFILE_FUSION_RRF_K", 10)
+	if err != nil {
+		return err
+	}
+	if rrfK <= 0 {
+		return fmt.Errorf("EOS_LC_PROFILE_FUSION_RRF_K must be > 0")
+	}
+	directLambda, err := parseFloatEnv("EOS_LC_PROFILE_FUSION_DIRECT_LAMBDA", 0.25)
+	if err != nil {
+		return err
+	}
+	if directLambda < 0 {
+		return fmt.Errorf("EOS_LC_PROFILE_FUSION_DIRECT_LAMBDA must be >= 0")
+	}
+	denseProtectTopK, err := parseIntEnv("EOS_LC_PROFILE_FUSION_DENSE_PROTECT_TOP_K", 0)
+	if err != nil {
+		return err
+	}
+	if denseProtectTopK < 0 {
+		return fmt.Errorf("EOS_LC_PROFILE_FUSION_DENSE_PROTECT_TOP_K must be >= 0")
+	}
+
+	qrelsPath := filepath.Join(datasetDir, "qrels", "test.tsv")
+	qrels, err := readQrels(qrelsPath)
+	if err != nil {
+		return err
+	}
+	profiles, err := parseInputs(root, os.Getenv(inputsEnv), qrels)
+	if err != nil {
+		return err
+	}
+	directPerQueryPath := getenv("EOS_LC_PROFILE_FUSION_DIRECT_PER_QUERY", filepath.Join(profiles[0].RunDir, "direct-eos.per-query.jsonl"))
+	directPerQueryPath = resolvePath(root, directPerQueryPath)
+	var directRankings map[string][]perQueryTopDoc
+	if fileExists(directPerQueryPath) {
+		directRankings, err = readDirectPerQuery(directPerQueryPath)
+		if err != nil {
+			return err
+		}
+		directPerQueryPath = absPath(directPerQueryPath)
+	}
+
+	caveats := []string{
+		"quality_claim=false; this is capped harness evidence only.",
+		"Consumes existing per-query artifacts and does not re-export vectors.",
+		"Qrels-derived oracle rows are diagnostics only and are not deployable routing/training evidence.",
+		"Sparse-profile fusion is not a product default or alias promotion.",
+	}
+
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		return err
+	}
+	metricsPath := filepath.Join(runDir, "profile-fusion.metrics.json")
+	perQueryPath := filepath.Join(runDir, "profile-fusion.per-query.jsonl")
+	summaryPath := filepath.Join(runDir, "profile-fusion.summary.tsv")
+	manifestPath := filepath.Join(runDir, "manifest.json")
+
+	rows := []metricsRow{}
+	for _, profile := range profiles {
+		profileCaveats := []string{"Source profile aggregate recomputed from per-query qrels for cross-checking existing comparison rows.", "quality_claim=false."}
+		if profile.ComparisonQuality != nil && profile.ComparisonQuality.QualityClaim {
+			profileCaveats = append(profileCaveats, "WARNING: source comparison row had quality_claim=true.")
+		}
+		rows = append(rows, metricsRow{
+			Method:       "profile_sparse_q4",
+			Profile:      profile.Name,
+			Quality:      profile.AggregateQuality,
+			QueryCount:   profile.QueryCount,
+			QualityClaim: false,
+			Diagnostic:   true,
+			Oracle:       false,
+			Caveats:      profileCaveats,
+		})
+	}
+
+	queryIDs := sortedQueryIDs(qrels)
+	sparseFusionRankings := map[string][]perQueryTopDoc{}
+	directFusionRankings := map[string][]perQueryTopDoc{}
+	oracleProfileTotal := quality{}
+	oracleBestTotal := quality{}
+	oracleProfileCount := 0
+	oracleBestCount := 0
+	perQueryRows := []perQueryOutputRow{}
+	for _, queryID := range queryIDs {
+		rels := qrels[queryID]
+		profileQualities := map[string]quality{}
+		profileTopDocs := map[string]string{}
+		rankingList := [][]perQueryTopDoc{}
+		bestProfileName := ""
+		bestProfileQ := quality{}
+		haveBestProfile := false
+		for _, profile := range profiles {
+			ranking, ok := profile.Rankings[queryID]
+			if !ok {
+				continue
+			}
+			q := rankingQuality(ranking, rels)
+			profileQualities[profile.Name] = q
+			profileTopDocs[profile.Name] = topDocID(ranking)
+			rankingList = append(rankingList, ranking)
+			bestProfileName, bestProfileQ, haveBestProfile = betterByNDCG(profile.Name, q, bestProfileName, bestProfileQ, haveBestProfile)
+		}
+		if len(rankingList) != len(profiles) {
+			continue
+		}
+		sparseFused := multiRRF(rankingList, nil, rrfK)
+		sparseFusionRankings[queryID] = sparseFused
+		sparseFusionQ := rankingQuality(sparseFused, rels)
+		oracleProfileTotal = addQuality(oracleProfileTotal, bestProfileQ)
+		oracleProfileCount++
+
+		row := perQueryOutputRow{
+			Schema:                    "eos.long_context_profile_fusion_per_query.v1",
+			Dataset:                   datasetName,
+			QueryID:                   queryID,
+			QualityClaim:              false,
+			Profiles:                  profileQualities,
+			ProfileTopDocs:            profileTopDocs,
+			SparseProfileFusionQuality: sparseFusionQ,
+			SparseProfileFusionTopDoc:  topDocID(sparseFused),
+			OracleBestProfile:         bestProfileName,
+			OracleBestProfileQuality:   bestProfileQ,
+			Caveats:                   caveats,
+		}
+
+		bestAnyName := "sparse_profile_fusion_rrf"
+		bestAnyQ := sparseFusionQ
+		haveBestAny := true
+		if directRankings != nil {
+			if directRanking, ok := directRankings[queryID]; ok {
+				directQ := rankingQuality(directRanking, rels)
+				row.DirectQuality = &directQ
+				row.DirectTopDoc = topDocID(directRanking)
+				bestAnyName, bestAnyQ, haveBestAny = betterByNDCG("direct_single_vector", directQ, bestAnyName, bestAnyQ, haveBestAny)
+				fused := multiRRF([][]perQueryTopDoc{directRanking, sparseFused}, []float64{directLambda, 1}, rrfK)
+				if denseProtectTopK > 0 {
+					fused = protectDirectPrefix(directRanking, fused, denseProtectTopK)
+				}
+				directFusionRankings[queryID] = fused
+				directFusionQ := rankingQuality(fused, rels)
+				row.DirectProfileFusionQuality = &directFusionQ
+				row.DirectProfileFusionTopDoc = topDocID(fused)
+				bestAnyName, bestAnyQ, haveBestAny = betterByNDCG("direct_profile_fusion_rrf", directFusionQ, bestAnyName, bestAnyQ, haveBestAny)
+			}
+		}
+		bestAnyName, bestAnyQ, haveBestAny = betterByNDCG("oracle_best_sparse_profile", bestProfileQ, bestAnyName, bestAnyQ, haveBestAny)
+		if haveBestAny {
+			row.OracleBestDirectProfileFusion = bestAnyName
+			row.OracleBestDirectProfileQuality = &bestAnyQ
+			oracleBestTotal = addQuality(oracleBestTotal, bestAnyQ)
+			oracleBestCount++
+		}
+		perQueryRows = append(perQueryRows, row)
+	}
+
+	sparseFusionQ, sparseFusionCount, err := aggregateQuality(sparseFusionRankings, qrels)
+	if err != nil {
+		return err
+	}
+	rows = append(rows, metricsRow{
+		Method:       "sparse_profile_fusion_rrf",
+		Quality:      sparseFusionQ,
+		QueryCount:   sparseFusionCount,
+		QualityClaim: false,
+		Diagnostic:   true,
+		Oracle:       false,
+		Caveats:      []string{"Equal-weight RRF fusion across all sparse profile rankings.", "quality_claim=false."},
+	})
+	if directRankings != nil {
+		directQ, directCount, err := aggregateQuality(directRankings, qrels)
+		if err != nil {
+			return err
+		}
+		rows = append(rows, metricsRow{
+			Method:       "direct_single_vector",
+			Quality:      directQ,
+			QueryCount:   directCount,
+			QualityClaim: false,
+			Diagnostic:   true,
+			Oracle:       false,
+			Caveats:      []string{"Direct Eos row loaded from existing first-profile per-query artifacts.", "quality_claim=false."},
+		})
+		if len(directFusionRankings) > 0 {
+			directFusionQ, directFusionCount, err := aggregateQuality(directFusionRankings, qrels)
+			if err != nil {
+				return err
+			}
+			rows = append(rows, metricsRow{
+				Method:       "direct_profile_fusion_rrf",
+				Quality:      directFusionQ,
+				QueryCount:   directFusionCount,
+				QualityClaim: false,
+				Diagnostic:   true,
+				Oracle:       false,
+				Caveats:      []string{"RRF fusion of direct ranking with sparse-profile fusion ranking.", "EOS_LC_PROFILE_FUSION_DIRECT_LAMBDA weights direct contribution; dense protect optionally preserves direct prefix.", "quality_claim=false."},
+			})
+		}
+	}
+	rows = append(rows, metricsRow{
+		Method:       "oracle_best_sparse_profile_per_query",
+		Quality:      divideQuality(oracleProfileTotal, float64(oracleProfileCount)),
+		QueryCount:   oracleProfileCount,
+		QualityClaim: false,
+		Diagnostic:   true,
+		Oracle:       true,
+		Caveats:      []string{"Qrels-derived oracle over sparse profiles; diagnostic only, not deployable.", "quality_claim=false."},
+	})
+	rows = append(rows, metricsRow{
+		Method:       "oracle_best_direct_profile_fusion_per_query",
+		Quality:      divideQuality(oracleBestTotal, float64(oracleBestCount)),
+		QueryCount:   oracleBestCount,
+		QualityClaim: false,
+		Diagnostic:   true,
+		Oracle:       true,
+		Caveats:      []string{"Qrels-derived oracle over direct/profile/fusion candidates; diagnostic only, not deployable.", "quality_claim=false."},
+	})
+
+	if err := writePerQueryJSONL(perQueryPath, perQueryRows); err != nil {
+		return err
+	}
+	if err := writeSummaryTSV(summaryPath, rows); err != nil {
+		return err
+	}
+	settings := map[string]string{
+		"EOS_LC_PROFILE_FUSION_RRF_K":               fmt.Sprintf("%.6g", rrfK),
+		"EOS_LC_PROFILE_FUSION_DIRECT_LAMBDA":       fmt.Sprintf("%.6g", directLambda),
+		"EOS_LC_PROFILE_FUSION_DENSE_PROTECT_TOP_K": strconv.Itoa(denseProtectTopK),
+	}
+	if err := writeJSON(metricsPath, metricsFile{
+		Schema:             "eos.long_context_profile_fusion_metrics.v1",
+		GeneratedAt:        timestamp,
+		DatasetName:        datasetName,
+		DatasetDir:         absPath(datasetDir),
+		QualityClaim:       false,
+		RRFK:               rrfK,
+		DirectLambda:       directLambda,
+		DenseProtectTopK:   denseProtectTopK,
+		DirectPerQueryPath: directPerQueryPath,
+		Profiles:           profiles,
+		Rows:               rows,
+		Caveats:            caveats,
+	}); err != nil {
+		return err
+	}
+	if err := writeJSON(manifestPath, manifestFile{
+		Schema:       "eos.long_context_profile_fusion_manifest.v1",
+		GeneratedAt:  timestamp,
+		RunDir:       absPath(runDir),
+		DatasetName:  datasetName,
+		DatasetDir:   absPath(datasetDir),
+		QualityClaim: false,
+		InputsEnv:    os.Getenv(inputsEnv),
+		Settings:     settings,
+		OutputFiles: map[string]string{
+			"metrics":   absPath(metricsPath),
+			"per_query": absPath(perQueryPath),
+			"summary":   absPath(summaryPath),
+		},
+		Caveats: caveats,
+	}); err != nil {
+		return err
+	}
+
+	fmt.Printf("run_dir=%s\n", runDir)
+	fmt.Printf("metrics=%s\n", metricsPath)
+	fmt.Printf("per_query=%s\n", perQueryPath)
+	fmt.Printf("summary=%s\n", summaryPath)
+	fmt.Printf("manifest=%s\n", manifestPath)
+	for _, row := range rows {
+		fmt.Printf("%s profile=%s ndcg@10=%.6f recall@100=%.6f quality_claim=%t oracle=%t\n",
+			row.Method, row.Profile, row.Quality.NDCGAt10, row.Quality.RecallAt100, row.QualityClaim, row.Oracle)
+	}
+	return nil
+}
