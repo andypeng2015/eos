@@ -4,6 +4,8 @@
 Inputs are `manta.embedding_retrieval_per_query.v1` JSONL files emitted by
 `eos eval-retrieval --per-query-jsonl` and
 `eos eval-retrieval-vectors --per-query-jsonl`.
+Multimethod diagnostics such as `eval-retrieval-multivector-turboquant` can be
+filtered with `--method` or `--bits`.
 
 The primary artifact is a JSONL frontier report. When `--dataset-dir` and
 `--hard-negatives-jsonl` are provided, the script also writes Eos-compatible
@@ -37,6 +39,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--teacher-per-query", required=True, type=Path)
     parser.add_argument("--eos-label", default="eos")
     parser.add_argument("--teacher-label", default="teacher")
+    parser.add_argument(
+        "--method",
+        default="",
+        help="Optional exact per-query method filter, useful for multimethod JSONL.",
+    )
+    parser.add_argument(
+        "--bits",
+        type=int,
+        default=None,
+        help="Optional per-query bit-width filter, useful for TurboQuant q-bit rows.",
+    )
     parser.add_argument("--dataset", default="")
     parser.add_argument(
         "--dataset-dir",
@@ -75,7 +88,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_per_query(path: Path) -> dict[str, dict[str, Any]]:
+def matches_filter(row: dict[str, Any], method: str, bits: int | None) -> bool:
+    if method and str(row.get("method", "")) != method:
+        return False
+    if bits is not None and int(row.get("bits", 0) or 0) != bits:
+        return False
+    return True
+
+
+def load_per_query(path: Path, method: str = "", bits: int | None = None) -> dict[str, dict[str, Any]]:
     rows: dict[str, dict[str, Any]] = {}
     with path.open("r", encoding="utf-8") as f:
         for line_no, line in enumerate(f, 1):
@@ -83,14 +104,22 @@ def load_per_query(path: Path) -> dict[str, dict[str, Any]]:
             if not line:
                 continue
             row = json.loads(line)
+            if not matches_filter(row, method, bits):
+                continue
             qid = str(row.get("query_id", ""))
             if not qid:
                 raise ValueError(f"{path}:{line_no}: missing query_id")
             if qid in rows:
-                raise ValueError(f"{path}:{line_no}: duplicate query_id {qid!r}")
+                suffix = ""
+                if method or bits is not None:
+                    suffix = f" after filters method={method!r} bits={bits!r}"
+                raise ValueError(f"{path}:{line_no}: duplicate query_id {qid!r}{suffix}")
             rows[qid] = row
     if not rows:
-        raise ValueError(f"{path}: no per-query rows")
+        suffix = ""
+        if method or bits is not None:
+            suffix = f" matching method={method!r} bits={bits!r}"
+        raise ValueError(f"{path}: no per-query rows{suffix}")
     return rows
 
 
@@ -111,8 +140,8 @@ def nonrelevant_top_docs(row: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def build_frontier_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
-    eos_rows = load_per_query(args.eos_per_query)
-    teacher_rows = load_per_query(args.teacher_per_query)
+    eos_rows = load_per_query(args.eos_per_query, args.method, args.bits)
+    teacher_rows = load_per_query(args.teacher_per_query, args.method, args.bits)
     shared_ids = sorted(set(eos_rows) & set(teacher_rows))
     if not shared_ids:
         raise ValueError("no shared query_id values between Eos and teacher rows")
