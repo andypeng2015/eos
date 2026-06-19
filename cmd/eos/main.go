@@ -3846,12 +3846,21 @@ func runRenameEmbed(args []string) error {
 	fs := flag.NewFlagSet("rename-embed", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var name string
+	var maxSeq int
 	fs.StringVar(&name, "name", "", "new embedding model name")
+	fs.IntVar(&maxSeq, "max-seq", 0, "new tokenizer maximum sequence length; 0 leaves unchanged")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: eos rename-embed --name <model-name> <input.mll> <output.mll>")
+		return fmt.Errorf("usage: eos rename-embed [--name <model-name>] [--max-seq N] <input.mll> <output.mll>")
+	}
+	if maxSeq < 0 {
+		return fmt.Errorf("rename-embed --max-seq must be non-negative")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" && maxSeq == 0 {
+		return fmt.Errorf("rename-embed requires --name or a positive --max-seq")
 	}
 	inputPath := fs.Arg(0)
 	outputPath := fs.Arg(1)
@@ -3859,8 +3868,15 @@ func runRenameEmbed(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := trainer.RenameEmbeddingModel(name); err != nil {
-		return err
+	if name != "" {
+		if err := trainer.RenameEmbeddingModel(name); err != nil {
+			return err
+		}
+	}
+	if maxSeq > 0 {
+		if err := trainer.SetEmbeddingTokenizerMaxSequence(maxSeq); err != nil {
+			return err
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
 		return err
@@ -3872,8 +3888,13 @@ func runRenameEmbed(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("renamed embedding package %q -> %q\n", inputPath, outputPath)
-	fmt.Printf("model: %s\n", name)
+	fmt.Printf("rewrote embedding package %q -> %q\n", inputPath, outputPath)
+	if name != "" {
+		fmt.Printf("model: %s\n", name)
+	}
+	if maxSeq > 0 {
+		fmt.Printf("tokenizer max_sequence: %d\n", maxSeq)
+	}
 	fmt.Printf("embedding manifest: %s\n", paths.EmbeddingManifestPath)
 	fmt.Printf("weights: %s\n", paths.WeightFilePath)
 	fmt.Printf("checkpoint: %s\n", paths.CheckpointPath)
@@ -6581,7 +6602,7 @@ func printUsage() {
 	fmt.Println("  eos init-model [flags] <artifact.mll>")
 	fmt.Println("  eos init-mirage [flags] <artifact.mll>")
 	fmt.Println("  eos init-train [flags] <artifact.mll>")
-	fmt.Println("  eos rename-embed --name <model-name> <input.mll> <output.mll>")
+	fmt.Println("  eos rename-embed [--name <model-name>] [--max-seq N] <input.mll> <output.mll>")
 	fmt.Println("  eos train-tokenizer [flags] <artifact.mll> <corpus.txt>")
 	fmt.Println("  eos tokenize-embed [flags] <artifact.mll> <input-text.jsonl> <output-token.jsonl>")
 	fmt.Println("  eos train-corpus [flags] <artifact.mll> <corpus.txt>")
@@ -6631,7 +6652,7 @@ func printUsage() {
 	fmt.Println("init-model creates the Eos-owned default quantized embedding training package.")
 	fmt.Println("init-mirage creates the Eos-owned Mirage Image v1 host-reference artifact.")
 	fmt.Println("init-train creates a native training package next to an artifact.")
-	fmt.Println("rename-embed rewrites a training package under a new embedding model identity.")
+	fmt.Println("rename-embed rewrites a training package under a new embedding model identity and/or diagnostic tokenizer max-sequence contract.")
 	fmt.Println("train-tokenizer builds a sibling .tokenizer.mll from a raw text corpus, using embedding-manifest vocab_size by default.")
 	fmt.Println("tokenize-embed converts text JSONL into reusable token JSONL for contrastive, pair, or hard-negative training and eval.")
 	fmt.Println("train-corpus trains tokenizer + mined text pairs + embedder in one Eos job from a raw text corpus.")

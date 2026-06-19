@@ -3468,6 +3468,13 @@ func TestRunRenameEmbedRewritesPackageIdentity(t *testing.T) {
 	if manifest.Name != "manta-embed-v1" {
 		t.Fatalf("manifest name = %q, want manta-embed-v1", manifest.Name)
 	}
+	trainManifest, err := eosruntime.ReadEmbeddingTrainManifestFile(eosruntime.DefaultEmbeddingTrainManifestPath(renamedPath))
+	if err != nil {
+		t.Fatalf("read renamed train manifest: %v", err)
+	}
+	if trainManifest.Name != "manta-embed-v1" || trainManifest.Embedding.Name != "manta-embed-v1" {
+		t.Fatalf("train manifest names = %q/%q, want manta-embed-v1", trainManifest.Name, trainManifest.Embedding.Name)
+	}
 	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(eosruntime.DefaultEmbeddingCheckpointPath(renamedPath))
 	if err != nil {
 		t.Fatalf("read renamed checkpoint: %v", err)
@@ -3475,11 +3482,104 @@ func TestRunRenameEmbedRewritesPackageIdentity(t *testing.T) {
 	if checkpoint.Manifest.Name != "manta-embed-v1" {
 		t.Fatalf("checkpoint manifest name = %q, want manta-embed-v1", checkpoint.Manifest.Name)
 	}
+	packageManifest, err := eosruntime.ReadPackageManifestFile(eosruntime.DefaultPackageManifestPath(renamedPath))
+	if err != nil {
+		t.Fatalf("read renamed package manifest: %v", err)
+	}
+	if err := packageManifest.VerifyFiles(map[string]string{
+		"artifact":           renamedPath,
+		"embedding_manifest": eosruntime.DefaultEmbeddingManifestPath(renamedPath),
+		"tokenizer":          eosruntime.DefaultTokenizerPath(renamedPath),
+		"weights":            eosruntime.DefaultWeightFilePath(renamedPath),
+		"memory_plan":        eosruntime.DefaultMemoryPlanPath(renamedPath),
+		"train_manifest":     eosruntime.DefaultEmbeddingTrainManifestPath(renamedPath),
+		"checkpoint":         eosruntime.DefaultEmbeddingCheckpointPath(renamedPath),
+		"train_profile":      eosruntime.DefaultEmbeddingTrainProfilePath(renamedPath),
+	}); err != nil {
+		t.Fatalf("verify renamed package manifest: %v", err)
+	}
 	if _, err := os.Stat(eosruntime.DefaultTokenizerPath(renamedPath)); err != nil {
 		t.Fatalf("renamed tokenizer sidecar missing: %v", err)
 	}
 	if _, err := eosruntime.LoadEmbeddingTrainerPackage(renamedPath); err != nil {
 		t.Fatalf("reload renamed package: %v", err)
+	}
+}
+
+func TestRunRenameEmbedRewritesTokenizerMaxSequence(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	tokenizer := eosruntime.TokenizerFile{
+		Version:      eosruntime.TokenizerFileVersion,
+		Tokens:       []string{"<pad>", "<unk>", "alpha", "beta"},
+		PadToken:     "<pad>",
+		UnknownToken: "<unk>",
+	}
+	if err := tokenizer.WriteFile(eosruntime.DefaultTokenizerPath(path)); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	retargetedPath := filepath.Join(t.TempDir(), "retargeted.mll")
+
+	output := captureRunOutput(t, []string{"rename-embed", "--max-seq", "1024", path, retargetedPath})
+	if !strings.Contains(output, "tokenizer max_sequence: 1024") {
+		t.Fatalf("rename output missing max sequence\noutput:\n%s", output)
+	}
+
+	manifest, err := eosruntime.ReadEmbeddingManifestFile(eosruntime.DefaultEmbeddingManifestPath(retargetedPath))
+	if err != nil {
+		t.Fatalf("read retargeted manifest: %v", err)
+	}
+	if manifest.Tokenizer.MaxSequence != 1024 {
+		t.Fatalf("embedding manifest max_sequence = %d, want 1024", manifest.Tokenizer.MaxSequence)
+	}
+	trainManifest, err := eosruntime.ReadEmbeddingTrainManifestFile(eosruntime.DefaultEmbeddingTrainManifestPath(retargetedPath))
+	if err != nil {
+		t.Fatalf("read retargeted train manifest: %v", err)
+	}
+	if trainManifest.Embedding.Tokenizer.MaxSequence != 1024 {
+		t.Fatalf("train manifest max_sequence = %d, want 1024", trainManifest.Embedding.Tokenizer.MaxSequence)
+	}
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(eosruntime.DefaultEmbeddingCheckpointPath(retargetedPath))
+	if err != nil {
+		t.Fatalf("read retargeted checkpoint: %v", err)
+	}
+	if checkpoint.Manifest.Tokenizer.MaxSequence != 1024 {
+		t.Fatalf("checkpoint max_sequence = %d, want 1024", checkpoint.Manifest.Tokenizer.MaxSequence)
+	}
+	packageManifest, err := eosruntime.ReadPackageManifestFile(eosruntime.DefaultPackageManifestPath(retargetedPath))
+	if err != nil {
+		t.Fatalf("read retargeted package manifest: %v", err)
+	}
+	if err := packageManifest.VerifyFiles(map[string]string{
+		"artifact":           retargetedPath,
+		"embedding_manifest": eosruntime.DefaultEmbeddingManifestPath(retargetedPath),
+		"tokenizer":          eosruntime.DefaultTokenizerPath(retargetedPath),
+		"weights":            eosruntime.DefaultWeightFilePath(retargetedPath),
+		"memory_plan":        eosruntime.DefaultMemoryPlanPath(retargetedPath),
+		"train_manifest":     eosruntime.DefaultEmbeddingTrainManifestPath(retargetedPath),
+		"checkpoint":         eosruntime.DefaultEmbeddingCheckpointPath(retargetedPath),
+		"train_profile":      eosruntime.DefaultEmbeddingTrainProfilePath(retargetedPath),
+	}); err != nil {
+		t.Fatalf("verify retargeted package manifest: %v", err)
+	}
+	if _, err := os.Stat(eosruntime.DefaultTokenizerPath(retargetedPath)); err != nil {
+		t.Fatalf("retargeted tokenizer sidecar missing: %v", err)
+	}
+	if _, err := eosruntime.LoadEmbeddingTrainerPackage(retargetedPath); err != nil {
+		t.Fatalf("reload retargeted package: %v", err)
+	}
+}
+
+func TestRunRenameEmbedRejectsNoopAndNegativeMaxSequence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "input.mll")
+	outputPath := filepath.Join(t.TempDir(), "output.mll")
+	if err := run([]string{"rename-embed", path, outputPath}); err == nil || !strings.Contains(err.Error(), "requires --name or a positive --max-seq") {
+		t.Fatalf("noop rename error = %v, want requires --name or positive --max-seq", err)
+	}
+	if err := run([]string{"rename-embed", "--max-seq=-1", path, outputPath}); err == nil || !strings.Contains(err.Error(), "--max-seq must be non-negative") {
+		t.Fatalf("negative max-seq error = %v, want non-negative", err)
 	}
 }
 

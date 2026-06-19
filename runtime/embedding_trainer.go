@@ -1525,6 +1525,21 @@ func (t *EmbeddingTrainer) RenameEmbeddingModel(name string) error {
 	return nil
 }
 
+// SetEmbeddingTokenizerMaxSequence updates the embedding tokenizer contract before rewriting a package.
+func (t *EmbeddingTrainer) SetEmbeddingTokenizerMaxSequence(maxSeq int) error {
+	if t == nil {
+		return fmt.Errorf("embedding trainer is not initialized")
+	}
+	if maxSeq < 0 {
+		return fmt.Errorf("embedding tokenizer max sequence must be non-negative")
+	}
+	if maxSeq == 0 {
+		return nil
+	}
+	t.manifest.Tokenizer.MaxSequence = maxSeq
+	return nil
+}
+
 // WriteEmbeddingPackage writes a packaged embedding model to sibling artifact, manifest, and weight files.
 func (t *EmbeddingTrainer) WriteEmbeddingPackage(artifactPath string) (EmbeddingPackagePaths, error) {
 	if t == nil {
