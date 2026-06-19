@@ -1,0 +1,677 @@
+package main
+
+// smoke_eos_sparse_long_context_retrieval codifies the evidence-only sparse
+// long-context retrieval plumbing row. It creates a tiny BEIR-shaped fixture,
+// retargets a run-local diagnostic max-seq package copy, exports
+// sparse-token-pool vectors, scores dense and q4 TurboQuant retrieval over the
+// vector cache, and asserts the claim boundary stays quality_claim=false.
+//
+// Usage:
+//   EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_sparse_long_context_retrieval.fw
+//
+// Useful overrides:
+//   EOS_SPARSE_LONG_CONTEXT_RETRIEVAL_SMOKE_RUN_ROOT=runs/eos-sparse-long-context-retrieval-smoke-<timestamp>
+//   EOS_SPARSE_LONG_CONTEXT_RETRIEVAL_SMOKE_ARTIFACT=runs/current-release-qwen3-nf005-continuation-20260616T224102Z/candidate/eos-embed-v1.mll
+//   EOS_SPARSE_LONG_CONTEXT_RETRIEVAL_SMOKE_MAX_SEQ=1024
+//   EOS_SPARSE_LONG_CONTEXT_RETRIEVAL_SMOKE_MAX_TOKENS=1024
+//   EOS_SPARSE_LONG_CONTEXT_RETRIEVAL_SMOKE_MIN_DOC_TOKENS=512
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const defaultArtifact = "runs/current-release-qwen3-nf005-continuation-20260616T224102Z/candidate/eos-embed-v1.mll"
+const datasetName = "tiny-long-beir-sparse-token-pool-single-vector"
+const evidenceLevel = "export_scoring_plumbing_only"
+const claimBoundary = "Prototype sparse-token pooling retrieval cache. Not production dense embedder output, not trained sparse encoder evidence, and not LongEmbed proof."
+
+type tokenStats struct {
+	MaxObservedTokens int `json:"max_observed_tokens"`
+}
+
+type exportManifest struct {
+	Method                  string     `json:"method"`
+	Experimental            bool       `json:"experimental"`
+	QualityClaim            bool       `json:"quality_claim"`
+	ClaimBoundary           string     `json:"claim_boundary"`
+	Dataset                 string     `json:"dataset"`
+	Artifact                string     `json:"artifact"`
+	Documents               int        `json:"documents"`
+	Queries                 int        `json:"queries"`
+	Dimension               int        `json:"dimension"`
+	MaxTokens               int        `json:"max_tokens"`
+	MinObservedDocTokens    int        `json:"min_observed_doc_tokens"`
+	TopK                    int        `json:"top_k"`
+	RouteBlockSize          int        `json:"route_block_size"`
+	RouteTopBlocks          int        `json:"route_top_blocks"`
+	Bits                    int        `json:"bits"`
+	QuantizerSeed           int64      `json:"quantizer_seed"`
+	AttentionMode           string     `json:"attention_mode"`
+	TurboQuantKVApplied     bool       `json:"turboquant_kv_applied"`
+	DenseKVMaterialized     bool       `json:"dense_kv_materialized"`
+	KVDecode                string     `json:"kv_decode"`
+	AttentionWeightsApplied bool       `json:"attention_weights_applied"`
+	AttentionOutputApplied  bool       `json:"attention_output_applied"`
+	HiddenProjectionApplied bool       `json:"hidden_projection_applied"`
+	ProjectionApplied       bool       `json:"projection_applied"`
+	DocumentTokenizerOutput tokenStats `json:"document_tokenizer_output"`
+	Caveats                 []string   `json:"caveats"`
+}
+
+type quality struct {
+	NDCGAt10    float64 `json:"ndcg_at_10"`
+	MRRAt10     float64 `json:"mrr_at_10"`
+	RecallAt100 float64 `json:"recall_at_100"`
+	MAPAt10     float64 `json:"map_at_10"`
+}
+
+type evalMetrics struct {
+	Backend string `json:"backend"`
+	Inputs  struct {
+		Documents     int   `json:"documents"`
+		Queries       int   `json:"queries"`
+		RelevantPairs int   `json:"relevant_pairs"`
+		ScoredPairs   int64 `json:"scored_pairs"`
+	} `json:"inputs"`
+	Quality quality `json:"quality"`
+}
+
+type turboMetrics struct {
+	Backend string `json:"backend"`
+	Config  struct {
+		QuantizerSeed int64 `json:"quantizer_seed"`
+	} `json:"config"`
+	Rows []struct {
+		Bits             int     `json:"bits"`
+		Method           string  `json:"method"`
+		Quality          quality `json:"quality"`
+		NDCGAt10Delta    float64 `json:"ndcg_at_10_delta"`
+		RecallAt100Delta float64 `json:"recall_at_100_delta"`
+	} `json:"rows"`
+}
+
+type fixtureManifest struct {
+	Schema           string   `json:"schema"`
+	CreatedAt        string   `json:"created_at"`
+	Dataset          string   `json:"dataset"`
+	Documents        int      `json:"documents"`
+	Queries          int      `json:"queries"`
+	Qrels            int      `json:"qrels"`
+	Purpose          string   `json:"purpose"`
+	EvidenceLevel    string   `json:"evidence_level"`
+	QualityClaim     bool     `json:"quality_claim"`
+	ExpectedBoundary string   `json:"expected_boundary"`
+	Caveats          []string `json:"caveats"`
+}
+
+type scorecard struct {
+	Schema        string     `json:"schema"`
+	GeneratedAt   string     `json:"generated_at"`
+	RunRoot       string     `json:"run_root"`
+	EvidenceLevel string     `json:"evidence_level"`
+	QualityClaim  bool       `json:"quality_claim"`
+	Caveats       []string   `json:"caveats"`
+	Rows          []scoreRow `json:"rows"`
+}
+
+type scoreRow struct {
+	Category                  string      `json:"category"`
+	Dataset                   string      `json:"dataset"`
+	Baseline                  string      `json:"baseline"`
+	EvidenceLevel             string      `json:"evidence_level"`
+	QualityClaim              bool        `json:"quality_claim"`
+	ClaimBoundary             string      `json:"claim_boundary"`
+	SourceManifest            string      `json:"source_manifest"`
+	FixtureManifest           string      `json:"fixture_manifest"`
+	Artifact                  string      `json:"artifact"`
+	DocumentScoringSurface     string      `json:"document_scoring_surface"`
+	AttentionMode             string      `json:"attention_mode"`
+	ExportMethod              string      `json:"export_method"`
+	MaxObservedDocTokens       int         `json:"max_observed_doc_tokens"`
+	MinObservedDocTokens       int         `json:"min_observed_doc_tokens"`
+	Documents                 int         `json:"documents"`
+	Queries                   int         `json:"queries"`
+	RelevantPairs             int         `json:"relevant_pairs"`
+	ScoredPairs               int64       `json:"scored_pairs"`
+	Dimension                 int         `json:"dimension"`
+	TopK                      int         `json:"top_k"`
+	RouteBlockSize            int         `json:"route_block_size"`
+	RouteTopBlocks            int         `json:"route_top_blocks"`
+	TurboQuantKVApplied       bool        `json:"turboquant_kv_applied"`
+	DenseKVMaterialized       bool        `json:"dense_kv_materialized"`
+	KVDecode                  string      `json:"kv_decode"`
+	AttentionWeightsApplied   bool        `json:"attention_weights_applied"`
+	AttentionOutputApplied    bool        `json:"attention_output_applied"`
+	HiddenProjectionApplied   bool        `json:"hidden_projection_applied"`
+	ProjectionApplied         bool        `json:"projection_applied"`
+	Row                       string      `json:"row"`
+	RetrievalBackend          string      `json:"retrieval_backend"`
+	Method                    string      `json:"method"`
+	Bits                      int         `json:"bits"`
+	QuantizerSeed             int64       `json:"quantizer_seed"`
+	NDCGAt10                  float64     `json:"ndcg_at_10"`
+	MRRAt10                   float64     `json:"mrr_at_10"`
+	RecallAt100               float64     `json:"recall_at_100"`
+	MAPAt10                   float64     `json:"map_at_10"`
+	NDCGAt10Delta             interface{} `json:"ndcg_at_10_delta"`
+	RecallAt100Delta          interface{} `json:"recall_at_100_delta"`
+}
+
+func getenv(name string, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func parseIntEnv(name string, fallback int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return value, nil
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findAncestorRoot(start string) string {
+	if start == "" {
+		return ""
+	}
+	dir, err := filepath.Abs(start)
+	if err != nil {
+		return ""
+	}
+	for {
+		if hasRepoRoot(dir) {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); explicit != "" {
+		if root := findAncestorRoot(explicit); root != "" {
+			return root, nil
+		}
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for _, candidate := range []string{
+		os.Getenv("PWD"),
+		os.Getenv("OLDPWD"),
+		cwd,
+	} {
+		if root := findAncestorRoot(candidate); root != "" {
+			return root, nil
+		}
+	}
+	return "", fmt.Errorf("could not find Eos repo root; set EOS_REPO_ROOT")
+}
+
+func runRoot(root string) string {
+	explicit := strings.TrimSpace(os.Getenv("EOS_SPARSE_LONG_CONTEXT_RETRIEVAL_SMOKE_RUN_ROOT"))
+	if explicit != "" {
+		if filepath.IsAbs(explicit) {
+			return explicit
+		}
+		return filepath.Join(root, explicit)
+	}
+	stamp := time.Now().UTC().Format("20060102T150405Z")
+	return filepath.Join(root, "runs", "eos-sparse-long-context-retrieval-smoke-"+stamp)
+}
+
+func rel(root string, path string) string {
+	relPath, err := filepath.Rel(root, path)
+	if err != nil {
+		return filepath.ToSlash(path)
+	}
+	return filepath.ToSlash(relPath)
+}
+
+func writeJSON(path string, value interface{}) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o644)
+}
+
+func readJSON(path string, value interface{}) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(data, value); err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	return nil
+}
+
+func runCapture(root string, label string, args []string, logPath string) error {
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	var b strings.Builder
+	b.WriteString("+ ")
+	b.WriteString(strings.Join(args, " "))
+	b.WriteString("\n")
+	b.Write(output)
+	if writeErr := os.WriteFile(logPath, []byte(b.String()), 0o644); writeErr != nil {
+		return writeErr
+	}
+	if err != nil {
+		return fmt.Errorf("%s failed: %w; see %s", label, err, logPath)
+	}
+	return nil
+}
+
+func writeJSONL(path string, rows []map[string]string) error {
+	var b strings.Builder
+	for _, row := range rows {
+		data, err := json.Marshal(row)
+		if err != nil {
+			return err
+		}
+		b.Write(data)
+		b.WriteByte('\n')
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func makeLongText(topic string, repeats int) string {
+	common := "general background paragraph about local retrieval systems storage budgets embeddings compression evaluation documents ordinary context "
+	parts := make([]string, 0, repeats+8)
+	for i := 0; i < repeats; i++ {
+		parts = append(parts, common)
+	}
+	parts = append(parts, "Late evidence marker. The archive answer is "+topic+". This sentence is intentionally near the end of the long document.")
+	return strings.Join(parts, " ")
+}
+
+func generateFixture(datasetDir string) error {
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		return err
+	}
+	corpus := []map[string]string{
+		{"_id": "doc-long", "title": "Synthetic long relevant document", "text": makeLongText("alpine insulin cedar moonstone", 95)},
+		{"_id": "doc-short-a", "title": "Synthetic distractor A", "text": "A compact distractor about bronze libraries, sodium harbors, and unrelated retrieval notes."},
+		{"_id": "doc-short-b", "title": "Synthetic distractor B", "text": "Another compact distractor about crimson telescopes, velvet enzymes, and ordinary context."},
+	}
+	queries := []map[string]string{
+		{"_id": "q-long", "text": "Which document says the archive answer is alpine insulin cedar moonstone?"},
+	}
+	if err := writeJSONL(filepath.Join(datasetDir, "corpus.jsonl"), corpus); err != nil {
+		return err
+	}
+	if err := writeJSONL(filepath.Join(datasetDir, "queries.jsonl"), queries); err != nil {
+		return err
+	}
+	qrels := "query-id\tcorpus-id\tscore\nq-long\tdoc-long\t1\n"
+	if err := os.WriteFile(filepath.Join(datasetDir, "qrels", "test.tsv"), []byte(qrels), 0o644); err != nil {
+		return err
+	}
+	manifest := fixtureManifest{
+		Schema:           "manta.tiny_long_beir_fixture.v1",
+		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
+		Dataset:          "tiny-long-beir",
+		Documents:        3,
+		Queries:          1,
+		Qrels:            1,
+		Purpose:          "Tiny BEIR-shaped fixture for sparse-token-pool export/retrieval metric plumbing only.",
+		EvidenceLevel:    evidenceLevel,
+		QualityClaim:     false,
+		ExpectedBoundary: "Synthetic/run-local fixture; proves export and scoring plumbing, not LongEmbed quality.",
+		Caveats: []string{
+			"Artificial long document; metric values are not product retrieval quality evidence.",
+			"Used only to assert sparse-token-pool export and vector-cache scoring plumbing.",
+		},
+	}
+	return writeJSON(filepath.Join(datasetDir, "fixture-manifest.json"), manifest)
+}
+
+func validateJSONL(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	line := 0
+	for scanner.Scan() {
+		line++
+		var row map[string]interface{}
+		if err := json.Unmarshal(scanner.Bytes(), &row); err != nil {
+			return fmt.Errorf("%s line %d: %w", path, line, err)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if line == 0 {
+		return fmt.Errorf("%s is empty", path)
+	}
+	return nil
+}
+
+func baseScoreRow(root string, runDir string, manifest exportManifest, dense evalMetrics, fixtureManifestPath string, exportManifestPath string) scoreRow {
+	return scoreRow{
+		Category:                  "long_context_sparse_token_pool_retrieval_plumbing",
+		Dataset:                   datasetName,
+		Baseline:                  "eos-embed-v1-maxseq1024-diagnostic",
+		EvidenceLevel:             evidenceLevel,
+		QualityClaim:              false,
+		ClaimBoundary:             manifest.ClaimBoundary,
+		SourceManifest:            rel(root, exportManifestPath),
+		FixtureManifest:           rel(root, fixtureManifestPath),
+		Artifact:                  rel(root, manifest.Artifact),
+		DocumentScoringSurface:     "single_vector",
+		AttentionMode:             manifest.AttentionMode,
+		ExportMethod:              manifest.Method,
+		MaxObservedDocTokens:       manifest.DocumentTokenizerOutput.MaxObservedTokens,
+		MinObservedDocTokens:       manifest.MinObservedDocTokens,
+		Documents:                 dense.Inputs.Documents,
+		Queries:                   dense.Inputs.Queries,
+		RelevantPairs:             dense.Inputs.RelevantPairs,
+		ScoredPairs:               dense.Inputs.ScoredPairs,
+		Dimension:                 manifest.Dimension,
+		TopK:                      100,
+		RouteBlockSize:            manifest.RouteBlockSize,
+		RouteTopBlocks:            manifest.RouteTopBlocks,
+		TurboQuantKVApplied:       manifest.TurboQuantKVApplied,
+		DenseKVMaterialized:       manifest.DenseKVMaterialized,
+		KVDecode:                  manifest.KVDecode,
+		AttentionWeightsApplied:   manifest.AttentionWeightsApplied,
+		AttentionOutputApplied:    manifest.AttentionOutputApplied,
+		HiddenProjectionApplied:   manifest.HiddenProjectionApplied,
+		ProjectionApplied:         manifest.ProjectionApplied,
+	}
+}
+
+func writeScorecard(root string, runDir string, exportManifestPath string, fixtureManifestPath string, denseMetricsPath string, turboMetricsPath string, minDocTokens int) (scorecard, error) {
+	var manifest exportManifest
+	if err := readJSON(exportManifestPath, &manifest); err != nil {
+		return scorecard{}, err
+	}
+	if manifest.QualityClaim {
+		return scorecard{}, fmt.Errorf("export manifest quality_claim=true, want false")
+	}
+	if manifest.DocumentTokenizerOutput.MaxObservedTokens < minDocTokens {
+		return scorecard{}, fmt.Errorf("max observed doc tokens=%d, want >= %d", manifest.DocumentTokenizerOutput.MaxObservedTokens, minDocTokens)
+	}
+	if manifest.Method != "experimental_sparse_token_pool" {
+		return scorecard{}, fmt.Errorf("export method=%q, want experimental_sparse_token_pool", manifest.Method)
+	}
+	var dense evalMetrics
+	if err := readJSON(denseMetricsPath, &dense); err != nil {
+		return scorecard{}, err
+	}
+	var turbo turboMetrics
+	if err := readJSON(turboMetricsPath, &turbo); err != nil {
+		return scorecard{}, err
+	}
+	if len(turbo.Rows) != 1 {
+		return scorecard{}, fmt.Errorf("turboquant rows=%d, want 1", len(turbo.Rows))
+	}
+	rows := []scoreRow{}
+	denseRow := baseScoreRow(root, runDir, manifest, dense, fixtureManifestPath, exportManifestPath)
+	denseRow.Row = "sparse-token-pool-single-vector-dense-score"
+	denseRow.RetrievalBackend = dense.Backend
+	denseRow.Method = "single_vector_dense_ip"
+	denseRow.Bits = 0
+	denseRow.QuantizerSeed = manifest.QuantizerSeed
+	denseRow.NDCGAt10 = dense.Quality.NDCGAt10
+	denseRow.MRRAt10 = dense.Quality.MRRAt10
+	denseRow.RecallAt100 = dense.Quality.RecallAt100
+	denseRow.MAPAt10 = dense.Quality.MAPAt10
+	denseRow.NDCGAt10Delta = ""
+	denseRow.RecallAt100Delta = ""
+	rows = append(rows, denseRow)
+
+	turboRow := baseScoreRow(root, runDir, manifest, dense, fixtureManifestPath, exportManifestPath)
+	turboRow.Row = "sparse-token-pool-single-vector-turboquant-q4-score"
+	turboRow.RetrievalBackend = turbo.Backend
+	turboRow.Method = turbo.Rows[0].Method
+	turboRow.Bits = turbo.Rows[0].Bits
+	turboRow.QuantizerSeed = turbo.Config.QuantizerSeed
+	turboRow.NDCGAt10 = turbo.Rows[0].Quality.NDCGAt10
+	turboRow.MRRAt10 = turbo.Rows[0].Quality.MRRAt10
+	turboRow.RecallAt100 = turbo.Rows[0].Quality.RecallAt100
+	turboRow.MAPAt10 = turbo.Rows[0].Quality.MAPAt10
+	turboRow.NDCGAt10Delta = turbo.Rows[0].NDCGAt10Delta
+	turboRow.RecallAt100Delta = turbo.Rows[0].RecallAt100Delta
+	rows = append(rows, turboRow)
+
+	card := scorecard{
+		Schema:        "manta.experimental_sparse_long_context_retrieval_scorecard.v1",
+		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		RunRoot:       rel(root, runDir),
+		EvidenceLevel: evidenceLevel,
+		QualityClaim:  false,
+		Caveats: []string{
+			"Fixture is synthetic and tiny; metric values only prove scorer wiring over generated caches.",
+			"Diagnostic max-seq package copy is not a trained long-context model.",
+			"quality_claim=false is required by this smoke.",
+		},
+		Rows: rows,
+	}
+	if err := writeJSON(filepath.Join(runDir, "scorecard.json"), card); err != nil {
+		return scorecard{}, err
+	}
+	return card, nil
+}
+
+func writeScorecardTSV(path string, rows []scoreRow) error {
+	header := []string{"category", "dataset", "baseline", "evidence_level", "quality_claim", "claim_boundary", "source_manifest", "fixture_manifest", "artifact", "document_scoring_surface", "attention_mode", "export_method", "max_observed_doc_tokens", "min_observed_doc_tokens", "documents", "queries", "relevant_pairs", "scored_pairs", "dimension", "top_k", "route_block_size", "route_top_blocks", "turboquant_kv_applied", "dense_kv_materialized", "kv_decode", "attention_weights_applied", "attention_output_applied", "hidden_projection_applied", "projection_applied", "row", "retrieval_backend", "method", "bits", "quantizer_seed", "ndcg_at_10", "mrr_at_10", "recall_at_100", "map_at_10", "ndcg_at_10_delta", "recall_at_100_delta"}
+	var b strings.Builder
+	b.WriteString(strings.Join(header, "\t"))
+	b.WriteByte('\n')
+	for _, row := range rows {
+		values := []string{
+			row.Category, row.Dataset, row.Baseline, row.EvidenceLevel, fmt.Sprint(row.QualityClaim), row.ClaimBoundary, row.SourceManifest, row.FixtureManifest, row.Artifact, row.DocumentScoringSurface, row.AttentionMode, row.ExportMethod,
+			strconv.Itoa(row.MaxObservedDocTokens), strconv.Itoa(row.MinObservedDocTokens), strconv.Itoa(row.Documents), strconv.Itoa(row.Queries), strconv.Itoa(row.RelevantPairs), strconv.FormatInt(row.ScoredPairs, 10), strconv.Itoa(row.Dimension), strconv.Itoa(row.TopK), strconv.Itoa(row.RouteBlockSize), strconv.Itoa(row.RouteTopBlocks),
+			fmt.Sprint(row.TurboQuantKVApplied), fmt.Sprint(row.DenseKVMaterialized), row.KVDecode, fmt.Sprint(row.AttentionWeightsApplied), fmt.Sprint(row.AttentionOutputApplied), fmt.Sprint(row.HiddenProjectionApplied), fmt.Sprint(row.ProjectionApplied),
+			row.Row, row.RetrievalBackend, row.Method, strconv.Itoa(row.Bits), strconv.FormatInt(row.QuantizerSeed, 10), fmt.Sprintf("%.6f", row.NDCGAt10), fmt.Sprintf("%.6f", row.MRRAt10), fmt.Sprintf("%.6f", row.RecallAt100), fmt.Sprintf("%.6f", row.MAPAt10), fmt.Sprint(row.NDCGAt10Delta), fmt.Sprint(row.RecallAt100Delta),
+		}
+		b.WriteString(strings.Join(values, "\t"))
+		b.WriteByte('\n')
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func writeSummaryTSV(path string, rows []scoreRow) error {
+	var b strings.Builder
+	b.WriteString("row\tsurface\tbits\tdoc_max_tokens\tquality_claim\tndcg@10\tmrr@10\trecall@100\tmethod\n")
+	for _, row := range rows {
+		b.WriteString(fmt.Sprintf("%s\t%s\t%d\t%d\t%v\t%.6f\t%.6f\t%.6f\t%s\n", row.Row, row.DocumentScoringSurface, row.Bits, row.MaxObservedDocTokens, row.QualityClaim, row.NDCGAt10, row.MRRAt10, row.RecallAt100, row.Method))
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func writeVerificationLog(path string, rows []scoreRow) error {
+	if len(rows) != 2 {
+		return fmt.Errorf("scorecard rows=%d, want 2", len(rows))
+	}
+	text := fmt.Sprintf("json_parse=pass\njsonl_parse=pass\nscorecard_rows=%d\nexport_quality_claim=%v\nmax_observed_doc_tokens=%d\ndense_ndcg_at_10=%.6f\nq4_ndcg_at_10=%.6f\n",
+		len(rows), rows[0].QualityClaim, rows[0].MaxObservedDocTokens, rows[0].NDCGAt10, rows[1].NDCGAt10)
+	return os.WriteFile(path, []byte(text), 0o644)
+}
+
+func main() {
+	root, err := findRoot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	runDir := runRoot(root)
+	logDir := filepath.Join(runDir, "logs")
+	fixtureDir := filepath.Join(runDir, "fixture", "tiny-long-beir")
+	vectorDir := filepath.Join(runDir, "vectors", "sparse-token-pool-single-vector")
+	diagnosticDir := filepath.Join(runDir, "diagnostic")
+	for _, dir := range []string{logDir, fixtureDir, vectorDir, diagnosticDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	artifact := getenv("EOS_SPARSE_LONG_CONTEXT_RETRIEVAL_SMOKE_ARTIFACT", defaultArtifact)
+	if !filepath.IsAbs(artifact) {
+		artifact = filepath.Join(root, artifact)
+	}
+	if _, err := os.Stat(artifact); err != nil {
+		fmt.Fprintf(os.Stderr, "artifact missing: %s: %v\n", artifact, err)
+		os.Exit(1)
+	}
+	maxSeq, err := parseIntEnv("EOS_SPARSE_LONG_CONTEXT_RETRIEVAL_SMOKE_MAX_SEQ", 1024)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	maxTokens, err := parseIntEnv("EOS_SPARSE_LONG_CONTEXT_RETRIEVAL_SMOKE_MAX_TOKENS", 1024)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	minDocTokens, err := parseIntEnv("EOS_SPARSE_LONG_CONTEXT_RETRIEVAL_SMOKE_MIN_DOC_TOKENS", 512)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := generateFixture(fixtureDir); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	diagnosticArtifact := filepath.Join(diagnosticDir, fmt.Sprintf("eos-embed-v1-maxseq%d.mll", maxSeq))
+	if err := runCapture(root, "rename-embed", []string{"go", "run", "./cmd/eos", "rename-embed", "--max-seq", strconv.Itoa(maxSeq), rel(root, artifact), rel(root, diagnosticArtifact)}, filepath.Join(logDir, "rename-embed.log")); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	exportManifestPath := filepath.Join(runDir, "export-manifest.json")
+	if err := runCapture(root, "export-sparse-token-pool-vectors", []string{
+		"go", "run", "./cmd/eos", "export-sparse-token-pool-vectors",
+		"--dataset", datasetName,
+		"--max-docs", "3",
+		"--max-queries", "1",
+		"--output-dim", "32",
+		"--top-k", "16",
+		"--route-block-size", "32",
+		"--route-top-blocks", "4",
+		"--bits", "4",
+		"--max-tokens", strconv.Itoa(maxTokens),
+		"--min-observed-doc-tokens", strconv.Itoa(minDocTokens),
+		"--manifest-json", rel(root, exportManifestPath),
+		rel(root, diagnosticArtifact),
+		rel(root, fixtureDir),
+		rel(root, vectorDir),
+	}, filepath.Join(logDir, "export-sparse-token-pool-vectors.log")); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	docVectors := filepath.Join(vectorDir, "doc-vectors.jsonl")
+	queryVectors := filepath.Join(vectorDir, "query-vectors.jsonl")
+	denseMetricsPath := filepath.Join(runDir, "retrieval-metrics.json")
+	perQueryPath := filepath.Join(runDir, "per-query.jsonl")
+	if err := runCapture(root, "eval-retrieval-vectors", []string{
+		"go", "run", "./cmd/eos", "eval-retrieval-vectors",
+		"--dataset", datasetName,
+		"--backend", "sparse-token-pool-single-vector",
+		"--artifact", rel(root, diagnosticArtifact),
+		"--top-k", "3",
+		"--max-docs", "3",
+		"--max-queries", "1",
+		"--doc-vectors", rel(root, docVectors),
+		"--query-vectors", rel(root, queryVectors),
+		"--metrics-json", rel(root, denseMetricsPath),
+		"--per-query-jsonl", rel(root, perQueryPath),
+		rel(root, fixtureDir),
+	}, filepath.Join(logDir, "eval-retrieval-vectors.log")); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	turboMetricsPath := filepath.Join(runDir, "retrieval-turboquant-metrics.json")
+	turboMetricsTSVPath := filepath.Join(runDir, "retrieval-turboquant-metrics.tsv")
+	if err := runCapture(root, "eval-retrieval-vectors-turboquant", []string{
+		"go", "run", "./cmd/eos", "eval-retrieval-vectors-turboquant",
+		"--dataset", datasetName,
+		"--backend", "sparse-token-pool-single-vector-turboquant-q4",
+		"--artifact", rel(root, diagnosticArtifact),
+		"--top-k", "3",
+		"--max-docs", "3",
+		"--max-queries", "1",
+		"--bits", "4",
+		"--doc-vectors", rel(root, docVectors),
+		"--query-vectors", rel(root, queryVectors),
+		"--metrics-json", rel(root, turboMetricsPath),
+		"--metrics-tsv", rel(root, turboMetricsTSVPath),
+		rel(root, fixtureDir),
+	}, filepath.Join(logDir, "eval-retrieval-vectors-turboquant.log")); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	for _, path := range []string{
+		filepath.Join(fixtureDir, "corpus.jsonl"),
+		filepath.Join(fixtureDir, "queries.jsonl"),
+		docVectors,
+		queryVectors,
+		perQueryPath,
+	} {
+		if err := validateJSONL(path); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	card, err := writeScorecard(root, runDir, exportManifestPath, filepath.Join(fixtureDir, "fixture-manifest.json"), denseMetricsPath, turboMetricsPath, minDocTokens)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := writeScorecardTSV(filepath.Join(runDir, "scorecard.tsv"), card.Rows); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := writeSummaryTSV(filepath.Join(runDir, "summary.tsv"), card.Rows); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := writeVerificationLog(filepath.Join(runDir, "verification.log"), card.Rows); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Printf("sparse long-context retrieval smoke: pass\n")
+	fmt.Printf("run_root: %s\n", rel(root, runDir))
+	fmt.Printf("quality_claim: false\n")
+	fmt.Printf("max_observed_doc_tokens: %d\n", card.Rows[0].MaxObservedDocTokens)
+	fmt.Printf("summary: %s\n", rel(root, filepath.Join(runDir, "summary.tsv")))
+}
