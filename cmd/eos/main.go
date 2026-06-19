@@ -569,6 +569,9 @@ func runExportSparseTokenPoolVectors(args []string) error {
 	documentChunkWords := fs.Int("document-chunk-words", 0, "when positive, export parent-child document word chunks")
 	documentChunkOverlap := fs.Int("document-chunk-overlap", 0, "word overlap between adjacent document chunks")
 	documentChunkMinWords := fs.Int("document-chunk-min-words", 1, "minimum words for a trailing document chunk")
+	tokenSpanTokens := fs.Int("token-span-tokens", 0, "when positive, export child vectors by pooling one encoded document over token spans of this size")
+	tokenSpanOverlap := fs.Int("token-span-overlap", 0, "token overlap between adjacent token-span child vectors")
+	tokenSpanMinTokens := fs.Int("token-span-min-tokens", 0, "minimum tokens for a trailing token span; default 1 when token-span mode is enabled")
 	documentPrefix := fs.String("document-prefix", "", "prefix prepended to document/chunk text before embedding")
 	queryPrefix := fs.String("query-prefix", "", "prefix prepended to query text before embedding")
 	manifestPath := fs.String("manifest-json", "", "write export summary JSON manifest")
@@ -620,6 +623,9 @@ func runExportSparseTokenPoolVectors(args []string) error {
 		DocumentChunkWords:    *documentChunkWords,
 		DocumentChunkOverlap:  *documentChunkOverlap,
 		DocumentChunkMinWords: *documentChunkMinWords,
+		TokenSpanTokens:       *tokenSpanTokens,
+		TokenSpanOverlap:      *tokenSpanOverlap,
+		TokenSpanMinTokens:    *tokenSpanMinTokens,
 		DocumentPrefix:        *documentPrefix,
 		QueryPrefix:           *queryPrefix,
 		ManifestJSONPath:      *manifestPath,
@@ -644,6 +650,9 @@ func runExportSparseTokenPoolVectors(args []string) error {
 	fmt.Printf(" dim=%d quality_claim=%t\n", summary.Dimension, summary.QualityClaim)
 	fmt.Printf("method: %s\n", summary.Method)
 	fmt.Printf("attention: mode=%s turboquant_kv_applied=%t kv_decode=%s top_k=%d route_block_size=%d route_top_blocks=%d bits=%d key_bits=%d value_bits=%d seed=%d\n", summary.AttentionMode, summary.TurboQuantKVApplied, summary.KVDecode, summary.TopK, summary.RouteBlockSize, summary.RouteTopBlocks, summary.Bits, summary.KeyBits, summary.ValueBits, summary.QuantizerSeed)
+	if summary.TokenSpanTokens > 0 {
+		fmt.Printf("token_span: tokens=%d overlap=%d min_tokens=%d\n", summary.TokenSpanTokens, summary.TokenSpanOverlap, summary.TokenSpanMinTokens)
+	}
 	fmt.Printf("tokenizer_output: doc_records=%d doc_max_tokens=%d doc_mean_tokens=%.2f doc_total_tokens=%d doc_truncated_by_max_tokens=%d query_records=%d query_max_tokens=%d query_mean_tokens=%.2f query_total_tokens=%d query_truncated_by_max_tokens=%d\n", summary.DocumentTokenizerOutput.RecordCount, summary.DocumentTokenizerOutput.MaxObservedTokens, summary.DocumentTokenizerOutput.MeanObservedTokens, summary.DocumentTokenizerOutput.TotalTokens, summary.DocumentTokenizerOutput.TruncatedByMaxTokensCount, summary.QueryTokenizerOutput.RecordCount, summary.QueryTokenizerOutput.MaxObservedTokens, summary.QueryTokenizerOutput.MeanObservedTokens, summary.QueryTokenizerOutput.TotalTokens, summary.QueryTokenizerOutput.TruncatedByMaxTokensCount)
 	fmt.Printf("weights: attention=%t attention_output=%t hidden_projection=%t projection=%t dense_kv_materialized=%t\n", summary.AttentionWeightsApplied, summary.AttentionOutputApplied, summary.HiddenProjectionApplied, summary.ProjectionApplied, summary.DenseKVMaterialized)
 	if summary.DocVectorPath != "" {
@@ -6624,7 +6633,7 @@ func printUsage() {
 	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Eos metadata in XMTA.")
 	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
 	fmt.Println("export-retrieval-vectors writes BEIR document/query vector caches from a packaged or sealed Eos embedding .mll, optionally as parent-child document chunks.")
-	fmt.Println("export-sparse-token-pool-vectors writes experimental_sparse_token_pool BEIR vector caches from tokenizer ids, token_embedding rows, and host-reference attention (--attention-mode turboquant_sparse|dense); quality_claim=false; --min-observed-doc-tokens can fail runs that never consume the requested document token length.")
+	fmt.Println("export-sparse-token-pool-vectors writes experimental_sparse_token_pool BEIR vector caches from tokenizer ids, token_embedding rows, and host-reference attention (--attention-mode turboquant_sparse|dense); --token-span-tokens emits child vectors from one encoded document pass; quality_claim=false; --min-observed-doc-tokens can fail runs that never consume the requested document token length.")
 	fmt.Println("export-timeseries-vectors writes text-rendered time-series window child-vector caches plus query vectors for the multivector TurboQuant quality harness.")
 	fmt.Println("export-event-trace-vectors writes text-rendered event/trace child-vector caches plus query vectors for the multivector TurboQuant quality harness.")
 	fmt.Println("eval-retrieval scores a sealed embedding .mll on BEIR-style corpus/query/qrels files with nDCG/MRR/Recall metrics.")

@@ -38,6 +38,9 @@ type SparseTokenPoolRetrievalVectorExportConfig struct {
 	DocumentChunkWords    int
 	DocumentChunkOverlap  int
 	DocumentChunkMinWords int
+	TokenSpanTokens       int
+	TokenSpanOverlap      int
+	TokenSpanMinTokens    int
 	DocumentPrefix        string
 	QueryPrefix           string
 	ManifestJSONPath      string
@@ -77,6 +80,9 @@ type SparseTokenPoolRetrievalVectorExportSummary struct {
 	DocumentChunkWords      int                       `json:"document_chunk_words,omitempty"`
 	DocumentChunkOverlap    int                       `json:"document_chunk_overlap,omitempty"`
 	DocumentChunkMinWords   int                       `json:"document_chunk_min_words,omitempty"`
+	TokenSpanTokens         int                       `json:"token_span_tokens,omitempty"`
+	TokenSpanOverlap        int                       `json:"token_span_overlap,omitempty"`
+	TokenSpanMinTokens      int                       `json:"token_span_min_tokens,omitempty"`
 	BatchSize               int                       `json:"batch_size"`
 	MaxDocs                 int                       `json:"max_docs,omitempty"`
 	MaxQueries              int                       `json:"max_queries,omitempty"`
@@ -141,6 +147,11 @@ type sparseTokenPoolTokenLengthStats struct {
 type sparseTokenPoolTokenObservation struct {
 	ObservedTokens       int
 	TruncatedByMaxTokens bool
+}
+
+type sparseTokenPoolTokenSpan struct {
+	start int
+	end   int
 }
 
 type sparseTokenPoolEncoder struct {
@@ -225,7 +236,13 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 	var docVectorPath, childDocVectorPath string
 	var dim, modelDim, childCount int
 	var docTokenStats, queryTokenStats sparseTokenPoolTokenLengthStats
-	if cfg.DocumentChunkWords > 0 {
+	if cfg.TokenSpanTokens > 0 {
+		childDocVectorPath = filepath.Join(cfg.OutputDir, "child-doc-vectors.jsonl")
+		dim, modelDim, docTokenStats, childCount, err = writeSparseTokenPoolTokenSpanChildVectorCache(ctx, encoder, corpus, childDocVectorPath, cfg.DocumentPrefix, cfg.OutputDim)
+		if err != nil {
+			return SparseTokenPoolRetrievalVectorExportSummary{}, fmt.Errorf("write token-span child document vectors: %w", err)
+		}
+	} else if cfg.DocumentChunkWords > 0 {
 		chunks := chunkRetrievalDocuments(corpus, cfg.DocumentChunkWords, cfg.DocumentChunkOverlap, cfg.DocumentChunkMinWords)
 		if len(chunks) == 0 {
 			return SparseTokenPoolRetrievalVectorExportSummary{}, fmt.Errorf("document chunking selected no chunks")
@@ -279,6 +296,9 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 		DocumentChunkWords:      cfg.DocumentChunkWords,
 		DocumentChunkOverlap:    cfg.DocumentChunkOverlap,
 		DocumentChunkMinWords:   cfg.DocumentChunkMinWords,
+		TokenSpanTokens:         cfg.TokenSpanTokens,
+		TokenSpanOverlap:        cfg.TokenSpanOverlap,
+		TokenSpanMinTokens:      cfg.TokenSpanMinTokens,
 		BatchSize:               cfg.BatchSize,
 		MaxDocs:                 cfg.MaxDocs,
 		MaxQueries:              cfg.MaxQueries,
@@ -357,6 +377,9 @@ func normalizeSparseTokenPoolExportConfig(cfg SparseTokenPoolRetrievalVectorExpo
 	if cfg.DocumentChunkMinWords == 0 {
 		cfg.DocumentChunkMinWords = 1
 	}
+	if cfg.TokenSpanTokens > 0 && cfg.TokenSpanMinTokens == 0 {
+		cfg.TokenSpanMinTokens = 1
+	}
 	if cfg.Bits == 0 {
 		cfg.Bits = 4
 	}
@@ -386,6 +409,21 @@ func validateSparseTokenPoolExportConfig(cfg SparseTokenPoolRetrievalVectorExpor
 		DocumentChunkMinWords: cfg.DocumentChunkMinWords,
 	}); err != nil {
 		return err
+	}
+	if cfg.TokenSpanTokens < 0 || cfg.TokenSpanOverlap < 0 || cfg.TokenSpanMinTokens < 0 {
+		return fmt.Errorf("token-span-tokens, token-span-overlap, and token-span-min-tokens must be non-negative")
+	}
+	if cfg.TokenSpanTokens == 0 && (cfg.TokenSpanOverlap != 0 || cfg.TokenSpanMinTokens != 0) {
+		return fmt.Errorf("token-span-overlap and token-span-min-tokens require token-span-tokens")
+	}
+	if cfg.TokenSpanTokens > 0 && cfg.DocumentChunkWords > 0 {
+		return fmt.Errorf("token-span-tokens is mutually exclusive with document-chunk-words")
+	}
+	if cfg.TokenSpanTokens > 0 && cfg.TokenSpanOverlap >= cfg.TokenSpanTokens {
+		return fmt.Errorf("token-span-overlap must be smaller than token-span-tokens")
+	}
+	if cfg.TokenSpanTokens > 0 && cfg.TokenSpanMinTokens > cfg.TokenSpanTokens {
+		return fmt.Errorf("token-span-min-tokens must be less than or equal to token-span-tokens")
 	}
 	if cfg.Bits != 2 && cfg.Bits != 4 && cfg.Bits != 8 {
 		return fmt.Errorf("bits must be 2, 4, or 8")
@@ -532,6 +570,73 @@ func writeSparseTokenPoolVectorCache(ctx context.Context, encoder *sparseTokenPo
 	return dim, modelDim, stats, nil
 }
 
+func writeSparseTokenPoolTokenSpanChildVectorCache(ctx context.Context, encoder *sparseTokenPoolEncoder, records []retrievalTextRecord, path, prefix string, outputDim int) (int, int, sparseTokenPoolTokenLengthStats, int, error) {
+	if !encoder.fullEncoderOK {
+		return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, fmt.Errorf("token-span child vectors require full manifest encoder weights; missing/invalid weights: %v", encoder.skippedWeights)
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, err
+	}
+	defer file.Close()
+	writer := bufio.NewWriter(file)
+	dim, modelDim, childCount := 0, 0, 0
+	var stats sparseTokenPoolTokenLengthStats
+	for _, record := range prefixRetrievalRecords(records, prefix) {
+		if err := ctx.Err(); err != nil {
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, err
+		}
+		rows, mask, observation, err := encoder.embedTextTokenRows(record.Text)
+		if err != nil {
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, fmt.Errorf("token rows for %q: %w", record.ID, err)
+		}
+		stats.add(observation)
+		seqLen := observation.ObservedTokens
+		rowDim := encoder.modelDimension
+		if modelDim == 0 {
+			modelDim = rowDim
+		} else if rowDim != modelDim {
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, fmt.Errorf("token rows for %q have encoded dimension %d, want %d", record.ID, rowDim, modelDim)
+		}
+		spans := sparseTokenPoolTokenSpans(seqLen, encoder.cfg.TokenSpanTokens, encoder.cfg.TokenSpanOverlap, encoder.cfg.TokenSpanMinTokens)
+		if len(spans) == 0 {
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, fmt.Errorf("token-span mode selected no spans for %q", record.ID)
+		}
+		for i, span := range spans {
+			vector, err := poolSparseTokenRowsRange(rows, mask, span.start, span.end, seqLen, rowDim)
+			if err != nil {
+				return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, fmt.Errorf("token span %d for %q: %w", i, record.ID, err)
+			}
+			embedding, err := transformRetrievalExportVector(vector, outputDim)
+			if err != nil {
+				return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, fmt.Errorf("token span %d for %q: %w", i, record.ID, err)
+			}
+			if dim == 0 {
+				dim = len(embedding)
+			} else if len(embedding) != dim {
+				return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, fmt.Errorf("token span %d for %q has dimension %d, want %d", i, record.ID, len(embedding), dim)
+			}
+			row := retrievalVectorExportRow{
+				ParentID:  record.ID,
+				ChildID:   fmt.Sprintf("%s#token-span-%04d", record.ID, i),
+				Embedding: embedding,
+			}
+			data, err := json.Marshal(row)
+			if err != nil {
+				return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, err
+			}
+			if _, err := writer.Write(append(data, '\n')); err != nil {
+				return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, err
+			}
+			childCount++
+		}
+	}
+	if err := writer.Flush(); err != nil {
+		return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, err
+	}
+	return dim, modelDim, stats, childCount, nil
+}
+
 func writeSparseTokenPoolChildVectorCache(ctx context.Context, encoder *sparseTokenPoolEncoder, chunks []retrievalDocumentChunk, path, prefix string, outputDim int) (int, int, sparseTokenPoolTokenLengthStats, error) {
 	file, err := os.Create(path)
 	if err != nil {
@@ -580,24 +685,9 @@ func writeSparseTokenPoolChildVectorCache(ctx context.Context, encoder *sparseTo
 }
 
 func (e *sparseTokenPoolEncoder) embedText(text string) ([]float32, sparseTokenPoolTokenObservation, error) {
-	tokens, mask, err := e.model.TokenizeText(text)
+	tokens, mask, observation, err := e.tokenizeText(text)
 	if err != nil {
 		return nil, sparseTokenPoolTokenObservation{}, err
-	}
-	truncatedByMaxTokens := false
-	if e.cfg.MaxTokens > 0 && len(tokens) > e.cfg.MaxTokens {
-		tokens = tokens[:e.cfg.MaxTokens]
-		if len(mask) > e.cfg.MaxTokens {
-			mask = mask[:e.cfg.MaxTokens]
-		}
-		truncatedByMaxTokens = true
-	}
-	if len(tokens) == 0 {
-		return nil, sparseTokenPoolTokenObservation{}, fmt.Errorf("tokenizer produced no tokens")
-	}
-	observation := sparseTokenPoolTokenObservation{
-		ObservedTokens:       len(tokens),
-		TruncatedByMaxTokens: truncatedByMaxTokens,
 	}
 	var vector []float32
 	if e.fullEncoderOK {
@@ -609,6 +699,44 @@ func (e *sparseTokenPoolEncoder) embedText(text string) ([]float32, sparseTokenP
 		return nil, sparseTokenPoolTokenObservation{}, err
 	}
 	return vector, observation, nil
+}
+
+func (e *sparseTokenPoolEncoder) embedTextTokenRows(text string) ([]float32, []int32, sparseTokenPoolTokenObservation, error) {
+	tokens, mask, observation, err := e.tokenizeText(text)
+	if err != nil {
+		return nil, nil, sparseTokenPoolTokenObservation{}, err
+	}
+	if !e.fullEncoderOK {
+		return nil, nil, sparseTokenPoolTokenObservation{}, fmt.Errorf("full manifest encoder weights are required; missing/invalid weights: %v", e.skippedWeights)
+	}
+	rows, err := e.embedTextFullEncoderRows(tokens)
+	if err != nil {
+		return nil, nil, sparseTokenPoolTokenObservation{}, err
+	}
+	return rows, mask, observation, nil
+}
+
+func (e *sparseTokenPoolEncoder) tokenizeText(text string) ([]int32, []int32, sparseTokenPoolTokenObservation, error) {
+	tokens, mask, err := e.model.TokenizeText(text)
+	if err != nil {
+		return nil, nil, sparseTokenPoolTokenObservation{}, err
+	}
+	truncatedByMaxTokens := false
+	if e.cfg.MaxTokens > 0 && len(tokens) > e.cfg.MaxTokens {
+		tokens = tokens[:e.cfg.MaxTokens]
+		if len(mask) > e.cfg.MaxTokens {
+			mask = mask[:e.cfg.MaxTokens]
+		}
+		truncatedByMaxTokens = true
+	}
+	if len(tokens) == 0 {
+		return nil, nil, sparseTokenPoolTokenObservation{}, fmt.Errorf("tokenizer produced no tokens")
+	}
+	observation := sparseTokenPoolTokenObservation{
+		ObservedTokens:       len(tokens),
+		TruncatedByMaxTokens: truncatedByMaxTokens,
+	}
+	return tokens, mask, observation, nil
 }
 
 func (e *sparseTokenPoolEncoder) embedTokenIDs(tokens []int32) ([]float32, error) {
@@ -706,6 +834,16 @@ func (s sparseTokenPoolTokenLengthStats) summary() TokenizerOutputTokenStats {
 }
 
 func (e *sparseTokenPoolEncoder) embedTextFullEncoder(tokens []int32, mask []int32) ([]float32, error) {
+	current, err := e.embedTextFullEncoderRows(tokens)
+	if err != nil {
+		return nil, err
+	}
+	seqLen := len(tokens)
+	dim := e.tokenEmbedding.Shape[1]
+	return maskedMeanPoolNormalized(current, mask, seqLen, dim), nil
+}
+
+func (e *sparseTokenPoolEncoder) embedTextFullEncoderRows(tokens []int32) ([]float32, error) {
 	current := e.gatherTokenRows(tokens)
 	seqLen := len(tokens)
 	dim := e.tokenEmbedding.Shape[1]
@@ -740,7 +878,7 @@ func (e *sparseTokenPoolEncoder) embedTextFullEncoder(tokens []int32, mask []int
 		current = ffnOut
 	}
 	normalizeRowsInPlace(current, seqLen, dim)
-	return maskedMeanPoolNormalized(current, mask, seqLen, dim), nil
+	return current, nil
 }
 
 func (e *sparseTokenPoolEncoder) gatherTokenRows(tokens []int32) []float32 {
@@ -963,6 +1101,65 @@ func maskedMeanPoolNormalized(rows []float32, mask []int32, rowCount, dim int) [
 		out[d] *= scale
 	}
 	return normalizeRetrievalVector(out)
+}
+
+func sparseTokenPoolTokenSpans(tokenCount, spanTokens, overlap, minTokens int) []sparseTokenPoolTokenSpan {
+	if tokenCount <= 0 || spanTokens <= 0 {
+		return nil
+	}
+	if minTokens <= 0 {
+		minTokens = 1
+	}
+	if tokenCount <= spanTokens {
+		if tokenCount < minTokens {
+			return nil
+		}
+		return []sparseTokenPoolTokenSpan{{start: 0, end: tokenCount}}
+	}
+	step := spanTokens - overlap
+	if step <= 0 {
+		return nil
+	}
+	spans := []sparseTokenPoolTokenSpan{}
+	for start := 0; start < tokenCount; start += step {
+		end := start + spanTokens
+		if end > tokenCount {
+			end = tokenCount
+		}
+		if end-start < minTokens {
+			break
+		}
+		spans = append(spans, sparseTokenPoolTokenSpan{start: start, end: end})
+		if end >= tokenCount {
+			break
+		}
+	}
+	return spans
+}
+
+func poolSparseTokenRowsRange(rows []float32, mask []int32, start, end, rowCount, dim int) ([]float32, error) {
+	if start < 0 || end > rowCount || start >= end {
+		return nil, fmt.Errorf("invalid token span [%d,%d) for token count %d", start, end, rowCount)
+	}
+	out := make([]float32, dim)
+	active := 0
+	for r := start; r < end; r++ {
+		if r < len(mask) && mask[r] == 0 {
+			continue
+		}
+		active++
+		for d := 0; d < dim; d++ {
+			out[d] += rows[r*dim+d]
+		}
+	}
+	if active == 0 {
+		return nil, fmt.Errorf("span [%d,%d) has no active tokens", start, end)
+	}
+	scale := float32(1.0 / float64(active))
+	for d := range out {
+		out[d] *= scale
+	}
+	return normalizeRetrievalVector(out), nil
 }
 
 func matmulRowsRight(rows []float32, rowCount, inDim int, weight *backend.Tensor) []float32 {

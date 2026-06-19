@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -348,6 +349,131 @@ func TestSparseTokenPoolRetrievalVectorExportAppliesManifestEncoderFFN(t *testin
 	}
 	if !manifest.HiddenProjectionApplied || manifest.EncoderRepeatsApplied != 2 || manifest.HiddenProjectionParam != "ffn_up" {
 		t.Fatalf("manifest = %+v", manifest)
+	}
+}
+
+func TestSparseTokenPoolRetrievalVectorExportTokenSpanChildren(t *testing.T) {
+	model, artifactPath := loadTinySparseTokenPoolFFNExportModel(t)
+	dir := t.TempDir()
+	datasetDir := writeTinyRetrievalExportDataset(t, dir)
+	outputDir := filepath.Join(dir, "sparse-token-span-vectors")
+	manifestPath := filepath.Join(dir, "sparse-token-span.manifest.json")
+	corpusPath, queriesPath, qrelsPath := BEIRRetrievalPaths(datasetDir, "test")
+
+	summary, err := ExportSparseTokenPoolRetrievalVectors(context.Background(), model, SparseTokenPoolRetrievalVectorExportConfig{
+		DatasetName:        "tiny-sparse-token-span",
+		ArtifactPath:       artifactPath,
+		CorpusPath:         corpusPath,
+		QueriesPath:        queriesPath,
+		QrelsPath:          qrelsPath,
+		OutputDir:          outputDir,
+		BatchSize:          1,
+		MaxDocs:            1,
+		MaxQueries:         1,
+		OutputDim:          2,
+		ManifestJSONPath:   manifestPath,
+		TopK:               2,
+		Bits:               4,
+		Seed:               31,
+		MaxTokens:          5,
+		TokenSpanTokens:    2,
+		TokenSpanOverlap:   1,
+		TokenSpanMinTokens: 1,
+	})
+	if err != nil {
+		t.Fatalf("export sparse token span vectors: %v", err)
+	}
+	if summary.DocVectorPath != "" || summary.ChildDocVectorPath != filepath.Join(outputDir, "child-doc-vectors.jsonl") {
+		t.Fatalf("summary document paths = %+v", summary)
+	}
+	if summary.ChildVectors != 4 || summary.DocumentTokenizerOutput.RecordCount != 1 || summary.DocumentTokenizerOutput.MaxObservedTokens != 5 || summary.DocumentTokenizerOutput.TotalTokens != 5 {
+		t.Fatalf("summary span counts/stats = %+v", summary)
+	}
+	if summary.TokenSpanTokens != 2 || summary.TokenSpanOverlap != 1 || summary.TokenSpanMinTokens != 1 {
+		t.Fatalf("summary token span settings = %+v", summary)
+	}
+	if !summary.HiddenProjectionApplied || summary.EncoderRepeatsApplied != 2 {
+		t.Fatalf("expected full encoder applied: %+v", summary)
+	}
+	rows := readJSONLRows(t, summary.ChildDocVectorPath)
+	if len(rows) != 4 {
+		t.Fatalf("child rows = %d, want 4", len(rows))
+	}
+	for i, row := range rows {
+		wantChildID := fmt.Sprintf("d1#token-span-%04d", i)
+		if row["parent_id"] != "d1" || row["child_id"] != wantChildID {
+			t.Fatalf("child row %d ids = %+v, want parent d1 child %s", i, row, wantChildID)
+		}
+		embedding, ok := row["embedding"].([]any)
+		if !ok || len(embedding) != 2 {
+			t.Fatalf("child row %d embedding = %+v", i, row["embedding"])
+		}
+		var norm float64
+		for _, value := range embedding {
+			v := value.(float64)
+			norm += v * v
+		}
+		if math.Abs(math.Sqrt(norm)-1) > 1e-5 {
+			t.Fatalf("child row %d norm = %.8f, want normalized", i, math.Sqrt(norm))
+		}
+	}
+	queryRows := readJSONLRows(t, summary.QueryVectorPath)
+	if len(queryRows) != 1 || queryRows[0]["id"] != "q1" {
+		t.Fatalf("query rows = %+v", queryRows)
+	}
+
+	var manifest SparseTokenPoolRetrievalVectorExportSummary
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if manifest.TokenSpanTokens != 2 || manifest.TokenSpanOverlap != 1 || manifest.TokenSpanMinTokens != 1 || manifest.DocumentTokenizerOutput != summary.DocumentTokenizerOutput {
+		t.Fatalf("manifest token span fields/stats = %+v", manifest)
+	}
+}
+
+func TestSparseTokenPoolRetrievalVectorExportTokenSpanRequiresFullEncoder(t *testing.T) {
+	model, artifactPath := loadTinySparseTokenPoolExportModel(t)
+	dir := t.TempDir()
+	datasetDir := writeTinyRetrievalExportDataset(t, dir)
+	corpusPath, queriesPath, qrelsPath := BEIRRetrievalPaths(datasetDir, "test")
+
+	_, err := ExportSparseTokenPoolRetrievalVectors(context.Background(), model, SparseTokenPoolRetrievalVectorExportConfig{
+		DatasetName:      "tiny-sparse-token-span-no-ffn",
+		ArtifactPath:     artifactPath,
+		CorpusPath:       corpusPath,
+		QueriesPath:      queriesPath,
+		QrelsPath:        qrelsPath,
+		OutputDir:        filepath.Join(dir, "sparse-token-span-no-ffn"),
+		TokenSpanTokens:  2,
+		TokenSpanOverlap: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "token-span child vectors require full manifest encoder weights") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSparseTokenPoolRetrievalVectorExportRejectsTokenSpanChunkMix(t *testing.T) {
+	model, artifactPath := loadTinySparseTokenPoolFFNExportModel(t)
+	dir := t.TempDir()
+	datasetDir := writeTinyRetrievalExportDataset(t, dir)
+	corpusPath, queriesPath, qrelsPath := BEIRRetrievalPaths(datasetDir, "test")
+
+	_, err := ExportSparseTokenPoolRetrievalVectors(context.Background(), model, SparseTokenPoolRetrievalVectorExportConfig{
+		DatasetName:        "tiny-sparse-token-span-invalid",
+		ArtifactPath:       artifactPath,
+		CorpusPath:         corpusPath,
+		QueriesPath:        queriesPath,
+		QrelsPath:          qrelsPath,
+		OutputDir:          filepath.Join(dir, "sparse-token-span-invalid"),
+		DocumentChunkWords: 4,
+		TokenSpanTokens:    2,
+	})
+	if err == nil || !strings.Contains(err.Error(), "token-span-tokens is mutually exclusive with document-chunk-words") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
