@@ -879,11 +879,11 @@ func rowsFromTurboQuantMultiVectorRetrievalMetrics(category string, baseline str
 }
 
 func tsvHeader() string {
-	return "category\tdataset\tbaseline\tstatus\tmetrics_path\tmethod\tbits\trerank_storage\tndcg_at_10\tndcg_at_100\tmrr_at_10\tprecision_at_1\tprecision_at_5\tprecision_at_10\thit_at_1\thit_at_5\thit_at_10\tmap_at_10\tmap_at_100\trecall_at_10\trecall_at_100\tndcg_at_10_delta\trecall_at_100_delta\tvector_bytes\tdense_vector_bytes\trerank_sidecar_bytes\ttotal_vector_bytes\tcompression_ratio\ttotal_compression_ratio\tdocs_per_second\ttop1_accuracy\tmean_reciprocal_rank\troc_auc\tscore_margin\tloss\tpair_count\tdocuments\tqueries\telapsed_seconds\teval_pairs_per_second\tdocuments_per_second\tqueries_per_second\tscores_per_second\toptimizer_updates\tforward_backend\trerank_overfetch\trerank_scores\n"
+	return "category\tdataset\tbaseline\tstatus\tmetrics_path\tmethod\tbits\tquantizer_seed\trerank_storage\tndcg_at_10\tndcg_at_100\tmrr_at_10\tprecision_at_1\tprecision_at_5\tprecision_at_10\thit_at_1\thit_at_5\thit_at_10\tmap_at_10\tmap_at_100\trecall_at_10\trecall_at_100\tndcg_at_10_delta\trecall_at_100_delta\tvector_bytes\tdense_vector_bytes\trerank_sidecar_bytes\ttotal_vector_bytes\tcompression_ratio\ttotal_compression_ratio\tdocs_per_second\ttop1_accuracy\tmean_reciprocal_rank\troc_auc\tscore_margin\tloss\tpair_count\tdocuments\tqueries\telapsed_seconds\teval_pairs_per_second\tdocuments_per_second\tqueries_per_second\tscores_per_second\toptimizer_updates\tforward_backend\trerank_overfetch\trerank_scores\n"
 }
 
 func formatRow(row scoreboardRow) string {
-	return fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%+.6f\t%+.6f\t%d\t%d\t%d\t%d\t%.6f\t%.6f\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%.3f\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%s\t%d\t%d\n",
+	return fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%+.6f\t%+.6f\t%d\t%d\t%d\t%d\t%.6f\t%.6f\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%.3f\t%.2f\t%.2f\t%.2f\t%.2f\t%d\t%s\t%d\t%d\n",
 		row.Category,
 		row.Dataset,
 		row.Baseline,
@@ -891,6 +891,7 @@ func formatRow(row scoreboardRow) string {
 		row.MetricsPath,
 		row.Method,
 		row.Bits,
+		row.QuantizerSeed,
 		row.RerankStorage,
 		row.NDCGAt10,
 		row.NDCGAt100,
