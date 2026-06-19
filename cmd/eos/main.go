@@ -1355,6 +1355,8 @@ func runEvalRetrievalMultiVectorTurboQuant(args []string) error {
 	bitsRaw := fs.String("bits", "2,4,8", "comma-separated TurboQuant IP bit widths; supported: 2..8")
 	quantizerSeed := fs.Int64("quantizer-seed", eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed, "TurboQuant IP quantizer seed for deterministic rows")
 	baselineDim := fs.Int("baseline-dim", 0, "dense fp32 baseline dimension for one-parent-vector budget; 0 uses child vector dimension")
+	aggregation := fs.String("aggregation", eosruntime.TurboQuantMultiVectorAggregationMax, "parent aggregation mode: max, top2-mean, top3-mean, top5-mean")
+	childCountPenalty := fs.Float64("child-count-penalty", 0, "subtract FLOAT*log1p(parent child count) from each parent score after aggregation")
 	allowMissingRelevant := fs.Bool("allow-missing-relevant", false, "allow qrels-relevant parent IDs missing from the child-vector cache")
 	metricsPath := fs.String("metrics-json", "", "write parent-child TurboQuant retrieval metrics JSON")
 	metricsTSVPath := fs.String("metrics-tsv", "", "write compact parent-child dense/quantized metrics TSV")
@@ -1369,6 +1371,14 @@ func runEvalRetrievalMultiVectorTurboQuant(args []string) error {
 	if err != nil {
 		return fmt.Errorf("bits: %w", err)
 	}
+	if *childCountPenalty < 0 {
+		return fmt.Errorf("child-count-penalty must be non-negative")
+	}
+	switch *aggregation {
+	case eosruntime.TurboQuantMultiVectorAggregationMax, "top2-mean", "top3-mean", "top5-mean":
+	default:
+		return fmt.Errorf("aggregation must be one of max, top2-mean, top3-mean, top5-mean")
+	}
 	datasetDir := fs.Arg(0)
 	corpusPath, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
 	if *qrelsPath == "" {
@@ -1378,22 +1388,24 @@ func runEvalRetrievalMultiVectorTurboQuant(args []string) error {
 		*datasetName = filepath.Base(datasetDir)
 	}
 	metrics, err := eosruntime.EvaluateTurboQuantMultiVectorCacheRetrieval(context.Background(), eosruntime.RetrievalEvalConfig{
-		DatasetName:          *datasetName,
-		ArtifactPath:         *artifactLabel,
-		CorpusPath:           corpusPath,
-		QueriesPath:          queriesPath,
-		QrelsPath:            *qrelsPath,
-		DocVectorPath:        *docVectorsPath,
-		QueryVectorPath:      *queryVectorsPath,
-		BackendName:          *backendName,
-		TopK:                 *topK,
-		PerQueryTopK:         *topK,
-		MaxDocs:              *maxDocs,
-		MaxQueries:           *maxQueries,
-		AllowMissingRelevant: *allowMissingRelevant,
-		QuantizerSeed:        *quantizerSeed,
-		BaselineDim:          *baselineDim,
-		PerQueryJSONLPath:    *perQueryPath,
+		DatasetName:                  *datasetName,
+		ArtifactPath:                 *artifactLabel,
+		CorpusPath:                   corpusPath,
+		QueriesPath:                  queriesPath,
+		QrelsPath:                    *qrelsPath,
+		DocVectorPath:                *docVectorsPath,
+		QueryVectorPath:              *queryVectorsPath,
+		BackendName:                  *backendName,
+		TopK:                         *topK,
+		PerQueryTopK:                 *topK,
+		MaxDocs:                      *maxDocs,
+		MaxQueries:                   *maxQueries,
+		AllowMissingRelevant:         *allowMissingRelevant,
+		QuantizerSeed:                *quantizerSeed,
+		BaselineDim:                  *baselineDim,
+		MultiVectorAggregation:       *aggregation,
+		MultiVectorChildCountPenalty: *childCountPenalty,
+		PerQueryJSONLPath:            *perQueryPath,
 	}, bits)
 	if err != nil {
 		return err

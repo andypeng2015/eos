@@ -1515,6 +1515,91 @@ func TestEvaluateTurboQuantMultiVectorRetrievalWritesPerQueryJSONL(t *testing.T)
 	}
 }
 
+func TestEvaluateTurboQuantMultiVectorRetrievalDefaultMaxLabelsRemain(t *testing.T) {
+	children := []retrievalChildVectorRecord{
+		{ParentID: "p1", ChildID: "p1-a", Vector: []float32{0.9, 0, 0, 0, 0, 0, 0, 0}},
+		{ParentID: "p2", ChildID: "p2-a", Vector: []float32{1, 0, 0, 0, 0, 0, 0, 0}},
+	}
+	queries := []retrievalVectorRecord{{ID: "q1", Vector: []float32{1, 0, 0, 0, 0, 0, 0, 0}}}
+	qrels := retrievalQrels{"q1": {"p1": 1}}
+
+	metrics, err := evaluateTurboQuantMultiVectorRetrieval(context.Background(), RetrievalEvalConfig{
+		DatasetName:   "tiny-default-max",
+		TopK:          2,
+		QuantizerSeed: 99,
+	}, []int{8}, children, queries, qrels)
+	if err != nil {
+		t.Fatalf("evaluate multivector turboquant retrieval: %v", err)
+	}
+	if metrics.Config.Aggregation != TurboQuantMultiVectorAggregationMax || metrics.Config.ChildCountPenalty != 0 {
+		t.Fatalf("aggregation config = %+v", metrics.Config)
+	}
+	if metrics.Dense.Aggregation != TurboQuantMultiVectorAggregationMax || metrics.Dense.ChildCountPenalty != 0 {
+		t.Fatalf("dense aggregation = %+v", metrics.Dense)
+	}
+	if len(metrics.Rows) != 1 || metrics.Rows[0].Method != "turboquant_ip_b8_child_max" || metrics.Rows[0].Aggregation != TurboQuantMultiVectorAggregationMax || metrics.Rows[0].ChildCountPenalty != 0 {
+		t.Fatalf("row default identity = %+v", metrics.Rows)
+	}
+}
+
+func TestTopMeanMultiVectorAggregationCanChangeParentOrdering(t *testing.T) {
+	children := []retrievalChildVectorRecord{
+		{ParentID: "steady", ChildID: "steady-a", Vector: []float32{0.9, 0, 0, 0, 0, 0, 0, 0}},
+		{ParentID: "steady", ChildID: "steady-b", Vector: []float32{0.9, 0, 0, 0, 0, 0, 0, 0}},
+		{ParentID: "spiky", ChildID: "spiky-a", Vector: []float32{1.0, 0, 0, 0, 0, 0, 0, 0}},
+		{ParentID: "spiky", ChildID: "spiky-b", Vector: []float32{-1.0, 0, 0, 0, 0, 0, 0, 0}},
+	}
+	queries := []retrievalVectorRecord{{ID: "q1", Vector: []float32{1, 0, 0, 0, 0, 0, 0, 0}}}
+	qrels := retrievalQrels{"q1": {"steady": 1}}
+
+	maxMetrics, err := evaluateTurboQuantMultiVectorRetrieval(context.Background(), RetrievalEvalConfig{
+		DatasetName:   "tiny-max",
+		TopK:          2,
+		QuantizerSeed: 99,
+	}, []int{8}, children, queries, qrels)
+	if err != nil {
+		t.Fatalf("evaluate max multivector retrieval: %v", err)
+	}
+	top2Metrics, err := evaluateTurboQuantMultiVectorRetrieval(context.Background(), RetrievalEvalConfig{
+		DatasetName:                  "tiny-top2",
+		TopK:                         2,
+		QuantizerSeed:                99,
+		MultiVectorAggregation:       "top2-mean",
+		MultiVectorChildCountPenalty: 0,
+	}, []int{8}, children, queries, qrels)
+	if err != nil {
+		t.Fatalf("evaluate top2 multivector retrieval: %v", err)
+	}
+	if maxMetrics.Dense.Quality.NDCGAt10 >= top2Metrics.Dense.Quality.NDCGAt10 {
+		t.Fatalf("dense quality max=%+v top2=%+v, want top2 ordering improvement", maxMetrics.Dense.Quality, top2Metrics.Dense.Quality)
+	}
+	if top2Metrics.Config.Aggregation != "top2-mean" || top2Metrics.Rows[0].Aggregation != "top2-mean" {
+		t.Fatalf("top2 aggregation metrics = config:%+v row:%+v", top2Metrics.Config, top2Metrics.Rows[0])
+	}
+	scores := topDenseMultiVectorParentScores(queries[0].Vector, children, 2, "top2-mean", 0)
+	if len(scores) < 2 || scores[0].ID != "steady" || scores[0].ChildID != "steady-a" || scores[0].ChildScore == nil || scores[1].ID != "spiky" {
+		t.Fatalf("top2 scores = %+v", scores)
+	}
+}
+
+func TestEvaluateTurboQuantMultiVectorRetrievalRejectsNegativeChildCountPenalty(t *testing.T) {
+	children := []retrievalChildVectorRecord{{ParentID: "p1", ChildID: "p1-a", Vector: []float32{1, 0, 0, 0, 0, 0, 0, 0}}}
+	queries := []retrievalVectorRecord{{ID: "q1", Vector: []float32{1, 0, 0, 0, 0, 0, 0, 0}}}
+	qrels := retrievalQrels{"q1": {"p1": 1}}
+
+	_, err := evaluateTurboQuantMultiVectorRetrieval(context.Background(), RetrievalEvalConfig{
+		DatasetName:                  "tiny-negative-penalty",
+		TopK:                         1,
+		MultiVectorChildCountPenalty: -0.1,
+	}, []int{8}, children, queries, qrels)
+	if err == nil {
+		t.Fatal("evaluation succeeded with negative child-count penalty")
+	}
+	if !strings.Contains(err.Error(), "child-count-penalty must be non-negative") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestEvaluateVectorCacheRetrievalRejectsDimensionMismatch(t *testing.T) {
 	dir := t.TempDir()
 	qrelsDir := filepath.Join(dir, "qrels")

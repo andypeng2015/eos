@@ -24,24 +24,26 @@ const RetrievalEvalPerQuerySchema = "manta.embedding_retrieval_per_query.v1"
 
 // RetrievalEvalConfig describes a BEIR-style retrieval eval.
 type RetrievalEvalConfig struct {
-	DatasetName          string
-	ArtifactPath         string
-	CorpusPath           string
-	QueriesPath          string
-	QrelsPath            string
-	DocVectorPath        string
-	QueryVectorPath      string
-	BackendName          string
-	BatchSize            int
-	TopK                 int
-	PerQueryTopK         int
-	MaxDocs              int
-	MaxQueries           int
-	PerQueryJSONLPath    string
-	AllowMissingRelevant bool
-	QuantizerSeed        int64
-	BaselineDim          int
-	Hybrid               RetrievalEvalHybridConfig
+	DatasetName                  string
+	ArtifactPath                 string
+	CorpusPath                   string
+	QueriesPath                  string
+	QrelsPath                    string
+	DocVectorPath                string
+	QueryVectorPath              string
+	BackendName                  string
+	BatchSize                    int
+	TopK                         int
+	PerQueryTopK                 int
+	MaxDocs                      int
+	MaxQueries                   int
+	PerQueryJSONLPath            string
+	AllowMissingRelevant         bool
+	QuantizerSeed                int64
+	BaselineDim                  int
+	MultiVectorAggregation       string
+	MultiVectorChildCountPenalty float64
+	Hybrid                       RetrievalEvalHybridConfig
 }
 
 type RetrievalEvalHybridConfig struct {
@@ -415,6 +417,9 @@ func normalizeRetrievalEvalConfig(cfg RetrievalEvalConfig) RetrievalEvalConfig {
 	}
 	if cfg.TopK < 100 {
 		cfg.TopK = 100
+	}
+	if cfg.MultiVectorAggregation == "" {
+		cfg.MultiVectorAggregation = TurboQuantMultiVectorAggregationMax
 	}
 	return cfg
 }

@@ -799,6 +799,102 @@ func TestRunEvalRetrievalMultiVectorTurboQuantWritesMetrics(t *testing.T) {
 	}
 }
 
+func TestRunEvalRetrievalMultiVectorTurboQuantAggregationFlagsRecordMetrics(t *testing.T) {
+	dir := t.TempDir()
+	qrelsDir := filepath.Join(dir, "qrels")
+	if err := os.Mkdir(qrelsDir, 0o755); err != nil {
+		t.Fatalf("mkdir qrels: %v", err)
+	}
+	corpusPath := filepath.Join(dir, "corpus.jsonl")
+	queriesPath := filepath.Join(dir, "queries.jsonl")
+	qrelsPath := filepath.Join(qrelsDir, "test.tsv")
+	docVectorsPath := filepath.Join(dir, "child-doc-vectors.jsonl")
+	queryVectorsPath := filepath.Join(dir, "query-vectors.jsonl")
+	metricsPath := filepath.Join(dir, "metrics.json")
+	perQueryPath := filepath.Join(dir, "per-query.jsonl")
+	if err := os.WriteFile(corpusPath, []byte(
+		`{"_id":"steady","text":"steady parent"}`+"\n"+
+			`{"_id":"spiky","text":"spiky parent"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(queriesPath, []byte(`{"_id":"q1","text":"steady query"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(qrelsPath, []byte("query-id\tcorpus-id\tscore\nq1\tsteady\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	if err := os.WriteFile(docVectorsPath, []byte(
+		`{"parent_id":"steady","child_id":"steady-a","vector":[0.9,0,0,0,0,0,0,0]}`+"\n"+
+			`{"parent_id":"steady","child_id":"steady-b","vector":[0.9,0,0,0,0,0,0,0]}`+"\n"+
+			`{"parent_id":"spiky","child_id":"spiky-a","vector":[1,0,0,0,0,0,0,0]}`+"\n"+
+			`{"parent_id":"spiky","child_id":"spiky-b","vector":[-1,0,0,0,0,0,0,0]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write doc vectors: %v", err)
+	}
+	if err := os.WriteFile(queryVectorsPath, []byte(`{"id":"q1","vector":[1,0,0,0,0,0,0,0]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write query vectors: %v", err)
+	}
+
+	captureRunOutput(t, []string{
+		"eval-retrieval-multivector-turboquant",
+		"--dataset", "tiny-aggregation",
+		"--bits", "8",
+		"--quantizer-seed", "99",
+		"--aggregation", "top2-mean",
+		"--child-count-penalty", "0.005",
+		"--doc-vectors", docVectorsPath,
+		"--query-vectors", queryVectorsPath,
+		"--metrics-json", metricsPath,
+		"--per-query-jsonl", perQueryPath,
+		dir,
+	})
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	var metrics eosruntime.TurboQuantMultiVectorRetrievalEvalMetrics
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		t.Fatalf("decode metrics: %v\n%s", err, data)
+	}
+	if metrics.Config.Aggregation != "top2-mean" || metrics.Config.ChildCountPenalty != 0.005 || metrics.Dense.Aggregation != "top2-mean" {
+		t.Fatalf("aggregation metrics = config:%+v dense:%+v", metrics.Config, metrics.Dense)
+	}
+	if len(metrics.Rows) != 1 || metrics.Rows[0].Aggregation != "top2-mean" || metrics.Rows[0].ChildCountPenalty != 0.005 || !strings.Contains(metrics.Rows[0].Method, "top2-mean") {
+		t.Fatalf("row aggregation metrics = %+v", metrics.Rows)
+	}
+	perQueryData, err := os.ReadFile(perQueryPath)
+	if err != nil {
+		t.Fatalf("read per-query: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(perQueryData)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("per-query lines = %d, want dense and q8 rows\n%s", len(lines), perQueryData)
+	}
+	var row eosruntime.TurboQuantMultiVectorRetrievalPerQueryRow
+	if err := json.Unmarshal([]byte(lines[0]), &row); err != nil {
+		t.Fatalf("decode per-query row: %v", err)
+	}
+	if row.Aggregation != "top2-mean" || row.ChildCountPenalty != 0.005 || row.TopK[0].ChildID == "" || row.TopK[0].ChildScore == nil {
+		t.Fatalf("per-query aggregation row = %+v", row)
+	}
+}
+
+func TestRunEvalRetrievalMultiVectorTurboQuantRejectsNegativePenalty(t *testing.T) {
+	_, err := captureRunOutputAndError(t, []string{
+		"eval-retrieval-multivector-turboquant",
+		"--aggregation", "max",
+		"--child-count-penalty", "-0.001",
+		"--doc-vectors", "missing-docs.jsonl",
+		"--query-vectors", "missing-queries.jsonl",
+		"datasets/longembed/repo-docs",
+	})
+	if err == nil {
+		t.Fatal("eval-retrieval-multivector-turboquant succeeded with negative penalty")
+	}
+	if !strings.Contains(err.Error(), "child-count-penalty must be non-negative") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestRunInitTrainCreatesTrainingPackage(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
