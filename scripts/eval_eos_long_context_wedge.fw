@@ -222,16 +222,33 @@ type fusionQuality struct {
 	HitAt1      float64 `json:"hit_at_1"`
 }
 
+type fusionCalibrationSummary struct {
+	QueryCount                         int           `json:"query_count"`
+	NDCGAt10ImprovedVsDirect          int           `json:"ndcg_at_10_improved_vs_direct"`
+	NDCGAt10TiedVsDirect              int           `json:"ndcg_at_10_tied_vs_direct"`
+	NDCGAt10RegressedVsDirect         int           `json:"ndcg_at_10_regressed_vs_direct"`
+	NDCGAt10MeanDeltaVsDirect         float64       `json:"ndcg_at_10_mean_delta_vs_direct"`
+	NDCGAt10MinDeltaVsDirect          float64       `json:"ndcg_at_10_min_delta_vs_direct"`
+	NDCGAt10MaxDeltaVsDirect          float64       `json:"ndcg_at_10_max_delta_vs_direct"`
+	OracleBestDirectOrFusion          fusionQuality `json:"oracle_best_direct_or_fusion"`
+	OracleBestDirectTokenOrFusion     fusionQuality `json:"oracle_best_direct_token_or_fusion"`
+	DirectTokenSpanTop1AgreeCount     int           `json:"direct_token_span_top1_agree_count"`
+	DirectFusionTop1AgreeCount        int           `json:"direct_fusion_top1_agree_count"`
+	DirectTokenSpanTop1DisagreeCount  int           `json:"direct_token_span_top1_disagree_count"`
+	DirectFusionTop1DisagreeCount     int           `json:"direct_fusion_top1_disagree_count"`
+}
+
 type fusionMetricsRow struct {
-	Method           string        `json:"method"`
-	DirectMethod     string        `json:"direct_method"`
-	TokenSpanMethod  string        `json:"token_span_method"`
-	RRFK             float64       `json:"rrf_k"`
-	RRFLambda        float64       `json:"rrf_lambda"`
-	DenseProtectTopK int           `json:"dense_protect_top_k"`
-	Quality          fusionQuality `json:"quality"`
-	QueryCount       int           `json:"query_count"`
-	Caveats          []string      `json:"caveats"`
+	Method           string                   `json:"method"`
+	DirectMethod     string                   `json:"direct_method"`
+	TokenSpanMethod  string                   `json:"token_span_method"`
+	RRFK             float64                  `json:"rrf_k"`
+	RRFLambda        float64                  `json:"rrf_lambda"`
+	DenseProtectTopK int                      `json:"dense_protect_top_k"`
+	Quality          fusionQuality            `json:"quality"`
+	QueryCount       int                      `json:"query_count"`
+	Calibration      fusionCalibrationSummary `json:"calibration"`
+	Caveats          []string                 `json:"caveats"`
 }
 
 type fusionMetricsFile struct {
@@ -243,6 +260,36 @@ type fusionMetricsFile struct {
 	TokenSpanMethod    string             `json:"token_span_method"`
 	Rows               []fusionMetricsRow `json:"rows"`
 	Caveats            []string           `json:"caveats"`
+}
+
+type fusionPerQueryRow struct {
+	Schema                         string        `json:"schema"`
+	Dataset                        string        `json:"dataset"`
+	QueryID                        string        `json:"query_id"`
+	Method                         string        `json:"method"`
+	DirectMethod                   string        `json:"direct_method"`
+	TokenSpanMethod                string        `json:"token_span_method"`
+	RRFK                           float64       `json:"rrf_k"`
+	RRFLambda                      float64       `json:"rrf_lambda"`
+	DenseProtectTopK               int           `json:"dense_protect_top_k"`
+	DirectQuality                  fusionQuality `json:"direct_quality"`
+	TokenSpanQuality               fusionQuality `json:"token_span_quality"`
+	FusionQuality                  fusionQuality `json:"fusion_quality"`
+	NDCGAt10DeltaVsDirect          float64       `json:"ndcg_at_10_delta_vs_direct"`
+	NDCGAt10DeltaVsTokenSpan       float64       `json:"ndcg_at_10_delta_vs_token_span"`
+	HitAt1DeltaVsDirect            float64       `json:"hit_at_1_delta_vs_direct"`
+	HitAt1DeltaVsTokenSpan         float64       `json:"hit_at_1_delta_vs_token_span"`
+	DirectFirstRelevantRank        int           `json:"direct_first_relevant_rank"`
+	TokenSpanFirstRelevantRank     int           `json:"token_span_first_relevant_rank"`
+	FusionFirstRelevantRank        int           `json:"fusion_first_relevant_rank"`
+	DirectTopDocID                 string        `json:"direct_top_doc_id"`
+	TokenSpanTopDocID              string        `json:"token_span_top_doc_id"`
+	FusionTopDocID                 string        `json:"fusion_top_doc_id"`
+	DirectTokenSpanTop1Agree       bool          `json:"direct_token_span_top1_agree"`
+	DirectFusionTop1Agree          bool          `json:"direct_fusion_top1_agree"`
+	DirectTokenSpanOverlapAt10     int           `json:"direct_token_span_overlap_at_10"`
+	QualityClaim                   bool          `json:"quality_claim"`
+	Caveats                        []string      `json:"caveats"`
 }
 
 type datasetManifestSummary struct {
@@ -723,6 +770,163 @@ func aggregateFusionQuality(rankings map[string][]perQueryTopDoc, qrels map[stri
 	return total, count, nil
 }
 
+func addFusionQuality(a fusionQuality, b fusionQuality) fusionQuality {
+	a.NDCGAt10 += b.NDCGAt10
+	a.RecallAt100 += b.RecallAt100
+	a.MRRAt10 += b.MRRAt10
+	a.HitAt1 += b.HitAt1
+	return a
+}
+
+func divideFusionQuality(q fusionQuality, denom float64) fusionQuality {
+	if denom <= 0 {
+		return q
+	}
+	q.NDCGAt10 /= denom
+	q.RecallAt100 /= denom
+	q.MRRAt10 /= denom
+	q.HitAt1 /= denom
+	return q
+}
+
+func firstRelevantRank(ranking []perQueryTopDoc, rels map[string]float64) int {
+	if len(ranking) == 0 {
+		return -1
+	}
+	for i, item := range ranking {
+		if rels[item.DocID] > 0 {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+func topDocID(ranking []perQueryTopDoc) string {
+	if len(ranking) == 0 {
+		return ""
+	}
+	return ranking[0].DocID
+}
+
+func top1Agree(a string, b string) bool {
+	return a != "" && a == b
+}
+
+func overlapAtK(a []perQueryTopDoc, b []perQueryTopDoc, k int) int {
+	if k <= 0 {
+		return 0
+	}
+	seen := map[string]bool{}
+	for i, item := range a {
+		if i >= k {
+			break
+		}
+		if item.DocID != "" {
+			seen[item.DocID] = true
+		}
+	}
+	overlap := 0
+	used := map[string]bool{}
+	for i, item := range b {
+		if i >= k {
+			break
+		}
+		if item.DocID != "" && seen[item.DocID] && !used[item.DocID] {
+			used[item.DocID] = true
+			overlap++
+		}
+	}
+	return overlap
+}
+
+func sortedQueryIDs(qrels map[string]map[string]float64) []string {
+	ids := []string{}
+	for queryID := range qrels {
+		ids = append(ids, queryID)
+	}
+	for i := 0; i < len(ids); i++ {
+		for j := i + 1; j < len(ids); j++ {
+			if ids[j] < ids[i] {
+				ids[i], ids[j] = ids[j], ids[i]
+			}
+		}
+	}
+	return ids
+}
+
+func betterQualityByNDCG(candidate fusionQuality, current fusionQuality, haveCurrent bool) (fusionQuality, bool) {
+	if !haveCurrent || candidate.NDCGAt10 > current.NDCGAt10 {
+		return candidate, true
+	}
+	return current, haveCurrent
+}
+
+func summarizeFusionCalibration(perQuery []fusionPerQueryRow) fusionCalibrationSummary {
+	summary := fusionCalibrationSummary{QueryCount: len(perQuery)}
+	if len(perQuery) == 0 {
+		return summary
+	}
+	totalDelta := 0.0
+	summary.NDCGAt10MinDeltaVsDirect = perQuery[0].NDCGAt10DeltaVsDirect
+	summary.NDCGAt10MaxDeltaVsDirect = perQuery[0].NDCGAt10DeltaVsDirect
+	oracleDirectFusionTotal := fusionQuality{}
+	oracleDirectTokenFusionTotal := fusionQuality{}
+	for _, row := range perQuery {
+		delta := row.NDCGAt10DeltaVsDirect
+		totalDelta += delta
+		if delta > 0 {
+			summary.NDCGAt10ImprovedVsDirect++
+		} else if delta < 0 {
+			summary.NDCGAt10RegressedVsDirect++
+		} else {
+			summary.NDCGAt10TiedVsDirect++
+		}
+		if delta < summary.NDCGAt10MinDeltaVsDirect {
+			summary.NDCGAt10MinDeltaVsDirect = delta
+		}
+		if delta > summary.NDCGAt10MaxDeltaVsDirect {
+			summary.NDCGAt10MaxDeltaVsDirect = delta
+		}
+		bestDirectFusion := row.DirectQuality
+		bestDirectFusion, _ = betterQualityByNDCG(row.FusionQuality, bestDirectFusion, true)
+		oracleDirectFusionTotal = addFusionQuality(oracleDirectFusionTotal, bestDirectFusion)
+
+		bestDirectTokenFusion := row.DirectQuality
+		bestDirectTokenFusion, _ = betterQualityByNDCG(row.FusionQuality, bestDirectTokenFusion, true)
+		bestDirectTokenFusion, _ = betterQualityByNDCG(row.TokenSpanQuality, bestDirectTokenFusion, true)
+		oracleDirectTokenFusionTotal = addFusionQuality(oracleDirectTokenFusionTotal, bestDirectTokenFusion)
+
+		if row.DirectTokenSpanTop1Agree {
+			summary.DirectTokenSpanTop1AgreeCount++
+		} else {
+			summary.DirectTokenSpanTop1DisagreeCount++
+		}
+		if row.DirectFusionTop1Agree {
+			summary.DirectFusionTop1AgreeCount++
+		} else {
+			summary.DirectFusionTop1DisagreeCount++
+		}
+	}
+	denom := float64(len(perQuery))
+	summary.NDCGAt10MeanDeltaVsDirect = totalDelta / denom
+	summary.OracleBestDirectOrFusion = divideFusionQuality(oracleDirectFusionTotal, denom)
+	summary.OracleBestDirectTokenOrFusion = divideFusionQuality(oracleDirectTokenFusionTotal, denom)
+	return summary
+}
+
+func writeFusionPerQueryJSONL(path string, rows []fusionPerQueryRow) error {
+	var b strings.Builder
+	for _, row := range rows {
+		data, err := json.Marshal(row)
+		if err != nil {
+			return err
+		}
+		b.Write(data)
+		b.WriteByte('\n')
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
 func rrfFuse(direct []perQueryTopDoc, tokenSpan []perQueryTopDoc, k float64, lambda float64) []perQueryTopDoc {
 	scores := map[string]float64{}
 	directRank := map[string]int{}
@@ -1026,9 +1230,13 @@ func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQuery
 		compressionRatio = 1.0 / storageMultiple
 	}
 	fusionChildCount := tokenSpanChildCount + directParentCount
+	queryIDs := sortedQueryIDs(fusionQrels)
+	perQueryRows := []fusionPerQueryRow{}
 	for _, def := range fusionDefs {
 		fusedByQuery := map[string][]perQueryTopDoc{}
-		for queryID := range fusionQrels {
+		defPerQueryRows := []fusionPerQueryRow{}
+		for _, queryID := range queryIDs {
+			rels := fusionQrels[queryID]
 			directRanking := directRows[queryID]
 			tokenRanking := tokenSpanRows[queryID]
 			fused := rrfFuse(directRanking, tokenRanking, def.RRFK, def.RRFLambda)
@@ -1036,7 +1244,43 @@ func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQuery
 				fused = protectDirectPrefix(directRanking, fused, def.DenseProtectTopK)
 			}
 			fusedByQuery[queryID] = fused
+			directQuality := rankingQuality(directRanking, rels)
+			tokenSpanQuality := rankingQuality(tokenRanking, rels)
+			fusionQuality := rankingQuality(fused, rels)
+			directTopDocID := topDocID(directRanking)
+			tokenSpanTopDocID := topDocID(tokenRanking)
+			fusionTopDocID := topDocID(fused)
+			defPerQueryRows = append(defPerQueryRows, fusionPerQueryRow{
+				Schema:                     "eos.long_context_wedge_parent_span_fusion_per_query.v1",
+				Dataset:                    datasetName,
+				QueryID:                    queryID,
+				Method:                     def.Method,
+				DirectMethod:               "direct_single_vector",
+				TokenSpanMethod:            tokenSpanMethod,
+				RRFK:                       def.RRFK,
+				RRFLambda:                  def.RRFLambda,
+				DenseProtectTopK:           def.DenseProtectTopK,
+				DirectQuality:              directQuality,
+				TokenSpanQuality:           tokenSpanQuality,
+				FusionQuality:              fusionQuality,
+				NDCGAt10DeltaVsDirect:      fusionQuality.NDCGAt10 - directQuality.NDCGAt10,
+				NDCGAt10DeltaVsTokenSpan:   fusionQuality.NDCGAt10 - tokenSpanQuality.NDCGAt10,
+				HitAt1DeltaVsDirect:        fusionQuality.HitAt1 - directQuality.HitAt1,
+				HitAt1DeltaVsTokenSpan:     fusionQuality.HitAt1 - tokenSpanQuality.HitAt1,
+				DirectFirstRelevantRank:    firstRelevantRank(directRanking, rels),
+				TokenSpanFirstRelevantRank: firstRelevantRank(tokenRanking, rels),
+				FusionFirstRelevantRank:    firstRelevantRank(fused, rels),
+				DirectTopDocID:             directTopDocID,
+				TokenSpanTopDocID:          tokenSpanTopDocID,
+				FusionTopDocID:             fusionTopDocID,
+				DirectTokenSpanTop1Agree:   top1Agree(directTopDocID, tokenSpanTopDocID),
+				DirectFusionTop1Agree:      top1Agree(directTopDocID, fusionTopDocID),
+				DirectTokenSpanOverlapAt10: overlapAtK(directRanking, tokenRanking, 10),
+				QualityClaim:               false,
+				Caveats:                    caveats,
+			})
 		}
+		perQueryRows = append(perQueryRows, defPerQueryRows...)
 		quality, queryCount, err := aggregateFusionQuality(fusedByQuery, fusionQrels)
 		if err != nil {
 			return rows, skipped, err
@@ -1067,10 +1311,15 @@ func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQuery
 			DenseProtectTopK: def.DenseProtectTopK,
 			Quality:          quality,
 			QueryCount:       queryCount,
+			Calibration:      summarizeFusionCalibration(defPerQueryRows),
 			Caveats:          caveats,
 		})
 	}
 	metricsPath := filepath.Join(runDir, "direct-token-span-fusion.metrics.json")
+	perQueryPath := filepath.Join(runDir, "direct-token-span-fusion.per-query.jsonl")
+	if err := writeFusionPerQueryJSONL(perQueryPath, perQueryRows); err != nil {
+		return rows, skipped, err
+	}
 	if err := writeJSON(metricsPath, fusionMetricsFile{
 		Schema:            "eos.long_context_wedge_parent_span_fusion_metrics.v1",
 		Dataset:           datasetName,
@@ -1083,6 +1332,7 @@ func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQuery
 	}); err != nil {
 		return rows, skipped, err
 	}
+	perQueryPaths["direct-token-span-fusion"] = perQueryPath
 	perQueryPaths["direct-token-span-fusion-metrics"] = metricsPath
 	return rows, skipped, nil
 }
