@@ -136,6 +136,16 @@ type comparisonRow struct {
 	Caveats           string  `json:"caveats"`
 }
 
+type datasetManifestSummary struct {
+	Schema string `json:"schema"`
+}
+
+type datasetFraming struct {
+	ThisLane         string
+	DirectRowCaveat  string
+	TopLevelCaveats []string
+}
+
 type manifest struct {
 	Schema                 string            `json:"schema"`
 	GeneratedAt            string            `json:"generated_at"`
@@ -283,6 +293,35 @@ func writeJSON(path string, value interface{}) error {
 		return err
 	}
 	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+func classifyDatasetFraming(datasetManifestPath string) datasetFraming {
+	repoDocs := datasetFraming{
+		ThisLane:        "local repo-docs heuristic-qrels wedge proxy; no official LongEmbed dataset acquisition",
+		DirectRowCaveat: "Direct Eos single-vector row over local repo-docs heuristic qrels; not LongEmbed proof.",
+		TopLevelCaveats: []string{
+			"repo-docs uses deterministic local path/heading qrels and is not an official LongEmbed task.",
+			"Official LongEmbed framing includes synthetic needle/passkey tasks across 0.25x-32x1024 token ranges and real NarrativeQA, 2WikiMultihopQA, QMSum, and SummScreenFD tasks; this harness records that framing but does not acquire those datasets.",
+		},
+	}
+	if !fileExists(datasetManifestPath) {
+		return repoDocs
+	}
+	var summary datasetManifestSummary
+	if err := readJSON(datasetManifestPath, &summary); err != nil {
+		return repoDocs
+	}
+	if summary.Schema == "eos.longembed.beir.v1" {
+		return datasetFraming{
+			ThisLane:        "official LongEmbed dataset converted to the repo's BEIR-compatible layout",
+			DirectRowCaveat: "Direct Eos single-vector row over official converted LongEmbed dataset; capped smoke/quality_claim=false, not a product-quality claim.",
+			TopLevelCaveats: []string{
+				"Dataset manifest schema eos.longembed.beir.v1 identifies this lane as an official LongEmbed dataset converted to the repo's BEIR-compatible layout.",
+				"quality_claim=false for every row; a capped LongEmbed smoke is acquisition/harness evidence, not a product-quality claim.",
+			},
+		}
+	}
+	return repoDocs
 }
 
 func appendMultiVectorRows(rows []comparisonRow, baseline string, model string, modelID string, methodPrefix string, artifact string, metricsPath string, mv mvMetrics, dim int, caveat string) []comparisonRow {
@@ -453,6 +492,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "required BEIR-shaped dataset files missing under %s\n", datasetDir)
 		os.Exit(1)
 	}
+	datasetFraming := classifyDatasetFraming(datasetManifestPath)
 
 	eosBin := filepath.Join(binDir, "eos")
 	rec, err := runCmd(root, "Build eos CLI", filepath.Join(logDir, "go-build-eos.log"), "go", []string{"build", "-trimpath", "-o", eosBin, "./cmd/eos"})
@@ -608,7 +648,7 @@ func main() {
 		Artifact:     evalArtifact,
 		ModelID:      filepath.Base(evalArtifact),
 		QualityClaim: false,
-		Caveats:      "Direct Eos single-vector row over local repo-docs heuristic qrels; not LongEmbed proof.",
+		Caveats:      datasetFraming.DirectRowCaveat,
 	}}
 	rows = appendMultiVectorRows(rows, "eos", "eos", filepath.Base(evalArtifact), fmt.Sprintf("sparse_token_span_%d_%d", tokenSpan, tokenOverlap), evalArtifact, sparseMetrics, sparseMV, sparseManifest.OutputDimension, "Experimental sparse-token-pool token-span child vectors; quality_claim=false; not trained long-context encoder evidence.")
 
@@ -660,7 +700,7 @@ func main() {
 			"official_synthetic_tasks": "needle, passkey over 0.25x-32x1024 token ranges",
 			"official_real_tasks":      "NarrativeQA, 2WikiMultihopQA, QMSum, SummScreenFD",
 			"paper_target_length":      "up to 32768 input tokens with dispersed target information",
-			"this_lane":                "local repo-docs heuristic-qrels wedge proxy; no official LongEmbed dataset acquisition",
+			"this_lane":                datasetFraming.ThisLane,
 		},
 		QuantizerSeed:       quantizerSeed,
 		BaselineDim:         baselineDim,
@@ -671,13 +711,11 @@ func main() {
 		Commands:            commands,
 		Rows:                rows,
 		SkippedExternalRows: skipped,
-		Caveats: []string{
+		Caveats: append([]string{
 			"quality_claim=false for every row; this harness is a reproducible long-context wedge comparison artifact, not a product-quality claim.",
-			"repo-docs uses deterministic local path/heading qrels and is not an official LongEmbed task.",
-			"Official LongEmbed framing includes synthetic needle/passkey tasks across 0.25x-32x1024 token ranges and real NarrativeQA, 2WikiMultihopQA, QMSum, and SummScreenFD tasks; this harness records that framing but does not acquire those datasets.",
 			"Eos sparse-token-span rows use experimental sparse-token-pool child vectors and max-child rollup; they are not trained sparse long-context encoder proof.",
 			"External Qwen3 0.6B and mxbai-large 128d chunked baselines are explicit but opt-in via EOS_LC_WEDGE_EXTERNAL_MODE=cache or export.",
-		},
+		}, datasetFraming.TopLevelCaveats...),
 	}
 	manifestPath := filepath.Join(runDir, "manifest.json")
 	if err := writeJSON(manifestPath, out); err != nil {
