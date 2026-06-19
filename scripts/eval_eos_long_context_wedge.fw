@@ -14,6 +14,8 @@ package main
 //   EOS_LC_WEDGE_RETARGET_MAX_SEQ=1024
 //   EOS_LC_WEDGE_TOKEN_SPAN=48
 //   EOS_LC_WEDGE_TOKEN_OVERLAP=12
+//   EOS_LC_WEDGE_PARENT_AGGREGATION=max|top2-mean|top3-mean|top5-mean
+//   EOS_LC_WEDGE_CHILD_COUNT_PENALTY=0
 //   EOS_LC_WEDGE_BITS=2,4,8
 //   EOS_LC_WEDGE_EXTERNAL_MODE=off|cache|export
 //   EOS_LC_WEDGE_MAX_DOCS=0
@@ -22,6 +24,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -158,6 +161,8 @@ type manifest struct {
 	LongEmbedFraming        map[string]string `json:"longembed_framing"`
 	QuantizerSeed          int64             `json:"quantizer_seed"`
 	BaselineDim            int               `json:"baseline_dim"`
+	ParentAggregation      string            `json:"parent_aggregation"`
+	ChildCountPenalty      float64           `json:"child_count_penalty"`
 	Artifact               string            `json:"artifact"`
 	EvaluationArtifact      string            `json:"evaluation_artifact"`
 	ComparisonTSV          string            `json:"comparison_tsv"`
@@ -225,6 +230,28 @@ func parseInt64Env(name string, fallback int64) (int64, error) {
 		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
 	}
 	return parsed, nil
+}
+
+func parseFloatEnv(name string, fallback float64) (float64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a float: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parseParentAggregationEnv() (string, error) {
+	value := getenv("EOS_LC_WEDGE_PARENT_AGGREGATION", "max")
+	switch value {
+	case "max", "top2-mean", "top3-mean", "top5-mean":
+		return value, nil
+	default:
+		return "", fmt.Errorf("EOS_LC_WEDGE_PARENT_AGGREGATION must be one of max, top2-mean, top3-mean, top5-mean; got %q", value)
+	}
 }
 
 func fileExists(path string) bool {
@@ -324,11 +351,26 @@ func classifyDatasetFraming(datasetManifestPath string) datasetFraming {
 	return repoDocs
 }
 
-func appendMultiVectorRows(rows []comparisonRow, baseline string, model string, modelID string, methodPrefix string, artifact string, metricsPath string, mv mvMetrics, dim int, caveat string) []comparisonRow {
+func multiVectorAggregationLabel(aggregation string, childCountPenalty float64) string {
+	label := aggregation
+	if childCountPenalty != 0 {
+		label += fmt.Sprintf("_penalty_%g", childCountPenalty)
+	}
+	return label
+}
+
+func denseMultiVectorMethod(aggregation string, childCountPenalty float64) string {
+	if aggregation == "max" && childCountPenalty == 0 {
+		return "dense_child_max"
+	}
+	return "dense_child_" + multiVectorAggregationLabel(aggregation, childCountPenalty)
+}
+
+func appendMultiVectorRows(rows []comparisonRow, baseline string, model string, modelID string, methodPrefix string, artifact string, metricsPath string, mv mvMetrics, dim int, caveat string, aggregation string, childCountPenalty float64) []comparisonRow {
 	rows = append(rows, comparisonRow{
 		Baseline:        baseline,
 		Model:           model,
-		Method:          methodPrefix + "_dense_child_max",
+		Method:          methodPrefix + "_" + denseMultiVectorMethod(aggregation, childCountPenalty),
 		Dim:             dim,
 		Bits:            0,
 		NDCGAt10:        mv.Dense.Quality.NDCGAt10,
@@ -390,7 +432,7 @@ func directModelDimension(sparseManifest sparseExportManifest, fallback int) int
 	return sparseManifest.Dimension
 }
 
-func evaluateExternal(root string, eosBin string, datasetName string, datasetDir string, runDir string, logDir string, commands []commandRecord, rows []comparisonRow, skipped []string, preset string, modelID string, cacheRoot string, externalMode string, bits string, baselineDim int, outputDim int, chunkWords int, chunkOverlap int, topK int, python string, maxDocs int, maxQueries int) ([]commandRecord, []comparisonRow, []string, error) {
+func evaluateExternal(root string, eosBin string, datasetName string, datasetDir string, runDir string, logDir string, commands []commandRecord, rows []comparisonRow, skipped []string, preset string, modelID string, cacheRoot string, externalMode string, bits string, baselineDim int, outputDim int, chunkWords int, chunkOverlap int, topK int, python string, maxDocs int, maxQueries int, aggregation string, childCountPenalty float64) ([]commandRecord, []comparisonRow, []string, error) {
 	cacheRoot = absUnder(root, cacheRoot)
 	cacheDir := filepath.Join(cacheRoot, datasetName)
 	childVectors := filepath.Join(cacheDir, "child-doc-vectors.jsonl")
@@ -439,6 +481,8 @@ func evaluateExternal(root string, eosBin string, datasetName string, datasetDir
 		"--bits", bits,
 		"--top-k", strconv.Itoa(topK),
 		"--baseline-dim", strconv.Itoa(baselineDim),
+		"--aggregation", aggregation,
+		"--child-count-penalty", strconv.FormatFloat(childCountPenalty, 'g', -1, 64),
 		"--metrics-json", metricsPath,
 		"--metrics-tsv", metricsTSV,
 	}
@@ -454,7 +498,7 @@ func evaluateExternal(root string, eosBin string, datasetName string, datasetDir
 		return commands, rows, skipped, err
 	}
 	caveat := "External chunked child-vector baseline; opt-in cache/export row, not LongEmbed proof."
-	rows = appendMultiVectorRows(rows, "external_chunked", preset, modelID, "chunk96_overlap16", modelID, metricsPath, mv, dim, caveat)
+	rows = appendMultiVectorRows(rows, "external_chunked", preset, modelID, "chunk96_overlap16", modelID, metricsPath, mv, dim, caveat, aggregation, childCountPenalty)
 	return commands, rows, skipped, nil
 }
 
@@ -549,6 +593,20 @@ func main() {
 		os.Exit(1)
 	}
 	bits := getenv("EOS_LC_WEDGE_BITS", "2,4,8")
+	parentAggregation, err := parseParentAggregationEnv()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	childCountPenalty, err := parseFloatEnv("EOS_LC_WEDGE_CHILD_COUNT_PENALTY", 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if math.IsNaN(childCountPenalty) || math.IsInf(childCountPenalty, 0) || childCountPenalty < 0 {
+		fmt.Fprintln(os.Stderr, "EOS_LC_WEDGE_CHILD_COUNT_PENALTY must be a finite non-negative float")
+		os.Exit(1)
+	}
 
 	directMetrics := filepath.Join(runDir, "direct-eos.metrics.json")
 	directArgs := []string{
@@ -618,6 +676,8 @@ func main() {
 		"--quantizer-seed", strconv.FormatInt(quantizerSeed, 10),
 		"--top-k", strconv.Itoa(topK),
 		"--baseline-dim", strconv.Itoa(baselineDim),
+		"--aggregation", parentAggregation,
+		"--child-count-penalty", strconv.FormatFloat(childCountPenalty, 'g', -1, 64),
 		"--metrics-json", sparseMetrics,
 		"--metrics-tsv", sparseTSV,
 	}
@@ -650,7 +710,7 @@ func main() {
 		QualityClaim: false,
 		Caveats:      datasetFraming.DirectRowCaveat,
 	}}
-	rows = appendMultiVectorRows(rows, "eos", "eos", filepath.Base(evalArtifact), fmt.Sprintf("sparse_token_span_%d_%d", tokenSpan, tokenOverlap), evalArtifact, sparseMetrics, sparseMV, sparseManifest.OutputDimension, "Experimental sparse-token-pool token-span child vectors; quality_claim=false; not trained long-context encoder evidence.")
+	rows = appendMultiVectorRows(rows, "eos", "eos", filepath.Base(evalArtifact), fmt.Sprintf("sparse_token_span_%d_%d", tokenSpan, tokenOverlap), evalArtifact, sparseMetrics, sparseMV, sparseManifest.OutputDimension, "Experimental sparse-token-pool token-span child vectors; quality_claim=false; not trained long-context encoder evidence.", parentAggregation, childCountPenalty)
 
 	externalMode := strings.ToLower(getenv("EOS_LC_WEDGE_EXTERNAL_MODE", "off"))
 	skipped := []string{}
@@ -661,12 +721,12 @@ func main() {
 		python := getenv("EOS_LC_WEDGE_EXTERNAL_PYTHON", "python3")
 		chunkWords, _ := parseIntEnv("EOS_LC_WEDGE_EXTERNAL_CHUNK_WORDS", 96)
 		chunkOverlap, _ := parseIntEnv("EOS_LC_WEDGE_EXTERNAL_CHUNK_OVERLAP", 16)
-		commands, rows, skipped, err = evaluateExternal(root, eosBin, datasetName, datasetDir, runDir, logDir, commands, rows, skipped, "qwen3-0.6b", "Qwen/Qwen3-Embedding-0.6B", getenv("EOS_LC_WEDGE_QWEN3_CACHE_ROOT", filepath.Join("runs", "external-vector-caches", "qwen3-0.6b-repo-docs-128d")), externalMode, bits, baselineDim, outputDim, chunkWords, chunkOverlap, topK, python, maxDocs, maxQueries)
+		commands, rows, skipped, err = evaluateExternal(root, eosBin, datasetName, datasetDir, runDir, logDir, commands, rows, skipped, "qwen3-0.6b", "Qwen/Qwen3-Embedding-0.6B", getenv("EOS_LC_WEDGE_QWEN3_CACHE_ROOT", filepath.Join("runs", "external-vector-caches", "qwen3-0.6b-repo-docs-128d")), externalMode, bits, baselineDim, outputDim, chunkWords, chunkOverlap, topK, python, maxDocs, maxQueries, parentAggregation, childCountPenalty)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		commands, rows, skipped, err = evaluateExternal(root, eosBin, datasetName, datasetDir, runDir, logDir, commands, rows, skipped, "mxbai-large", "mixedbread-ai/mxbai-embed-large-v1", getenv("EOS_LC_WEDGE_MXBAI_CACHE_ROOT", filepath.Join("runs", "external-vector-caches", "mxbai-large-repo-docs-128d")), externalMode, bits, baselineDim, outputDim, chunkWords, chunkOverlap, topK, python, maxDocs, maxQueries)
+		commands, rows, skipped, err = evaluateExternal(root, eosBin, datasetName, datasetDir, runDir, logDir, commands, rows, skipped, "mxbai-large", "mixedbread-ai/mxbai-embed-large-v1", getenv("EOS_LC_WEDGE_MXBAI_CACHE_ROOT", filepath.Join("runs", "external-vector-caches", "mxbai-large-repo-docs-128d")), externalMode, bits, baselineDim, outputDim, chunkWords, chunkOverlap, topK, python, maxDocs, maxQueries, parentAggregation, childCountPenalty)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -704,6 +764,8 @@ func main() {
 		},
 		QuantizerSeed:       quantizerSeed,
 		BaselineDim:         baselineDim,
+		ParentAggregation:   parentAggregation,
+		ChildCountPenalty:   childCountPenalty,
 		Artifact:            artifact,
 		EvaluationArtifact:  evalArtifact,
 		ComparisonTSV:       comparisonTSV,
