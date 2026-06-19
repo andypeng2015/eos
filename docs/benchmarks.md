@@ -186,6 +186,15 @@ The external multivector group is opt-in via `EOS_SCOREBOARD_EXTERNAL_MULTIVECTO
 
 The q-bit rows use quantizer seed `5581486560434873699`. Treat the Eos 128d child rows as prefix truncation plus L2 renormalization from the default 256d artifact, not as evidence for a trained Matryoshka head. Treat every repo-docs row as local harness evidence over deterministic repo-specific qrels, not LongEmbed proof.
 
+The repo-docs token-span sweeps add diagnostic sparse-token-pool child-vector evidence for the Eos lineage, using run-local maxseq1024 retargets rather than trained long-context artifacts. The best 256d row was token span `64/16`: dense `0.647864`, q4 `0.650561`, q8 `0.652997`, `211` child vectors, and q4 storage `2.472656x` versus a 256d dense parent-vector budget. The best compact 128d row was `48/12`: dense `0.660476`, q4 `0.659998`, q8 `0.655515`, `290` child vectors, q4 storage `0.438x` versus a 1024d parent budget and `1.751x` versus a 256d parent budget.
+
+| Row | Best span/overlap | Dense nDCG@10 | q4 nDCG@10 | q8 nDCG@10 | Child vectors | q4 storage |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Eos 256d token-span | 64/16 | 0.647864 | 0.650561 | 0.652997 | 211 | 2.472656x vs 256d parent |
+| Eos 128d compact token-span | 48/12 | 0.660476 | 0.659998 | 0.655515 | 290 | 0.438x vs 1024d parent; 1.751x vs 256d parent |
+
+These rows narrowly beat the Eos default repo-docs dense row (`0.644872`) on this lane, but they still trail the external compact child-vector references, including Qwen3 0.6B 128d child q4 `0.739269` and mxbai-large 128d child q4 `0.691586`. Provenance lives in `runs/eos-lc-token-span-sweep-v1-20260619T004023Z`, `runs/eos-lc-compact-token-span-sweep-v1-20260619T005356Z`, `.tiller/scratch/codex/eos-lc-token-span-sweep-v1-report.md`, and `.tiller/scratch/codex/eos-lc-compact-token-span-sweep-v1-report.md`. Keep `quality_claim=false`: this is tiny heuristic-qrels repo-docs evidence, not LongEmbed proof.
+
 Calibrate hybrid retrieval before using `eos-hybrid` rows as product evidence:
 
 ```bash

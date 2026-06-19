@@ -266,6 +266,16 @@ External child-vector caches can be added to the long-retrieval scoreboard with 
 | mxbai-large 128d child | q8 child-max | 0.708765 | 1.000000 |
 
 For repo-docs Qwen3/mxbai/Eos 128d child caches, this makes the direct dense/q-bit child-max evidence land in `scoreboard.json`; it is still repo-specific harness evidence, not LongEmbed proof. The Eos 128d child cache uses prefix truncation plus L2 renormalization from the default 256d artifact, not a trained Matryoshka head.
+
+Repo-docs token-span sweeps now add diagnostic Eos sparse-token-pool child-vector evidence. These used maxseq1024 retargeted packages to prove the path can consume longer token sequences, but the retarget is diagnostic only and not a trained long-context artifact. The important rows are:
+
+| Row | Best span/overlap | Dense nDCG@10 | q4 nDCG@10 | q8 nDCG@10 | Child vectors | q4 storage |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Eos 256d token-span | 64/16 | 0.647864 | 0.650561 | 0.652997 | 211 | 2.472656x vs 256d parent |
+| Eos 128d compact token-span | 48/12 | 0.660476 | 0.659998 | 0.655515 | 290 | 0.438x vs 1024d parent; 1.751x vs 256d parent |
+
+Both best rows beat Eos default repo-docs dense `0.644872` on this local lane, while still trailing Qwen3 0.6B 128d child q4 `0.739269` and mxbai-large 128d child q4 `0.691586`. Reports and ignored run roots: `runs/eos-lc-token-span-sweep-v1-20260619T004023Z`, `runs/eos-lc-compact-token-span-sweep-v1-20260619T005356Z`, `.tiller/scratch/codex/eos-lc-token-span-sweep-v1-report.md`, and `.tiller/scratch/codex/eos-lc-compact-token-span-sweep-v1-report.md`. Preserve `quality_claim=false`: repo-docs is tiny deterministic path/heading qrels evidence, not LongEmbed proof.
+
 Use `eos eval-retrieval-vectors-turboquant` on those same caches to compare q2/q4/q8 TurboQuant IP document-vector indexes without adding provider SDKs. This is the key CorkScrewDB default-promotion comparison surface because every candidate, including external BGE/Qwen/Jina/Voyage/Cohere/OpenAI caches and sealed local Eos embeddings, can be judged by dense quality plus compressed vector-index quality and cost.
 Enable `EOS_SCOREBOARD_HYBRID_RETRIEVAL=1` to add lexical+dense hybrid rows without removing dense, BM25, or TurboQuant rows. The harness runs `eos eval-retrieval-hybrid` for local Eos rows and `eos eval-retrieval-vectors-hybrid` for external vector caches, using `EOS_SCOREBOARD_HYBRID_METHOD`, `EOS_SCOREBOARD_HYBRID_ALPHA`, `EOS_SCOREBOARD_HYBRID_RRF_K`, and `EOS_SCOREBOARD_HYBRID_RRF_LAMBDA`. Treat the FiQA dev-selected `minmax`/`alpha=0.75` setting as guarded hybrid retrieval evidence only; it does not promote the dense embedder.
 For pairwise `train-embed --eval-only` rows, the harness uses `EOS_SCOREBOARD_PAIRWISE_ARTIFACT` when set; otherwise it infers the sibling trainable package when `EOS_SCOREBOARD_ARTIFACT` points at a sealed `.mll`.
