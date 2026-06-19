@@ -1934,11 +1934,16 @@ func validateClearTurboQuantPrefixRunConfig(cfg EmbeddingTrainRunConfig) error {
 	if cfg.TurboQuantPrefixWeight != 0 {
 		return fmt.Errorf("clear_turboquant_prefix is mutually exclusive with turboquant_prefix_weight")
 	}
+	seedOrModeOnlyForRankMargin := len(cfg.TurboQuantRankMarginObjectives) > 0
 	if cfg.TurboQuantPrefixSeed != 0 {
-		return fmt.Errorf("clear_turboquant_prefix is mutually exclusive with turboquant_prefix_seed")
+		if !seedOrModeOnlyForRankMargin {
+			return fmt.Errorf("clear_turboquant_prefix is mutually exclusive with turboquant_prefix_seed")
+		}
 	}
 	if strings.TrimSpace(cfg.TurboQuantPrefixScoreMode) != "" {
-		return fmt.Errorf("clear_turboquant_prefix is mutually exclusive with turboquant_prefix_score_mode")
+		if !seedOrModeOnlyForRankMargin {
+			return fmt.Errorf("clear_turboquant_prefix is mutually exclusive with turboquant_prefix_score_mode")
+		}
 	}
 	return nil
 }

@@ -825,6 +825,54 @@ func TestEmbeddingTrainerFitContrastiveRejectsClearTurboQuantPrefixWithNewObject
 	}
 }
 
+func TestEmbeddingTrainerFitHardNegativesClearTurboQuantPrefixAllowsRankMarginOnly(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.005)
+	trainer.config.MatryoshkaDims = []int{2}
+	trainer.config.MatryoshkaWeights = []float32{1}
+	trainer.config.TurboQuantPrefixObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 4, Weight: 0.5}}
+	trainer.config.TurboQuantPrefixSeed = 123
+	trainer.config.TurboQuantPrefixScoreMode = TurboQuantPrefixScoreModePreparedIP
+
+	summary, err := trainer.FitHardNegatives(tinyEmbeddingHardNegativeDataset(), nil, EmbeddingTrainRunConfig{
+		Epochs:                1,
+		BatchSize:             2,
+		Shuffle:               false,
+		ClearTurboQuantPrefix: true,
+		HardNegativeTrain:     true,
+		HardNegativesPerQuery: 1,
+		TurboQuantRankMarginObjectives: []TurboQuantPrefixObjective{
+			{Dim: 2, BitWidth: 2, Weight: 0.25},
+		},
+	})
+	if err != nil {
+		t.Fatalf("fit hard negatives with clear prefix and rank-margin objectives: %v", err)
+	}
+	if len(summary.Config.TurboQuantPrefixBits) != 0 || len(summary.Config.TurboQuantPrefixObjectives) != 0 {
+		t.Fatalf("summary compact prefix config = bits:%v objectives:%+v, want cleared", summary.Config.TurboQuantPrefixBits, summary.Config.TurboQuantPrefixObjectives)
+	}
+	if summary.Config.TurboQuantPrefixWeight != 0 {
+		t.Fatalf("summary prefix weight = %f, want 0 for rank-margin-only", summary.Config.TurboQuantPrefixWeight)
+	}
+	if got := summary.Config.TurboQuantRankMarginObjectives; len(got) != 1 || got[0].Dim != 2 || got[0].BitWidth != 2 || got[0].Weight != 0.25 {
+		t.Fatalf("summary rank-margin objectives = %+v, want 2:2=0.25", got)
+	}
+	if summary.Config.TurboQuantRankMargin != 0.02 {
+		t.Fatalf("summary rank margin = %f, want default 0.02", summary.Config.TurboQuantRankMargin)
+	}
+	if summary.Config.TurboQuantPrefixSeed != DefaultTurboQuantMultiVectorQuantizerSeed {
+		t.Fatalf("summary prefix seed = %d, want default %d", summary.Config.TurboQuantPrefixSeed, DefaultTurboQuantMultiVectorQuantizerSeed)
+	}
+	if summary.Config.TurboQuantPrefixScoreMode != TurboQuantPrefixScoreModeReconstructCosine {
+		t.Fatalf("summary score mode = %q, want %q", summary.Config.TurboQuantPrefixScoreMode, TurboQuantPrefixScoreModeReconstructCosine)
+	}
+	if len(trainer.config.TurboQuantPrefixBits) != 0 || len(trainer.config.TurboQuantPrefixObjectives) != 0 {
+		t.Fatalf("trainer compact prefix config = bits:%v objectives:%+v, want cleared", trainer.config.TurboQuantPrefixBits, trainer.config.TurboQuantPrefixObjectives)
+	}
+	if got := trainer.config.TurboQuantRankMarginObjectives; len(got) != 1 || got[0].Dim != 2 || got[0].BitWidth != 2 || got[0].Weight != 0.25 {
+		t.Fatalf("trainer rank-margin objectives = %+v, want 2:2=0.25", got)
+	}
+}
+
 func TestTurboQuantPreparedIPPrefixScoreMatchesQuantizer(t *testing.T) {
 	q := turboquant.NewIPWithSeed(4, 3, DefaultTurboQuantMultiVectorQuantizerSeed)
 	rawCandidate := []float32{2, -1, 0.5, 1.5}

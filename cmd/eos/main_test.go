@@ -3378,6 +3378,70 @@ func TestRunTrainEmbedClearTurboQuantPrefixClearsInheritedMetricsAndCheckpoint(t
 	}
 }
 
+func TestRunTrainEmbedClearTurboQuantPrefixAllowsRankMarginOnly(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	dir := t.TempDir()
+	contrastivePath := filepath.Join(dir, "contrastive.jsonl")
+	hardTrainPath := filepath.Join(dir, "hard-train.jsonl")
+	metricsPath := filepath.Join(dir, "train.metrics.json")
+	contrastiveExamples := []eosruntime.EmbeddingContrastiveExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
+	}
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(contrastivePath, contrastiveExamples); err != nil {
+		t.Fatalf("write contrastive dataset: %v", err)
+	}
+	if err := run([]string{"train-embed", "--epochs", "1", "--batch-size", "2", "--contrastive-loss", "infonce", "--matryoshka-dims", "2", "--turboquant-prefix-objectives", "2:2=0.25", "--turboquant-prefix-score-mode", "prepared-ip", path, contrastivePath}); err != nil {
+		t.Fatalf("run initial train-embed turboquant prefix objectives: %v", err)
+	}
+	hardExamples := []eosruntime.EmbeddingHardNegativeExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}, NegativeTokens: [][]int32{{2, 3}}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}, NegativeMasks: [][]int32{{1, 1}}, TeacherScores: []float32{1, 0}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}, NegativeTokens: [][]int32{{1, 2}}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}, NegativeMasks: [][]int32{{1, 1}}, TeacherScores: []float32{1, 0}},
+	}
+	if err := eosruntime.WriteEmbeddingHardNegativeExamplesFile(hardTrainPath, hardExamples); err != nil {
+		t.Fatalf("write hard-negative dataset: %v", err)
+	}
+	if err := run([]string{"train-embed", "--hard-negative-train", "--epochs", "1", "--batch-size", "2", "--contrastive-loss", "grouped_infonce", "--clear-turboquant-prefix", "--turboquant-rank-margin-objectives", "2:2=0.25", "--metrics-json", metricsPath, path, hardTrainPath}); err != nil {
+		t.Fatalf("run train-embed clear prefix with rank-margin objectives: %v", err)
+	}
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	var metrics trainMetricsJSON
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		t.Fatalf("unmarshal metrics: %v", err)
+	}
+	if len(metrics.Config.TurboQuantPrefixBits) != 0 || len(metrics.Config.TurboQuantPrefixObjectives) != 0 {
+		t.Fatalf("metrics compact prefix config = bits:%v objectives:%+v, want cleared", metrics.Config.TurboQuantPrefixBits, metrics.Config.TurboQuantPrefixObjectives)
+	}
+	if metrics.Config.TurboQuantPrefixWeight != 0 {
+		t.Fatalf("metrics prefix weight = %f, want 0 for rank-margin-only", metrics.Config.TurboQuantPrefixWeight)
+	}
+	if got := metrics.Config.TurboQuantRankMarginObjectives; len(got) != 1 || got[0].Dim != 2 || got[0].BitWidth != 2 || got[0].Weight != 0.25 {
+		t.Fatalf("metrics rank-margin objectives = %+v, want 2:2=0.25", got)
+	}
+	if metrics.Config.TurboQuantPrefixSeed != eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed {
+		t.Fatalf("metrics prefix seed = %d, want default %d", metrics.Config.TurboQuantPrefixSeed, eosruntime.DefaultTurboQuantMultiVectorQuantizerSeed)
+	}
+	if metrics.Config.TurboQuantPrefixScoreMode != eosruntime.TurboQuantPrefixScoreModeReconstructCosine {
+		t.Fatalf("metrics score mode = %q, want %q", metrics.Config.TurboQuantPrefixScoreMode, eosruntime.TurboQuantPrefixScoreModeReconstructCosine)
+	}
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(eosruntime.DefaultEmbeddingCheckpointPath(path))
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if len(checkpoint.Config.TurboQuantPrefixBits) != 0 || len(checkpoint.Config.TurboQuantPrefixObjectives) != 0 {
+		t.Fatalf("checkpoint compact prefix config = bits:%v objectives:%+v, want cleared", checkpoint.Config.TurboQuantPrefixBits, checkpoint.Config.TurboQuantPrefixObjectives)
+	}
+	if got := checkpoint.Config.TurboQuantRankMarginObjectives; len(got) != 1 || got[0].Dim != 2 || got[0].BitWidth != 2 || got[0].Weight != 0.25 {
+		t.Fatalf("checkpoint rank-margin objectives = %+v, want 2:2=0.25", got)
+	}
+}
+
 func TestRunTrainEmbedRejectsClearTurboQuantPrefixWithNewPrefixConfig(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
