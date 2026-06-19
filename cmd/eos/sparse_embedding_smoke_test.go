@@ -228,3 +228,79 @@ func TestRunSmokeSparseEmbeddingEncoderWritesArtifacts(t *testing.T) {
 		t.Fatalf("scorecard TSV row missing evidence boundary:\n%s", scorecardLines[1])
 	}
 }
+
+func TestRunSmokeSparseEmbeddingEncoderWrites32KRuntimeArtifacts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("32k sparse embedding runtime smoke is skipped in short mode")
+	}
+	runRoot := t.TempDir()
+	if err := runSmokeSparseEmbeddingEncoder([]string{
+		"-run-root", runRoot,
+		"-backend", "host",
+		"-seq-len", "32768",
+		"-query-len", "1",
+		"-dim", "4",
+		"-top-k", "2",
+		"-route-top-blocks", "1",
+		"-preflight-key-lens", "32768",
+		"-max-score-fraction", "0.2",
+		"-max-parity-seq-len", "0",
+	}); err != nil {
+		t.Fatalf("run 32k smoke: %v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(runRoot, "eos-sparse-embedding-encoder-smoke-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("run dirs = %v, want one", matches)
+	}
+	manifestPath := filepath.Join(matches[0], "manifest.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var manifest sparseEmbeddingSmokeManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if manifest.Config.RuntimeSeqLen != 32768 || manifest.ThirtyTwoKPreflightOnly {
+		t.Fatalf("runtime/preflight-only metadata runtime=%d preflight_only=%v", manifest.Config.RuntimeSeqLen, manifest.ThirtyTwoKPreflightOnly)
+	}
+	if !manifest.ThirtyTwoKPreflight.Present || !manifest.ThirtyTwoKPreflight.Passed {
+		t.Fatalf("32k preflight = %+v, want present pass", manifest.ThirtyTwoKPreflight)
+	}
+	if manifest.Embedding.Dimension != 4 || len(manifest.Embedding.Vector) != 4 || manifest.Embedding.SHA256 == "" {
+		t.Fatalf("embedding metadata = dim %d len %d sha %q", manifest.Embedding.Dimension, len(manifest.Embedding.Vector), manifest.Embedding.SHA256)
+	}
+	if manifest.Runtime.AttentionMetadata["runtime_seq_len"] != float64(32768) {
+		t.Fatalf("runtime attention metadata seq_len = %v, want 32768", manifest.Runtime.AttentionMetadata["runtime_seq_len"])
+	}
+	if manifest.Runtime.AttentionMetadata["routing"] != "block_anchor" {
+		t.Fatalf("routing metadata = %v, want block_anchor", manifest.Runtime.AttentionMetadata["routing"])
+	}
+	if !manifest.Parity.StrictGate || manifest.Parity.Diagnostics.Status != "skipped" || manifest.Parity.Diagnostics.SkippedReason != "disabled_by_max_parity_seq_len" {
+		t.Fatalf("parity metadata = %+v, want strict gate with long dense diagnostics skipped", manifest.Parity)
+	}
+	scorecardData, err := os.ReadFile(filepath.Join(matches[0], "scorecard.json"))
+	if err != nil {
+		t.Fatalf("read scorecard: %v", err)
+	}
+	var scorecard sparseEmbeddingSmokeScorecard
+	if err := json.Unmarshal(scorecardData, &scorecard); err != nil {
+		t.Fatalf("decode scorecard: %v", err)
+	}
+	if len(scorecard.Rows) != 1 {
+		t.Fatalf("scorecard rows = %d, want 1", len(scorecard.Rows))
+	}
+	row := scorecard.Rows[0]
+	if row.RuntimeSeqLen != 32768 || row.ThirtyTwoKPreflightOnly {
+		t.Fatalf("scorecard runtime/preflight-only fields = %+v", row)
+	}
+	if row.EvidenceLevel != "smoke_synthetic_kernel_evidence" || row.QualityClaim {
+		t.Fatalf("scorecard evidence_level=%q quality_claim=%v", row.EvidenceLevel, row.QualityClaim)
+	}
+	if row.EmbeddingDim != 4 || row.EmbeddingSHA256 == "" || row.ParityStatus != "pass" {
+		t.Fatalf("scorecard embedding/parity fields = %+v", row)
+	}
+}
