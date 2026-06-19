@@ -386,6 +386,135 @@ func TestEvaluateTurboQuantVectorRetrievalReportsFP16RerankRows(t *testing.T) {
 	}
 }
 
+func TestEvaluateTurboQuantVectorRetrievalFP16RerankOverfetch200MatchesSingleAndList(t *testing.T) {
+	docs := make([]retrievalVectorRecord, 230)
+	for i := range docs {
+		vec := make([]float32, 8)
+		vec[i%len(vec)] = 1
+		vec[(i*3+1)%len(vec)] += float32(i%17) * 0.001
+		switch i {
+		case 0:
+			vec = []float32{1, 0, 0, 0, 0, 0, 0, 0}
+		case 1:
+			vec = []float32{0, 1, 0, 0, 0, 0, 0, 0}
+		}
+		docs[i] = retrievalVectorRecord{ID: fmt.Sprintf("d%d", i+1), Vector: normalizeRetrievalVector(vec)}
+	}
+	queries := []retrievalVectorRecord{
+		{ID: "q1", Vector: normalizeRetrievalVector([]float32{1, 0.1, 0, 0, 0, 0, 0, 0})},
+		{ID: "q2", Vector: normalizeRetrievalVector([]float32{0.1, 1, 0, 0, 0, 0, 0, 0})},
+	}
+	qrels := retrievalQrels{
+		"q1": {"d1": 1},
+		"q2": {"d2": 1},
+	}
+
+	dir := t.TempDir()
+	singlePerQueryPath := filepath.Join(dir, "single.per-query.jsonl")
+	listPerQueryPath := filepath.Join(dir, "list.per-query.jsonl")
+	cfg := RetrievalEvalConfig{
+		DatasetName:   "tiny-tq-fp16-command-shape",
+		TopK:          100,
+		QuantizerSeed: 5581486560434873699,
+	}
+	singleCfg := cfg
+	singleCfg.PerQueryJSONLPath = singlePerQueryPath
+	single, err := evaluateTurboQuantVectorRetrievalWithRerankStorage(context.Background(), singleCfg, []int{4}, []int{200}, TurboQuantRerankStorageFP16, docs, queries, qrels)
+	if err != nil {
+		t.Fatalf("evaluate single overfetch: %v", err)
+	}
+	listCfg := cfg
+	listCfg.PerQueryJSONLPath = listPerQueryPath
+	list, err := evaluateTurboQuantVectorRetrievalWithRerankStorage(context.Background(), listCfg, []int{4}, []int{125, 150, 200, 225}, TurboQuantRerankStorageFP16, docs, queries, qrels)
+	if err != nil {
+		t.Fatalf("evaluate overfetch list: %v", err)
+	}
+
+	singleRow := findTurboQuantMetricRow(t, single, "turboquant_ip_b4_overfetch200_fp16_rerank")
+	listRow := findTurboQuantMetricRow(t, list, "turboquant_ip_b4_overfetch200_fp16_rerank")
+	assertStableTurboQuantMetricRowsEqual(t, singleRow, listRow)
+
+	singlePerQueryRows := readTurboQuantPerQueryRowsByMethod(t, singlePerQueryPath, "turboquant_ip_b4_overfetch200_fp16_rerank")
+	listPerQueryRows := readTurboQuantPerQueryRowsByMethod(t, listPerQueryPath, "turboquant_ip_b4_overfetch200_fp16_rerank")
+	if len(singlePerQueryRows) != len(listPerQueryRows) {
+		t.Fatalf("per-query overfetch200 rows: single=%d list=%d", len(singlePerQueryRows), len(listPerQueryRows))
+	}
+	for i := range singlePerQueryRows {
+		singleData, err := json.Marshal(singlePerQueryRows[i])
+		if err != nil {
+			t.Fatalf("marshal single per-query row: %v", err)
+		}
+		listData, err := json.Marshal(listPerQueryRows[i])
+		if err != nil {
+			t.Fatalf("marshal list per-query row: %v", err)
+		}
+		if string(singleData) != string(listData) {
+			t.Fatalf("per-query row %d differs\nsingle=%s\nlist=%s", i, singleData, listData)
+		}
+	}
+}
+
+func findTurboQuantMetricRow(t *testing.T, metrics TurboQuantRetrievalEvalMetrics, method string) TurboQuantRetrievalBitMetrics {
+	t.Helper()
+	for _, row := range metrics.Rows {
+		if row.Method == method {
+			return row
+		}
+	}
+	t.Fatalf("method %q not found in %+v", method, metrics.Rows)
+	return TurboQuantRetrievalBitMetrics{}
+}
+
+func assertStableTurboQuantMetricRowsEqual(t *testing.T, left, right TurboQuantRetrievalBitMetrics) {
+	t.Helper()
+	left.QuantizeSeconds = 0
+	left.ScoreSeconds = 0
+	left.RerankScoreSeconds = 0
+	left.ScoresPerSecond = 0
+	left.DocsPerSecond = 0
+	left.QueryLatency = RetrievalEvalLatencyMetrics{}
+	right.QuantizeSeconds = 0
+	right.ScoreSeconds = 0
+	right.RerankScoreSeconds = 0
+	right.ScoresPerSecond = 0
+	right.DocsPerSecond = 0
+	right.QueryLatency = RetrievalEvalLatencyMetrics{}
+	leftData, err := json.Marshal(left)
+	if err != nil {
+		t.Fatalf("marshal left metric row: %v", err)
+	}
+	rightData, err := json.Marshal(right)
+	if err != nil {
+		t.Fatalf("marshal right metric row: %v", err)
+	}
+	if string(leftData) != string(rightData) {
+		t.Fatalf("stable metric rows differ\nsingle=%s\nlist=%s", leftData, rightData)
+	}
+}
+
+func readTurboQuantPerQueryRowsByMethod(t *testing.T, path, method string) []TurboQuantRetrievalPerQueryRow {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read per-query JSONL: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	rows := []TurboQuantRetrievalPerQueryRow{}
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var row TurboQuantRetrievalPerQueryRow
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatalf("decode per-query row: %v", err)
+		}
+		if row.Method == method {
+			rows = append(rows, row)
+		}
+	}
+	return rows
+}
+
 func TestTurboQuantFP16RerankRescueLeavesIncompleteWindowUnchanged(t *testing.T) {
 	fp16Ranked, compactScores, compactRanks := turboQuantRescueFixture(119)
 	got := applyTurboQuantFP16RerankRescue(fp16Ranked, compactScores, compactRanks)
