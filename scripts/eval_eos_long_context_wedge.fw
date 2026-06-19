@@ -19,6 +19,7 @@ package main
 //   EOS_LC_WEDGE_BITS=2,4,8
 //   EOS_LC_WEDGE_PER_QUERY=1
 //   EOS_LC_WEDGE_PARENT_SPAN_FUSION=1
+//   EOS_LC_WEDGE_PARENT_SPAN_FUSION_EXTRA_RECIPES=name:k:lambda:protect;name2:k:lambda:protect
 //   EOS_LC_WEDGE_EXTERNAL_MODE=off|cache|export
 //   EOS_LC_WEDGE_SPARSE_ENCODER=0
 //   EOS_LC_WEDGE_MAX_DOCS=0
@@ -37,6 +38,8 @@ import (
 )
 
 const defaultQuantizerSeed int64 = 5581486560434873699
+const parentSpanFusionExtraRecipesEnv = "EOS_LC_WEDGE_PARENT_SPAN_FUSION_EXTRA_RECIPES"
+const parentSpanFusionExtraRecipesFormat = "name:k:lambda:protect;name2:k:lambda:protect"
 
 type quality struct {
 	NDCGAt10    float64 `json:"ndcg_at_10"`
@@ -213,6 +216,13 @@ type tokenSpanPerQueryRow struct {
 	QueryID string           `json:"query_id"`
 	Method  string           `json:"method"`
 	TopK    []perQueryTopDoc `json:"top_k"`
+}
+
+type parentSpanFusionRecipe struct {
+	Method           string
+	RRFK             float64
+	RRFLambda        float64
+	DenseProtectTopK int
 }
 
 type fusionQuality struct {
@@ -1153,6 +1163,86 @@ func appendSparseEncoderRows(rows []comparisonRow, modelID string, artifact stri
 	return rows
 }
 
+func defaultParentSpanFusionRecipes() []parentSpanFusionRecipe {
+	return []parentSpanFusionRecipe{
+		{Method: "direct_token_span_fusion_rrf_k10_lambda025", RRFK: 10, RRFLambda: 0.25, DenseProtectTopK: 0},
+		{Method: "direct_token_span_fusion_dense_protect_n1_rrf_k10_lambda05", RRFK: 10, RRFLambda: 0.5, DenseProtectTopK: 1},
+	}
+}
+
+func parentSpanFusionRecipes() ([]parentSpanFusionRecipe, error) {
+	recipes := defaultParentSpanFusionRecipes()
+	seen := map[string]bool{}
+	for _, recipe := range recipes {
+		if recipe.Method == "" {
+			return nil, fmt.Errorf("default parent-span fusion recipe has empty method")
+		}
+		if seen[recipe.Method] {
+			return nil, fmt.Errorf("duplicate default parent-span fusion method %q", recipe.Method)
+		}
+		seen[recipe.Method] = true
+	}
+
+	value := strings.TrimSpace(os.Getenv(parentSpanFusionExtraRecipesEnv))
+	if value == "" {
+		return recipes, nil
+	}
+	for index, raw := range strings.Split(value, ";") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return nil, fmt.Errorf("%s recipe %d is empty; expected %s", parentSpanFusionExtraRecipesEnv, index+1, parentSpanFusionExtraRecipesFormat)
+		}
+		recipe, err := parseParentSpanFusionRecipe(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%s recipe %d invalid: %w; expected %s", parentSpanFusionExtraRecipesEnv, index+1, err, parentSpanFusionExtraRecipesFormat)
+		}
+		if seen[recipe.Method] {
+			return nil, fmt.Errorf("%s duplicate method name %q; expected %s", parentSpanFusionExtraRecipesEnv, recipe.Method, parentSpanFusionExtraRecipesFormat)
+		}
+		seen[recipe.Method] = true
+		recipes = append(recipes, recipe)
+	}
+	return recipes, nil
+}
+
+func parseParentSpanFusionRecipe(value string) (parentSpanFusionRecipe, error) {
+	parts := strings.Split(value, ":")
+	if len(parts) != 4 {
+		return parentSpanFusionRecipe{}, fmt.Errorf("got %d fields", len(parts))
+	}
+	method := strings.TrimSpace(parts[0])
+	if method == "" {
+		return parentSpanFusionRecipe{}, fmt.Errorf("method/name must be non-empty")
+	}
+	rrfK, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+	if err != nil {
+		return parentSpanFusionRecipe{}, fmt.Errorf("k must be a finite float > 0")
+	}
+	if math.IsNaN(rrfK) || math.IsInf(rrfK, 0) || rrfK <= 0 {
+		return parentSpanFusionRecipe{}, fmt.Errorf("k must be finite and > 0")
+	}
+	rrfLambda, err := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
+	if err != nil {
+		return parentSpanFusionRecipe{}, fmt.Errorf("lambda must be a finite float >= 0")
+	}
+	if math.IsNaN(rrfLambda) || math.IsInf(rrfLambda, 0) || rrfLambda < 0 {
+		return parentSpanFusionRecipe{}, fmt.Errorf("lambda must be finite and >= 0")
+	}
+	protect, err := strconv.Atoi(strings.TrimSpace(parts[3]))
+	if err != nil {
+		return parentSpanFusionRecipe{}, fmt.Errorf("protect must be an integer >= 0")
+	}
+	if protect < 0 {
+		return parentSpanFusionRecipe{}, fmt.Errorf("protect must be >= 0")
+	}
+	return parentSpanFusionRecipe{
+		Method:           method,
+		RRFK:             rrfK,
+		RRFLambda:        rrfLambda,
+		DenseProtectTopK: protect,
+	}, nil
+}
+
 func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQueryPaths map[string]string, datasetName string, datasetDir string, runDir string, directPerQueryPath string, tokenSpanPerQueryPath string, tokenSpanMethod string, dim int, artifact string, modelID string, tokenSpanChildCount int, directParentCount int, tokenSpanQ4StorageMultiple float64, directParentDenseStorageMultiple float64, bits string, fusionEnabled bool) ([]comparisonRow, []string, error) {
 	if !fusionEnabled {
 		skipped = append(skipped, "direct+token-span diagnostic fusion disabled by EOS_LC_WEDGE_PARENT_SPAN_FUSION=0")
@@ -1208,14 +1298,9 @@ func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQuery
 		skipped = append(skipped, "direct+token-span diagnostic fusion skipped: no overlapping qrels/direct/token-span per-query rows")
 		return rows, skipped, nil
 	}
-	fusionDefs := []struct {
-		Method           string
-		RRFK             float64
-		RRFLambda        float64
-		DenseProtectTopK int
-	}{
-		{Method: "direct_token_span_fusion_rrf_k10_lambda025", RRFK: 10, RRFLambda: 0.25, DenseProtectTopK: 0},
-		{Method: "direct_token_span_fusion_dense_protect_n1_rrf_k10_lambda05", RRFK: 10, RRFLambda: 0.5, DenseProtectTopK: 1},
+	fusionDefs, err := parentSpanFusionRecipes()
+	if err != nil {
+		return rows, skipped, err
 	}
 	metricsRows := []fusionMetricsRow{}
 	caveats := []string{
