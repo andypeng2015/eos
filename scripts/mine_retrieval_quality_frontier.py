@@ -5,7 +5,9 @@ Inputs are `manta.embedding_retrieval_per_query.v1` JSONL files emitted by
 `eos eval-retrieval --per-query-jsonl` and
 `eos eval-retrieval-vectors --per-query-jsonl`.
 Multimethod diagnostics such as `eval-retrieval-multivector-turboquant` can be
-filtered with `--method` or `--bits`.
+filtered with `--method` or `--bits`. Use `--eos-method`/`--teacher-method`
+and `--eos-bits`/`--teacher-bits` when comparing asymmetric surfaces such as
+direct Eos rows against a q4 external teacher row.
 
 The primary artifact is a JSONL frontier report. When `--dataset-dir` and
 `--hard-negatives-jsonl` are provided, the script also writes Eos-compatible
@@ -42,13 +44,41 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--method",
         default="",
-        help="Optional exact per-query method filter, useful for multimethod JSONL.",
+        help=(
+            "Optional exact per-query method filter for both inputs. "
+            "Used as the default for --eos-method and --teacher-method."
+        ),
+    )
+    parser.add_argument(
+        "--eos-method",
+        default=None,
+        help="Optional exact per-query method filter for the Eos input only.",
+    )
+    parser.add_argument(
+        "--teacher-method",
+        default=None,
+        help="Optional exact per-query method filter for the teacher input only.",
     )
     parser.add_argument(
         "--bits",
         type=int,
         default=None,
-        help="Optional per-query bit-width filter, useful for TurboQuant q-bit rows.",
+        help=(
+            "Optional per-query bit-width filter for both inputs. "
+            "Used as the default for --eos-bits and --teacher-bits."
+        ),
+    )
+    parser.add_argument(
+        "--eos-bits",
+        type=int,
+        default=None,
+        help="Optional per-query bit-width filter for the Eos input only.",
+    )
+    parser.add_argument(
+        "--teacher-bits",
+        type=int,
+        default=None,
+        help="Optional per-query bit-width filter for the teacher input only.",
     )
     parser.add_argument("--dataset", default="")
     parser.add_argument(
@@ -124,10 +154,18 @@ def load_per_query(path: Path, method: str = "", bits: int | None = None) -> dic
 
 
 def metric(row: dict[str, Any], name: str) -> float:
-    return float(row.get("quality", {}).get(name, 0.0) or 0.0)
+    for field in ("quality", "fusion_quality", "direct_quality", "token_span_quality"):
+        value = row.get(field)
+        if isinstance(value, dict) and name in value:
+            return float(value.get(name, 0.0) or 0.0)
+    return 0.0
 
 
 def first_rank(row: dict[str, Any]) -> int:
+    if "first_relevant_rank" in row:
+        return int(row.get("first_relevant_rank", 0) or 0)
+    if "fusion_first_relevant_rank" in row:
+        return int(row.get("fusion_first_relevant_rank", 0) or 0)
     return int(row.get("first_relevant_rank", 0) or 0)
 
 
@@ -140,8 +178,12 @@ def nonrelevant_top_docs(row: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def build_frontier_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
-    eos_rows = load_per_query(args.eos_per_query, args.method, args.bits)
-    teacher_rows = load_per_query(args.teacher_per_query, args.method, args.bits)
+    eos_method = args.method if args.eos_method is None else args.eos_method
+    teacher_method = args.method if args.teacher_method is None else args.teacher_method
+    eos_bits = args.bits if args.eos_bits is None else args.eos_bits
+    teacher_bits = args.bits if args.teacher_bits is None else args.teacher_bits
+    eos_rows = load_per_query(args.eos_per_query, eos_method, eos_bits)
+    teacher_rows = load_per_query(args.teacher_per_query, teacher_method, teacher_bits)
     shared_ids = sorted(set(eos_rows) & set(teacher_rows))
     if not shared_ids:
         raise ValueError("no shared query_id values between Eos and teacher rows")
@@ -354,6 +396,11 @@ def write_summary(path: Path, rows: list[dict[str, Any]], hard_negative_rows: in
         "schema": FRONTIER_SCHEMA + ".summary",
         "queries": len(rows),
         "hard_negative_rows": hard_negative_rows,
+        "quality_claim": False,
+        "claim_boundary": (
+            "Protected candidate training data only; capped mined rows are not "
+            "benchmark or product-quality evidence."
+        ),
         "mean_teacher_minus_eos_ndcg_at_10": total_gap / len(rows) if rows else 0.0,
         "max_teacher_minus_eos_ndcg_at_10": rows[0]["delta"]["teacher_minus_eos_ndcg_at_10"]
         if rows
