@@ -1,0 +1,1209 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const defaultCorkScrewDBRepo = "/home/draco/work/corkscrewdb"
+const defaultHybridArtifact = "runs/eos-s40-longembed-balanced-anchor-sweep-v1-20260620T195017Z/candidates/fiqa24-nf48/candidate/eos-embed-v1.sealed.mll"
+const defaultPolicyLabel = "fiqa24-nf48-minmax-blend-alpha0.5-top100"
+const defaultFusionAlpha = 0.5
+const defaultTopK = 100
+
+type qualityMetrics struct {
+	NDCGAt10    float64 `json:"ndcg_at_10"`
+	RecallAt100 float64 `json:"recall_at_100"`
+}
+
+type harnessQualityMetrics struct {
+	NDCGAt10    float64
+	RecallAt100 float64
+}
+
+type harnessMetrics struct {
+	Schema              string
+	Dataset             string
+	Collection          string
+	Dimension           int
+	BitWidth            int
+	Documents           int
+	Queries             int
+	RelevantPairs       int
+	LoadedSparseDocs    int
+	SparseVocabTerms    int
+	TopK                int
+	FusionDenseWeight   float64
+	FusionSparseWeight  float64
+	SparseMethod        string
+	LoadSeconds         float64
+	DenseSearchSeconds  float64
+	HybridSearchSeconds float64
+	DenseOnly           harnessQualityMetrics
+	Hybrid              harnessQualityMetrics
+	Deltas              harnessQualityMetrics
+	OverallPass         bool
+	Gates               map[string]bool
+	Caveats             []string
+}
+
+type exportManifest struct {
+	Schema          string `json:"schema"`
+	Dataset         string `json:"dataset"`
+	Artifact        string `json:"artifact"`
+	Documents       int    `json:"documents"`
+	Queries         int    `json:"queries"`
+	Dimension       int    `json:"dimension"`
+	DocVectorPath   string `json:"doc_vector_path"`
+	QueryVectorPath string `json:"query_vector_path"`
+	CorpusPath      string `json:"corpus_path"`
+	QueriesPath     string `json:"queries_path"`
+	QrelsPath       string `json:"qrels_path"`
+}
+
+type selectedPolicy struct {
+	Label            string  `json:"label"`
+	Artifact         string  `json:"artifact"`
+	Method           string  `json:"method"`
+	Alpha            float64 `json:"alpha"`
+	DenseWeight      float64 `json:"dense_weight"`
+	SparseWeight     float64 `json:"sparse_weight"`
+	TopK             int     `json:"top_k"`
+	DenseProtectTopK int     `json:"dense_protect_top_k"`
+	Decision         string  `json:"decision"`
+}
+
+type commandLog struct {
+	Label string   `json:"label"`
+	Args  []string `json:"args"`
+	Dir   string   `json:"dir"`
+	Log   string   `json:"log"`
+}
+
+type gateResult struct {
+	Metric string  `json:"metric"`
+	Dense  float64 `json:"dense"`
+	Hybrid float64 `json:"hybrid"`
+	Delta  float64 `json:"delta"`
+	Passed bool    `json:"passed"`
+}
+
+type smokeManifest struct {
+	Schema             string                `json:"schema"`
+	GeneratedAt        string                `json:"generated_at"`
+	RunDir             string                `json:"run_dir"`
+	RepoRoot           string                `json:"repo_root"`
+	CorkScrewDBRepo    string                `json:"corkscrewdb_repo"`
+	HarnessDir         string                `json:"harness_dir"`
+	Dataset            string                `json:"dataset"`
+	DatasetDir         string                `json:"dataset_dir"`
+	Split              string                `json:"split"`
+	VectorExportPath   string                `json:"vector_export_path"`
+	DocVectors         string                `json:"doc_vectors"`
+	QueryVectors       string                `json:"query_vectors"`
+	Qrels              string                `json:"qrels"`
+	ExportManifestPath string                `json:"export_manifest_path"`
+	GeneratedVectors   bool                  `json:"generated_vectors"`
+	SparseMethod       string                `json:"sparse_lexical_method"`
+	FusionConfig       map[string]any        `json:"fusion_config"`
+	SelectedPolicy     selectedPolicy        `json:"selected_policy"`
+	Inputs             map[string]any        `json:"inputs"`
+	DenseOnlyQuality   qualityMetrics        `json:"dense_only_quality"`
+	HybridQuality      qualityMetrics        `json:"hybrid_searchmulti_quality"`
+	Deltas             qualityMetrics        `json:"deltas"`
+	Gates              map[string]gateResult `json:"gates"`
+	OverallPass        bool                  `json:"overall_pass"`
+	HarnessMetricsPath string                `json:"harness_metrics_path"`
+	SummaryTSV         string                `json:"summary_tsv"`
+	CommandLogs        []commandLog          `json:"command_logs"`
+	Caveats            []string              `json:"caveats"`
+}
+
+func usage() {
+	fmt.Println(`CorkScrewDB API-level smoke for the selected Eos hybrid retrieval policy.
+
+Run:
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_corkscrewdb_hybrid_policy.fw
+
+Environment:
+  EOS_CORKSCREW_HYBRID_SMOKE_ARTIFACT=/path/to/eos-embed-v1.sealed.mll
+  EOS_CORKSCREW_HYBRID_SMOKE_DATASET_ROOT=datasets/manta-embed-v1
+  EOS_CORKSCREW_HYBRID_SMOKE_DATASET=scifact
+  EOS_CORKSCREW_HYBRID_SMOKE_SPLIT=test
+  EOS_CORKSCREW_HYBRID_SMOKE_RUN_DIR=runs/eos-corkscrewdb-hybrid-policy-smoke-<timestamp>
+  EOS_CORKSCREW_HYBRID_SMOKE_CORKSCREWDB_REPO=/home/draco/work/corkscrewdb
+  EOS_CORKSCREW_HYBRID_SMOKE_DOC_VECTORS=/path/to/doc-vectors.jsonl
+  EOS_CORKSCREW_HYBRID_SMOKE_QUERY_VECTORS=/path/to/query-vectors.jsonl
+  EOS_CORKSCREW_HYBRID_SMOKE_EXPORT_DIR=/path/to/vector-cache
+  EOS_CORKSCREW_HYBRID_SMOKE_MAX_DOCS=600
+  EOS_CORKSCREW_HYBRID_SMOKE_MAX_QUERIES=20
+  EOS_CORKSCREW_HYBRID_SMOKE_TOP_K=100
+  EOS_CORKSCREW_HYBRID_SMOKE_BATCH_SIZE=64
+  EOS_CORKSCREW_HYBRID_SMOKE_BITS=8
+  EOS_CORKSCREW_HYBRID_SMOKE_FAIL_ON_GATE=0`)
+}
+
+func getenv(name string, fallback string) string {
+	value := os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func parseIntEnv(name string, fallback int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func envBool(name string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	if value == "" {
+		return fallback
+	}
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	if pwd := os.Getenv("PWD"); hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func requireLocalRepo(path string) error {
+	if !hasRepoRoot(path) {
+		return fmt.Errorf("local CorkScrewDB repo is required at %s", path)
+	}
+	return nil
+}
+
+func firstExistingDir(paths []string, fallback string) string {
+	for _, path := range paths {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return path
+		}
+	}
+	return fallback
+}
+
+func retrievalDatasetDir(root string, dataset string) string {
+	candidate := filepath.Join(root, "raw", dataset, dataset)
+	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+		return candidate
+	}
+	return filepath.Join(root, dataset)
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func renderCommand(args []string) string {
+	parts := []string{}
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func runCommand(dir string, logDir string, label string, args []string, env []string) (commandLog, error) {
+	logPath := filepath.Join(logDir, label+".log")
+	fmt.Println("\n== " + label + " ==")
+	fmt.Println("+ " + renderCommand(args))
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		return commandLog{}, err
+	}
+	defer logFile.Close()
+	if _, err := fmt.Fprintln(logFile, "+ "+renderCommand(args)); err != nil {
+		return commandLog{}, err
+	}
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = dir
+	cmd.Env = env
+	writer := io.MultiWriter(os.Stdout, logFile)
+	cmd.Stdout = writer
+	cmd.Stderr = writer
+	entry := commandLog{Label: label, Args: args, Dir: dir, Log: logPath}
+	if err := cmd.Run(); err != nil {
+		return entry, fmt.Errorf("%s failed: %w", label, err)
+	}
+	return entry, nil
+}
+
+func writeHarnessModule(harnessDir string, corkscrewRepo string) error {
+	if err := os.MkdirAll(harnessDir, 0o755); err != nil {
+		return err
+	}
+	goMod := "module eos-corkscrewdb-hybrid-policy-smoke\n\ngo 1.23\n\nrequire m31labs.dev/corkscrewdb v0.0.0\n\nreplace m31labs.dev/corkscrewdb => " + corkscrewRepo + "\n"
+	if err := os.WriteFile(filepath.Join(harnessDir, "go.mod"), []byte(goMod), 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(harnessDir, "main.go"), []byte(harnessSource), 0o644)
+}
+
+func readExportManifest(path string) (exportManifest, error) {
+	var manifest exportManifest
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return manifest, err
+	}
+	return manifest, json.Unmarshal(data, &manifest)
+}
+
+func readHarnessMetrics(path string) (harnessMetrics, error) {
+	var metrics harnessMetrics
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return metrics, err
+	}
+	return metrics, json.Unmarshal(data, &metrics)
+}
+
+func writeSummaryTSV(path string, manifest smokeManifest) error {
+	var b strings.Builder
+	b.WriteString("dataset\tdocuments\tqueries\trelevant_pairs\tsparse_method\tfusion_dense\tfusion_sparse\tdense_ndcg_at_10\thybrid_ndcg_at_10\tdelta_ndcg_at_10\tdense_recall_at_100\thybrid_recall_at_100\tdelta_recall_at_100\toverall_pass\n")
+	fmt.Fprintf(&b, "%s\t%d\t%d\t%d\t%s\t%.6f\t%.6f\t%.12f\t%.12f\t%.12f\t%.12f\t%.12f\t%.12f\t%t\n",
+		manifest.Dataset,
+		manifest.Inputs["documents"],
+		manifest.Inputs["queries"],
+		manifest.Inputs["relevant_pairs"],
+		manifest.SparseMethod,
+		manifest.FusionConfig["dense_weight"],
+		manifest.FusionConfig["sparse_weight"],
+		manifest.DenseOnlyQuality.NDCGAt10,
+		manifest.HybridQuality.NDCGAt10,
+		manifest.Deltas.NDCGAt10,
+		manifest.DenseOnlyQuality.RecallAt100,
+		manifest.HybridQuality.RecallAt100,
+		manifest.Deltas.RecallAt100,
+		manifest.OverallPass)
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	runDir := getenv("EOS_CORKSCREW_HYBRID_SMOKE_RUN_DIR", filepath.Join(root, "runs", "eos-corkscrewdb-hybrid-policy-smoke-"+time.Now().UTC().Format("20060102T150405Z")))
+	runDir, err = filepath.Abs(runDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	logDir := filepath.Join(runDir, "logs")
+	harnessDir := filepath.Join(runDir, "harness")
+	dbPath := filepath.Join(runDir, "corkscrewdb")
+	vectorExportDir := getenv("EOS_CORKSCREW_HYBRID_SMOKE_EXPORT_DIR", filepath.Join(runDir, "vector-cache"))
+	for _, dir := range []string{runDir, logDir, harnessDir, dbPath, vectorExportDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+
+	corkscrewRepo := getenv("EOS_CORKSCREW_HYBRID_SMOKE_CORKSCREWDB_REPO", defaultCorkScrewDBRepo)
+	corkscrewRepo, err = filepath.Abs(corkscrewRepo)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := requireLocalRepo(corkscrewRepo); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	defaultDatasetRoot := firstExistingDir([]string{
+		filepath.Join(root, "datasets", "eos-embed-v1"),
+		filepath.Join(root, "datasets", "manta-embed-v1"),
+	}, filepath.Join(root, "datasets", "manta-embed-v1"))
+	datasetRoot := getenv("EOS_CORKSCREW_HYBRID_SMOKE_DATASET_ROOT", defaultDatasetRoot)
+	dataset := getenv("EOS_CORKSCREW_HYBRID_SMOKE_DATASET", "scifact")
+	split := getenv("EOS_CORKSCREW_HYBRID_SMOKE_SPLIT", "test")
+	datasetDir := retrievalDatasetDir(datasetRoot, dataset)
+	if info, err := os.Stat(datasetDir); err != nil || !info.IsDir() {
+		fmt.Fprintf(os.Stderr, "dataset directory does not exist: %s\n", datasetDir)
+		os.Exit(1)
+	}
+	qrels := getenv("EOS_CORKSCREW_HYBRID_SMOKE_QRELS", filepath.Join(datasetDir, "qrels", split+".tsv"))
+	if !fileExists(qrels) {
+		fmt.Fprintf(os.Stderr, "qrels file does not exist: %s\n", qrels)
+		os.Exit(1)
+	}
+
+	topK, err := parseIntEnv("EOS_CORKSCREW_HYBRID_SMOKE_TOP_K", defaultTopK)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	maxDocs, err := parseIntEnv("EOS_CORKSCREW_HYBRID_SMOKE_MAX_DOCS", 600)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	maxQueries, err := parseIntEnv("EOS_CORKSCREW_HYBRID_SMOKE_MAX_QUERIES", 20)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	batchSize, err := parseIntEnv("EOS_CORKSCREW_HYBRID_SMOKE_BATCH_SIZE", 64)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	bits, err := parseIntEnv("EOS_CORKSCREW_HYBRID_SMOKE_BITS", 8)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	artifact := getenv("EOS_CORKSCREW_HYBRID_SMOKE_ARTIFACT", filepath.Join(root, defaultHybridArtifact))
+	docVectors := os.Getenv("EOS_CORKSCREW_HYBRID_SMOKE_DOC_VECTORS")
+	queryVectors := os.Getenv("EOS_CORKSCREW_HYBRID_SMOKE_QUERY_VECTORS")
+	exportManifestPath := filepath.Join(vectorExportDir, "manifest.json")
+	generatedVectors := false
+	commandLogs := []commandLog{}
+	if docVectors == "" || queryVectors == "" {
+		if !fileExists(artifact) {
+			fmt.Fprintf(os.Stderr, "artifact does not exist: %s\n", artifact)
+			os.Exit(1)
+		}
+		args := []string{
+			"go", "run", "./cmd/eos", "export-retrieval-vectors",
+			"--dataset", dataset,
+			"--split", split,
+			"--qrels", qrels,
+			"--batch-size", strconv.Itoa(batchSize),
+			"--max-docs", strconv.Itoa(maxDocs),
+			"--max-queries", strconv.Itoa(maxQueries),
+			"--manifest-json", exportManifestPath,
+			artifact,
+			datasetDir,
+			vectorExportDir,
+		}
+		entry, err := runCommand(root, logDir, "export-retrieval-vectors", args, append(os.Environ(), "EOS_REPO_ROOT="+root))
+		commandLogs = append(commandLogs, entry)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		exportManifest, err := readExportManifest(exportManifestPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		docVectors = exportManifest.DocVectorPath
+		queryVectors = exportManifest.QueryVectorPath
+		generatedVectors = true
+	} else {
+		exportManifestPath = ""
+	}
+	for _, path := range []string{docVectors, queryVectors} {
+		if !fileExists(path) {
+			fmt.Fprintf(os.Stderr, "required vector cache does not exist: %s\n", path)
+			os.Exit(1)
+		}
+	}
+
+	if err := writeHarnessModule(harnessDir, corkscrewRepo); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	entry, err := runCommand(harnessDir, logDir, "harness-go-mod-tidy", []string{"go", "mod", "tidy"}, os.Environ())
+	commandLogs = append(commandLogs, entry)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	harnessMetricsPath := filepath.Join(runDir, "harness.metrics.json")
+	harnessArgs := []string{
+		"go", "run", ".",
+		"--dataset", dataset,
+		"--dataset-dir", datasetDir,
+		"--doc-vectors", docVectors,
+		"--query-vectors", queryVectors,
+		"--qrels", qrels,
+		"--db", dbPath,
+		"--bits", strconv.Itoa(bits),
+		"--top-k", strconv.Itoa(topK),
+		"--metrics-json", harnessMetricsPath,
+	}
+	entry, err = runCommand(harnessDir, logDir, "harness-searchmulti", harnessArgs, os.Environ())
+	commandLogs = append(commandLogs, entry)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	metrics, err := readHarnessMetrics(harnessMetricsPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	gates := map[string]gateResult{
+		"hybrid_ndcg_at_10_gte_dense": {
+			Metric: "ndcg_at_10",
+			Dense:  metrics.DenseOnly.NDCGAt10,
+			Hybrid: metrics.Hybrid.NDCGAt10,
+			Delta:  metrics.Deltas.NDCGAt10,
+			Passed: metrics.Hybrid.NDCGAt10+1e-12 >= metrics.DenseOnly.NDCGAt10,
+		},
+		"hybrid_recall_at_100_gte_dense": {
+			Metric: "recall_at_100",
+			Dense:  metrics.DenseOnly.RecallAt100,
+			Hybrid: metrics.Hybrid.RecallAt100,
+			Delta:  metrics.Deltas.RecallAt100,
+			Passed: metrics.Hybrid.RecallAt100+1e-12 >= metrics.DenseOnly.RecallAt100,
+		},
+	}
+	overallPass := true
+	for _, gate := range gates {
+		if !gate.Passed {
+			overallPass = false
+		}
+	}
+	caveats := []string{
+		"API-level CorkScrewDB smoke only: this proves the selected policy can be translated to WithSparse plus SearchMulti WeightedFusion through the public API.",
+		"The sparse channel is lexical TF-IDF derived from the same BEIR corpus/query text; it is not BM25 and is not exact eval-retrieval-hybrid parity.",
+		"No Eos dense default asset or CorkScrewDB default alias is changed.",
+	}
+	if maxDocs != 0 || maxQueries != 0 {
+		caveats = append(caveats, "This run used max-docs or max-queries limits; use max-docs=0 and max-queries=0 for full SciFact evidence.")
+	}
+	if len(metrics.Caveats) > 0 {
+		caveats = append(caveats, metrics.Caveats...)
+	}
+
+	manifestJSON := filepath.Join(runDir, "manifest.json")
+	summaryTSV := filepath.Join(runDir, "summary.tsv")
+	manifest := smokeManifest{
+		Schema:             "eos.corkscrewdb_hybrid_policy_api_smoke.v1",
+		GeneratedAt:        time.Now().UTC().Format(time.RFC3339),
+		RunDir:             runDir,
+		RepoRoot:           root,
+		CorkScrewDBRepo:    corkscrewRepo,
+		HarnessDir:         harnessDir,
+		Dataset:            dataset,
+		DatasetDir:         datasetDir,
+		Split:              split,
+		VectorExportPath:   vectorExportDir,
+		DocVectors:         docVectors,
+		QueryVectors:       queryVectors,
+		Qrels:              qrels,
+		ExportManifestPath: exportManifestPath,
+		GeneratedVectors:   generatedVectors,
+		SparseMethod:       metrics.SparseMethod,
+		FusionConfig: map[string]any{
+			"method":        "WeightedFusion",
+			"dense_weight":  defaultFusionAlpha,
+			"sparse_weight": defaultFusionAlpha,
+			"source_policy": "minmax_blend alpha=0.5",
+		},
+		SelectedPolicy: selectedPolicy{
+			Label:            defaultPolicyLabel,
+			Artifact:         artifact,
+			Method:           "minmax_blend",
+			Alpha:            defaultFusionAlpha,
+			DenseWeight:      defaultFusionAlpha,
+			SparseWeight:     defaultFusionAlpha,
+			TopK:             topK,
+			DenseProtectTopK: 0,
+			Decision:         "api_translation_smoke_only",
+		},
+		Inputs: map[string]any{
+			"documents":          metrics.Documents,
+			"queries":            metrics.Queries,
+			"relevant_pairs":     metrics.RelevantPairs,
+			"dimension":          metrics.Dimension,
+			"bit_width":          metrics.BitWidth,
+			"loaded_sparse_docs": metrics.LoadedSparseDocs,
+			"sparse_vocab_terms": metrics.SparseVocabTerms,
+			"top_k":              metrics.TopK,
+		},
+		DenseOnlyQuality: qualityMetrics{
+			NDCGAt10:    metrics.DenseOnly.NDCGAt10,
+			RecallAt100: metrics.DenseOnly.RecallAt100,
+		},
+		HybridQuality: qualityMetrics{
+			NDCGAt10:    metrics.Hybrid.NDCGAt10,
+			RecallAt100: metrics.Hybrid.RecallAt100,
+		},
+		Deltas: qualityMetrics{
+			NDCGAt10:    metrics.Deltas.NDCGAt10,
+			RecallAt100: metrics.Deltas.RecallAt100,
+		},
+		Gates:              gates,
+		OverallPass:        overallPass,
+		HarnessMetricsPath: harnessMetricsPath,
+		SummaryTSV:         summaryTSV,
+		CommandLogs:        commandLogs,
+		Caveats:            caveats,
+	}
+	if err := writeSummaryTSV(summaryTSV, manifest); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(manifestJSON, append(data, '\n'), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("\nsummary_tsv: %s\n", summaryTSV)
+	fmt.Printf("manifest: %s\n", manifestJSON)
+	fmt.Printf("dense_only: ndcg@10=%.12f recall@100=%.12f\n", manifest.DenseOnlyQuality.NDCGAt10, manifest.DenseOnlyQuality.RecallAt100)
+	fmt.Printf("hybrid_searchmulti: ndcg@10=%.12f recall@100=%.12f overall_pass=%t\n", manifest.HybridQuality.NDCGAt10, manifest.HybridQuality.RecallAt100, manifest.OverallPass)
+	if !manifest.OverallPass && envBool("EOS_CORKSCREW_HYBRID_SMOKE_FAIL_ON_GATE", false) {
+		os.Exit(1)
+	}
+}
+
+const harnessSource = `package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	corkscrewdb "m31labs.dev/corkscrewdb"
+)
+
+type vectorRow struct {
+	ID        string
+	Embedding []float32
+	Vector    []float32
+	Values    []float32
+}
+
+type textRow struct {
+	ID    string
+	Title string
+	Text  string
+}
+
+type sparseVector struct {
+	indices []uint32
+	values  []float32
+}
+
+type qualityMetrics struct {
+	NDCGAt10    float64
+	RecallAt100 float64
+}
+
+type metrics struct {
+	Schema              string
+	Dataset             string
+	Collection          string
+	Dimension           int
+	BitWidth            int
+	Documents           int
+	Queries             int
+	RelevantPairs       int
+	LoadedSparseDocs    int
+	SparseVocabTerms    int
+	TopK                int
+	FusionDenseWeight   float64
+	FusionSparseWeight  float64
+	SparseMethod        string
+	LoadSeconds         float64
+	DenseSearchSeconds  float64
+	HybridSearchSeconds float64
+	DenseOnly           qualityMetrics
+	Hybrid              qualityMetrics
+	Deltas              qualityMetrics
+	OverallPass         bool
+	Gates               map[string]bool
+	Caveats             []string
+}
+
+var tokenRE = regexp.MustCompile("[a-z0-9]+")
+
+func fatalf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(1)
+}
+
+func firstVector(row vectorRow) []float32 {
+	if len(row.Embedding) > 0 {
+		return row.Embedding
+	}
+	if len(row.Vector) > 0 {
+		return row.Vector
+	}
+	return row.Values
+}
+
+func normalizeVector(in []float32) []float32 {
+	var sum float64
+	for _, v := range in {
+		sum += float64(v) * float64(v)
+	}
+	if sum == 0 {
+		out := make([]float32, len(in))
+		copy(out, in)
+		return out
+	}
+	scale := float32(1 / math.Sqrt(sum))
+	out := make([]float32, len(in))
+	for i, v := range in {
+		out[i] = v * scale
+	}
+	return out
+}
+
+func readVectors(path string) (map[string][]float32, int, error) {
+	out := map[string][]float32{}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
+	dim := 0
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var row vectorRow
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			return nil, 0, fmt.Errorf("%s:%d: %w", path, lineNo, err)
+		}
+		if strings.TrimSpace(row.ID) == "" {
+			continue
+		}
+		vec := firstVector(row)
+		if len(vec) == 0 {
+			return nil, 0, fmt.Errorf("%s:%d: empty vector for %s", path, lineNo, row.ID)
+		}
+		if dim == 0 {
+			dim = len(vec)
+		} else if len(vec) != dim {
+			return nil, 0, fmt.Errorf("%s:%d: vector dimension %d, want %d", path, lineNo, len(vec), dim)
+		}
+		if _, exists := out[row.ID]; !exists {
+			out[row.ID] = normalizeVector(vec)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, 0, err
+	}
+	return out, dim, nil
+}
+
+func readTextRows(path string) (map[string]textRow, []string, error) {
+	out := map[string]textRow{}
+	order := []string{}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 64*1024*1024)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			return nil, nil, fmt.Errorf("%s:%d: %w", path, lineNo, err)
+		}
+		id := firstString(raw, "_id", "id")
+		if id == "" {
+			continue
+		}
+		row := textRow{ID: id, Title: firstString(raw, "title"), Text: firstString(raw, "text")}
+		if _, exists := out[id]; !exists {
+			order = append(order, id)
+			out[id] = row
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, nil, err
+	}
+	return out, order, nil
+}
+
+func firstString(raw map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := raw[key]; ok {
+			if s, ok := value.(string); ok {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	return ""
+}
+
+func readQrels(path string) (map[string]map[string]float64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	qrels := map[string]map[string]float64{}
+	scanner := bufio.NewScanner(file)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if lineNo == 1 && len(parts) >= 2 && strings.Contains(strings.ToLower(parts[0]), "query") {
+			continue
+		}
+		if len(parts) < 3 {
+			return nil, fmt.Errorf("%s:%d: malformed qrels row", path, lineNo)
+		}
+		score := 1.0
+		if parsed, err := strconvParseFloat(parts[2]); err == nil {
+			score = parsed
+		}
+		if score <= 0 {
+			continue
+		}
+		qid := parts[0]
+		docid := parts[1]
+		if qrels[qid] == nil {
+			qrels[qid] = map[string]float64{}
+		}
+		qrels[qid][docid] = score
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return qrels, nil
+}
+
+func strconvParseFloat(value string) (float64, error) {
+	var out float64
+	_, err := fmt.Sscanf(strings.TrimSpace(value), "%f", &out)
+	return out, err
+}
+
+func tokens(text string) []string {
+	return tokenRE.FindAllString(strings.ToLower(text), -1)
+}
+
+func buildSparse(corpus map[string]textRow, docIDs []string, queries map[string]textRow, queryIDs []string) (map[string]sparseVector, map[string]sparseVector, int) {
+	termID := map[string]uint32{}
+	docFreq := map[string]int{}
+	docTerms := map[string][]string{}
+	queryTerms := map[string][]string{}
+	for _, id := range docIDs {
+		row := corpus[id]
+		terms := tokens(row.Title + " " + row.Text)
+		docTerms[id] = terms
+		seen := map[string]bool{}
+		for _, term := range terms {
+			if _, ok := termID[term]; !ok {
+				termID[term] = uint32(len(termID) + 1)
+			}
+			if !seen[term] {
+				docFreq[term]++
+				seen[term] = true
+			}
+		}
+	}
+	for _, id := range queryIDs {
+		row := queries[id]
+		terms := tokens(row.Title + " " + row.Text)
+		queryTerms[id] = terms
+		for _, term := range terms {
+			if _, ok := termID[term]; !ok {
+				termID[term] = uint32(len(termID) + 1)
+			}
+		}
+	}
+	nDocs := float64(len(docIDs))
+	docSparse := map[string]sparseVector{}
+	for id, terms := range docTerms {
+		docSparse[id] = termsToSparse(terms, termID, docFreq, nDocs)
+	}
+	querySparse := map[string]sparseVector{}
+	for id, terms := range queryTerms {
+		querySparse[id] = termsToSparse(terms, termID, docFreq, nDocs)
+	}
+	return docSparse, querySparse, len(termID)
+}
+
+func termsToSparse(terms []string, termID map[string]uint32, docFreq map[string]int, nDocs float64) sparseVector {
+	tf := map[string]float64{}
+	for _, term := range terms {
+		tf[term]++
+	}
+	type pair struct {
+		index uint32
+		value float64
+	}
+	pairs := []pair{}
+	var norm float64
+	for term, count := range tf {
+		index := termID[term]
+		idf := math.Log((nDocs+1)/(float64(docFreq[term])+1)) + 1
+		value := (1 + math.Log(count)) * idf
+		pairs = append(pairs, pair{index: index, value: value})
+		norm += value * value
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].index < pairs[j].index })
+	if norm == 0 {
+		return sparseVector{}
+	}
+	scale := 1 / math.Sqrt(norm)
+	out := sparseVector{indices: make([]uint32, len(pairs)), values: make([]float32, len(pairs))}
+	for i, pair := range pairs {
+		out.indices[i] = pair.index
+		out.values[i] = float32(pair.value * scale)
+	}
+	return out
+}
+
+func toCorkSparse(sv sparseVector) *corkscrewdb.SparseVector {
+	if len(sv.indices) == 0 {
+		return nil
+	}
+	return &corkscrewdb.SparseVector{Indices: sv.indices, Values: sv.values}
+}
+
+func resultIDs(results []corkscrewdb.SearchResult) []string {
+	out := make([]string, len(results))
+	for i, result := range results {
+		out[i] = result.ID
+	}
+	return out
+}
+
+func dcg(ids []string, rels map[string]float64, k int) float64 {
+	limit := k
+	if len(ids) < limit {
+		limit = len(ids)
+	}
+	var score float64
+	for i := 0; i < limit; i++ {
+		rel := rels[ids[i]]
+		if rel <= 0 {
+			continue
+		}
+		score += rel / math.Log2(float64(i)+2)
+	}
+	return score
+}
+
+func idealDCG(rels map[string]float64, k int) float64 {
+	values := make([]float64, 0, len(rels))
+	for _, rel := range rels {
+		if rel > 0 {
+			values = append(values, rel)
+		}
+	}
+	sort.Slice(values, func(i, j int) bool { return values[i] > values[j] })
+	limit := k
+	if len(values) < limit {
+		limit = len(values)
+	}
+	var score float64
+	for i := 0; i < limit; i++ {
+		score += values[i] / math.Log2(float64(i)+2)
+	}
+	return score
+}
+
+func quality(rankings map[string][]string, qrels map[string]map[string]float64) (qualityMetrics, int) {
+	var total qualityMetrics
+	count := 0
+	for qid, rels := range qrels {
+		ids, ok := rankings[qid]
+		if !ok {
+			continue
+		}
+		idcg10 := idealDCG(rels, 10)
+		if idcg10 > 0 {
+			total.NDCGAt10 += dcg(ids, rels, 10) / idcg10
+		}
+		recovered := 0
+		limit := 100
+		if len(ids) < limit {
+			limit = len(ids)
+		}
+		for i := 0; i < limit; i++ {
+			if rels[ids[i]] > 0 {
+				recovered++
+			}
+		}
+		if len(rels) > 0 {
+			total.RecallAt100 += float64(recovered) / float64(len(rels))
+		}
+		count++
+	}
+	if count > 0 {
+		total.NDCGAt10 /= float64(count)
+		total.RecallAt100 /= float64(count)
+	}
+	return total, count
+}
+
+func countRelevant(qrels map[string]map[string]float64, queryIDs map[string]bool, docIDs map[string]bool) int {
+	count := 0
+	for qid, rels := range qrels {
+		if !queryIDs[qid] {
+			continue
+		}
+		for docid := range rels {
+			if docIDs[docid] {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func main() {
+	dataset := flag.String("dataset", "scifact", "dataset name")
+	datasetDir := flag.String("dataset-dir", "", "BEIR dataset dir")
+	docVectorsPath := flag.String("doc-vectors", "", "doc vector JSONL")
+	queryVectorsPath := flag.String("query-vectors", "", "query vector JSONL")
+	qrelsPath := flag.String("qrels", "", "qrels TSV")
+	dbPath := flag.String("db", "", "CorkScrewDB path")
+	bits := flag.Int("bits", 8, "CorkScrewDB bit width")
+	topK := flag.Int("top-k", 100, "retrieval top K")
+	collection := flag.String("collection", "eos_hybrid_policy_smoke", "collection name")
+	metricsPath := flag.String("metrics-json", "", "metrics JSON output")
+	flag.Parse()
+	if *datasetDir == "" || *docVectorsPath == "" || *queryVectorsPath == "" || *qrelsPath == "" || *dbPath == "" || *metricsPath == "" {
+		fatalf("--dataset-dir, --doc-vectors, --query-vectors, --qrels, --db, and --metrics-json are required")
+	}
+	startLoad := time.Now()
+	docVectors, dim, err := readVectors(*docVectorsPath)
+	if err != nil {
+		fatalf("read doc vectors: %v", err)
+	}
+	queryVectors, queryDim, err := readVectors(*queryVectorsPath)
+	if err != nil {
+		fatalf("read query vectors: %v", err)
+	}
+	if dim != queryDim {
+		fatalf("doc dim %d != query dim %d", dim, queryDim)
+	}
+	corpus, corpusOrder, err := readTextRows(filepath.Join(*datasetDir, "corpus.jsonl"))
+	if err != nil {
+		fatalf("read corpus: %v", err)
+	}
+	queries, queryOrder, err := readTextRows(filepath.Join(*datasetDir, "queries.jsonl"))
+	if err != nil {
+		fatalf("read queries: %v", err)
+	}
+	qrels, err := readQrels(*qrelsPath)
+	if err != nil {
+		fatalf("read qrels: %v", err)
+	}
+	docIDs := []string{}
+	docSet := map[string]bool{}
+	for _, id := range corpusOrder {
+		if _, ok := docVectors[id]; ok {
+			docIDs = append(docIDs, id)
+			docSet[id] = true
+		}
+	}
+	queryIDs := []string{}
+	querySet := map[string]bool{}
+	for _, id := range queryOrder {
+		if _, ok := queryVectors[id]; ok {
+			queryIDs = append(queryIDs, id)
+			querySet[id] = true
+		}
+	}
+	docSparse, querySparse, vocabTerms := buildSparse(corpus, docIDs, queries, queryIDs)
+	if err := os.RemoveAll(*dbPath); err != nil {
+		fatalf("clear db: %v", err)
+	}
+	db, err := corkscrewdb.Open(*dbPath)
+	if err != nil {
+		fatalf("open db: %v", err)
+	}
+	coll := db.Collection(*collection, corkscrewdb.WithBitWidth(*bits), corkscrewdb.WithSparse())
+	loadedSparseDocs := 0
+	for _, id := range docIDs {
+		row := corpus[id]
+		sparse := toCorkSparse(docSparse[id])
+		if sparse != nil {
+			loadedSparseDocs++
+		}
+		if err := coll.Put(id, corkscrewdb.Entry{
+			Vector: docVectors[id],
+			Text: strings.TrimSpace(row.Title + " " + row.Text),
+			Sparse: sparse,
+			Metadata: map[string]string{"dataset": *dataset},
+		}); err != nil {
+			fatalf("put %s: %v", id, err)
+		}
+	}
+	loadSeconds := time.Since(startLoad).Seconds()
+	denseRankings := map[string][]string{}
+	startDense := time.Now()
+	for _, qid := range queryIDs {
+		results, err := coll.SearchMulti(corkscrewdb.MultiQuery{
+			Dense: queryVectors[qid],
+			Fusion: corkscrewdb.WeightedFusion{Dense: 1, Sparse: 0},
+		}, *topK)
+		if err != nil {
+			fatalf("dense SearchMulti %s: %v", qid, err)
+		}
+		denseRankings[qid] = resultIDs(results)
+	}
+	denseSeconds := time.Since(startDense).Seconds()
+	hybridRankings := map[string][]string{}
+	startHybrid := time.Now()
+	for _, qid := range queryIDs {
+		results, err := coll.SearchMulti(corkscrewdb.MultiQuery{
+			Dense: queryVectors[qid],
+			Sparse: toCorkSparse(querySparse[qid]),
+			Fusion: corkscrewdb.WeightedFusion{Dense: 0.5, Sparse: 0.5},
+		}, *topK)
+		if err != nil {
+			fatalf("hybrid SearchMulti %s: %v", qid, err)
+		}
+		hybridRankings[qid] = resultIDs(results)
+	}
+	hybridSeconds := time.Since(startHybrid).Seconds()
+	if err := db.Close(); err != nil {
+		fatalf("close db: %v", err)
+	}
+	denseQuality, denseCount := quality(denseRankings, qrels)
+	hybridQuality, hybridCount := quality(hybridRankings, qrels)
+	if denseCount == 0 || hybridCount == 0 {
+		fatalf("no overlapping qrels/query rankings")
+	}
+	deltas := qualityMetrics{
+		NDCGAt10: hybridQuality.NDCGAt10 - denseQuality.NDCGAt10,
+		RecallAt100: hybridQuality.RecallAt100 - denseQuality.RecallAt100,
+	}
+	gates := map[string]bool{
+		"hybrid_ndcg_at_10_gte_dense": hybridQuality.NDCGAt10+1e-12 >= denseQuality.NDCGAt10,
+		"hybrid_recall_at_100_gte_dense": hybridQuality.RecallAt100+1e-12 >= denseQuality.RecallAt100,
+	}
+	overall := true
+	for _, passed := range gates {
+		if !passed {
+			overall = false
+		}
+	}
+	caveats := []string{}
+	relevantPairs := countRelevant(qrels, querySet, docSet)
+	if relevantPairs == 0 {
+		caveats = append(caveats, "No relevant pairs overlap loaded doc/query vectors; metrics are not meaningful.")
+	}
+	out := metrics{
+		Schema: "eos.corkscrewdb_hybrid_policy_harness_metrics.v1",
+		Dataset: *dataset,
+		Collection: *collection,
+		Dimension: dim,
+		BitWidth: *bits,
+		Documents: len(docIDs),
+		Queries: len(queryIDs),
+		RelevantPairs: relevantPairs,
+		LoadedSparseDocs: loadedSparseDocs,
+		SparseVocabTerms: vocabTerms,
+		TopK: *topK,
+		FusionDenseWeight: 0.5,
+		FusionSparseWeight: 0.5,
+		SparseMethod: "lexical_tf_idf_l2_vocab_from_loaded_beir_docs_and_queries",
+		LoadSeconds: loadSeconds,
+		DenseSearchSeconds: denseSeconds,
+		HybridSearchSeconds: hybridSeconds,
+		DenseOnly: denseQuality,
+		Hybrid: hybridQuality,
+		Deltas: deltas,
+		OverallPass: overall,
+		Gates: gates,
+		Caveats: caveats,
+	}
+	data, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		fatalf("marshal metrics: %v", err)
+	}
+	if err := os.WriteFile(*metricsPath, append(data, '\n'), 0o644); err != nil {
+		fatalf("write metrics: %v", err)
+	}
+	fmt.Printf("dense_only ndcg@10=%.12f recall@100=%.12f\n", denseQuality.NDCGAt10, denseQuality.RecallAt100)
+	fmt.Printf("hybrid_searchmulti ndcg@10=%.12f recall@100=%.12f pass=%t\n", hybridQuality.NDCGAt10, hybridQuality.RecallAt100, overall)
+}
+`
