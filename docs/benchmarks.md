@@ -147,6 +147,16 @@ ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
 
 The scoreboard run writes `scoreboard.tsv`, `scoreboard.json`, per-task metrics JSON, command logs, and a run-local `eos` binary under `runs/<run-id>/`. Dense local rows default to `baseline=eos`; hybrid rows default to `baseline=eos-hybrid`; local TurboQuant rows use `eos-turboquant` for direct quantized scoring and `eos-turboquant-rerank` for quantized candidate overfetch plus rerank storage modes such as fp16; external TurboQuant rows use `<external>-turboquant`; external child-vector rows use `<external>-dense-child` for dense child max and `<external>-turboquant-child` for q-bit child max rows. Set `EOS_SCOREBOARD_BASELINE_LABEL=manta` and `EOS_SCOREBOARD_HYBRID_BASELINE_LABEL=manta-hybrid` only when intentionally producing a legacy-labeled scoreboard. Pairwise rows use `EOS_SCOREBOARD_PAIRWISE_ARTIFACT` when set, or infer the sibling trainable package from a sealed artifact path. Add `EOS_SCOREBOARD_LONG_ROOT` and `EOS_SCOREBOARD_LONG_DATASETS` when long-document retrieval datasets are prepared.
 
+Current command-level hybrid short-retrieval evidence uses `runs/eos-s40-longembed-balanced-anchor-sweep-v1-20260620T195017Z/candidates/fiqa24-nf48/candidate/eos-embed-v1.sealed.mll` with `eval-retrieval-hybrid --method minmax_blend --alpha 0.5 --top-k 100`, recorded in `runs/eos-s40-command-hybrid-validation-v1-20260620T224155Z/command-hybrid-validation.json`. It is ranking-policy evidence for `eos-hybrid`, not dense `eos` promotion and not a default asset change.
+
+| Dataset | Hybrid nDCG@10 | Hybrid recall@100 | Gate |
+| --- | ---: | ---: | --- |
+| SciFact | 0.717644867485 | 0.932888888889 | pass |
+| NFCorpus | 0.311158654714 | 0.290278895553 | pass |
+| FiQA | 0.219415915378 | 0.500980325402 | pass |
+
+NFCorpus command nDCG@10 is lower than the prior offline simulation by `0.002670461567`, but the command-level gate is unaffected.
+
 Run the parent/single-vector prefix-dimension compact-quality harness when the question is "how much quality does the current default artifact keep after prefix truncation plus direct q-bit vector-index compression?":
 
 ```bash

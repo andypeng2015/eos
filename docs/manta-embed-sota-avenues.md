@@ -56,6 +56,16 @@ Dense comparison against the previous nf005 default:
 | NFCorpus | 0.205571 | 0.242059 | +0.000213 | +0.000011 |
 | FiQA | 0.121261 | 0.351678 | +0.000151 | +0.000000 |
 
+2026-06-20 hybrid ranking-policy evidence: the `fiqa24-nf48` candidate artifact at `runs/eos-s40-longembed-balanced-anchor-sweep-v1-20260620T195017Z/candidates/fiqa24-nf48/candidate/eos-embed-v1.sealed.mll` passed command-level short retrieval gates with `eval-retrieval-hybrid --method minmax_blend --alpha 0.5 --top-k 100`. This is lexical+dense ranking-policy evidence only; it is not dense model promotion, does not replace the s40 dense default, and does not change shipped assets.
+
+| Dataset | Hybrid nDCG@10 | Hybrid recall@100 | Gate |
+| --- | ---: | ---: | --- |
+| SciFact | 0.717644867485 | 0.932888888889 | pass |
+| NFCorpus | 0.311158654714 | 0.290278895553 | pass |
+| FiQA | 0.219415915378 | 0.500980325402 | pass |
+
+Evidence lives in `runs/eos-s40-command-hybrid-validation-v1-20260620T224155Z/command-hybrid-validation.json` and `.tiller/scratch/codex/eos-s40-command-hybrid-validation-v1-report.md`. NFCorpus command-level nDCG@10 is lower than the prior offline simulation by `0.002670461567`, but recall matches and the command gate remains comfortably above the s40 floor.
+
 The s40 package is the dense release-candidate line. Its promoted compact policy is q4/fp16/rerank-overfetch=200, method `turboquant_ip_b4_overfetch200_fp16_rerank`, total compression `1.5900621118x`. It passed strict seeded compact non-regression against the nf005 q4/fp16/o200 anchor: NFCorpus nDCG@10 `+0.000052`, recall@100 `+0.000460`; FiQA nDCG@10 `+0.000038`, recall@100 `+0.000386`; macro nDCG@10 `+0.000030`, recall@100 `+0.000282`. The capped serving smoke in `runs/eos-default-embedder-serving-smoke-20260620T161633Z/` selected q4/fp16/o200 with SciFact nDCG@10 `0.7846268033`, recall@100 `0.95`, total compression `1.5900621118x`, and p95 `0.984950ms`. Current CorkScrewDB local flat packed-parent API evidence is the s40 main-checkout run `runs/eos-s40-current-default-corkscrewdb-budget-quality-packed-q4q8-main-20260620T165050Z/`, using vector cache `runs/eos-vector-caches/eos-s40-current-default-scifact-child-w128-o32-128d/` and CorkScrewDB commit `511f5d24408d9aeba21941954d29cca3569875da`: q4 `packed_parent_multivectors` with `metadata=none`, ordinal child IDs, `quantized_only` storage, and flat index measured `5,183` parents, `12,468` children, `128d`, nDCG@10 `0.452971`, recall@100 `0.755222`, DB directory multiple `0.041675x`, vector payload multiple `0.013312x`, p95 `13.434893ms`, planner fit `180`, target fit `true`, and target storage multiple `0.554545x`. q8 is diagnostic only: nDCG@10 `0.472424`, recall@100 `0.776889`, DB directory multiple `0.066733x`, vector payload multiple `0.025841x`, p95 `21.874919ms`, planner fit `93`, target fit `false`, and target storage multiple `1.074026x`. This evidence covers the local flat API only; it is not remote mode, federation, HNSW, hosted parity, or a service SLO. q8 misses target fit and the DB directory gate.
 
 Historical rejected probes from the prior sealed-anchor lane:
