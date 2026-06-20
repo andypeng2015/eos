@@ -454,6 +454,57 @@ func TestEvaluateTurboQuantVectorRetrievalFP16RerankOverfetch200MatchesSingleAnd
 	}
 }
 
+func TestEvaluateTurboQuantVectorRetrievalPerQueryTopKExtendsFormalFP16RerankRows(t *testing.T) {
+	docs := make([]retrievalVectorRecord, 230)
+	for i := range docs {
+		vec := make([]float32, 8)
+		vec[i%len(vec)] = 1
+		vec[(i*3+1)%len(vec)] += float32(i%17) * 0.001
+		if i == 0 {
+			vec = []float32{1, 0, 0, 0, 0, 0, 0, 0}
+		}
+		docs[i] = retrievalVectorRecord{ID: fmt.Sprintf("d%d", i+1), Vector: normalizeRetrievalVector(vec)}
+	}
+	queries := []retrievalVectorRecord{
+		{ID: "q1", Vector: normalizeRetrievalVector([]float32{1, 0.1, 0, 0, 0, 0, 0, 0})},
+	}
+	qrels := retrievalQrels{"q1": {"d1": 1}}
+
+	perQueryPath := filepath.Join(t.TempDir(), "formal-window.per-query.jsonl")
+	metrics, err := evaluateTurboQuantVectorRetrievalWithRerankStorage(context.Background(), RetrievalEvalConfig{
+		DatasetName:       "tiny-tq-fp16-formal-window",
+		TopK:              100,
+		PerQueryTopK:      120,
+		PerQueryJSONLPath: perQueryPath,
+		QuantizerSeed:     5581486560434873699,
+	}, []int{4}, []int{200}, TurboQuantRerankStorageFP16, docs, queries, qrels)
+	if err != nil {
+		t.Fatalf("evaluate formal fp16 rerank window: %v", err)
+	}
+	if metrics.Config.TopK != 100 {
+		t.Fatalf("metrics top_k = %d, want 100", metrics.Config.TopK)
+	}
+	rerankMetric := findTurboQuantMetricRow(t, metrics, "turboquant_ip_b4_overfetch200_fp16_rerank")
+	if rerankMetric.RerankOverfetch != 200 || rerankMetric.RerankStorage != TurboQuantRerankStorageFP16 {
+		t.Fatalf("rerank metric = %+v", rerankMetric)
+	}
+
+	rows := readTurboQuantPerQueryRowsByMethod(t, perQueryPath, "turboquant_ip_b4_overfetch200_fp16_rerank")
+	if len(rows) != 1 {
+		t.Fatalf("rerank per-query rows = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.Method != "turboquant_ip_b4_overfetch200_fp16_rerank" || row.Bits != 4 || row.RerankOverfetch != 200 || row.RerankStorage != TurboQuantRerankStorageFP16 {
+		t.Fatalf("rerank per-query row identity = %+v", row)
+	}
+	if len(row.TopK) != 120 {
+		t.Fatalf("rerank per-query top_k len = %d, want 120", len(row.TopK))
+	}
+	if row.TopK[119].Rank != 120 {
+		t.Fatalf("rerank per-query final rank = %+v, want rank 120", row.TopK[119])
+	}
+}
+
 func findTurboQuantMetricRow(t *testing.T, metrics TurboQuantRetrievalEvalMetrics, method string) TurboQuantRetrievalBitMetrics {
 	t.Helper()
 	for _, row := range metrics.Rows {

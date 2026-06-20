@@ -1246,6 +1246,7 @@ func runEvalRetrievalTurboQuant(args []string) error {
 	metricsPath := fs.String("metrics-json", "", "write TurboQuant retrieval metrics JSON")
 	metricsTSVPath := fs.String("metrics-tsv", "", "write compact dense/quantized metrics TSV")
 	perQueryPath := fs.String("per-query-jsonl", "", "write one compact TurboQuant retrieval diagnostics JSONL row per evaluated query and method")
+	perQueryTopK := fs.Int("per-query-top-k", 0, "optional retrieval depth for per-query diagnostics only; metrics still use --top-k")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1283,6 +1284,7 @@ func runEvalRetrievalTurboQuant(args []string) error {
 		QrelsPath:         *qrelsPath,
 		BatchSize:         *batchSize,
 		TopK:              *topK,
+		PerQueryTopK:      *perQueryTopK,
 		MaxDocs:           *maxDocs,
 		MaxQueries:        *maxQueries,
 		PerQueryJSONLPath: *perQueryPath,

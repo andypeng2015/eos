@@ -392,7 +392,7 @@ func evaluateTurboQuantVectorRetrievalWithRerankStorage(ctx context.Context, cfg
 		if err := ctx.Err(); err != nil {
 			return TurboQuantRetrievalEvalMetrics{}, err
 		}
-		rows, err := evaluateTurboQuantRetrievalBits(ctx, dim, bitWidth, cfg.TopK, cfg.QuantizerSeed, rerankOverfetch, rerankStorage, docs, queries, qrels, denseQuality, denseVectorBytes, scoredPairs, cfg.DatasetName, cfg.PerQueryJSONLPath)
+		rows, err := evaluateTurboQuantRetrievalBits(ctx, dim, bitWidth, cfg.TopK, cfg.PerQueryTopK, cfg.QuantizerSeed, rerankOverfetch, rerankStorage, docs, queries, qrels, denseQuality, denseVectorBytes, scoredPairs, cfg.DatasetName, cfg.PerQueryJSONLPath)
 		if err != nil {
 			return TurboQuantRetrievalEvalMetrics{}, err
 		}
@@ -405,7 +405,7 @@ func evaluateTurboQuantVectorRetrievalWithRerankStorage(ctx context.Context, cfg
 	return out, nil
 }
 
-func evaluateTurboQuantRetrievalBits(ctx context.Context, dim, bitWidth, topK int, quantizerSeed int64, rerankOverfetch []int, rerankStorage string, docs, queries []retrievalVectorRecord, qrels retrievalQrels, denseQuality RetrievalEvalQualityMetrics, denseVectorBytes, scoredPairs int64, datasetName, perQueryJSONLPath string) ([]TurboQuantRetrievalBitMetrics, error) {
+func evaluateTurboQuantRetrievalBits(ctx context.Context, dim, bitWidth, topK, perQueryTopK int, quantizerSeed int64, rerankOverfetch []int, rerankStorage string, docs, queries []retrievalVectorRecord, qrels retrievalQrels, denseQuality RetrievalEvalQualityMetrics, denseVectorBytes, scoredPairs int64, datasetName, perQueryJSONLPath string) ([]TurboQuantRetrievalBitMetrics, error) {
 	q := turboquant.NewIPWithSeed(dim, bitWidth, quantizerSeed)
 	quantizeStart := time.Now()
 	qdocs := make([]turboQuantRetrievalDoc, len(docs))
@@ -419,7 +419,7 @@ func evaluateTurboQuantRetrievalBits(ctx context.Context, dim, bitWidth, topK in
 		quantizedBytes += int64(len(qx.MSE) + len(qx.Signs) + 4) // ResNorm is a float32 sidecar.
 	}
 	quantizeDuration := time.Since(quantizeStart)
-	if err := writeTurboQuantRetrievalPerQueryRows(ctx, datasetName, perQueryJSONLPath, q, bitWidth, topK, quantizerSeed, rerankOverfetch, rerankStorage, docs, queries, qdocs, qrels); err != nil {
+	if err := writeTurboQuantRetrievalPerQueryRows(ctx, datasetName, perQueryJSONLPath, q, bitWidth, topK, perQueryTopK, quantizerSeed, rerankOverfetch, rerankStorage, docs, queries, qdocs, qrels); err != nil {
 		return nil, err
 	}
 
@@ -572,7 +572,7 @@ func (w *turboQuantPerQueryWriter) Close() error {
 	return nil
 }
 
-func writeTurboQuantRetrievalPerQueryRows(ctx context.Context, datasetName, path string, q *turboquant.IPQuantizer, bitWidth, topK int, quantizerSeed int64, rerankOverfetch []int, rerankStorage string, denseDocs []retrievalVectorRecord, queries []retrievalVectorRecord, qdocs []turboQuantRetrievalDoc, qrels retrievalQrels) error {
+func writeTurboQuantRetrievalPerQueryRows(ctx context.Context, datasetName, path string, q *turboquant.IPQuantizer, bitWidth, topK, perQueryTopK int, quantizerSeed int64, rerankOverfetch []int, rerankStorage string, denseDocs []retrievalVectorRecord, queries []retrievalVectorRecord, qdocs []turboQuantRetrievalDoc, qrels retrievalQrels) error {
 	writer, err := newTurboQuantPerQueryWriter(path)
 	if err != nil {
 		return err
@@ -584,6 +584,10 @@ func writeTurboQuantRetrievalPerQueryRows(ctx context.Context, datasetName, path
 	finalTopK := topK
 	if finalTopK < 100 {
 		finalTopK = 100
+	}
+	outputTopK := finalTopK
+	if perQueryTopK > outputTopK {
+		outputTopK = perQueryTopK
 	}
 	docIDSet := make(map[string]bool, len(denseDocs))
 	denseByID := make(map[string][]float32, len(denseDocs))
@@ -610,10 +614,10 @@ func writeTurboQuantRetrievalPerQueryRows(ctx context.Context, datasetName, path
 			continue
 		}
 		prepared := q.PrepareQuery(query.Vector)
-		denseScores := topRetrievalScores(query.Vector, denseDocs, finalTopK)
+		denseScores := topRetrievalScores(query.Vector, denseDocs, outputTopK)
 		denseRanks := retrievalRankMap(denseScores)
 		denseScoresByID := retrievalScoreMap(denseScores)
-		directScores := topTurboQuantRetrievalScores(q, prepared, qdocs, finalTopK)
+		directScores := topTurboQuantRetrievalScores(q, prepared, qdocs, outputTopK)
 		directMethod := fmt.Sprintf("turboquant_ip_b%d", bitWidth)
 		directRanks := retrievalRankMap(directScores)
 		directScoreByID := retrievalScoreMap(directScores)
@@ -631,16 +635,16 @@ func writeTurboQuantRetrievalPerQueryRows(ctx context.Context, datasetName, path
 			var method string
 			switch rerankStorage {
 			case TurboQuantRerankStorageDense:
-				reranked = topDenseRerankScores(query.Vector, candidates, denseByID, finalTopK)
+				reranked = topDenseRerankScores(query.Vector, candidates, denseByID, outputTopK)
 				method = turboQuantRetrievalMethodName(bitWidth, overfetch, rerankStorage)
 			case TurboQuantRerankStorageCompactReconstruct:
-				reranked = topTurboQuantReconstructRerankScores(q, query.Vector, candidates, quantizedByID, finalTopK)
+				reranked = topTurboQuantReconstructRerankScores(q, query.Vector, candidates, quantizedByID, outputTopK)
 				method = turboQuantRetrievalMethodName(bitWidth, overfetch, rerankStorage)
 			case TurboQuantRerankStorageFP16:
 				if shouldApplyTurboQuantFP16RerankRescue(bitWidth, finalTopK, overfetch, len(candidates)) {
-					reranked = topFP16RerankRescueScores(query.Vector, candidates, halfByID, finalTopK)
+					reranked = topFP16RerankRescueScores(query.Vector, candidates, halfByID, outputTopK)
 				} else {
-					reranked = topFP16RerankScores(query.Vector, candidates, halfByID, finalTopK)
+					reranked = topFP16RerankScores(query.Vector, candidates, halfByID, outputTopK)
 				}
 				method = turboQuantRetrievalMethodName(bitWidth, overfetch, rerankStorage)
 			default:
