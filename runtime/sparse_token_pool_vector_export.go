@@ -58,6 +58,8 @@ type SparseTokenPoolRetrievalVectorExportConfig struct {
 	Method                string
 	EvidenceLevel         string
 	ClaimBoundary         string
+	Resume                bool
+	ProgressEvery         int
 }
 
 // SparseTokenPoolRetrievalVectorExportSummary is the manifest written beside
@@ -82,6 +84,11 @@ type SparseTokenPoolRetrievalVectorExportSummary struct {
 	DocVectorPath                       string                    `json:"doc_vector_path,omitempty"`
 	ChildDocVectorPath                  string                    `json:"child_doc_vector_path,omitempty"`
 	QueryVectorPath                     string                    `json:"query_vector_path"`
+	ResumeEnabled                       bool                      `json:"resume_enabled"`
+	ProgressEvery                       int                       `json:"progress_every,omitempty"`
+	ResumedDocumentRecords              int                       `json:"resumed_document_records,omitempty"`
+	ResumedChildVectors                 int                       `json:"resumed_child_vectors,omitempty"`
+	ResumedQueryRecords                 int                       `json:"resumed_query_records,omitempty"`
 	DocumentChunkWords                  int                       `json:"document_chunk_words,omitempty"`
 	DocumentChunkOverlap                int                       `json:"document_chunk_overlap,omitempty"`
 	DocumentChunkMinWords               int                       `json:"document_chunk_min_words,omitempty"`
@@ -277,9 +284,10 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 	var docVectorPath, childDocVectorPath string
 	var dim, modelDim, childCount int
 	var docTokenStats, queryTokenStats sparseTokenPoolTokenLengthStats
+	var docResume, queryResume sparseTokenPoolResumeResult
 	if cfg.TokenSpanTokens > 0 {
 		childDocVectorPath = filepath.Join(cfg.OutputDir, "child-doc-vectors.jsonl")
-		dim, modelDim, docTokenStats, childCount, err = writeSparseTokenPoolTokenSpanChildVectorCache(ctx, encoder, corpus, childDocVectorPath, cfg.DocumentPrefix, cfg.OutputDim)
+		dim, modelDim, docTokenStats, childCount, docResume, err = writeSparseTokenPoolTokenSpanChildVectorCache(ctx, encoder, corpus, childDocVectorPath, cfg.DocumentPrefix, cfg.OutputDim)
 		if err != nil {
 			return SparseTokenPoolRetrievalVectorExportSummary{}, fmt.Errorf("write token-span child document vectors: %w", err)
 		}
@@ -304,7 +312,7 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 	if cfg.MinObservedDocTokens > 0 && docTokenStats.MaxObservedTokens < cfg.MinObservedDocTokens {
 		return SparseTokenPoolRetrievalVectorExportSummary{}, fmt.Errorf("sparse-token-pool observed document tokenizer-output max tokens %d below --min-observed-doc-tokens %d; check the tokenizer max sequence, input corpus length, --max-tokens, and qrels/max-docs filtering", docTokenStats.MaxObservedTokens, cfg.MinObservedDocTokens)
 	}
-	queryDim, queryModelDim, queryTokenStats, err := writeSparseTokenPoolVectorCache(ctx, encoder, queries, queryVectorPath, cfg.QueryPrefix, cfg.OutputDim)
+	queryDim, queryModelDim, queryTokenStats, queryResume, err := writeSparseTokenPoolVectorCacheResumable(ctx, encoder, queries, queryVectorPath, cfg.QueryPrefix, cfg.OutputDim, "query", cfg.Resume, cfg.ProgressEvery)
 	if err != nil {
 		return SparseTokenPoolRetrievalVectorExportSummary{}, fmt.Errorf("write query vectors: %w", err)
 	}
@@ -348,6 +356,11 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 		DocVectorPath:           docVectorPath,
 		ChildDocVectorPath:      childDocVectorPath,
 		QueryVectorPath:         queryVectorPath,
+		ResumeEnabled:           cfg.Resume,
+		ProgressEvery:           cfg.ProgressEvery,
+		ResumedDocumentRecords:  docResume.RecordsReused,
+		ResumedChildVectors:     docResume.RowsReused,
+		ResumedQueryRecords:     queryResume.RecordsReused,
 		DocumentChunkWords:      cfg.DocumentChunkWords,
 		DocumentChunkOverlap:    cfg.DocumentChunkOverlap,
 		DocumentChunkMinWords:   cfg.DocumentChunkMinWords,
@@ -538,8 +551,8 @@ func validateSparseTokenPoolExportConfig(cfg SparseTokenPoolRetrievalVectorExpor
 	if cfg.ValueBits != 2 && cfg.ValueBits != 4 && cfg.ValueBits != 8 {
 		return fmt.Errorf("value-bits must be 0, 2, 4, or 8")
 	}
-	if cfg.TopK < 0 || cfg.RouteBlockSize < 0 || cfg.RouteTopBlocks < 0 || cfg.MaxTokens < 0 || cfg.MinObservedDocTokens < 0 {
-		return fmt.Errorf("top-k, route-block-size, route-top-blocks, max-tokens, and min-observed-doc-tokens must be non-negative")
+	if cfg.TopK < 0 || cfg.RouteBlockSize < 0 || cfg.RouteTopBlocks < 0 || cfg.MaxTokens < 0 || cfg.MinObservedDocTokens < 0 || cfg.ProgressEvery < 0 {
+		return fmt.Errorf("top-k, route-block-size, route-top-blocks, max-tokens, min-observed-doc-tokens, and progress-every must be non-negative")
 	}
 	switch cfg.AttentionMode {
 	case SparseTokenPoolAttentionModeTurboQuantSparse, SparseTokenPoolAttentionModeDense:
@@ -674,25 +687,127 @@ func writeSparseTokenPoolVectorCache(ctx context.Context, encoder *sparseTokenPo
 	return dim, modelDim, stats, nil
 }
 
-func writeSparseTokenPoolTokenSpanChildVectorCache(ctx context.Context, encoder *sparseTokenPoolEncoder, records []retrievalTextRecord, path, prefix string, outputDim int) (int, int, sparseTokenPoolTokenLengthStats, int, error) {
-	if !encoder.fullEncoderOK {
-		return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, fmt.Errorf("token-span child vectors require full manifest encoder weights; missing/invalid weights: %v", encoder.skippedWeights)
-	}
-	file, err := os.Create(path)
+type sparseTokenPoolResumeResult struct {
+	RecordsReused int
+	RowsReused    int
+}
+
+type sparseTokenPoolVectorExportProgress struct {
+	Schema    string                                   `json:"schema"`
+	Kind      string                                   `json:"kind"`
+	DataPath  string                                   `json:"data_path"`
+	Records   []sparseTokenPoolVectorExportProgressRow `json:"records"`
+	UpdatedAt time.Time                                `json:"updated_at"`
+}
+
+type sparseTokenPoolVectorExportProgressRow struct {
+	ID                   string `json:"id"`
+	Offset               int64  `json:"offset"`
+	Rows                 int    `json:"rows"`
+	ObservedTokens       int    `json:"observed_tokens"`
+	TruncatedByMaxTokens bool   `json:"truncated_by_max_tokens,omitempty"`
+}
+
+type sparseTokenPoolResumeState struct {
+	completed map[string]sparseTokenPoolVectorExportProgressRow
+	progress  sparseTokenPoolVectorExportProgress
+}
+
+const sparseTokenPoolVectorExportProgressSchema = "manta.experimental_sparse_token_pool_vector_export_progress.v1"
+
+func writeSparseTokenPoolVectorCacheResumable(ctx context.Context, encoder *sparseTokenPoolEncoder, records []retrievalTextRecord, path, prefix string, outputDim int, kind string, resume bool, progressEvery int) (int, int, sparseTokenPoolTokenLengthStats, sparseTokenPoolResumeResult, error) {
+	state, file, err := prepareSparseTokenPoolResumeFile(path, kind, resume)
 	if err != nil {
-		return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, err
+		return 0, 0, sparseTokenPoolTokenLengthStats{}, sparseTokenPoolResumeResult{}, err
 	}
 	defer file.Close()
 	writer := bufio.NewWriter(file)
-	dim, modelDim, childCount := 0, 0, 0
+	dim, modelDim := sparseTokenPoolExpectedVectorDims(encoder, outputDim)
 	var stats sparseTokenPoolTokenLengthStats
-	for _, record := range prefixRetrievalRecords(records, prefix) {
+	var resumeResult sparseTokenPoolResumeResult
+	prefixedRecords := prefixRetrievalRecords(records, prefix)
+	if err := reconcileSparseTokenPoolResumeState(file, path, &state, sparseTokenPoolRecordIDs(prefixedRecords)); err != nil {
+		return 0, 0, sparseTokenPoolTokenLengthStats{}, sparseTokenPoolResumeResult{}, err
+	}
+	completed, total := 0, len(prefixedRecords)
+	start := time.Now()
+	for _, record := range prefixedRecords {
 		if err := ctx.Err(); err != nil {
-			return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, err
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, sparseTokenPoolResumeResult{}, err
+		}
+		if row, ok := state.completed[record.ID]; ok {
+			stats.add(sparseTokenPoolTokenObservation{ObservedTokens: row.ObservedTokens, TruncatedByMaxTokens: row.TruncatedByMaxTokens})
+			resumeResult.RecordsReused++
+			resumeResult.RowsReused += row.Rows
+			completed++
+			continue
+		}
+		vector, observation, err := encoder.embedText(record.Text)
+		if err != nil {
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, sparseTokenPoolResumeResult{}, fmt.Errorf("vector for %q: %w", record.ID, err)
+		}
+		stats.add(observation)
+		if modelDim == 0 {
+			modelDim = len(vector)
+		} else if len(vector) != modelDim {
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, sparseTokenPoolResumeResult{}, fmt.Errorf("vector for %q has encoded dimension %d, want %d", record.ID, len(vector), modelDim)
+		}
+		embedding, err := transformRetrievalExportVector(vector, outputDim)
+		if err != nil {
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, sparseTokenPoolResumeResult{}, fmt.Errorf("vector for %q: %w", record.ID, err)
+		}
+		if dim == 0 {
+			dim = len(embedding)
+		} else if len(embedding) != dim {
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, sparseTokenPoolResumeResult{}, fmt.Errorf("vector for %q has dimension %d, want %d", record.ID, len(embedding), dim)
+		}
+		row := retrievalVectorExportRow{ID: record.ID, Embedding: embedding}
+		if err := writeSparseTokenPoolResumeJSONLRow(writer, file, path, &state, sparseTokenPoolVectorExportProgressRow{ID: record.ID, Rows: 1, ObservedTokens: observation.ObservedTokens, TruncatedByMaxTokens: observation.TruncatedByMaxTokens}, row); err != nil {
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, sparseTokenPoolResumeResult{}, err
+		}
+		completed++
+		reportSparseTokenPoolProgress(kind, completed, total, 0, progressEvery, start)
+	}
+	if err := writer.Flush(); err != nil {
+		return 0, 0, sparseTokenPoolTokenLengthStats{}, sparseTokenPoolResumeResult{}, err
+	}
+	return dim, modelDim, stats, resumeResult, nil
+}
+
+func writeSparseTokenPoolTokenSpanChildVectorCache(ctx context.Context, encoder *sparseTokenPoolEncoder, records []retrievalTextRecord, path, prefix string, outputDim int) (int, int, sparseTokenPoolTokenLengthStats, int, sparseTokenPoolResumeResult, error) {
+	if !encoder.fullEncoderOK {
+		return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, sparseTokenPoolResumeResult{}, fmt.Errorf("token-span child vectors require full manifest encoder weights; missing/invalid weights: %v", encoder.skippedWeights)
+	}
+	state, file, err := prepareSparseTokenPoolResumeFile(path, "token-span-child", encoder.cfg.Resume)
+	if err != nil {
+		return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, sparseTokenPoolResumeResult{}, err
+	}
+	defer file.Close()
+	writer := bufio.NewWriter(file)
+	dim, modelDim, childCount := sparseTokenPoolTokenSpanExpectedDims(encoder, outputDim)
+	var stats sparseTokenPoolTokenLengthStats
+	var resumeResult sparseTokenPoolResumeResult
+	prefixedRecords := prefixRetrievalRecords(records, prefix)
+	if err := reconcileSparseTokenPoolResumeState(file, path, &state, sparseTokenPoolRecordIDs(prefixedRecords)); err != nil {
+		return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, sparseTokenPoolResumeResult{}, err
+	}
+	completed, total := 0, len(prefixedRecords)
+	start := time.Now()
+	for _, record := range prefixedRecords {
+		if err := ctx.Err(); err != nil {
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, sparseTokenPoolResumeResult{}, err
+		}
+		if row, ok := state.completed[record.ID]; ok {
+			stats.add(sparseTokenPoolTokenObservation{ObservedTokens: row.ObservedTokens, TruncatedByMaxTokens: row.TruncatedByMaxTokens})
+			childCount += row.Rows
+			resumeResult.RecordsReused++
+			resumeResult.RowsReused += row.Rows
+			completed++
+			continue
 		}
 		rows, mask, observation, err := encoder.embedTextTokenRows(record.Text)
 		if err != nil {
-			return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, fmt.Errorf("token rows for %q: %w", record.ID, err)
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, sparseTokenPoolResumeResult{}, fmt.Errorf("token rows for %q: %w", record.ID, err)
 		}
 		stats.add(observation)
 		seqLen := observation.ObservedTokens
@@ -700,25 +815,26 @@ func writeSparseTokenPoolTokenSpanChildVectorCache(ctx context.Context, encoder 
 		if modelDim == 0 {
 			modelDim = rowDim
 		} else if rowDim != modelDim {
-			return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, fmt.Errorf("token rows for %q have encoded dimension %d, want %d", record.ID, rowDim, modelDim)
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, sparseTokenPoolResumeResult{}, fmt.Errorf("token rows for %q have encoded dimension %d, want %d", record.ID, rowDim, modelDim)
 		}
 		spans := sparseTokenPoolTokenSpans(seqLen, encoder.cfg.TokenSpanTokens, encoder.cfg.TokenSpanOverlap, encoder.cfg.TokenSpanMinTokens)
 		if len(spans) == 0 {
-			return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, fmt.Errorf("token-span mode selected no spans for %q", record.ID)
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, sparseTokenPoolResumeResult{}, fmt.Errorf("token-span mode selected no spans for %q", record.ID)
 		}
+		recordChildCount := 0
 		for i, span := range spans {
 			vector, err := poolSparseTokenRowsRange(rows, mask, span.start, span.end, seqLen, rowDim)
 			if err != nil {
-				return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, fmt.Errorf("token span %d for %q: %w", i, record.ID, err)
+				return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, sparseTokenPoolResumeResult{}, fmt.Errorf("token span %d for %q: %w", i, record.ID, err)
 			}
 			embedding, err := transformRetrievalExportVector(vector, outputDim)
 			if err != nil {
-				return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, fmt.Errorf("token span %d for %q: %w", i, record.ID, err)
+				return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, sparseTokenPoolResumeResult{}, fmt.Errorf("token span %d for %q: %w", i, record.ID, err)
 			}
 			if dim == 0 {
 				dim = len(embedding)
 			} else if len(embedding) != dim {
-				return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, fmt.Errorf("token span %d for %q has dimension %d, want %d", i, record.ID, len(embedding), dim)
+				return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, sparseTokenPoolResumeResult{}, fmt.Errorf("token span %d for %q has dimension %d, want %d", i, record.ID, len(embedding), dim)
 			}
 			row := retrievalVectorExportRow{
 				ParentID:  record.ID,
@@ -727,18 +843,228 @@ func writeSparseTokenPoolTokenSpanChildVectorCache(ctx context.Context, encoder 
 			}
 			data, err := json.Marshal(row)
 			if err != nil {
-				return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, err
+				return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, sparseTokenPoolResumeResult{}, err
 			}
 			if _, err := writer.Write(append(data, '\n')); err != nil {
-				return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, err
+				return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, sparseTokenPoolResumeResult{}, err
 			}
 			childCount++
+			recordChildCount++
 		}
+		if err := flushSparseTokenPoolResumeRecord(writer, file, path, &state, sparseTokenPoolVectorExportProgressRow{ID: record.ID, Rows: recordChildCount, ObservedTokens: observation.ObservedTokens, TruncatedByMaxTokens: observation.TruncatedByMaxTokens}); err != nil {
+			return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, sparseTokenPoolResumeResult{}, err
+		}
+		completed++
+		reportSparseTokenPoolProgress("token-span-child", completed, total, childCount, encoder.cfg.ProgressEvery, start)
 	}
 	if err := writer.Flush(); err != nil {
-		return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, err
+		return 0, 0, sparseTokenPoolTokenLengthStats{}, 0, sparseTokenPoolResumeResult{}, err
 	}
-	return dim, modelDim, stats, childCount, nil
+	return dim, modelDim, stats, childCount, resumeResult, nil
+}
+
+func sparseTokenPoolProgressPath(path string) string {
+	return path + ".progress.json"
+}
+
+func prepareSparseTokenPoolResumeFile(path, kind string, resume bool) (sparseTokenPoolResumeState, *os.File, error) {
+	state := sparseTokenPoolResumeState{completed: map[string]sparseTokenPoolVectorExportProgressRow{}}
+	if !resume {
+		state.progress = sparseTokenPoolVectorExportProgress{
+			Schema:   sparseTokenPoolVectorExportProgressSchema,
+			Kind:     kind,
+			DataPath: path,
+		}
+		if err := os.Remove(sparseTokenPoolProgressPath(path)); err != nil && !os.IsNotExist(err) {
+			return state, nil, err
+		}
+		file, err := os.Create(path)
+		return state, file, err
+	}
+	progressPath := sparseTokenPoolProgressPath(path)
+	progress, err := readSparseTokenPoolVectorExportProgress(progressPath)
+	if err != nil && !os.IsNotExist(err) {
+		return state, nil, err
+	}
+	if err == nil && progress.Kind != kind {
+		return state, nil, fmt.Errorf("resume progress kind %q does not match export kind %q", progress.Kind, kind)
+	}
+	if os.IsNotExist(err) {
+		progress = sparseTokenPoolVectorExportProgress{
+			Schema:   sparseTokenPoolVectorExportProgressSchema,
+			Kind:     kind,
+			DataPath: path,
+		}
+	}
+	validRecords := make([]sparseTokenPoolVectorExportProgressRow, 0, len(progress.Records))
+	var lastOffset int64
+	for _, record := range progress.Records {
+		if record.ID == "" || record.Offset < lastOffset || record.Rows <= 0 {
+			break
+		}
+		validRecords = append(validRecords, record)
+		lastOffset = record.Offset
+		state.completed[record.ID] = record
+	}
+	progress.Records = validRecords
+	progress.Schema = sparseTokenPoolVectorExportProgressSchema
+	progress.Kind = kind
+	progress.DataPath = path
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return state, nil, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return state, nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return state, nil, err
+	}
+	if lastOffset > info.Size() {
+		file.Close()
+		return state, nil, fmt.Errorf("resume progress offset %d exceeds %s size %d", lastOffset, path, info.Size())
+	}
+	if err := file.Truncate(lastOffset); err != nil {
+		file.Close()
+		return state, nil, err
+	}
+	if _, err := file.Seek(lastOffset, 0); err != nil {
+		file.Close()
+		return state, nil, err
+	}
+	state.progress = progress
+	if err := writeSparseTokenPoolVectorExportProgress(progressPath, state.progress); err != nil {
+		file.Close()
+		return state, nil, err
+	}
+	return state, file, nil
+}
+
+func reconcileSparseTokenPoolResumeState(file *os.File, path string, state *sparseTokenPoolResumeState, recordIDs []string) error {
+	if len(state.completed) == 0 {
+		return nil
+	}
+	records := make([]sparseTokenPoolVectorExportProgressRow, 0, len(recordIDs))
+	completed := map[string]sparseTokenPoolVectorExportProgressRow{}
+	var lastOffset int64
+	for _, id := range recordIDs {
+		row, ok := state.completed[id]
+		if !ok {
+			break
+		}
+		records = append(records, row)
+		completed[id] = row
+		lastOffset = row.Offset
+	}
+	if err := file.Truncate(lastOffset); err != nil {
+		return err
+	}
+	if _, err := file.Seek(lastOffset, 0); err != nil {
+		return err
+	}
+	state.completed = completed
+	state.progress.Records = records
+	return writeSparseTokenPoolVectorExportProgress(sparseTokenPoolProgressPath(path), state.progress)
+}
+
+func sparseTokenPoolRecordIDs(records []retrievalTextRecord) []string {
+	ids := make([]string, 0, len(records))
+	for _, record := range records {
+		ids = append(ids, record.ID)
+	}
+	return ids
+}
+
+func readSparseTokenPoolVectorExportProgress(path string) (sparseTokenPoolVectorExportProgress, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return sparseTokenPoolVectorExportProgress{}, err
+	}
+	var progress sparseTokenPoolVectorExportProgress
+	if err := json.Unmarshal(data, &progress); err != nil {
+		return sparseTokenPoolVectorExportProgress{}, fmt.Errorf("read resume progress %s: %w", path, err)
+	}
+	if progress.Schema != "" && progress.Schema != sparseTokenPoolVectorExportProgressSchema {
+		return sparseTokenPoolVectorExportProgress{}, fmt.Errorf("resume progress %s has schema %q, want %q", path, progress.Schema, sparseTokenPoolVectorExportProgressSchema)
+	}
+	return progress, nil
+}
+
+func writeSparseTokenPoolVectorExportProgress(path string, progress sparseTokenPoolVectorExportProgress) error {
+	progress.UpdatedAt = time.Now().UTC()
+	data, err := json.MarshalIndent(progress, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func writeSparseTokenPoolResumeJSONLRow(writer *bufio.Writer, file *os.File, path string, state *sparseTokenPoolResumeState, progressRow sparseTokenPoolVectorExportProgressRow, row retrievalVectorExportRow) error {
+	data, err := json.Marshal(row)
+	if err != nil {
+		return err
+	}
+	if _, err := writer.Write(append(data, '\n')); err != nil {
+		return err
+	}
+	return flushSparseTokenPoolResumeRecord(writer, file, path, state, progressRow)
+}
+
+func flushSparseTokenPoolResumeRecord(writer *bufio.Writer, file *os.File, path string, state *sparseTokenPoolResumeState, row sparseTokenPoolVectorExportProgressRow) error {
+	if err := writer.Flush(); err != nil {
+		return err
+	}
+	offset, err := file.Seek(0, 1)
+	if err != nil {
+		return err
+	}
+	row.Offset = offset
+	state.completed[row.ID] = row
+	state.progress.Records = append(state.progress.Records, row)
+	state.progress.Schema = sparseTokenPoolVectorExportProgressSchema
+	state.progress.DataPath = path
+	if err := writeSparseTokenPoolVectorExportProgress(sparseTokenPoolProgressPath(path), state.progress); err != nil {
+		return err
+	}
+	return nil
+}
+
+func sparseTokenPoolExpectedVectorDims(encoder *sparseTokenPoolEncoder, outputDim int) (int, int) {
+	modelDim := encoder.modelDimension
+	if !encoder.fullEncoderOK && encoder.projectionOK {
+		modelDim = encoder.projectedDimension
+	}
+	dim := modelDim
+	if outputDim > 0 && outputDim < dim {
+		dim = outputDim
+	}
+	return dim, modelDim
+}
+
+func sparseTokenPoolTokenSpanExpectedDims(encoder *sparseTokenPoolEncoder, outputDim int) (int, int, int) {
+	modelDim := encoder.modelDimension
+	dim := modelDim
+	if outputDim > 0 && outputDim < dim {
+		dim = outputDim
+	}
+	return dim, modelDim, 0
+}
+
+func reportSparseTokenPoolProgress(kind string, completed, total, childCount, progressEvery int, start time.Time) {
+	if progressEvery <= 0 || completed <= 0 || completed%progressEvery != 0 {
+		return
+	}
+	if childCount > 0 {
+		fmt.Fprintf(os.Stderr, "export-sparse-token-pool-vectors progress: kind=%s completed=%d/%d child_vectors=%d elapsed=%.1fs\n", kind, completed, total, childCount, time.Since(start).Seconds())
+		return
+	}
+	fmt.Fprintf(os.Stderr, "export-sparse-token-pool-vectors progress: kind=%s completed=%d/%d elapsed=%.1fs\n", kind, completed, total, time.Since(start).Seconds())
 }
 
 func writeSparseTokenPoolChildVectorCache(ctx context.Context, encoder *sparseTokenPoolEncoder, chunks []retrievalDocumentChunk, path, prefix string, outputDim int) (int, int, sparseTokenPoolTokenLengthStats, error) {

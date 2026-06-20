@@ -587,6 +587,8 @@ func runExportSparseTokenPoolVectors(args []string) error {
 	maxTokens := fs.Int("max-tokens", 0, "truncate tokenized text to at most this many tokens after tokenizer limits; 0 keeps tokenizer output")
 	minObservedDocTokens := fs.Int("min-observed-doc-tokens", 0, "fail when max observed document tokenizer-output tokens consumed by the sparse-token-pool encoder is below this threshold; 0 disables")
 	attentionMode := fs.String("attention-mode", eosruntime.SparseTokenPoolAttentionModeTurboQuantSparse, "attention implementation: turboquant_sparse or dense")
+	resume := fs.Bool("resume", false, "resume JSONL vector export from per-file progress sidecars, truncating partial output to the last completed record before appending")
+	progressEvery := fs.Int("progress-every", 0, "emit sparse token-pool export progress to stderr every N completed records; 0 disables")
 	weightPath := fs.String("weights", "", "explicit sibling weight file path; default is <artifact>.weights.mll")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -641,6 +643,8 @@ func runExportSparseTokenPoolVectors(args []string) error {
 		MaxTokens:             *maxTokens,
 		MinObservedDocTokens:  *minObservedDocTokens,
 		AttentionMode:         *attentionMode,
+		Resume:                *resume,
+		ProgressEvery:         *progressEvery,
 	})
 	if err != nil {
 		return err
@@ -654,6 +658,9 @@ func runExportSparseTokenPoolVectors(args []string) error {
 	fmt.Printf("attention: mode=%s turboquant_kv_applied=%t kv_decode=%s top_k=%d route_block_size=%d route_top_blocks=%d bits=%d key_bits=%d value_bits=%d seed=%d\n", summary.AttentionMode, summary.TurboQuantKVApplied, summary.KVDecode, summary.TopK, summary.RouteBlockSize, summary.RouteTopBlocks, summary.Bits, summary.KeyBits, summary.ValueBits, summary.QuantizerSeed)
 	if summary.TokenSpanTokens > 0 {
 		fmt.Printf("token_span: tokens=%d overlap=%d min_tokens=%d\n", summary.TokenSpanTokens, summary.TokenSpanOverlap, summary.TokenSpanMinTokens)
+	}
+	if summary.ResumeEnabled || summary.ProgressEvery > 0 {
+		fmt.Printf("resume: enabled=%t progress_every=%d resumed_document_records=%d resumed_child_vectors=%d resumed_query_records=%d\n", summary.ResumeEnabled, summary.ProgressEvery, summary.ResumedDocumentRecords, summary.ResumedChildVectors, summary.ResumedQueryRecords)
 	}
 	fmt.Printf("tokenizer_output: doc_records=%d doc_max_tokens=%d doc_mean_tokens=%.2f doc_total_tokens=%d doc_truncated_by_max_tokens=%d query_records=%d query_max_tokens=%d query_mean_tokens=%.2f query_total_tokens=%d query_truncated_by_max_tokens=%d\n", summary.DocumentTokenizerOutput.RecordCount, summary.DocumentTokenizerOutput.MaxObservedTokens, summary.DocumentTokenizerOutput.MeanObservedTokens, summary.DocumentTokenizerOutput.TotalTokens, summary.DocumentTokenizerOutput.TruncatedByMaxTokensCount, summary.QueryTokenizerOutput.RecordCount, summary.QueryTokenizerOutput.MaxObservedTokens, summary.QueryTokenizerOutput.MeanObservedTokens, summary.QueryTokenizerOutput.TotalTokens, summary.QueryTokenizerOutput.TruncatedByMaxTokensCount)
 	fmt.Printf("weights: attention=%t attention_output=%t hidden_projection=%t projection=%t dense_kv_materialized=%t\n", summary.AttentionWeightsApplied, summary.AttentionOutputApplied, summary.HiddenProjectionApplied, summary.ProjectionApplied, summary.DenseKVMaterialized)

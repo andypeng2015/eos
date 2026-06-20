@@ -218,6 +218,19 @@ func TestRunDoctorReportsRuntimeFacts(t *testing.T) {
 	}
 }
 
+func TestExportSparseTokenPoolVectorsAcceptsResumeProgressFlags(t *testing.T) {
+	err := runExportSparseTokenPoolVectors([]string{"--resume", "--progress-every", "7"})
+	if err == nil {
+		t.Fatal("runExportSparseTokenPoolVectors succeeded without positional args, want usage error")
+	}
+	if strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatalf("resume/progress flags were not registered: %v", err)
+	}
+	if !strings.Contains(err.Error(), "usage: eos export-sparse-token-pool-vectors") {
+		t.Fatalf("error = %v, want usage error after parsing flags", err)
+	}
+}
+
 func TestRunMineRetrievalCompactHardNegativesRequiresNoTrainTestSmoke(t *testing.T) {
 	dir := t.TempDir()
 	datasetDir := filepath.Join(dir, "tiny")

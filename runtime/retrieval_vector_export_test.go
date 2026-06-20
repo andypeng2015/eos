@@ -600,6 +600,151 @@ func TestSparseTokenPoolRetrievalVectorExportTokenSpanChildren(t *testing.T) {
 	}
 }
 
+func TestSparseTokenPoolRetrievalVectorExportTokenSpanResumeSkipsCompletedRecords(t *testing.T) {
+	model, artifactPath := loadTinySparseTokenPoolFFNExportModel(t)
+	dir := t.TempDir()
+	datasetDir := writeTinyRetrievalExportDataset(t, dir)
+	outputDir := filepath.Join(dir, "sparse-token-span-resume")
+	manifestPath := filepath.Join(dir, "sparse-token-span-resume.manifest.json")
+	corpusPath, queriesPath, _ := BEIRRetrievalPaths(datasetDir, "test")
+	base := SparseTokenPoolRetrievalVectorExportConfig{
+		DatasetName:        "tiny-sparse-token-span-resume",
+		ArtifactPath:       artifactPath,
+		CorpusPath:         corpusPath,
+		QueriesPath:        queriesPath,
+		OutputDir:          outputDir,
+		BatchSize:          1,
+		OutputDim:          2,
+		ManifestJSONPath:   manifestPath,
+		TopK:               2,
+		Bits:               4,
+		Seed:               31,
+		MaxTokens:          5,
+		TokenSpanTokens:    2,
+		TokenSpanOverlap:   1,
+		TokenSpanMinTokens: 1,
+		Resume:             true,
+		ProgressEvery:      1,
+	}
+	first := base
+	first.MaxDocs = 1
+	first.MaxQueries = 1
+	summary, err := ExportSparseTokenPoolRetrievalVectors(context.Background(), model, first)
+	if err != nil {
+		t.Fatalf("initial export sparse token span vectors: %v", err)
+	}
+	if summary.ResumedDocumentRecords != 0 || summary.ResumedQueryRecords != 0 {
+		t.Fatalf("initial resume counts = %+v", summary)
+	}
+	appendFile(t, summary.ChildDocVectorPath, []byte(`{"parent_id":"d2","child_id":"d2#token-span-0000","embedding":[0`))
+	appendFile(t, summary.QueryVectorPath, []byte(`{"id":"q2","embedding":[0`))
+
+	second := base
+	second.MaxDocs = 2
+	second.MaxQueries = 2
+	summary, err = ExportSparseTokenPoolRetrievalVectors(context.Background(), model, second)
+	if err != nil {
+		t.Fatalf("resumed export sparse token span vectors: %v", err)
+	}
+	if !summary.ResumeEnabled || summary.ProgressEvery != 1 || summary.ResumedDocumentRecords != 1 || summary.ResumedChildVectors != 4 || summary.ResumedQueryRecords != 1 {
+		t.Fatalf("resume summary = %+v", summary)
+	}
+	childRows := readJSONLRows(t, summary.ChildDocVectorPath)
+	seenChildIDs := map[string]bool{}
+	for _, row := range childRows {
+		childID, ok := row["child_id"].(string)
+		if !ok || childID == "" {
+			t.Fatalf("child row missing child_id: %+v", row)
+		}
+		if seenChildIDs[childID] {
+			t.Fatalf("duplicate child id %q in rows: %+v", childID, childRows)
+		}
+		seenChildIDs[childID] = true
+	}
+	if !seenChildIDs["d1#token-span-0000"] || !seenChildIDs["d2#token-span-0000"] {
+		t.Fatalf("expected resumed d1 and appended d2 child rows, saw IDs %+v", seenChildIDs)
+	}
+	queryRows := readJSONLRows(t, summary.QueryVectorPath)
+	seenQueryIDs := map[string]bool{}
+	for _, row := range queryRows {
+		id, ok := row["id"].(string)
+		if !ok || id == "" {
+			t.Fatalf("query row missing id: %+v", row)
+		}
+		if seenQueryIDs[id] {
+			t.Fatalf("duplicate query id %q in rows: %+v", id, queryRows)
+		}
+		seenQueryIDs[id] = true
+	}
+	if !seenQueryIDs["q1"] || !seenQueryIDs["q2"] {
+		t.Fatalf("expected resumed q1 and appended q2 query rows, saw IDs %+v", seenQueryIDs)
+	}
+
+	var manifest SparseTokenPoolRetrievalVectorExportSummary
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if !manifest.ResumeEnabled || manifest.ProgressEvery != 1 || manifest.ResumedDocumentRecords != 1 || manifest.ResumedChildVectors != 4 || manifest.ResumedQueryRecords != 1 {
+		t.Fatalf("manifest resume fields = %+v", manifest)
+	}
+}
+
+func TestSparseTokenPoolRetrievalVectorExportNonResumeClearsStaleProgress(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "query-vectors.jsonl")
+	oldRow := []byte(`{"id":"q-old","embedding":[1,0]}` + "\n")
+	if err := os.WriteFile(path, oldRow, 0o644); err != nil {
+		t.Fatalf("write old data: %v", err)
+	}
+	if err := writeSparseTokenPoolVectorExportProgress(sparseTokenPoolProgressPath(path), sparseTokenPoolVectorExportProgress{
+		Schema:   sparseTokenPoolVectorExportProgressSchema,
+		Kind:     "query",
+		DataPath: path,
+		Records: []sparseTokenPoolVectorExportProgressRow{{
+			ID:             "q-old",
+			Offset:         int64(len(oldRow)),
+			Rows:           1,
+			ObservedTokens: 3,
+		}},
+	}); err != nil {
+		t.Fatalf("write stale progress: %v", err)
+	}
+
+	_, file, err := prepareSparseTokenPoolResumeFile(path, "query", false)
+	if err != nil {
+		t.Fatalf("prepare non-resume file: %v", err)
+	}
+	freshRow := []byte(`{"id":"q-fresh","embedding":[0,1],"pad":"long enough to exceed the stale offset"}` + "\n")
+	if _, err := file.Write(freshRow); err != nil {
+		t.Fatalf("write fresh data: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close fresh data: %v", err)
+	}
+	if _, err := os.Stat(sparseTokenPoolProgressPath(path)); !os.IsNotExist(err) {
+		t.Fatalf("stale progress sidecar still exists after non-resume prepare: %v", err)
+	}
+
+	state, resumeFile, err := prepareSparseTokenPoolResumeFile(path, "query", true)
+	if err != nil {
+		t.Fatalf("prepare later resume file: %v", err)
+	}
+	defer resumeFile.Close()
+	if len(state.completed) != 0 {
+		t.Fatalf("later resume trusted stale completed records: %+v", state.completed)
+	}
+	if err := reconcileSparseTokenPoolResumeState(resumeFile, path, &state, []string{"q-old"}); err != nil {
+		t.Fatalf("reconcile later resume state: %v", err)
+	}
+	if len(state.completed) != 0 {
+		t.Fatalf("later resume reused stale q-old record: %+v", state.completed)
+	}
+}
+
 func TestSparseTokenPoolRetrievalVectorExportTokenSpanRequiresFullEncoder(t *testing.T) {
 	model, artifactPath := loadTinySparseTokenPoolExportModel(t)
 	dir := t.TempDir()
@@ -1156,4 +1301,16 @@ func readJSONLRows(t *testing.T, path string) []map[string]any {
 		t.Fatalf("scan JSONL %q: %v", path, err)
 	}
 	return rows
+}
+
+func appendFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("open append %q: %v", path, err)
+	}
+	defer file.Close()
+	if _, err := file.Write(data); err != nil {
+		t.Fatalf("append %q: %v", path, err)
+	}
 }
