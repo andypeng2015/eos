@@ -93,6 +93,39 @@ class ExportRetrievalVectorsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exceeds native embedding dimension"):
             exporter.prepare_embedding([1.0, 2.0], output_dim=3)
 
+    def test_write_manifest_marks_external_exports_as_no_quality_claim(self) -> None:
+        args = type(
+            "Args",
+            (),
+            {
+                "dataset_name": "sample",
+                "dataset_dir": Path("datasets/sample"),
+                "model_name": "example/model",
+                "output_dim": 2,
+                "document_chunk_words": 128,
+                "document_chunk_overlap": 32,
+                "document_chunk_min_words": 1,
+                "query_prefix": "query: ",
+                "document_prefix": "doc: ",
+            },
+        )()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "manifest.json"
+            exporter.write_manifest(
+                output_path,
+                args,
+                docs=[("doc-1", "alpha")],
+                queries=[("query-1", "beta")],
+                chunks=[exporter.DocumentChunk("doc-1", "doc-1#chunk-0000", "alpha")],
+                vector_result=exporter.WriteResult(rows=1, native_dim=3, output_dim=2),
+                query_result=exporter.WriteResult(rows=1, native_dim=3, output_dim=2),
+                normalize=True,
+            )
+            manifest = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertIs(manifest["quality_claim"], False)
+
 
 if __name__ == "__main__":
     unittest.main()

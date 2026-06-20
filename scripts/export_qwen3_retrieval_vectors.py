@@ -397,6 +397,7 @@ def write_manifest(
         "document_chunk_overlap": args.document_chunk_overlap,
         "document_chunk_min_words": args.document_chunk_min_words,
         "child_chunk_count": len(chunks),
+        "quality_claim": False,
         "query_prefix": args.query_prefix,
         "document_prefix": args.document_prefix,
     }
