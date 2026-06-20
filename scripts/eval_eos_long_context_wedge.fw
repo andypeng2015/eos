@@ -297,6 +297,7 @@ type fusionPerQueryRow struct {
 	DirectTopDocID                 string        `json:"direct_top_doc_id"`
 	TokenSpanTopDocID              string        `json:"token_span_top_doc_id"`
 	FusionTopDocID                 string        `json:"fusion_top_doc_id"`
+	TopK                           []perQueryTopDoc  `json:"top_k"`
 	DirectTokenSpanTop1Agree       bool          `json:"direct_token_span_top1_agree"`
 	DirectFusionTop1Agree          bool          `json:"direct_fusion_top1_agree"`
 	DirectTokenSpanOverlapAt10     int           `json:"direct_token_span_overlap_at_10"`
@@ -677,6 +678,20 @@ func dedupeRanking(items []perQueryTopDoc) []perQueryTopDoc {
 		if item.Rank == 0 {
 			item.Rank = len(out) + 1
 		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func topKWithRelevance(ranking []perQueryTopDoc, rels map[string]float64, limit int) []perQueryTopDoc {
+	if limit <= 0 || limit > len(ranking) {
+		limit = len(ranking)
+	}
+	out := make([]perQueryTopDoc, 0, limit)
+	for i := 0; i < limit; i++ {
+		item := ranking[i]
+		item.Rank = i + 1
+		item.Relevance = rels[item.DocID]
 		out = append(out, item)
 	}
 	return out
@@ -1360,6 +1375,7 @@ func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQuery
 				DirectTopDocID:             directTopDocID,
 				TokenSpanTopDocID:          tokenSpanTopDocID,
 				FusionTopDocID:             fusionTopDocID,
+				TopK:                       topKWithRelevance(fused, rels, len(fused)),
 				DirectTokenSpanTop1Agree:   top1Agree(directTopDocID, tokenSpanTopDocID),
 				DirectFusionTop1Agree:      top1Agree(directTopDocID, fusionTopDocID),
 				DirectTokenSpanOverlapAt10: overlapAtK(directRanking, tokenRanking, 10),
