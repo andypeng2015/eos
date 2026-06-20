@@ -444,12 +444,14 @@ This wrapper feeds `runs/eos-128d-child-cache-quality-20260615T000000Z/scifact/c
 
 For API-level dense+sparse policy translation evidence, run `scripts/smoke_eos_corkscrewdb_hybrid_policy.fw`. It exports or reuses Eos BEIR document/query vector caches, derives a lexical TF-IDF sparse channel from the same loaded corpus/query text, loads a CorkScrewDB `WithSparse` collection, and compares dense-only `SearchMulti` to `SearchMulti` with `WeightedFusion{Dense:0.5,Sparse:0.5}` as the public-API equivalent of the selected `minmax_blend alpha=0.5` policy.
 
-| Run | Docs | Queries | Relevant pairs | Dense-only nDCG@10 / recall@100 | Hybrid nDCG@10 / recall@100 | Gate |
-| --- | ---: | ---: | ---: | ---: | ---: | --- |
-| `runs/eos-corkscrewdb-hybrid-policy-smoke-20260620T232130Z/` | 600 | 20 | 22 | 0.729755 / 0.950000 | 0.928080 / 1.000000 | pass |
-| `runs/eos-corkscrewdb-hybrid-policy-full-scifact-v1-20260620T232832Z/` | 5,183 | 300 | 339 | 0.565375 / 0.796444 | 0.703644 / 0.934556 | pass |
+| Run | Bits | Docs | Queries | Relevant pairs | Dense-only nDCG@10 / recall@100 | Hybrid nDCG@10 / recall@100 | Gate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `runs/eos-corkscrewdb-hybrid-policy-smoke-20260620T232130Z/` | 8 | 600 | 20 | 22 | 0.729755 / 0.950000 | 0.928080 / 1.000000 | pass |
+| `runs/eos-corkscrewdb-hybrid-policy-full-scifact-v1-20260620T232832Z/` | 8 | 5,183 | 300 | 339 | 0.565375 / 0.796444 | 0.703644 / 0.934556 | pass |
+| `runs/eos-corkscrewdb-hybrid-policy-full-scifact-q4-v1-20260620T000000Z/` | 4 | 5,183 | 300 | 339 | 0.550000 / 0.799111 | 0.695287 / 0.936222 | pass |
+| `runs/eos-corkscrewdb-hybrid-policy-full-scifact-q2-v1-20260620T000000Z/` | 2 | 5,183 | 300 | 339 | 0.472358 / 0.760889 | 0.688250 / 0.924556 | pass |
 
-Treat this as CorkScrewDB API translation evidence with lexical sparse features; the sparse side is TF-IDF over loaded BEIR corpus/query text, not exact `eval-retrieval-hybrid` BM25 parity. It is not default asset or alias promotion.
+Treat this as CorkScrewDB API translation evidence with lexical sparse features; the sparse side is TF-IDF over loaded BEIR corpus/query text, not exact `eval-retrieval-hybrid` BM25 parity. q2 still passes the hybrid-vs-dense API gate, but direct dense-only quality drops versus q8, so keep q2 framed as compact diagnostic evidence rather than a default-quality direct-vector profile. It is not default asset or alias promotion.
 
 The same wrapper also supports `EOS_CORKSCREW_BUDGET_QUALITY_LAYOUT=single_parent_vectors` for a real document-span layout baseline. On the existing full Eos SciFact child cache at `runs/eos-vector-caches/eos-embed-v1-scifact-child-w128-o32-full/scifact/`, the wrapper compared q4/q8 packed `none`/`ordinal` parent multivectors with mean-pooled single-parent vectors over `5,183` parents, `12,468` child spans, `300` queries, and `256d` vectors. Packed run `runs/eos-real-scifact-full-packed-none-ordinal-q4q8-diagnostic2-20260616T000000Z/` recorded q4 `ndcg@10=0.449435`, `recall@100=0.773111`, DB directory multiple `0.032900x`, and p95 `15.934540ms`; q8 recorded `0.461862`, `0.774778`, `0.057958x`, and `30.366188ms`. Single-parent run `runs/eos-real-scifact-full-single-parent-q4q8-diagnostic-20260616T000000Z/` recorded q4 `ndcg@10=0.406498`, `recall@100=0.743111`, DB directory multiple `0.022411x`, and p95 `7.075771ms`; q8 recorded `0.422597`, `0.745889`, `0.032827x`, and `13.242884ms`. Treat this as real local flat document-span layout evidence: packed preserves child-span evidence better at higher storage/latency, while single-parent is smaller and faster but mean-pools span structure away. The diagnostic run disabled old q4 quality/storage/planner floors; it does not claim remote mode, HNSW, federation, or native Matryoshka behavior.
 
