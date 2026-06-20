@@ -1805,6 +1805,7 @@ func TestRunEvalRetrievalVectorsTurboQuantWritesMetricsJSONAndTSV(t *testing.T) 
 	}
 	metricsPath := filepath.Join(dir, "vectors.turboquant.metrics.json")
 	metricsTSVPath := filepath.Join(dir, "vectors.turboquant.metrics.tsv")
+	perQueryPath := filepath.Join(dir, "vectors.turboquant.per-query.jsonl")
 
 	output := captureRunOutput(t, []string{
 		"eval-retrieval-vectors-turboquant",
@@ -1817,6 +1818,8 @@ func TestRunEvalRetrievalVectorsTurboQuantWritesMetricsJSONAndTSV(t *testing.T) 
 		"--quantizer-seed", "123",
 		"--metrics-json", metricsPath,
 		"--metrics-tsv", metricsTSVPath,
+		"--per-query-jsonl", perQueryPath,
+		"--per-query-top-k", "2",
 		datasetDir,
 	})
 	for _, want := range []string{
@@ -1825,6 +1828,7 @@ func TestRunEvalRetrievalVectorsTurboQuantWritesMetricsJSONAndTSV(t *testing.T) 
 		"q8: ndcg@10=",
 		"metrics: " + metricsPath,
 		"metrics_tsv: " + metricsTSVPath,
+		"per_query: " + perQueryPath,
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("eval-retrieval-vectors-turboquant output missing %q\noutput:\n%s", want, output)
@@ -1856,6 +1860,23 @@ func TestRunEvalRetrievalVectorsTurboQuantWritesMetricsJSONAndTSV(t *testing.T) 
 	}
 	if !strings.Contains(string(tsv), "tiny\tquantized\t8\tturboquant_ip_b8") {
 		t.Fatalf("metrics TSV missing q8 row:\n%s", string(tsv))
+	}
+	perQueryData, err := os.ReadFile(perQueryPath)
+	if err != nil {
+		t.Fatalf("read per-query JSONL: %v", err)
+	}
+	perQueryLines := strings.Split(strings.TrimSpace(string(perQueryData)), "\n")
+	if len(perQueryLines) != 2 {
+		t.Fatalf("per-query lines = %d, want one q8 row per query\n%s", len(perQueryLines), perQueryData)
+	}
+	for _, line := range perQueryLines {
+		var row eosruntime.TurboQuantRetrievalPerQueryRow
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatalf("decode per-query row: %v\n%s", err, line)
+		}
+		if row.Schema != eosruntime.TurboQuantRetrievalPerQuerySchema || row.Dataset != "tiny" || row.Method != "turboquant_ip_b8" || row.Bits != 8 || row.QuantizerSeed != 123 || len(row.TopK) == 0 {
+			t.Fatalf("per-query row = %+v", row)
+		}
 	}
 }
 

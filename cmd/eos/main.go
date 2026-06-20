@@ -1362,6 +1362,8 @@ func runEvalRetrievalVectorsTurboQuant(args []string) error {
 	rerankStorage := fs.String("rerank-storage", eosruntime.TurboQuantRerankStorageDense, "rerank storage for --rerank-overfetch: dense, compact-reconstruct, or fp16")
 	metricsPath := fs.String("metrics-json", "", "write TurboQuant retrieval metrics JSON")
 	metricsTSVPath := fs.String("metrics-tsv", "", "write compact dense/quantized metrics TSV")
+	perQueryPath := fs.String("per-query-jsonl", "", "write one compact TurboQuant retrieval diagnostics JSONL row per evaluated query and method")
+	perQueryTopK := fs.Int("per-query-top-k", 0, "optional retrieval depth for per-query diagnostics only; metrics still use --top-k")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1385,18 +1387,20 @@ func runEvalRetrievalVectorsTurboQuant(args []string) error {
 		*datasetName = filepath.Base(datasetDir)
 	}
 	metrics, err := eosruntime.EvaluateTurboQuantVectorCacheRetrievalWithRerankStorage(context.Background(), eosruntime.RetrievalEvalConfig{
-		DatasetName:     *datasetName,
-		ArtifactPath:    *artifactLabel,
-		CorpusPath:      corpusPath,
-		QueriesPath:     queriesPath,
-		QrelsPath:       *qrelsPath,
-		DocVectorPath:   *docVectorsPath,
-		QueryVectorPath: *queryVectorsPath,
-		BackendName:     *backendName,
-		TopK:            *topK,
-		MaxDocs:         *maxDocs,
-		MaxQueries:      *maxQueries,
-		QuantizerSeed:   *quantizerSeed,
+		DatasetName:       *datasetName,
+		ArtifactPath:      *artifactLabel,
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         *qrelsPath,
+		DocVectorPath:     *docVectorsPath,
+		QueryVectorPath:   *queryVectorsPath,
+		BackendName:       *backendName,
+		TopK:              *topK,
+		PerQueryTopK:      *perQueryTopK,
+		MaxDocs:           *maxDocs,
+		MaxQueries:        *maxQueries,
+		PerQueryJSONLPath: *perQueryPath,
+		QuantizerSeed:     *quantizerSeed,
 	}, bits, rerankOverfetch, *rerankStorage)
 	if err != nil {
 		return err
@@ -1444,6 +1448,9 @@ func runEvalRetrievalVectorsTurboQuant(args []string) error {
 	}
 	if *metricsTSVPath != "" {
 		fmt.Printf("metrics_tsv: %s\n", *metricsTSVPath)
+	}
+	if *perQueryPath != "" {
+		fmt.Printf("per_query: %s\n", *perQueryPath)
 	}
 	return nil
 }
