@@ -1056,9 +1056,7 @@ func main() {
 		options = append(options, corkscrewdb.WithIndexType(corkscrewdb.IndexHNSW))
 	}
 	if *quantOnly {
-		options = append(options, corkscrewdb.WithQuantizedOnlyPersistence())
-	} else if *vectorStore == "raw" {
-		options = append(options, corkscrewdb.WithVectorStorage(corkscrewdb.VectorStorageRaw))
+		options = append(options, corkscrewdb.WithoutRawStore())
 	}
 	coll := db.Collection(*collection, options...)
 	loadStart := time.Now()
