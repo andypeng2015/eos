@@ -132,40 +132,48 @@
     "note": "q4/fp16/rerank-overfetch=200 remains the promoted compact profile. The s40 candidate passes strict seeded compact non-regression against the nf005 q4/fp16/o200 anchor across SciFact, NFCorpus, and FiQA."
   },
   "corkscrewdb_api_evidence": {
-    "status": "predecessor_nf005_local_flat_smoke",
-    "report": ".tiller/scratch/codex/eos-nf005-current-default-corkscrewdb-api-smoke-v1-report.md",
-    "run_dir": "runs/eos-nf005-current-default-corkscrewdb-budget-quality-packed-q4q8-20260617T142823Z/",
-    "vector_cache": "runs/eos-vector-caches/eos-nf005-current-default-scifact-child-w128-o32-128d/",
+    "status": "s40_main_local_flat_smoke",
+    "report": ".tiller/scratch/codex/eos-corkscrewdb-main-rawstore-api-compat-v1-report.md",
+    "run_dir": "runs/eos-s40-current-default-corkscrewdb-budget-quality-packed-q4q8-main-20260620T165050Z/",
+    "vector_cache": "runs/eos-vector-caches/eos-s40-current-default-scifact-child-w128-o32-128d/",
+    "corkscrewdb_commit": "511f5d24408d9aeba21941954d29cca3569875da",
     "layout": "packed_parent_multivectors",
     "metadata": "none",
     "child_ids": "ordinal",
+    "storage": "quantized_only",
+    "index": "flat",
     "api_scope": "local_flat_only",
+    "parents": 5183,
+    "children": 12468,
+    "dim": 128,
     "q4_release_gate": {
-      "ndcg_at_10": 0.451122,
+      "ndcg_at_10": 0.452971,
       "recall_at_100": 0.755222,
-      "db_dir_multiple": 0.020372,
+      "db_dir_multiple": 0.041675,
       "vector_payload_multiple": 0.013312,
-      "p95_ms": 142.971679,
+      "p95_ms": 13.434893,
       "planner_fit": 180,
       "target_child_fit": true,
       "target_storage_multiple": 0.554545
     },
     "q8_diagnostic": {
-      "ndcg_at_10": 0.472867,
-      "recall_at_100": 0.780222,
-      "db_dir_multiple": 0.032901,
-      "p95_ms": 22.988553,
+      "ndcg_at_10": 0.472424,
+      "recall_at_100": 0.776889,
+      "db_dir_multiple": 0.066733,
+      "vector_payload_multiple": 0.025841,
+      "p95_ms": 21.874919,
       "planner_fit": 93,
-      "target_child_fit": false
+      "target_child_fit": false,
+      "target_storage_multiple": 1.074026
     },
-    "caveat": "Predecessor nf005 local flat CorkScrewDB API evidence retained as historical release-hardening context only; not a direct s40 API load/index/search proof. q8 is diagnostic because target_child_fit is false; q4 p95 latency is run evidence, not a service SLO."
+    "caveat": "s40 evidence covers the CorkScrewDB main local flat packed-parent API only. It does not prove remote mode, federation, HNSW, hosted parity, or a service SLO. q8 is diagnostic because target_child_fit is false and its DB directory multiple misses the q4 release gate."
   },
   "caveats": [
     "This asset is the durable Eos-side default embedder package for CorkScrewDB external-provider loading.",
     "The ignored runs/ release directory remains provenance.",
     "s40 is a frontier-teacher sentinel-balanced continuation from nf005; nf005 remains predecessor comparison provenance.",
     "Serving evidence is capped SciFact TurboQuant proxy evidence, not hosted parity or a full retrieval benchmark.",
-    "Current CorkScrewDB API evidence in this manifest is predecessor nf005 local-flat context only.",
-    "No CorkScrewDB remote mode, federation, HNSW, native Matryoshka, or hosted-model parity claim is implied."
+    "Current CorkScrewDB API evidence in this manifest is s40 local-flat packed-parent evidence against CorkScrewDB main only.",
+    "No CorkScrewDB remote mode, federation, HNSW, native Matryoshka, hosted-model parity, or service SLO claim is implied."
   ]
 }
