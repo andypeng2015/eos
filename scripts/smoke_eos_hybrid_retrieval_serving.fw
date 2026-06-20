@@ -1,0 +1,533 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const defaultHybridArtifact = "runs/eos-s40-longembed-balanced-anchor-sweep-v1-20260620T195017Z/candidates/fiqa24-nf48/candidate/eos-embed-v1.sealed.mll"
+const defaultHybridMethod = "minmax_blend"
+const defaultHybridAlpha = 0.5
+const defaultHybridRRFK = 60.0
+const defaultHybridRRFLambda = 1.0
+const defaultHybridTopK = 100
+
+type hybridMetrics struct {
+	Dataset  string `json:"dataset"`
+	Backend  string `json:"backend"`
+	Artifact string `json:"artifact"`
+	Inputs   struct {
+		Documents     int   `json:"documents"`
+		Queries       int   `json:"queries"`
+		RelevantPairs int   `json:"relevant_pairs"`
+		ScoredPairs   int64 `json:"scored_pairs"`
+	} `json:"inputs"`
+	Config struct {
+		TopK       int `json:"top_k"`
+		BatchSize  int `json:"batch_size"`
+		MaxDocs    int `json:"max_docs"`
+		MaxQueries int `json:"max_queries"`
+		Hybrid     struct {
+			Method           string  `json:"method"`
+			Alpha            float64 `json:"alpha"`
+			RRFK             float64 `json:"rrf_k"`
+			RRFLambda        float64 `json:"rrf_lambda"`
+			DenseProtectTopK int     `json:"dense_protect_top_k"`
+		} `json:"hybrid"`
+	} `json:"config"`
+	Quality    qualityMetrics `json:"quality"`
+	Throughput struct {
+		ElapsedSeconds     float64 `json:"elapsed_seconds"`
+		DocumentsPerSecond float64 `json:"documents_per_second"`
+		QueriesPerSecond   float64 `json:"queries_per_second"`
+		ScoresPerSecond    float64 `json:"scores_per_second"`
+	} `json:"throughput"`
+}
+
+type qualityMetrics struct {
+	NDCGAt10      float64 `json:"ndcg_at_10"`
+	NDCGAt100     float64 `json:"ndcg_at_100"`
+	MRRAt10       float64 `json:"mrr_at_10"`
+	PrecisionAt1  float64 `json:"precision_at_1"`
+	PrecisionAt5  float64 `json:"precision_at_5"`
+	PrecisionAt10 float64 `json:"precision_at_10"`
+	HitAt1        float64 `json:"hit_at_1"`
+	HitAt5        float64 `json:"hit_at_5"`
+	HitAt10       float64 `json:"hit_at_10"`
+	MAPAt10       float64 `json:"map_at_10"`
+	MAPAt100      float64 `json:"map_at_100"`
+	RecallAt10    float64 `json:"recall_at_10"`
+	RecallAt100   float64 `json:"recall_at_100"`
+}
+
+type policyIdentity struct {
+	Label            string  `json:"label"`
+	Artifact         string  `json:"artifact"`
+	Method           string  `json:"method"`
+	Alpha            float64 `json:"alpha"`
+	RRFK             float64 `json:"rrf_k"`
+	RRFLambda        float64 `json:"rrf_lambda"`
+	TopK             int     `json:"top_k"`
+	DenseProtectTopK int     `json:"dense_protect_top_k"`
+	Decision         string  `json:"decision"`
+}
+
+type smokeManifest struct {
+	Schema         string                `json:"schema"`
+	GeneratedAt    string                `json:"generated_at"`
+	RunDir         string                `json:"run_dir"`
+	Command        []string              `json:"command"`
+	Config         smokeConfig           `json:"config"`
+	MetricsPath    string                `json:"metrics_path"`
+	PerQueryPath   string                `json:"per_query_path,omitempty"`
+	SummaryPath    string                `json:"summary_path"`
+	Quality        qualityMetrics        `json:"quality"`
+	Throughput     map[string]float64    `json:"throughput"`
+	Inputs         map[string]any        `json:"inputs"`
+	Gates          map[string]gateResult `json:"gates"`
+	OverallPass    bool                  `json:"overall_pass"`
+	Caveats        []string              `json:"caveats"`
+	SelectedPolicy policyIdentity        `json:"selected_policy_identity"`
+}
+
+type smokeConfig struct {
+	Artifact            string  `json:"artifact"`
+	Dataset             string  `json:"dataset"`
+	DatasetDir          string  `json:"dataset_dir"`
+	Split               string  `json:"split"`
+	TopK                int     `json:"top_k"`
+	MaxDocs             int     `json:"max_docs"`
+	MaxQueries          int     `json:"max_queries"`
+	BatchSize           int     `json:"batch_size"`
+	Method              string  `json:"method"`
+	Alpha               float64 `json:"alpha"`
+	RRFK                float64 `json:"rrf_k"`
+	RRFLambda           float64 `json:"rrf_lambda"`
+	DenseProtectTopK    int     `json:"dense_protect_top_k"`
+	MinNDCGAt10         float64 `json:"min_ndcg_at_10"`
+	MinRecallAt100      float64 `json:"min_recall_at_100"`
+	MinMRRAt10          float64 `json:"min_mrr_at_10"`
+	RequireFullRelevant bool    `json:"require_full_relevant"`
+}
+
+type gateResult struct {
+	Metric string  `json:"metric"`
+	Value  float64 `json:"value"`
+	Floor  float64 `json:"floor"`
+	Passed bool    `json:"passed"`
+}
+
+func usage() {
+	fmt.Println(`Repo-local serving smoke for the selected Eos hybrid retrieval policy.
+
+This is product/serving evidence for the eos-hybrid retrieval surface only. It
+does not promote or change the dense default embedder asset.
+
+Run:
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_eos_hybrid_retrieval_serving.fw
+
+Environment:
+  EOS_HYBRID_SERVE_SMOKE_ARTIFACT=/path/to/eos-embed-v1.sealed.mll
+  EOS_HYBRID_SERVE_SMOKE_DATASET_ROOT=datasets/eos-embed-v1
+  EOS_HYBRID_SERVE_SMOKE_DATASET=scifact
+  EOS_HYBRID_SERVE_SMOKE_SPLIT=test
+  EOS_HYBRID_SERVE_SMOKE_RUN_ROOT=runs/eos-hybrid-retrieval-serving-smoke-<timestamp>
+  EOS_HYBRID_SERVE_SMOKE_MAX_DOCS=0       # 0 means full corpus
+  EOS_HYBRID_SERVE_SMOKE_MAX_QUERIES=0    # 0 means full query set
+  EOS_HYBRID_SERVE_SMOKE_TOP_K=100
+  EOS_HYBRID_SERVE_SMOKE_METHOD=minmax_blend
+  EOS_HYBRID_SERVE_SMOKE_ALPHA=0.5
+  EOS_HYBRID_SERVE_SMOKE_RRF_K=60
+  EOS_HYBRID_SERVE_SMOKE_RRF_LAMBDA=1.0
+  EOS_HYBRID_SERVE_SMOKE_DENSE_PROTECT_TOP_K=0
+  EOS_HYBRID_SERVE_SMOKE_MIN_NDCG_AT_10=0.5645379155090131
+  EOS_HYBRID_SERVE_SMOKE_MIN_RECALL_AT_100=0.7964444444444444
+  EOS_HYBRID_SERVE_SMOKE_MIN_MRR_AT_10=0
+  EOS_HYBRID_SERVE_SMOKE_PER_QUERY=1`)
+}
+
+func getenv(name string, fallback string) string {
+	value := os.Getenv(name)
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	if pwd := os.Getenv("PWD"); hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func firstExistingDir(paths []string, fallback string) string {
+	for _, path := range paths {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return path
+		}
+	}
+	return fallback
+}
+
+func retrievalDatasetDir(root string, dataset string) string {
+	candidate := filepath.Join(root, "raw", dataset, dataset)
+	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+		return candidate
+	}
+	return filepath.Join(root, dataset)
+}
+
+func parseIntEnv(name string, fallback int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parseFloatEnv(name string, fallback float64) (float64, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a float: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func parseBoolEnv(name string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	if value == "" {
+		return fallback
+	}
+	return value == "1" || value == "true" || value == "yes"
+}
+
+func runCommand(root string, args []string) error {
+	fmt.Println("+ " + strings.Join(args, " "))
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = root
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func readMetrics(path string) (hybridMetrics, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return hybridMetrics{}, err
+	}
+	var metrics hybridMetrics
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		return hybridMetrics{}, err
+	}
+	return metrics, nil
+}
+
+func checkGate(metric string, value float64, floor float64) gateResult {
+	return gateResult{
+		Metric: metric,
+		Value:  value,
+		Floor:  floor,
+		Passed: floor <= 0 || value >= floor,
+	}
+}
+
+func writeSummaryTSV(path string, manifest smokeManifest) error {
+	var b strings.Builder
+	b.WriteString("dataset\tmethod\talpha\trrf_k\trrf_lambda\tdense_protect_top_k\ttop_k\tmax_docs\tmax_queries\tdocuments\tqueries\trelevant_pairs\tndcg_at_10\tmrr_at_10\trecall_at_100\tscores_per_second\toverall_pass\n")
+	fmt.Fprintf(&b, "%s\t%s\t%.6f\t%.6f\t%.6f\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%.12f\t%.12f\t%.12f\t%.2f\t%t\n",
+		manifest.Config.Dataset,
+		manifest.Config.Method,
+		manifest.Config.Alpha,
+		manifest.Config.RRFK,
+		manifest.Config.RRFLambda,
+		manifest.Config.DenseProtectTopK,
+		manifest.Config.TopK,
+		manifest.Config.MaxDocs,
+		manifest.Config.MaxQueries,
+		manifest.Inputs["documents"],
+		manifest.Inputs["queries"],
+		manifest.Inputs["relevant_pairs"],
+		manifest.Quality.NDCGAt10,
+		manifest.Quality.MRRAt10,
+		manifest.Quality.RecallAt100,
+		manifest.Throughput["scores_per_second"],
+		manifest.OverallPass)
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	defaultArtifact := filepath.Join(root, defaultHybridArtifact)
+	artifact := getenv("EOS_HYBRID_SERVE_SMOKE_ARTIFACT", defaultArtifact)
+	if info, err := os.Stat(artifact); err != nil || info.IsDir() {
+		fmt.Fprintf(os.Stderr, "artifact does not exist or is not a file: %s\n", artifact)
+		os.Exit(1)
+	}
+
+	defaultDatasetRoot := firstExistingDir([]string{
+		filepath.Join(root, "datasets", "eos-embed-v1"),
+		filepath.Join(root, "datasets", "manta-embed-v1"),
+	}, filepath.Join(root, "datasets", "eos-embed-v1"))
+	datasetRoot := getenv("EOS_HYBRID_SERVE_SMOKE_DATASET_ROOT", defaultDatasetRoot)
+	dataset := getenv("EOS_HYBRID_SERVE_SMOKE_DATASET", "scifact")
+	datasetDir := retrievalDatasetDir(datasetRoot, dataset)
+	if info, err := os.Stat(datasetDir); err != nil || !info.IsDir() {
+		fmt.Fprintf(os.Stderr, "dataset directory does not exist: %s\n", datasetDir)
+		os.Exit(1)
+	}
+
+	runRoot := getenv("EOS_HYBRID_SERVE_SMOKE_RUN_ROOT", filepath.Join(root, "runs", "eos-hybrid-retrieval-serving-smoke-"+time.Now().UTC().Format("20060102T150405Z")))
+	if err := os.MkdirAll(runRoot, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	metricsJSON := filepath.Join(runRoot, dataset+".hybrid-serving.metrics.json")
+	perQueryJSONL := filepath.Join(runRoot, dataset+".hybrid-serving.per-query.jsonl")
+	summaryTSV := filepath.Join(runRoot, "summary.tsv")
+	manifestJSON := filepath.Join(runRoot, "manifest.json")
+
+	topK, err := parseIntEnv("EOS_HYBRID_SERVE_SMOKE_TOP_K", defaultHybridTopK)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	maxDocs, err := parseIntEnv("EOS_HYBRID_SERVE_SMOKE_MAX_DOCS", 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	maxQueries, err := parseIntEnv("EOS_HYBRID_SERVE_SMOKE_MAX_QUERIES", 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	batchSize, err := parseIntEnv("EOS_HYBRID_SERVE_SMOKE_BATCH_SIZE", 64)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	alpha, err := parseFloatEnv("EOS_HYBRID_SERVE_SMOKE_ALPHA", defaultHybridAlpha)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	rrfK, err := parseFloatEnv("EOS_HYBRID_SERVE_SMOKE_RRF_K", defaultHybridRRFK)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	rrfLambda, err := parseFloatEnv("EOS_HYBRID_SERVE_SMOKE_RRF_LAMBDA", defaultHybridRRFLambda)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	denseProtectTopK, err := parseIntEnv("EOS_HYBRID_SERVE_SMOKE_DENSE_PROTECT_TOP_K", 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	minNDCGAt10, err := parseFloatEnv("EOS_HYBRID_SERVE_SMOKE_MIN_NDCG_AT_10", 0.5645379155090131)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	minRecallAt100, err := parseFloatEnv("EOS_HYBRID_SERVE_SMOKE_MIN_RECALL_AT_100", 0.7964444444444444)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	minMRRAt10, err := parseFloatEnv("EOS_HYBRID_SERVE_SMOKE_MIN_MRR_AT_10", 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	method := getenv("EOS_HYBRID_SERVE_SMOKE_METHOD", defaultHybridMethod)
+	split := getenv("EOS_HYBRID_SERVE_SMOKE_SPLIT", "test")
+	args := []string{
+		"go", "run", "./cmd/eos", "eval-retrieval-hybrid",
+		"--dataset", dataset,
+		"--split", split,
+		"--top-k", strconv.Itoa(topK),
+		"--batch-size", strconv.Itoa(batchSize),
+		"--method", method,
+		"--alpha", strconv.FormatFloat(alpha, 'g', -1, 64),
+		"--rrf-k", strconv.FormatFloat(rrfK, 'g', -1, 64),
+		"--rrf-lambda", strconv.FormatFloat(rrfLambda, 'g', -1, 64),
+		"--dense-protect-top-k", strconv.Itoa(denseProtectTopK),
+		"--metrics-json", metricsJSON,
+	}
+	if parseBoolEnv("EOS_HYBRID_SERVE_SMOKE_PER_QUERY", true) {
+		args = append(args, "--per-query-jsonl", perQueryJSONL)
+	}
+	if maxDocs != 0 {
+		args = append(args, "--max-docs", strconv.Itoa(maxDocs))
+	}
+	if maxQueries != 0 {
+		args = append(args, "--max-queries", strconv.Itoa(maxQueries))
+	}
+	args = append(args, artifact, datasetDir)
+
+	if err := runCommand(root, args); err != nil {
+		fmt.Fprintf(os.Stderr, "hybrid serving smoke eval failed: %v\n", err)
+		os.Exit(1)
+	}
+	metrics, err := readMetrics(metricsJSON)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	gates := map[string]gateResult{
+		"ndcg_at_10":    checkGate("ndcg_at_10", metrics.Quality.NDCGAt10, minNDCGAt10),
+		"recall_at_100": checkGate("recall_at_100", metrics.Quality.RecallAt100, minRecallAt100),
+		"mrr_at_10":     checkGate("mrr_at_10", metrics.Quality.MRRAt10, minMRRAt10),
+	}
+	overallPass := true
+	for _, gate := range gates {
+		if !gate.Passed {
+			overallPass = false
+		}
+	}
+	requireFullRelevant := parseBoolEnv("EOS_HYBRID_SERVE_SMOKE_REQUIRE_FULL_RELEVANT", false)
+	if requireFullRelevant && metrics.Inputs.RelevantPairs == 0 {
+		overallPass = false
+	}
+	caveats := []string{
+		"Hybrid serving smoke is retrieval-surface evidence only; it does not promote or change the dense default asset.",
+	}
+	if maxDocs != 0 || maxQueries != 0 {
+		caveats = append(caveats, "This run used max-docs or max-queries limits and should not be treated as full-dataset product evidence.")
+	}
+	if metrics.Inputs.RelevantPairs == 0 {
+		caveats = append(caveats, "No relevant pairs were evaluated; quality metrics are not meaningful.")
+	}
+
+	manifest := smokeManifest{
+		Schema:      "eos.hybrid_retrieval_serving_smoke.v1",
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		RunDir:      runRoot,
+		Command:     args,
+		Config: smokeConfig{
+			Artifact:            artifact,
+			Dataset:             dataset,
+			DatasetDir:          datasetDir,
+			Split:               split,
+			TopK:                topK,
+			MaxDocs:             maxDocs,
+			MaxQueries:          maxQueries,
+			BatchSize:           batchSize,
+			Method:              method,
+			Alpha:               alpha,
+			RRFK:                rrfK,
+			RRFLambda:           rrfLambda,
+			DenseProtectTopK:    denseProtectTopK,
+			MinNDCGAt10:         minNDCGAt10,
+			MinRecallAt100:      minRecallAt100,
+			MinMRRAt10:          minMRRAt10,
+			RequireFullRelevant: requireFullRelevant,
+		},
+		MetricsPath: metricsJSON,
+		SummaryPath: summaryTSV,
+		Quality:     metrics.Quality,
+		Throughput: map[string]float64{
+			"elapsed_seconds":      metrics.Throughput.ElapsedSeconds,
+			"documents_per_second": metrics.Throughput.DocumentsPerSecond,
+			"queries_per_second":   metrics.Throughput.QueriesPerSecond,
+			"scores_per_second":    metrics.Throughput.ScoresPerSecond,
+		},
+		Inputs: map[string]any{
+			"documents":      metrics.Inputs.Documents,
+			"queries":        metrics.Inputs.Queries,
+			"relevant_pairs": metrics.Inputs.RelevantPairs,
+			"scored_pairs":   metrics.Inputs.ScoredPairs,
+		},
+		Gates:       gates,
+		OverallPass: overallPass,
+		Caveats:     caveats,
+		SelectedPolicy: policyIdentity{
+			Label:            "fiqa24-nf48-minmax-blend-alpha0.5-top100",
+			Artifact:         artifact,
+			Method:           method,
+			Alpha:            alpha,
+			RRFK:             rrfK,
+			RRFLambda:        rrfLambda,
+			TopK:             topK,
+			DenseProtectTopK: denseProtectTopK,
+			Decision:         "candidate_policy_evidence_for_eos_hybrid",
+		},
+	}
+	if parseBoolEnv("EOS_HYBRID_SERVE_SMOKE_PER_QUERY", true) {
+		manifest.PerQueryPath = perQueryJSONL
+	}
+	if err := writeSummaryTSV(summaryTSV, manifest); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(manifestJSON, data, 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("summary_tsv: %s\n", summaryTSV)
+	fmt.Printf("manifest: %s\n", manifestJSON)
+	fmt.Printf("selected_policy: method=%s alpha=%.6g top_k=%d dense_protect_top_k=%d\n", method, alpha, topK, denseProtectTopK)
+	fmt.Printf("quality: ndcg@10=%.12f mrr@10=%.12f recall@100=%.12f pass=%t\n",
+		metrics.Quality.NDCGAt10, metrics.Quality.MRRAt10, metrics.Quality.RecallAt100, overallPass)
+	if !overallPass {
+		os.Exit(1)
+	}
+}
