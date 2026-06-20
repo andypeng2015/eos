@@ -22,6 +22,7 @@ package main
 //   EOS_LC_WEDGE_PER_QUERY=1
 //   EOS_LC_WEDGE_PARENT_SPAN_FUSION=1
 //   EOS_LC_WEDGE_PARENT_SPAN_FUSION_EXTRA_RECIPES=name:k:lambda:protect;name2:k:lambda:protect
+//   EOS_LC_WEDGE_RECIPE_SELF_TEST=1
 //   EOS_LC_WEDGE_EXTERNAL_MODE=off|cache|export
 //   EOS_LC_WEDGE_SPARSE_ENCODER=0
 //   EOS_LC_WEDGE_MAX_DOCS=0
@@ -1187,17 +1188,21 @@ func defaultParentSpanFusionRecipes() []parentSpanFusionRecipe {
 	}
 }
 
+func sameParentSpanFusionRecipe(a parentSpanFusionRecipe, b parentSpanFusionRecipe) bool {
+	return a.Method == b.Method && a.RRFK == b.RRFK && a.RRFLambda == b.RRFLambda && a.DenseProtectTopK == b.DenseProtectTopK
+}
+
 func parentSpanFusionRecipes() ([]parentSpanFusionRecipe, error) {
 	recipes := defaultParentSpanFusionRecipes()
-	seen := map[string]bool{}
+	seen := map[string]parentSpanFusionRecipe{}
 	for _, recipe := range recipes {
 		if recipe.Method == "" {
 			return nil, fmt.Errorf("default parent-span fusion recipe has empty method")
 		}
-		if seen[recipe.Method] {
+		if _, ok := seen[recipe.Method]; ok {
 			return nil, fmt.Errorf("duplicate default parent-span fusion method %q", recipe.Method)
 		}
-		seen[recipe.Method] = true
+		seen[recipe.Method] = recipe
 	}
 
 	value := strings.TrimSpace(os.Getenv(parentSpanFusionExtraRecipesEnv))
@@ -1213,13 +1218,62 @@ func parentSpanFusionRecipes() ([]parentSpanFusionRecipe, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s recipe %d invalid: %w; expected %s", parentSpanFusionExtraRecipesEnv, index+1, err, parentSpanFusionExtraRecipesFormat)
 		}
-		if seen[recipe.Method] {
-			return nil, fmt.Errorf("%s duplicate method name %q; expected %s", parentSpanFusionExtraRecipesEnv, recipe.Method, parentSpanFusionExtraRecipesFormat)
+		if previous, ok := seen[recipe.Method]; ok {
+			// Exact duplicates are idempotent, so rerunning with a repeated
+			// default recipe cannot fail after expensive artifacts are built.
+			if sameParentSpanFusionRecipe(previous, recipe) {
+				continue
+			}
+			return nil, fmt.Errorf("%s conflicting duplicate method name %q; expected %s", parentSpanFusionExtraRecipesEnv, recipe.Method, parentSpanFusionExtraRecipesFormat)
 		}
-		seen[recipe.Method] = true
+		seen[recipe.Method] = recipe
 		recipes = append(recipes, recipe)
 	}
 	return recipes, nil
+}
+
+func runRecipeSelfTest() error {
+	originalValue, hadOriginalValue := os.LookupEnv(parentSpanFusionExtraRecipesEnv)
+	defer func() {
+		if hadOriginalValue {
+			os.Setenv(parentSpanFusionExtraRecipesEnv, originalValue)
+		} else {
+			os.Unsetenv(parentSpanFusionExtraRecipesEnv)
+		}
+	}()
+
+	duplicateDefault := "direct_token_span_fusion_dense_protect_n1_rrf_k10_lambda05:10:0.5:1"
+	os.Setenv(parentSpanFusionExtraRecipesEnv, duplicateDefault)
+	recipes, err := parentSpanFusionRecipes()
+	if err != nil {
+		return fmt.Errorf("exact duplicate default recipe should be ignored: %w", err)
+	}
+	if len(recipes) != len(defaultParentSpanFusionRecipes()) {
+		return fmt.Errorf("exact duplicate default recipe changed recipe count: got %d want %d", len(recipes), len(defaultParentSpanFusionRecipes()))
+	}
+
+	conflictingDefault := "direct_token_span_fusion_dense_protect_n1_rrf_k10_lambda05:10:0.25:1"
+	os.Setenv(parentSpanFusionExtraRecipesEnv, conflictingDefault)
+	if _, err := parentSpanFusionRecipes(); err == nil {
+		return fmt.Errorf("conflicting duplicate default recipe should fail")
+	}
+
+	extra := "diagnostic_fusion_rrf:60:0.1:0"
+	os.Setenv(parentSpanFusionExtraRecipesEnv, extra+";"+extra)
+	recipes, err = parentSpanFusionRecipes()
+	if err != nil {
+		return fmt.Errorf("exact duplicate extra recipe should be ignored: %w", err)
+	}
+	if len(recipes) != len(defaultParentSpanFusionRecipes())+1 {
+		return fmt.Errorf("exact duplicate extra recipe changed recipe count: got %d want %d", len(recipes), len(defaultParentSpanFusionRecipes())+1)
+	}
+
+	os.Setenv(parentSpanFusionExtraRecipesEnv, "diagnostic_fusion_rrf:60:0.1:0;diagnostic_fusion_rrf:60:0.2:0")
+	if _, err := parentSpanFusionRecipes(); err == nil {
+		return fmt.Errorf("conflicting duplicate extra recipe should fail")
+	}
+
+	return nil
 }
 
 func parseParentSpanFusionRecipe(value string) (parentSpanFusionRecipe, error) {
@@ -1577,6 +1631,15 @@ func evaluateExternal(root string, eosBin string, datasetName string, datasetDir
 }
 
 func main() {
+	if parseBoolEnv("EOS_LC_WEDGE_RECIPE_SELF_TEST") {
+		if err := runRecipeSelfTest(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("parent-span fusion recipe self-test passed")
+		return
+	}
+
 	root, err := findRoot()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
