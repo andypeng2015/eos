@@ -1,0 +1,653 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type qualityMetrics struct {
+	NDCGAt10    float64 `json:"ndcg_at_10"`
+	RecallAt100 float64 `json:"recall_at_100"`
+}
+
+type retrievalMetrics struct {
+	Dataset string `json:"dataset"`
+	Backend string `json:"backend"`
+	Inputs struct {
+		Documents int `json:"documents"`
+		Queries   int `json:"queries"`
+	} `json:"inputs"`
+	Quality qualityMetrics `json:"quality"`
+}
+
+type turboQuantMetrics struct {
+	Dataset string `json:"dataset"`
+	Backend string `json:"backend"`
+	Config struct {
+		QuantizerSeed int64 `json:"quantizer_seed"`
+	} `json:"config"`
+	Inputs struct {
+		Documents int `json:"documents"`
+		Queries   int `json:"queries"`
+	} `json:"inputs"`
+	Dense struct {
+		Quality     qualityMetrics `json:"quality"`
+		VectorBytes int64          `json:"vector_bytes"`
+	} `json:"dense"`
+	Rows []struct {
+		Bits                  int            `json:"bits"`
+		Method                string         `json:"method"`
+		Quality               qualityMetrics `json:"quality"`
+		VectorBytes           int64          `json:"vector_bytes"`
+		DenseVectorBytes      int64          `json:"dense_vector_bytes"`
+		CompressionRatio      float64        `json:"compression_ratio"`
+		TotalVectorBytes      int64          `json:"total_vector_bytes"`
+		TotalCompressionRatio float64        `json:"total_compression_ratio"`
+	} `json:"rows"`
+}
+
+type exportManifest struct {
+	Dataset         string `json:"dataset"`
+	Documents       int    `json:"documents"`
+	Queries         int    `json:"queries"`
+	Dimension       int    `json:"dimension"`
+	ModelDimension  int    `json:"model_dimension"`
+	OutputDimension int    `json:"output_dimension"`
+	DocVectorPath   string `json:"doc_vector_path"`
+	QueryVectorPath string `json:"query_vector_path"`
+}
+
+type commandRecord struct {
+	Label string   `json:"label"`
+	Args  []string `json:"args"`
+	Log   string   `json:"log,omitempty"`
+}
+
+type summaryRow struct {
+	Dataset              string  `json:"dataset"`
+	PrefixDim            int     `json:"prefix_dim"`
+	OutputDim            int     `json:"output_dim"`
+	ModelDim             int     `json:"model_dim"`
+	Method               string  `json:"method"`
+	Bits                 int     `json:"bits,omitempty"`
+	NDCGAt10             float64 `json:"ndcg_at_10"`
+	RecallAt100          float64 `json:"recall_at_100"`
+	DenseVectorBytes     int64   `json:"dense_vector_bytes"`
+	QuantizedVectorBytes int64   `json:"quantized_vector_bytes,omitempty"`
+	StorageMultiple      float64 `json:"storage_multiple,omitempty"`
+	CompressionRatio     float64 `json:"compression_ratio,omitempty"`
+	MetricsPath          string  `json:"metrics_path"`
+	ManifestPath         string  `json:"manifest_path"`
+}
+
+type runManifest struct {
+	Schema      string            `json:"schema"`
+	GeneratedAt string            `json:"generated_at"`
+	PlanOnly    bool              `json:"plan_only"`
+	RepoRoot    string            `json:"repo_root"`
+	RunDir      string            `json:"run_dir"`
+	Inputs      map[string]string `json:"inputs"`
+	Commands    []commandRecord   `json:"commands"`
+	Rows        []summaryRow      `json:"rows"`
+	Caveats     []string          `json:"caveats"`
+}
+
+type config struct {
+	Root        string
+	RunID       string
+	RunRoot     string
+	RunDir      string
+	LogDir      string
+	CacheDir    string
+	MetricsDir  string
+	EosBin      string
+	Artifact    string
+	DatasetRoot string
+	Datasets    []string
+	Dims        []int
+	Bits        string
+	Split       string
+	TopK        string
+	MaxDocs     string
+	MaxQueries  string
+	BatchSize   string
+	PlanOnly    bool
+	SummaryJSON string
+	SummaryTSV  string
+}
+
+func usage() {
+	fmt.Println(`Evaluate an Eos prefix-dimension retrieval curve from vector caches.
+
+Required for real runs:
+  EOS_PREFIX_CURVE_ARTIFACT=/path/to/eos.sealed.mll
+
+Optional:
+  EOS_REPO_ROOT=$PWD
+  EOS_PREFIX_CURVE_DATASET_ROOT=$PWD/datasets/eos-embed-v1
+  EOS_PREFIX_CURVE_DATASETS=scifact,nfcorpus,fiqa
+  EOS_PREFIX_CURVE_DIMS=32,64,96,128
+  EOS_PREFIX_CURVE_BITS=2,4,8
+  EOS_PREFIX_CURVE_SPLIT=test
+  EOS_PREFIX_CURVE_TOP_K=100
+  EOS_PREFIX_CURVE_MAX_DOCS=0
+  EOS_PREFIX_CURVE_MAX_QUERIES=0
+  EOS_PREFIX_CURVE_BATCH_SIZE=64
+  EOS_PREFIX_CURVE_RUN_ROOT=$PWD/runs
+  EOS_PREFIX_CURVE_RUN_ID=eos-prefix-dim-curve-20260619
+  EOS_PREFIX_CURVE_PLAN_ONLY=1`)
+}
+
+func getenv(name string, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	if pwd := os.Getenv("PWD"); hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func splitList(value string) []string {
+	out := []string{}
+	for _, raw := range strings.Split(value, ",") {
+		item := strings.TrimSpace(raw)
+		if item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func parseIntList(name string, fallback string) ([]int, error) {
+	values := splitList(getenv(name, fallback))
+	out := []int{}
+	for _, value := range values {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed <= 0 {
+			return nil, fmt.Errorf("%s must contain positive integers: %q", name, value)
+		}
+		out = append(out, parsed)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%s is empty", name)
+	}
+	return out, nil
+}
+
+func firstExistingDir(paths []string, fallback string) string {
+	for _, path := range paths {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return path
+		}
+	}
+	return fallback
+}
+
+func prepareConfig(root string) (config, error) {
+	planOnly := getenv("EOS_PREFIX_CURVE_PLAN_ONLY", "0") == "1"
+	artifact := os.Getenv("EOS_PREFIX_CURVE_ARTIFACT")
+	if artifact == "" {
+		if planOnly {
+			artifact = "/path/to/eos.sealed.mll"
+		} else {
+			return config{}, fmt.Errorf("EOS_PREFIX_CURVE_ARTIFACT is required")
+		}
+	}
+	artifactAbs, err := filepath.Abs(artifact)
+	if err != nil {
+		return config{}, err
+	}
+	if !planOnly {
+		if _, err := os.Stat(artifactAbs); err != nil {
+			return config{}, fmt.Errorf("EOS_PREFIX_CURVE_ARTIFACT does not exist: %s", artifactAbs)
+		}
+	}
+	dims, err := parseIntList("EOS_PREFIX_CURVE_DIMS", "32,64,96,128")
+	if err != nil {
+		return config{}, err
+	}
+	defaultDatasetRoot := firstExistingDir([]string{
+		filepath.Join(root, "datasets", "eos-embed-v1"),
+		filepath.Join(root, "datasets", "manta-embed-v1"),
+	}, filepath.Join(root, "datasets", "eos-embed-v1"))
+	datasetRoot, err := filepath.Abs(getenv("EOS_PREFIX_CURVE_DATASET_ROOT", defaultDatasetRoot))
+	if err != nil {
+		return config{}, err
+	}
+	datasets := splitList(getenv("EOS_PREFIX_CURVE_DATASETS", "scifact,nfcorpus,fiqa"))
+	if len(datasets) == 0 {
+		return config{}, fmt.Errorf("EOS_PREFIX_CURVE_DATASETS is empty")
+	}
+	runID := getenv("EOS_PREFIX_CURVE_RUN_ID", "eos-prefix-dim-curve-"+time.Now().UTC().Format("20060102T150405Z"))
+	runRoot := getenv("EOS_PREFIX_CURVE_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir, err := filepath.Abs(filepath.Join(runRoot, runID))
+	if err != nil {
+		return config{}, err
+	}
+	if !planOnly {
+		if entries, err := os.ReadDir(runDir); err == nil && len(entries) > 0 {
+			return config{}, fmt.Errorf("run directory already exists and is not empty: %s", runDir)
+		}
+	}
+	cfg := config{
+		Root:        root,
+		RunID:       runID,
+		RunRoot:     runRoot,
+		RunDir:      runDir,
+		LogDir:      filepath.Join(runDir, "logs"),
+		CacheDir:    filepath.Join(runDir, "caches"),
+		MetricsDir:  filepath.Join(runDir, "metrics"),
+		EosBin:      filepath.Join(runDir, "bin", "eos"),
+		Artifact:    artifactAbs,
+		DatasetRoot: datasetRoot,
+		Datasets:    datasets,
+		Dims:        dims,
+		Bits:        getenv("EOS_PREFIX_CURVE_BITS", "2,4,8"),
+		Split:       getenv("EOS_PREFIX_CURVE_SPLIT", "test"),
+		TopK:        getenv("EOS_PREFIX_CURVE_TOP_K", "100"),
+		MaxDocs:     getenv("EOS_PREFIX_CURVE_MAX_DOCS", "0"),
+		MaxQueries:  getenv("EOS_PREFIX_CURVE_MAX_QUERIES", "0"),
+		BatchSize:   getenv("EOS_PREFIX_CURVE_BATCH_SIZE", "64"),
+		PlanOnly:    planOnly,
+		SummaryJSON: filepath.Join(runDir, "prefix-dim-curve.summary.json"),
+		SummaryTSV:  filepath.Join(runDir, "prefix-dim-curve.summary.tsv"),
+	}
+	return cfg, nil
+}
+
+func datasetDir(cfg config, dataset string) string {
+	rawPath := filepath.Join(cfg.DatasetRoot, "raw", dataset, dataset)
+	if info, err := os.Stat(rawPath); err == nil && info.IsDir() {
+		return rawPath
+	}
+	return filepath.Join(cfg.DatasetRoot, dataset)
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func renderCommand(args []string) string {
+	parts := []string{}
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func runOrRecord(cfg config, commands *[]commandRecord, label string, logName string, args []string) error {
+	logPath := ""
+	if logName != "" {
+		logPath = filepath.Join(cfg.LogDir, logName)
+	}
+	record := commandRecord{Label: label, Args: args, Log: logPath}
+	*commands = append(*commands, record)
+	fmt.Println("+ " + renderCommand(args))
+	if cfg.PlanOnly {
+		return nil
+	}
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = cfg.Root
+	out, err := cmd.CombinedOutput()
+	if logPath != "" {
+		_ = os.WriteFile(logPath+".cmd", []byte(renderCommand(args)+"\n"), 0o644)
+		_ = os.WriteFile(logPath, out, 0o644)
+	}
+	if err != nil {
+		return fmt.Errorf("%s failed: %w; see %s", label, err, logPath)
+	}
+	return nil
+}
+
+func readJSON(path string, target interface{}) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, target)
+}
+
+func denseBytes(manifest exportManifest) int64 {
+	dim := manifest.OutputDimension
+	if dim == 0 {
+		dim = manifest.Dimension
+	}
+	return int64(manifest.Documents) * int64(dim) * 4
+}
+
+func appendSummaryTSV(path string, rows []summaryRow) error {
+	var b strings.Builder
+	b.WriteString("dataset\tprefix_dim\toutput_dim\tmodel_dim\tmethod\tbits\tndcg_at_10\trecall_at_100\tdense_vector_bytes\tquantized_vector_bytes\tstorage_multiple\tcompression_ratio\tmetrics_path\tmanifest_path\n")
+	for _, row := range rows {
+		b.WriteString(fmt.Sprintf("%s\t%d\t%d\t%d\t%s\t", row.Dataset, row.PrefixDim, row.OutputDim, row.ModelDim, row.Method))
+		if row.Bits > 0 {
+			b.WriteString(strconv.Itoa(row.Bits))
+		}
+		b.WriteString(fmt.Sprintf("\t%.6f\t%.6f\t%d\t", row.NDCGAt10, row.RecallAt100, row.DenseVectorBytes))
+		if row.QuantizedVectorBytes > 0 {
+			b.WriteString(strconv.FormatInt(row.QuantizedVectorBytes, 10))
+		}
+		b.WriteString(fmt.Sprintf("\t%.6f\t%.6f\t%s\t%s\n", row.StorageMultiple, row.CompressionRatio, row.MetricsPath, row.ManifestPath))
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func writeManifest(cfg config, commands []commandRecord, rows []summaryRow) error {
+	manifest := runManifest{
+		Schema:      "eos.prefix_dim_curve.v1",
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		PlanOnly:    cfg.PlanOnly,
+		RepoRoot:    cfg.Root,
+		RunDir:      cfg.RunDir,
+		Inputs: map[string]string{
+			"artifact":     cfg.Artifact,
+			"dataset_root": cfg.DatasetRoot,
+			"datasets":     strings.Join(cfg.Datasets, ","),
+			"dims":         intsCSV(cfg.Dims),
+			"bits":         cfg.Bits,
+			"split":        cfg.Split,
+			"top_k":        cfg.TopK,
+			"max_docs":     cfg.MaxDocs,
+			"max_queries":  cfg.MaxQueries,
+			"batch_size":   cfg.BatchSize,
+		},
+		Commands: commands,
+		Rows:     rows,
+		Caveats: []string{
+			"Prefix dimensions use export-retrieval-vectors --output-dim, which prefix-truncates and L2-renormalizes existing embeddings.",
+			"Treat prefix rows as Matryoshka evidence only when the artifact was trained with a Matryoshka/prefix loss.",
+			"Dense vector bytes are document_vector_count * output_dim * 4 and exclude JSONL/container metadata.",
+			"TurboQuant byte/compression fields are copied from eval-retrieval-vectors-turboquant when available.",
+		},
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(cfg.SummaryJSON, data, 0o644)
+}
+
+func intsCSV(values []int) string {
+	parts := []string{}
+	for _, value := range values {
+		parts = append(parts, strconv.Itoa(value))
+	}
+	return strings.Join(parts, ",")
+}
+
+func plannedRows(dataset string, dim int, bits []int, denseMetricsPath string, tqMetricsPath string, manifestPath string) []summaryRow {
+	rows := []summaryRow{{
+		Dataset:      dataset,
+		PrefixDim:    dim,
+		OutputDim:    dim,
+		ModelDim:     0,
+		Method:       "dense",
+		MetricsPath:  denseMetricsPath,
+		ManifestPath: manifestPath,
+	}}
+	for _, bit := range bits {
+		rows = append(rows, summaryRow{
+			Dataset:      dataset,
+			PrefixDim:    dim,
+			OutputDim:    dim,
+			ModelDim:     0,
+			Method:       fmt.Sprintf("turboquant_ip_b%d", bit),
+			Bits:         bit,
+			MetricsPath:  tqMetricsPath,
+			ManifestPath: manifestPath,
+		})
+	}
+	return rows
+}
+
+func runCurve(cfg config) error {
+	if err := os.MkdirAll(filepath.Join(cfg.RunDir, "bin"), 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(cfg.LogDir, 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(cfg.CacheDir, 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(cfg.MetricsDir, 0o755); err != nil {
+		return err
+	}
+	bits, err := parseIntList("EOS_PREFIX_CURVE_BITS", cfg.Bits)
+	if err != nil {
+		return err
+	}
+	commands := []commandRecord{}
+	rows := []summaryRow{}
+	if err := runOrRecord(cfg, &commands, "Build eos CLI", "go-build.log", []string{"go", "build", "-trimpath", "-o", cfg.EosBin, "./cmd/eos"}); err != nil {
+		return err
+	}
+	for _, dataset := range cfg.Datasets {
+		dataDir := datasetDir(cfg, dataset)
+		if !cfg.PlanOnly {
+			if info, err := os.Stat(dataDir); err != nil || !info.IsDir() {
+				return fmt.Errorf("dataset directory missing for %s: %s", dataset, dataDir)
+			}
+		}
+		for _, dim := range cfg.Dims {
+			cacheDir := filepath.Join(cfg.CacheDir, dataset, fmt.Sprintf("dim-%d", dim))
+			manifestPath := filepath.Join(cacheDir, "export.manifest.json")
+			denseMetricsPath := filepath.Join(cfg.MetricsDir, fmt.Sprintf("%s.dim%d.dense.json", dataset, dim))
+			tqMetricsPath := filepath.Join(cfg.MetricsDir, fmt.Sprintf("%s.dim%d.turboquant.json", dataset, dim))
+			tqTSVPath := filepath.Join(cfg.MetricsDir, fmt.Sprintf("%s.dim%d.turboquant.tsv", dataset, dim))
+			exportArgs := []string{
+				cfg.EosBin,
+				"export-retrieval-vectors",
+				"--dataset", dataset,
+				"--split", cfg.Split,
+				"--batch-size", cfg.BatchSize,
+				"--output-dim", strconv.Itoa(dim),
+				"--manifest-json", manifestPath,
+			}
+			if cfg.MaxDocs != "" && cfg.MaxDocs != "0" {
+				exportArgs = append(exportArgs, "--max-docs", cfg.MaxDocs)
+			}
+			if cfg.MaxQueries != "" && cfg.MaxQueries != "0" {
+				exportArgs = append(exportArgs, "--max-queries", cfg.MaxQueries)
+			}
+			exportArgs = append(exportArgs, cfg.Artifact, dataDir, cacheDir)
+			if err := runOrRecord(cfg, &commands, fmt.Sprintf("Export %s dim %d", dataset, dim), fmt.Sprintf("%s-dim%d-export.log", dataset, dim), exportArgs); err != nil {
+				return err
+			}
+			docVectors := filepath.Join(cacheDir, "doc-vectors.jsonl")
+			queryVectors := filepath.Join(cacheDir, "query-vectors.jsonl")
+			denseArgs := []string{
+				cfg.EosBin,
+				"eval-retrieval-vectors",
+				"--dataset", dataset,
+				"--split", cfg.Split,
+				"--top-k", cfg.TopK,
+				"--backend", fmt.Sprintf("eos-prefix-d%d", dim),
+				"--artifact", filepath.Base(cfg.Artifact),
+				"--doc-vectors", docVectors,
+				"--query-vectors", queryVectors,
+				"--metrics-json", denseMetricsPath,
+			}
+			if cfg.MaxDocs != "" && cfg.MaxDocs != "0" {
+				denseArgs = append(denseArgs, "--max-docs", cfg.MaxDocs)
+			}
+			if cfg.MaxQueries != "" && cfg.MaxQueries != "0" {
+				denseArgs = append(denseArgs, "--max-queries", cfg.MaxQueries)
+			}
+			denseArgs = append(denseArgs, dataDir)
+			if err := runOrRecord(cfg, &commands, fmt.Sprintf("Evaluate dense %s dim %d", dataset, dim), fmt.Sprintf("%s-dim%d-dense.log", dataset, dim), denseArgs); err != nil {
+				return err
+			}
+			tqArgs := []string{
+				cfg.EosBin,
+				"eval-retrieval-vectors-turboquant",
+				"--dataset", dataset,
+				"--split", cfg.Split,
+				"--top-k", cfg.TopK,
+				"--backend", fmt.Sprintf("eos-prefix-d%d", dim),
+				"--artifact", filepath.Base(cfg.Artifact),
+				"--bits", cfg.Bits,
+				"--doc-vectors", docVectors,
+				"--query-vectors", queryVectors,
+				"--metrics-json", tqMetricsPath,
+				"--metrics-tsv", tqTSVPath,
+			}
+			if cfg.MaxDocs != "" && cfg.MaxDocs != "0" {
+				tqArgs = append(tqArgs, "--max-docs", cfg.MaxDocs)
+			}
+			if cfg.MaxQueries != "" && cfg.MaxQueries != "0" {
+				tqArgs = append(tqArgs, "--max-queries", cfg.MaxQueries)
+			}
+			tqArgs = append(tqArgs, dataDir)
+			if err := runOrRecord(cfg, &commands, fmt.Sprintf("Evaluate TurboQuant %s dim %d", dataset, dim), fmt.Sprintf("%s-dim%d-turboquant.log", dataset, dim), tqArgs); err != nil {
+				return err
+			}
+			if cfg.PlanOnly {
+				rows = append(rows, plannedRows(dataset, dim, bits, denseMetricsPath, tqMetricsPath, manifestPath)...)
+				continue
+			}
+			var exportInfo exportManifest
+			if err := readJSON(manifestPath, &exportInfo); err != nil {
+				return err
+			}
+			outputDim := exportInfo.OutputDimension
+			if outputDim == 0 {
+				outputDim = exportInfo.Dimension
+			}
+			modelDim := exportInfo.ModelDimension
+			if modelDim == 0 {
+				modelDim = exportInfo.Dimension
+			}
+			denseVectorBytes := denseBytes(exportInfo)
+			var denseMetrics retrievalMetrics
+			if err := readJSON(denseMetricsPath, &denseMetrics); err != nil {
+				return err
+			}
+			rows = append(rows, summaryRow{
+				Dataset:          dataset,
+				PrefixDim:        dim,
+				OutputDim:        outputDim,
+				ModelDim:         modelDim,
+				Method:           "dense",
+				NDCGAt10:         denseMetrics.Quality.NDCGAt10,
+				RecallAt100:      denseMetrics.Quality.RecallAt100,
+				DenseVectorBytes: denseVectorBytes,
+				StorageMultiple:  1.0,
+				CompressionRatio: 1.0,
+				MetricsPath:      denseMetricsPath,
+				ManifestPath:     manifestPath,
+			})
+			var tqMetrics turboQuantMetrics
+			if err := readJSON(tqMetricsPath, &tqMetrics); err != nil {
+				return err
+			}
+			for _, tqRow := range tqMetrics.Rows {
+				quantBytes := tqRow.TotalVectorBytes
+				if quantBytes == 0 {
+					quantBytes = tqRow.VectorBytes
+				}
+				compression := tqRow.TotalCompressionRatio
+				if compression == 0 {
+					compression = tqRow.CompressionRatio
+				}
+				denseBytesForRow := tqRow.DenseVectorBytes
+				if denseBytesForRow == 0 {
+					denseBytesForRow = denseVectorBytes
+				}
+				storageMultiple := 0.0
+				if denseBytesForRow > 0 && quantBytes > 0 {
+					storageMultiple = float64(quantBytes) / float64(denseBytesForRow)
+				}
+				rows = append(rows, summaryRow{
+					Dataset:              dataset,
+					PrefixDim:            dim,
+					OutputDim:            outputDim,
+					ModelDim:             modelDim,
+					Method:               tqRow.Method,
+					Bits:                 tqRow.Bits,
+					NDCGAt10:             tqRow.Quality.NDCGAt10,
+					RecallAt100:          tqRow.Quality.RecallAt100,
+					DenseVectorBytes:     denseBytesForRow,
+					QuantizedVectorBytes: quantBytes,
+					StorageMultiple:      storageMultiple,
+					CompressionRatio:     compression,
+					MetricsPath:          tqMetricsPath,
+					ManifestPath:         manifestPath,
+				})
+			}
+		}
+	}
+	if err := appendSummaryTSV(cfg.SummaryTSV, rows); err != nil {
+		return err
+	}
+	if err := writeManifest(cfg, commands, rows); err != nil {
+		return err
+	}
+	fmt.Println("summary_json=" + cfg.SummaryJSON)
+	fmt.Println("summary_tsv=" + cfg.SummaryTSV)
+	fmt.Println("run_dir=" + cfg.RunDir)
+	return nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	cfg, err := prepareConfig(root)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	if err := runCurve(cfg); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+}
