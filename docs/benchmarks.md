@@ -147,6 +147,39 @@ ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
 
 The scoreboard run writes `scoreboard.tsv`, `scoreboard.json`, per-task metrics JSON, command logs, and a run-local `eos` binary under `runs/<run-id>/`. Dense local rows default to `baseline=eos`; hybrid rows default to `baseline=eos-hybrid`; local TurboQuant rows use `eos-turboquant` for direct quantized scoring and `eos-turboquant-rerank` for quantized candidate overfetch plus rerank storage modes such as fp16; external TurboQuant rows use `<external>-turboquant`; external child-vector rows use `<external>-dense-child` for dense child max and `<external>-turboquant-child` for q-bit child max rows. Set `EOS_SCOREBOARD_BASELINE_LABEL=manta` and `EOS_SCOREBOARD_HYBRID_BASELINE_LABEL=manta-hybrid` only when intentionally producing a legacy-labeled scoreboard. Pairwise rows use `EOS_SCOREBOARD_PAIRWISE_ARTIFACT` when set, or infer the sibling trainable package from a sealed artifact path. Add `EOS_SCOREBOARD_LONG_ROOT` and `EOS_SCOREBOARD_LONG_DATASETS` when long-document retrieval datasets are prepared.
 
+Run the parent/single-vector prefix-dimension compact-quality harness when the question is "how much quality does the current default artifact keep after prefix truncation plus direct q-bit vector-index compression?":
+
+```bash
+EOS_REPO_ROOT=$PWD \
+EOS_PREFIX_CURVE_ARTIFACT=$PWD/assets/corkscrewdb-default-embedder/corkscrewdb-default-embedder.mll \
+EOS_PREFIX_CURVE_DATASET_ROOT=$PWD/datasets/manta-embed-v1 \
+EOS_PREFIX_CURVE_DATASETS=scifact,nfcorpus,fiqa \
+EOS_PREFIX_CURVE_DIMS=32,64,96,128 \
+EOS_PREFIX_CURVE_BITS=2,4,8 \
+EOS_PREFIX_CURVE_MAX_QUERIES=300 \
+EOS_PREFIX_CURVE_TOP_K=100 \
+EOS_PREFIX_CURVE_BATCH_SIZE=64 \
+ferrous-wheel run scripts/eval_eos_prefix_dim_curve.fw
+```
+
+Use `EOS_PREFIX_CURVE_MAX_QUERIES=0`, `EOS_PREFIX_CURVE_DIMS=128`, and `EOS_PREFIX_CURVE_BITS=4,8` for the current full-query short-set confirmation. The harness writes `prefix-dim-curve.summary.json`, `prefix-dim-curve.summary.tsv`, export manifests, metrics JSON, and command logs under `runs/<run-id>/`. Its prefix rows use `export-retrieval-vectors --output-dim`, which prefix-truncates and L2-renormalizes existing embeddings. They are not trained Matryoshka/native 128d heads unless the artifact was trained with a prefix/Matryoshka objective. Compression fields are vector-payload accounting from the vector-cache/TurboQuant metrics, not full CorkScrewDB DB-byte evidence and not q4/fp16 rerank evidence.
+
+Current default full-query `128d` parent/single-vector evidence is in `runs/eos-prefix-128-q4q8-full-query-current-default-v1-20260620T021328Z/` and `.tiller/scratch/codex/eos-prefix-128-q4q8-full-query-current-default-v1-report.md`:
+
+| dataset | method | nDCG@10 | recall@100 | storage multiple | compression |
+| --- | --- | ---: | ---: | ---: | ---: |
+| scifact | dense | 0.494851 | 0.761889 | 1.000000 | 1.000000x |
+| scifact | q4 | 0.478427 | 0.758556 | 0.132812 | 7.529412x |
+| scifact | q8 | 0.492185 | 0.760778 | 0.257812 | 3.878788x |
+| nfcorpus | dense | 0.184242 | 0.214583 | 1.000000 | 1.000000x |
+| nfcorpus | q4 | 0.178007 | 0.216910 | 0.132812 | 7.529412x |
+| nfcorpus | q8 | 0.184394 | 0.215245 | 0.257812 | 3.878788x |
+| fiqa | dense | 0.098073 | 0.299695 | 1.000000 | 1.000000x |
+| fiqa | q4 | 0.092377 | 0.297274 | 0.132812 | 7.529412x |
+| fiqa | q8 | 0.097320 | 0.301407 | 0.257812 | 3.878788x |
+
+Interpretation for product lanes: `128d q8` is the near-dense compact cache reference for the current default artifact, at about `3.878788x` vector-payload compression. `128d q4` is the aggressive compact candidate, at about `7.529412x` vector-payload compression, with full-query nDCG deltas versus dense of `-0.016424` SciFact, `-0.006235` NFCorpus, and `-0.005696` FiQA. q2 is not default-quality-ready without a trained compact head: on the bounded prefix curve it remained materially below dense at `128d`, and at `32d` it was the clear collapse setting on every dataset. Keep this parent/single-vector prefix evidence distinct from the packed-parent child-vector evidence below, which measures many vectors per parent object and separate CorkScrewDB layout/storage questions.
+
 For the current synthetic late-needle long-context smoke, run:
 
 ```bash

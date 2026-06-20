@@ -15,11 +15,14 @@ This is a default-embedder product lane for CorkScrewDB: Eos can emit compact ch
 - Quality evidence, storage evidence, and local CorkScrewDB API evidence are separate. Cache-only quality rows do not measure DB directory size or API latency; planner rows do not measure ranking quality; local flat CorkScrewDB rows do not prove remote mode, federation, HNSW, WAL/compaction behavior, or production service latency.
 - The current `128d` Eos child cache is prefix-truncated and L2-renormalized. Treat it as a measured bridge, not native Matryoshka training or a dedicated numeric time-series encoder.
 - q4/fp16 sidecar rerank is a different product surface. It preserves quality for two-stage retrieval, but a per-child fp16 sidecar erases much of the hundred-child storage advantage and should not be used as the direct child-vector storage claim.
+- Parent/single-vector prefix curves are another distinct product lane. `scripts/eval_eos_prefix_dim_curve.fw` measures `export-retrieval-vectors --output-dim` prefix truncation plus L2 renormalization and direct q-bit vector-payload compression for one vector per document. It does not measure packed-parent DB bytes, many-child fit counts, or q4/fp16 rerank quality.
 
 ## Evidence Table
 
 | Evidence | Layer | Exact result | Boundary |
 | --- | --- | --- | --- |
+| Current default 128d prefix q8 | Parent/single-vector vector-cache quality | Full-query SciFact/NFCorpus/FiQA q8 nDCG@10 `0.492185`/`0.184394`/`0.097320`, recall@100 `0.760778`/`0.215245`/`0.301407`, storage multiple `0.257812`, compression `3.878788x`. | Prefix truncation plus L2 renorm; vector-payload accounting only; near-dense compact cache reference, not packed-parent DB-byte evidence or native Matryoshka. |
+| Current default 128d prefix q4 | Parent/single-vector vector-cache quality | Full-query SciFact/NFCorpus/FiQA q4 nDCG@10 `0.478427`/`0.178007`/`0.092377`, recall@100 `0.758556`/`0.216910`/`0.297274`, storage multiple `0.132812`, compression `7.529412x`. | Aggressive compact candidate; vector-payload accounting only; not full CorkScrewDB DB bytes and not q4/fp16 rerank evidence. |
 | Packed planner frontier | Storage/accounting | Against one `3072d` fp32 dense vector budget, packed `128d` children fit q2/q4/q8 counts `341`/`180`/`93`. | Planner math only; same-dim `128d` does not fit hundreds. |
 | Event trace use case | Storage/accounting | q4 `180` children fits at `0.996104x` of the `3072d` dense budget. | Edge-fit storage row; no retrieval-quality claim. |
 | q2 frontier use case | Storage/accounting | q2 `341` children fits at `0.999026x` of the `3072d` dense budget. | Storage frontier only. |
@@ -49,4 +52,5 @@ This is a default-embedder product lane for CorkScrewDB: Eos can emit compact ch
 - Use `scripts/smoke_eos_corkscrewdb_budget_quality.fw` or `scripts/smoke_corkscrewdb_child_vectors.fw` with candidate-specific child/query/qrels inputs when the actual local flat CorkScrewDB API path must pass.
 - Compare `scripts/smoke_corkscrewdb_child_vectors.fw` layouts on the same inputs when making storage tradeoffs: `single_parent_vectors` mean-pools to one vector per parent, `separate_child_vectors` writes one row per child, and `packed_parent_multivectors` preserves child vectors while paying parent/object overhead once.
 - Promote packed-parent evidence only when layout, metadata mode, child-ID mode, DB bytes, p95 latency, and parent-search mode are recorded.
+- For parent/single-vector compact cache decisions, treat `128d q8` as the current near-dense reference and `128d q4` as the aggressive compact candidate. Do not promote q2 as default-quality-ready until a trained compact head or equivalent evidence closes the quality gap.
 - Before broader product claims, run larger real-document and real-event workloads, native/trained compact heads or Matryoshka experiments, and remote/HNSW/federation-specific CorkScrewDB smokes rather than extrapolating from local flat rows.
