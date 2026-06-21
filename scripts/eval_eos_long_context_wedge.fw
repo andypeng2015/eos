@@ -938,6 +938,18 @@ func top1Agree(a string, b string) bool {
 	return a != "" && a == b
 }
 
+func rankOfDoc(ranking []perQueryTopDoc, docID string) int {
+	if docID == "" {
+		return 0
+	}
+	for i, item := range ranking {
+		if item.DocID == docID {
+			return i + 1
+		}
+	}
+	return 0
+}
+
 func overlapAtK(a []perQueryTopDoc, b []perQueryTopDoc, k int) int {
 	if k <= 0 {
 		return 0
@@ -1093,8 +1105,30 @@ func rankingScoreStdTopK(ranking []perQueryTopDoc, k int) float64 {
 	return math.Sqrt(variance / float64(k))
 }
 
-func routerSignalFeatureSchema() []string {
-	return []string{
+func fusionFeaturePrefix(index int) string {
+	return fmt.Sprintf("fusion_%02d", index+1)
+}
+
+func appendFusionFeatureSchema(schema []string, fusionCount int) []string {
+	for i := 0; i < fusionCount; i++ {
+		prefix := fusionFeaturePrefix(i)
+		schema = append(schema,
+			prefix+"_direct_top1_rank",
+			prefix+"_token_q4_top1_rank",
+			prefix+"_direct_top1_agree",
+			prefix+"_token_q4_top1_agree",
+			prefix+"_score_top1",
+			prefix+"_score_margin_1_2",
+			prefix+"_score_margin_1_5",
+			prefix+"_score_gap_1_10",
+			prefix+"_score_std_top10",
+		)
+	}
+	return schema
+}
+
+func routerSignalFeatureSchema(fusionCount int) []string {
+	schema := []string{
 		"direct_score_top1",
 		"direct_score_margin_1_2",
 		"direct_score_margin_1_5",
@@ -1106,6 +1140,12 @@ func routerSignalFeatureSchema() []string {
 		"token_q4_score_gap_1_10",
 		"token_q4_score_std_top10",
 		"direct_token_top1_agree",
+		"direct_top1_rank_in_token_q4",
+		"token_q4_top1_rank_in_direct",
+		"direct_token_overlap_at_3",
+		"direct_token_overlap_at_3_frac",
+		"direct_token_overlap_at_5",
+		"direct_token_overlap_at_5_frac",
 		"direct_token_overlap_at_10",
 		"direct_token_overlap_at_10_frac",
 		"direct_len_top_k",
@@ -1118,13 +1158,18 @@ func routerSignalFeatureSchema() []string {
 		"token_span_overlap",
 		"child_count_penalty",
 	}
+	return appendFusionFeatureSchema(schema, fusionCount)
 }
 
-func routerSignalFeatures(directRanking []perQueryTopDoc, tokenRanking []perQueryTopDoc, tokenSpanChildCount int, tokenSpanQ4StorageMultiple float64, directParentDenseStorageMultiple float64, tokenSpanTokens int, tokenSpanOverlap int, childCountPenalty float64) map[string]interface{} {
+func routerSignalFeatures(directRanking []perQueryTopDoc, tokenRanking []perQueryTopDoc, fusionRankings [][]perQueryTopDoc, tokenSpanChildCount int, tokenSpanQ4StorageMultiple float64, directParentDenseStorageMultiple float64, tokenSpanTokens int, tokenSpanOverlap int, childCountPenalty float64) map[string]interface{} {
+	overlap3 := overlapAtK(directRanking, tokenRanking, 3)
+	overlap5 := overlapAtK(directRanking, tokenRanking, 5)
 	overlap10 := overlapAtK(directRanking, tokenRanking, 10)
 	directTop1, _ := rankingScoreAt(directRanking, 1)
 	tokenTop1, _ := rankingScoreAt(tokenRanking, 1)
-	return map[string]interface{}{
+	directTopDocID := topDocID(directRanking)
+	tokenTopDocID := topDocID(tokenRanking)
+	features := map[string]interface{}{
 		"direct_score_top1":              directTop1,
 		"direct_score_margin_1_2":        rankingScoreMargin(directRanking, 1, 2),
 		"direct_score_margin_1_5":        rankingScoreMargin(directRanking, 1, 5),
@@ -1135,7 +1180,13 @@ func routerSignalFeatures(directRanking []perQueryTopDoc, tokenRanking []perQuer
 		"token_q4_score_margin_1_5":      rankingScoreMargin(tokenRanking, 1, 5),
 		"token_q4_score_gap_1_10":        rankingScoreGap(tokenRanking, 1, 10),
 		"token_q4_score_std_top10":       rankingScoreStdTopK(tokenRanking, 10),
-		"direct_token_top1_agree":        top1Agree(topDocID(directRanking), topDocID(tokenRanking)),
+		"direct_token_top1_agree":        top1Agree(directTopDocID, tokenTopDocID),
+		"direct_top1_rank_in_token_q4":   rankOfDoc(tokenRanking, directTopDocID),
+		"token_q4_top1_rank_in_direct":   rankOfDoc(directRanking, tokenTopDocID),
+		"direct_token_overlap_at_3":      overlap3,
+		"direct_token_overlap_at_3_frac": float64(overlap3) / 3.0,
+		"direct_token_overlap_at_5":      overlap5,
+		"direct_token_overlap_at_5_frac": float64(overlap5) / 5.0,
 		"direct_token_overlap_at_10":     overlap10,
 		"direct_token_overlap_at_10_frac": float64(overlap10) / 10.0,
 		"direct_len_top_k":               len(directRanking),
@@ -1148,6 +1199,20 @@ func routerSignalFeatures(directRanking []perQueryTopDoc, tokenRanking []perQuer
 		"token_span_overlap":             float64(tokenSpanOverlap),
 		"child_count_penalty":            childCountPenalty,
 	}
+	for i, fusionRanking := range fusionRankings {
+		prefix := fusionFeaturePrefix(i)
+		fusionTop1, _ := rankingScoreAt(fusionRanking, 1)
+		features[prefix+"_direct_top1_rank"] = rankOfDoc(fusionRanking, directTopDocID)
+		features[prefix+"_token_q4_top1_rank"] = rankOfDoc(fusionRanking, tokenTopDocID)
+		features[prefix+"_direct_top1_agree"] = top1Agree(topDocID(fusionRanking), directTopDocID)
+		features[prefix+"_token_q4_top1_agree"] = top1Agree(topDocID(fusionRanking), tokenTopDocID)
+		features[prefix+"_score_top1"] = fusionTop1
+		features[prefix+"_score_margin_1_2"] = rankingScoreMargin(fusionRanking, 1, 2)
+		features[prefix+"_score_margin_1_5"] = rankingScoreMargin(fusionRanking, 1, 5)
+		features[prefix+"_score_gap_1_10"] = rankingScoreGap(fusionRanking, 1, 10)
+		features[prefix+"_score_std_top10"] = rankingScoreStdTopK(fusionRanking, 10)
+	}
+	return features
 }
 
 func sortedStrings(values []string) []string {
@@ -1769,6 +1834,7 @@ func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQuery
 	directQualityByQuery := map[string]fusionQuality{}
 	tokenQualityByQuery := map[string]fusionQuality{}
 	fusionQualityByQuery := map[string]map[string]fusionQuality{}
+	fusionRankingByQuery := map[string]map[string][]perQueryTopDoc{}
 	for _, def := range fusionDefs {
 		fusedByQuery := map[string][]perQueryTopDoc{}
 		defPerQueryRows := []fusionPerQueryRow{}
@@ -1789,7 +1855,11 @@ func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQuery
 			if fusionQualityByQuery[queryID] == nil {
 				fusionQualityByQuery[queryID] = map[string]fusionQuality{}
 			}
+			if fusionRankingByQuery[queryID] == nil {
+				fusionRankingByQuery[queryID] = map[string][]perQueryTopDoc{}
+			}
 			fusionQualityByQuery[queryID][def.Method] = fusedQuality
+			fusionRankingByQuery[queryID][def.Method] = fused
 			directTopDocID := topDocID(directRanking)
 			tokenSpanTopDocID := topDocID(tokenRanking)
 			fusionTopDocID := topDocID(fused)
@@ -1884,7 +1954,7 @@ func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQuery
 		"deployable_features/features contain only inference-time numeric or boolean features; query_id is metadata and document IDs/qrels/action quality are excluded from features.",
 		"action_ndcg_at_10 and action_delta_vs_direct are diagnostic labels derived from qrels and must not be used as deployable features.",
 	)
-	featureSchema := routerSignalFeatureSchema()
+	featureSchema := routerSignalFeatureSchema(len(fusionDefs))
 	actions := []string{routerSignalDirectAction, routerSignalTokenSpanQ4Action}
 	for _, def := range fusionDefs {
 		actions = append(actions, def.Method)
@@ -1905,7 +1975,11 @@ func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQuery
 			actionNDCG[def.Method] = q.NDCGAt10
 			actionDelta[def.Method] = q.NDCGAt10 - directQuality.NDCGAt10
 		}
-		features := routerSignalFeatures(directRows[queryID], tokenSpanRows[queryID], tokenSpanChildCount, tokenSpanQ4StorageMultiple, directParentDenseStorageMultiple, tokenSpanTokens, tokenSpanOverlap, childCountPenalty)
+		fusionRankings := make([][]perQueryTopDoc, 0, len(fusionDefs))
+		for _, def := range fusionDefs {
+			fusionRankings = append(fusionRankings, fusionRankingByQuery[queryID][def.Method])
+		}
+		features := routerSignalFeatures(directRows[queryID], tokenSpanRows[queryID], fusionRankings, tokenSpanChildCount, tokenSpanQ4StorageMultiple, directParentDenseStorageMultiple, tokenSpanTokens, tokenSpanOverlap, childCountPenalty)
 		routerRows = append(routerRows, routerSignalRow{
 			Schema:             "eos.long_context_wedge_direct_token_span_router_signal_row.v1",
 			Dataset:            datasetName,
