@@ -45,6 +45,8 @@ import (
 const defaultQuantizerSeed int64 = 5581486560434873699
 const parentSpanFusionExtraRecipesEnv = "EOS_LC_WEDGE_PARENT_SPAN_FUSION_EXTRA_RECIPES"
 const parentSpanFusionExtraRecipesFormat = "name:k:lambda:protect;name2:k:lambda:protect"
+const routerSignalDirectAction = "direct"
+const routerSignalTokenSpanQ4Action = "token_span_q4"
 
 type quality struct {
 	NDCGAt10    float64 `json:"ndcg_at_10"`
@@ -340,6 +342,59 @@ type fusionPerQueryRow struct {
 	Caveats                        []string      `json:"caveats"`
 }
 
+type routerSignalRow struct {
+	Schema               string             `json:"schema"`
+	Dataset              string             `json:"dataset"`
+	QueryID              string             `json:"query_id"`
+	QueryOrdinal         int                `json:"query_ordinal"`
+	QualityClaim         bool               `json:"quality_claim"`
+	Actions              []string           `json:"actions"`
+	ActionNDCGAt10        map[string]float64 `json:"action_ndcg_at_10"`
+	ActionDeltaVsDirect   map[string]float64 `json:"action_delta_vs_direct"`
+	WinnerActions         []string           `json:"winner_actions"`
+	FeatureSchema         []string           `json:"feature_schema"`
+	DeployableFeatures    map[string]interface{} `json:"deployable_features"`
+	Features              map[string]interface{} `json:"features"`
+	Metadata              map[string]interface{} `json:"metadata"`
+	Caveats               []string           `json:"caveats"`
+}
+
+type routerSignalActionSummary struct {
+	MeanNDCGAt10          float64 `json:"mean_ndcg_at_10"`
+	MeanDeltaVsDirect     float64 `json:"mean_delta_vs_direct"`
+	ImprovedVsDirectCount int     `json:"improved_vs_direct_count"`
+	TiedVsDirectCount     int     `json:"tied_vs_direct_count"`
+	RegressedVsDirectCount int    `json:"regressed_vs_direct_count"`
+	MinDeltaVsDirect      float64 `json:"min_delta_vs_direct"`
+	MaxDeltaVsDirect      float64 `json:"max_delta_vs_direct"`
+}
+
+type routerSignalLeakageAudit struct {
+	CheckedFeatureKeyCount int      `json:"checked_feature_key_count"`
+	ForbiddenSubstrings    []string `json:"forbidden_substrings"`
+	ForbiddenFeatureKeys   []string `json:"forbidden_feature_keys"`
+	FeatureValuesNumericOrBool bool `json:"feature_values_numeric_or_bool"`
+	QueryIDOnlyMetadata     bool    `json:"query_id_only_metadata"`
+	DocIDsInFeatures        bool    `json:"doc_ids_in_features"`
+	Passed                 bool     `json:"passed"`
+}
+
+type routerSignalSummary struct {
+	Schema                         string                              `json:"schema"`
+	Dataset                        string                              `json:"dataset"`
+	QualityClaim                   bool                                `json:"quality_claim"`
+	RowCount                       int                                 `json:"row_count"`
+	Actions                        []string                            `json:"actions"`
+	ActionMeans                    map[string]float64                  `json:"action_means_ndcg_at_10"`
+	ActionDeltasVsDirect           map[string]float64                  `json:"action_mean_delta_vs_direct"`
+	ActionSummaries                map[string]routerSignalActionSummary `json:"action_summaries"`
+	OracleBestDirectTokenOrFusionNDCGAt10 float64                      `json:"oracle_best_direct_token_or_fusion_ndcg_at_10"`
+	OracleBestDirectOrFusionNDCGAt10      float64                      `json:"oracle_best_direct_or_fusion_ndcg_at_10"`
+	FeatureSchema                  []string                            `json:"feature_schema"`
+	FeatureLeakageAudit            routerSignalLeakageAudit            `json:"feature_leakage_audit"`
+	Caveats                        []string                            `json:"caveats"`
+}
+
 type datasetManifestSummary struct {
 	Schema string `json:"schema"`
 }
@@ -589,6 +644,15 @@ func bitsIncludeQ4(bits string) bool {
 		}
 	}
 	return false
+}
+
+func reservedRouterSignalActionName(name string) bool {
+	switch name {
+	case routerSignalDirectAction, routerSignalTokenSpanQ4Action:
+		return true
+	default:
+		return false
+	}
 }
 
 func multiVectorStorageMultipleForBits(mv mvMetrics, bits int) (float64, bool) {
@@ -989,6 +1053,255 @@ func writeFusionPerQueryJSONL(path string, rows []fusionPerQueryRow) error {
 	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
 
+func rankingScoreAt(ranking []perQueryTopDoc, rank int) (float64, bool) {
+	if rank <= 0 || len(ranking) < rank {
+		return 0, false
+	}
+	return ranking[rank-1].Score, true
+}
+
+func rankingScoreMargin(ranking []perQueryTopDoc, a int, b int) float64 {
+	av, okA := rankingScoreAt(ranking, a)
+	bv, okB := rankingScoreAt(ranking, b)
+	if !okA || !okB {
+		return 0
+	}
+	return av - bv
+}
+
+func rankingScoreGap(ranking []perQueryTopDoc, a int, b int) float64 {
+	return rankingScoreMargin(ranking, a, b)
+}
+
+func rankingScoreStdTopK(ranking []perQueryTopDoc, k int) float64 {
+	if k <= 0 || len(ranking) == 0 {
+		return 0
+	}
+	if k > len(ranking) {
+		k = len(ranking)
+	}
+	mean := 0.0
+	for i := 0; i < k; i++ {
+		mean += ranking[i].Score
+	}
+	mean /= float64(k)
+	variance := 0.0
+	for i := 0; i < k; i++ {
+		diff := ranking[i].Score - mean
+		variance += diff * diff
+	}
+	return math.Sqrt(variance / float64(k))
+}
+
+func routerSignalFeatureSchema() []string {
+	return []string{
+		"direct_score_top1",
+		"direct_score_margin_1_2",
+		"direct_score_margin_1_5",
+		"direct_score_gap_1_10",
+		"direct_score_std_top10",
+		"token_q4_score_top1",
+		"token_q4_score_margin_1_2",
+		"token_q4_score_margin_1_5",
+		"token_q4_score_gap_1_10",
+		"token_q4_score_std_top10",
+		"direct_token_top1_agree",
+		"direct_token_overlap_at_10",
+		"direct_token_overlap_at_10_frac",
+		"direct_len_top_k",
+		"token_q4_len_top_k",
+		"token_span_child_count",
+		"token_span_storage_multiple",
+		"direct_parent_storage_multiple",
+		"fusion_storage_multiple",
+		"token_span_tokens",
+		"token_span_overlap",
+		"child_count_penalty",
+	}
+}
+
+func routerSignalFeatures(directRanking []perQueryTopDoc, tokenRanking []perQueryTopDoc, tokenSpanChildCount int, tokenSpanQ4StorageMultiple float64, directParentDenseStorageMultiple float64, tokenSpanTokens int, tokenSpanOverlap int, childCountPenalty float64) map[string]interface{} {
+	overlap10 := overlapAtK(directRanking, tokenRanking, 10)
+	directTop1, _ := rankingScoreAt(directRanking, 1)
+	tokenTop1, _ := rankingScoreAt(tokenRanking, 1)
+	return map[string]interface{}{
+		"direct_score_top1":              directTop1,
+		"direct_score_margin_1_2":        rankingScoreMargin(directRanking, 1, 2),
+		"direct_score_margin_1_5":        rankingScoreMargin(directRanking, 1, 5),
+		"direct_score_gap_1_10":          rankingScoreGap(directRanking, 1, 10),
+		"direct_score_std_top10":         rankingScoreStdTopK(directRanking, 10),
+		"token_q4_score_top1":            tokenTop1,
+		"token_q4_score_margin_1_2":      rankingScoreMargin(tokenRanking, 1, 2),
+		"token_q4_score_margin_1_5":      rankingScoreMargin(tokenRanking, 1, 5),
+		"token_q4_score_gap_1_10":        rankingScoreGap(tokenRanking, 1, 10),
+		"token_q4_score_std_top10":       rankingScoreStdTopK(tokenRanking, 10),
+		"direct_token_top1_agree":        top1Agree(topDocID(directRanking), topDocID(tokenRanking)),
+		"direct_token_overlap_at_10":     overlap10,
+		"direct_token_overlap_at_10_frac": float64(overlap10) / 10.0,
+		"direct_len_top_k":               len(directRanking),
+		"token_q4_len_top_k":             len(tokenRanking),
+		"token_span_child_count":         float64(tokenSpanChildCount),
+		"token_span_storage_multiple":    tokenSpanQ4StorageMultiple,
+		"direct_parent_storage_multiple": directParentDenseStorageMultiple,
+		"fusion_storage_multiple":        tokenSpanQ4StorageMultiple + directParentDenseStorageMultiple,
+		"token_span_tokens":              float64(tokenSpanTokens),
+		"token_span_overlap":             float64(tokenSpanOverlap),
+		"child_count_penalty":            childCountPenalty,
+	}
+}
+
+func sortedStrings(values []string) []string {
+	out := append([]string{}, values...)
+	for i := 0; i < len(out); i++ {
+		for j := i + 1; j < len(out); j++ {
+			if out[j] < out[i] {
+				out[i], out[j] = out[j], out[i]
+			}
+		}
+	}
+	return out
+}
+
+func winnerActions(actionNDCG map[string]float64) []string {
+	best := 0.0
+	haveBest := false
+	winners := []string{}
+	for action, ndcg := range actionNDCG {
+		if !haveBest || ndcg > best {
+			best = ndcg
+			haveBest = true
+			winners = []string{action}
+		} else if ndcg == best {
+			winners = append(winners, action)
+		}
+	}
+	return sortedStrings(winners)
+}
+
+func writeRouterSignalJSONL(path string, rows []routerSignalRow) error {
+	var b strings.Builder
+	for _, row := range rows {
+		data, err := json.Marshal(row)
+		if err != nil {
+			return err
+		}
+		b.Write(data)
+		b.WriteByte('\n')
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func routerSignalLeakage(rows []routerSignalRow) routerSignalLeakageAudit {
+	forbidden := []string{"query_id", "doc_id", "qrels", "relevance", "label", "teacher", "external", "ndcg", "quality", "action"}
+	audit := routerSignalLeakageAudit{
+		ForbiddenSubstrings:       forbidden,
+		FeatureValuesNumericOrBool: true,
+		QueryIDOnlyMetadata:       true,
+	}
+	seen := map[string]bool{}
+	for _, row := range rows {
+		for key, value := range row.Features {
+			seen[key] = true
+			lower := strings.ToLower(key)
+			for _, bad := range forbidden {
+				if strings.Contains(lower, bad) {
+					audit.ForbiddenFeatureKeys = append(audit.ForbiddenFeatureKeys, key)
+					break
+				}
+			}
+			switch value.(type) {
+			case int, int64, float64, bool:
+			default:
+				audit.FeatureValuesNumericOrBool = false
+			}
+			if stringValue, ok := value.(string); ok && stringValue != "" {
+				audit.DocIDsInFeatures = true
+			}
+		}
+	}
+	audit.CheckedFeatureKeyCount = len(seen)
+	audit.ForbiddenFeatureKeys = sortedStrings(audit.ForbiddenFeatureKeys)
+	audit.Passed = len(audit.ForbiddenFeatureKeys) == 0 && audit.FeatureValuesNumericOrBool && !audit.DocIDsInFeatures && audit.QueryIDOnlyMetadata
+	return audit
+}
+
+func summarizeRouterSignalRows(datasetName string, rows []routerSignalRow, featureSchema []string, caveats []string) routerSignalSummary {
+	summary := routerSignalSummary{
+		Schema:                "eos.long_context_wedge_direct_token_span_router_signal_summary.v1",
+		Dataset:               datasetName,
+		QualityClaim:          false,
+		RowCount:              len(rows),
+		FeatureSchema:         featureSchema,
+		ActionMeans:           map[string]float64{},
+		ActionDeltasVsDirect:  map[string]float64{},
+		ActionSummaries:       map[string]routerSignalActionSummary{},
+		FeatureLeakageAudit:   routerSignalLeakage(rows),
+		Caveats:               caveats,
+	}
+	if len(rows) == 0 {
+		return summary
+	}
+	summary.Actions = rows[0].Actions
+	oracleDirectFusionNDCGTotal := 0.0
+	oracleDirectTokenFusionNDCGTotal := 0.0
+	for _, action := range summary.Actions {
+		actionSummary := routerSignalActionSummary{}
+		actionSummary.MinDeltaVsDirect = rows[0].ActionDeltaVsDirect[action]
+		actionSummary.MaxDeltaVsDirect = rows[0].ActionDeltaVsDirect[action]
+		for _, row := range rows {
+			ndcg := row.ActionNDCGAt10[action]
+			delta := row.ActionDeltaVsDirect[action]
+			actionSummary.MeanNDCGAt10 += ndcg
+			actionSummary.MeanDeltaVsDirect += delta
+			if delta > 0 {
+				actionSummary.ImprovedVsDirectCount++
+			} else if delta < 0 {
+				actionSummary.RegressedVsDirectCount++
+			} else {
+				actionSummary.TiedVsDirectCount++
+			}
+			if delta < actionSummary.MinDeltaVsDirect {
+				actionSummary.MinDeltaVsDirect = delta
+			}
+			if delta > actionSummary.MaxDeltaVsDirect {
+				actionSummary.MaxDeltaVsDirect = delta
+			}
+		}
+		denom := float64(len(rows))
+		actionSummary.MeanNDCGAt10 /= denom
+		actionSummary.MeanDeltaVsDirect /= denom
+		summary.ActionMeans[action] = actionSummary.MeanNDCGAt10
+		summary.ActionDeltasVsDirect[action] = actionSummary.MeanDeltaVsDirect
+		summary.ActionSummaries[action] = actionSummary
+	}
+	for _, row := range rows {
+		bestDirectFusion := row.ActionNDCGAt10[routerSignalDirectAction]
+		for _, action := range summary.Actions {
+			if action == routerSignalTokenSpanQ4Action {
+				continue
+			}
+			candidate := row.ActionNDCGAt10[action]
+			if candidate > bestDirectFusion {
+				bestDirectFusion = candidate
+			}
+		}
+		oracleDirectFusionNDCGTotal += bestDirectFusion
+
+		bestDirectTokenFusion := row.ActionNDCGAt10[routerSignalDirectAction]
+		for _, action := range summary.Actions {
+			candidate := row.ActionNDCGAt10[action]
+			if candidate > bestDirectTokenFusion {
+				bestDirectTokenFusion = candidate
+			}
+		}
+		oracleDirectTokenFusionNDCGTotal += bestDirectTokenFusion
+	}
+	denom := float64(len(rows))
+	summary.OracleBestDirectOrFusionNDCGAt10 = oracleDirectFusionNDCGTotal / denom
+	summary.OracleBestDirectTokenOrFusionNDCGAt10 = oracleDirectTokenFusionNDCGTotal / denom
+	return summary
+}
+
 func rrfFuse(direct []perQueryTopDoc, tokenSpan []perQueryTopDoc, k float64, lambda float64) []perQueryTopDoc {
 	scores := map[string]float64{}
 	directRank := map[string]int{}
@@ -1233,6 +1546,9 @@ func parentSpanFusionRecipes() ([]parentSpanFusionRecipe, error) {
 		if recipe.Method == "" {
 			return nil, fmt.Errorf("default parent-span fusion recipe has empty method")
 		}
+		if reservedRouterSignalActionName(recipe.Method) {
+			return nil, fmt.Errorf("parent-span fusion method %q is reserved for router-signal actions", recipe.Method)
+		}
 		if _, ok := seen[recipe.Method]; ok {
 			return nil, fmt.Errorf("duplicate default parent-span fusion method %q", recipe.Method)
 		}
@@ -1251,6 +1567,9 @@ func parentSpanFusionRecipes() ([]parentSpanFusionRecipe, error) {
 		recipe, err := parseParentSpanFusionRecipe(raw)
 		if err != nil {
 			return nil, fmt.Errorf("%s recipe %d invalid: %w; expected %s", parentSpanFusionExtraRecipesEnv, index+1, err, parentSpanFusionExtraRecipesFormat)
+		}
+		if reservedRouterSignalActionName(recipe.Method) {
+			return nil, fmt.Errorf("%s recipe %d method %q is reserved for router-signal actions; expected %s", parentSpanFusionExtraRecipesEnv, index+1, recipe.Method, parentSpanFusionExtraRecipesFormat)
 		}
 		if previous, ok := seen[recipe.Method]; ok {
 			// Exact duplicates are idempotent, so rerunning with a repeated
@@ -1307,6 +1626,31 @@ func runRecipeSelfTest() error {
 		return fmt.Errorf("conflicting duplicate extra recipe should fail")
 	}
 
+	for _, reserved := range []string{routerSignalDirectAction, routerSignalTokenSpanQ4Action} {
+		os.Setenv(parentSpanFusionExtraRecipesEnv, reserved+":10:0.5:0")
+		if _, err := parentSpanFusionRecipes(); err == nil {
+			return fmt.Errorf("reserved router action name %q should fail as a parent-span fusion recipe", reserved)
+		}
+	}
+
+	cleanRouterRows := []routerSignalRow{{
+		Features: map[string]interface{}{
+			"direct_score_top1":       1.0,
+			"direct_token_top1_agree": true,
+		},
+	}}
+	if audit := routerSignalLeakage(cleanRouterRows); !audit.Passed {
+		return fmt.Errorf("clean router-signal feature audit should pass: %+v", audit)
+	}
+	leakyRouterRows := []routerSignalRow{{
+		Features: map[string]interface{}{
+			"query_id": "q1",
+		},
+	}}
+	if audit := routerSignalLeakage(leakyRouterRows); audit.Passed {
+		return fmt.Errorf("leaky router-signal feature audit should fail")
+	}
+
 	return nil
 }
 
@@ -1348,7 +1692,7 @@ func parseParentSpanFusionRecipe(value string) (parentSpanFusionRecipe, error) {
 	}, nil
 }
 
-func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQueryPaths map[string]string, datasetName string, datasetDir string, runDir string, directPerQueryPath string, tokenSpanPerQueryPath string, tokenSpanMethod string, dim int, artifact string, modelID string, tokenSpanChildCount int, directParentCount int, tokenSpanQ4StorageMultiple float64, directParentDenseStorageMultiple float64, bits string, fusionEnabled bool) ([]comparisonRow, []string, error) {
+func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQueryPaths map[string]string, datasetName string, datasetDir string, runDir string, directPerQueryPath string, tokenSpanPerQueryPath string, tokenSpanMethod string, dim int, artifact string, modelID string, tokenSpanChildCount int, directParentCount int, tokenSpanQ4StorageMultiple float64, directParentDenseStorageMultiple float64, bits string, fusionEnabled bool, tokenSpanTokens int, tokenSpanOverlap int, childCountPenalty float64) ([]comparisonRow, []string, error) {
 	if !fusionEnabled {
 		skipped = append(skipped, "direct+token-span diagnostic fusion disabled by EOS_LC_WEDGE_PARENT_SPAN_FUSION=0")
 		return rows, skipped, nil
@@ -1422,6 +1766,9 @@ func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQuery
 	fusionChildCount := tokenSpanChildCount + directParentCount
 	queryIDs := sortedQueryIDs(fusionQrels)
 	perQueryRows := []fusionPerQueryRow{}
+	directQualityByQuery := map[string]fusionQuality{}
+	tokenQualityByQuery := map[string]fusionQuality{}
+	fusionQualityByQuery := map[string]map[string]fusionQuality{}
 	for _, def := range fusionDefs {
 		fusedByQuery := map[string][]perQueryTopDoc{}
 		defPerQueryRows := []fusionPerQueryRow{}
@@ -1436,7 +1783,13 @@ func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQuery
 			fusedByQuery[queryID] = fused
 			directQuality := rankingQuality(directRanking, rels)
 			tokenSpanQuality := rankingQuality(tokenRanking, rels)
-			fusionQuality := rankingQuality(fused, rels)
+			fusedQuality := rankingQuality(fused, rels)
+			directQualityByQuery[queryID] = directQuality
+			tokenQualityByQuery[queryID] = tokenSpanQuality
+			if fusionQualityByQuery[queryID] == nil {
+				fusionQualityByQuery[queryID] = map[string]fusionQuality{}
+			}
+			fusionQualityByQuery[queryID][def.Method] = fusedQuality
 			directTopDocID := topDocID(directRanking)
 			tokenSpanTopDocID := topDocID(tokenRanking)
 			fusionTopDocID := topDocID(fused)
@@ -1452,11 +1805,11 @@ func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQuery
 				DenseProtectTopK:           def.DenseProtectTopK,
 				DirectQuality:              directQuality,
 				TokenSpanQuality:           tokenSpanQuality,
-				FusionQuality:              fusionQuality,
-				NDCGAt10DeltaVsDirect:      fusionQuality.NDCGAt10 - directQuality.NDCGAt10,
-				NDCGAt10DeltaVsTokenSpan:   fusionQuality.NDCGAt10 - tokenSpanQuality.NDCGAt10,
-				HitAt1DeltaVsDirect:        fusionQuality.HitAt1 - directQuality.HitAt1,
-				HitAt1DeltaVsTokenSpan:     fusionQuality.HitAt1 - tokenSpanQuality.HitAt1,
+				FusionQuality:              fusedQuality,
+				NDCGAt10DeltaVsDirect:      fusedQuality.NDCGAt10 - directQuality.NDCGAt10,
+				NDCGAt10DeltaVsTokenSpan:   fusedQuality.NDCGAt10 - tokenSpanQuality.NDCGAt10,
+				HitAt1DeltaVsDirect:        fusedQuality.HitAt1 - directQuality.HitAt1,
+				HitAt1DeltaVsTokenSpan:     fusedQuality.HitAt1 - tokenSpanQuality.HitAt1,
 				DirectFirstRelevantRank:    firstRelevantRank(directRanking, rels),
 				TokenSpanFirstRelevantRank: firstRelevantRank(tokenRanking, rels),
 				FusionFirstRelevantRank:    firstRelevantRank(fused, rels),
@@ -1508,6 +1861,8 @@ func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQuery
 	}
 	metricsPath := filepath.Join(runDir, "direct-token-span-fusion.metrics.json")
 	perQueryPath := filepath.Join(runDir, "direct-token-span-fusion.per-query.jsonl")
+	routerDatasetPath := filepath.Join(runDir, "direct-token-span-router-signal.dataset.jsonl")
+	routerSummaryPath := filepath.Join(runDir, "direct-token-span-router-signal.summary.json")
 	if err := writeFusionPerQueryJSONL(perQueryPath, perQueryRows); err != nil {
 		return rows, skipped, err
 	}
@@ -1523,8 +1878,70 @@ func appendParentSpanFusionRows(rows []comparisonRow, skipped []string, perQuery
 	}); err != nil {
 		return rows, skipped, err
 	}
+	routerCaveats := append([]string{}, caveats...)
+	routerCaveats = append(routerCaveats,
+		"Router-signal rows are emitted by default when parent-span fusion artifacts are emitted.",
+		"deployable_features/features contain only inference-time numeric or boolean features; query_id is metadata and document IDs/qrels/action quality are excluded from features.",
+		"action_ndcg_at_10 and action_delta_vs_direct are diagnostic labels derived from qrels and must not be used as deployable features.",
+	)
+	featureSchema := routerSignalFeatureSchema()
+	actions := []string{routerSignalDirectAction, routerSignalTokenSpanQ4Action}
+	for _, def := range fusionDefs {
+		actions = append(actions, def.Method)
+	}
+	routerRows := []routerSignalRow{}
+	for queryOrdinal, queryID := range queryIDs {
+		directQuality := directQualityByQuery[queryID]
+		actionNDCG := map[string]float64{
+			routerSignalDirectAction:      directQuality.NDCGAt10,
+			routerSignalTokenSpanQ4Action: tokenQualityByQuery[queryID].NDCGAt10,
+		}
+		actionDelta := map[string]float64{
+			routerSignalDirectAction:      0,
+			routerSignalTokenSpanQ4Action: tokenQualityByQuery[queryID].NDCGAt10 - directQuality.NDCGAt10,
+		}
+		for _, def := range fusionDefs {
+			q := fusionQualityByQuery[queryID][def.Method]
+			actionNDCG[def.Method] = q.NDCGAt10
+			actionDelta[def.Method] = q.NDCGAt10 - directQuality.NDCGAt10
+		}
+		features := routerSignalFeatures(directRows[queryID], tokenSpanRows[queryID], tokenSpanChildCount, tokenSpanQ4StorageMultiple, directParentDenseStorageMultiple, tokenSpanTokens, tokenSpanOverlap, childCountPenalty)
+		routerRows = append(routerRows, routerSignalRow{
+			Schema:             "eos.long_context_wedge_direct_token_span_router_signal_row.v1",
+			Dataset:            datasetName,
+			QueryID:            queryID,
+			QueryOrdinal:       queryOrdinal,
+			QualityClaim:       false,
+			Actions:            actions,
+			ActionNDCGAt10:      actionNDCG,
+			ActionDeltaVsDirect: actionDelta,
+			WinnerActions:       winnerActions(actionNDCG),
+			FeatureSchema:       featureSchema,
+			DeployableFeatures:  features,
+			Features:            features,
+			Metadata: map[string]interface{}{
+				"quality_claim":                       false,
+				"source_query_id_present_but_not_feature": true,
+				"direct_method":                       "direct_single_vector",
+				"token_span_method":                   tokenSpanMethod,
+			},
+			Caveats: routerCaveats,
+		})
+	}
+	if err := writeRouterSignalJSONL(routerDatasetPath, routerRows); err != nil {
+		return rows, skipped, err
+	}
+	routerSummary := summarizeRouterSignalRows(datasetName, routerRows, featureSchema, routerCaveats)
+	if err := writeJSON(routerSummaryPath, routerSummary); err != nil {
+		return rows, skipped, err
+	}
+	if !routerSummary.FeatureLeakageAudit.Passed {
+		return rows, skipped, fmt.Errorf("router signal feature leakage audit failed: forbidden_feature_keys=%v feature_values_numeric_or_bool=%t doc_ids_in_features=%t", routerSummary.FeatureLeakageAudit.ForbiddenFeatureKeys, routerSummary.FeatureLeakageAudit.FeatureValuesNumericOrBool, routerSummary.FeatureLeakageAudit.DocIDsInFeatures)
+	}
 	perQueryPaths["direct-token-span-fusion"] = perQueryPath
 	perQueryPaths["direct-token-span-fusion-metrics"] = metricsPath
+	perQueryPaths["direct-token-span-router-signal-dataset"] = routerDatasetPath
+	perQueryPaths["direct-token-span-router-signal-summary"] = routerSummaryPath
 	return rows, skipped, nil
 }
 
@@ -2093,7 +2510,7 @@ func main() {
 		directStorageBaselineDim = baselineDim
 	}
 	directStorageMultiple := directParentDenseStorageMultiple(directModelDimension(sparseManifest, baselineDim), directStorageBaselineDim)
-	rows, skipped, err = appendParentSpanFusionRows(rows, skipped, perQueryPaths, datasetName, datasetDir, runDir, directPerQueryPath, tokenSpanPerQueryPath, tokenSpanQ4Method, sparseManifest.OutputDimension, evalArtifact, filepath.Base(evalArtifact), sparseMV.Inputs.ChildCount, direct.Inputs.Documents, tokenSpanQ4StorageMultiple, directStorageMultiple, bits, fusionEnabled)
+	rows, skipped, err = appendParentSpanFusionRows(rows, skipped, perQueryPaths, datasetName, datasetDir, runDir, directPerQueryPath, tokenSpanPerQueryPath, tokenSpanQ4Method, sparseManifest.OutputDimension, evalArtifact, filepath.Base(evalArtifact), sparseMV.Inputs.ChildCount, direct.Inputs.Documents, tokenSpanQ4StorageMultiple, directStorageMultiple, bits, fusionEnabled, tokenSpan, tokenOverlap, childCountPenalty)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
