@@ -25,6 +25,8 @@ package main
 //   EOS_LC_WEDGE_RECIPE_SELF_TEST=1
 //   EOS_LC_WEDGE_EXTERNAL_MODE=off|cache|export
 //   EOS_LC_WEDGE_SPARSE_ENCODER=0
+//   EOS_LC_WEDGE_ROUTE_BLOCK_SIZE=128
+//   EOS_LC_WEDGE_ROUTE_TOP_BLOCKS=8
 //   EOS_LC_WEDGE_MAX_DOCS=0
 //   EOS_LC_WEDGE_MAX_QUERIES=0
 
@@ -103,15 +105,41 @@ type sparseEncoderExportManifest struct {
 	MinObservedDocTokens                int      `json:"min_observed_doc_tokens"`
 	TopKConfigured                      int      `json:"top_k_configured"`
 	TopK                                int      `json:"top_k"`
+	RouteBlockSize                      int      `json:"route_block_size"`
+	RouteTopBlocks                      int      `json:"route_top_blocks"`
+	AttentionMode                       string   `json:"attention_mode"`
 	SparseTopKConfigured                int      `json:"sparse_top_k_configured"`
 	SparseTopK                          int      `json:"sparse_top_k"`
 	SparseTopKEffectiveMaxObservedDoc   int      `json:"sparse_top_k_effective_max_observed_doc"`
+	MaxObservedDocPlan                  *sparseAttentionPlanAudit `json:"max_observed_doc_sparse_plan"`
+	DocumentTokenizerOutput             tokenizerOutputTokenStats `json:"document_tokenizer_output"`
 	ScoreFractionMaxObservedDoc         float64  `json:"score_fraction_max_observed_doc"`
 	CandidateKeyBudgetMaxObservedDoc    int      `json:"candidate_key_budget_max_observed_doc"`
 	SubquadraticScorePlanMaxObservedDoc bool     `json:"subquadratic_score_plan_max_observed_doc"`
 	RequireFullEncoder                  bool     `json:"require_full_encoder"`
 	FullEncoderApplied                  bool     `json:"full_encoder_applied"`
 	Caveats                             []string `json:"caveats"`
+}
+
+type tokenizerOutputTokenStats struct {
+	RecordCount               int     `json:"record_count"`
+	TotalTokens               int64   `json:"total_tokens"`
+	MaxObservedTokens         int     `json:"max_observed_tokens"`
+	MeanObservedTokens        float64 `json:"mean_observed_tokens"`
+	TruncatedByMaxTokensCount int     `json:"truncated_by_max_tokens_count"`
+}
+
+type sparseAttentionPlanAudit struct {
+	KeyLen                      int     `json:"key_len"`
+	Routing                     string  `json:"routing"`
+	RouteBlockSize              int     `json:"route_block_size"`
+	RouteTopBlocks              int     `json:"route_top_blocks"`
+	RouteBlockCount             int     `json:"route_block_count"`
+	SelectedRouteBlocks         int     `json:"selected_route_blocks"`
+	CandidateKeyBudget          int     `json:"candidate_key_budget"`
+	EstimatedScoreCountPerQuery int     `json:"estimated_score_count_per_query"`
+	ScoreCountFraction          float64 `json:"score_count_fraction"`
+	SubquadraticScorePlan       bool    `json:"subquadratic_score_plan"`
 }
 
 type externalExportManifest struct {
@@ -1526,11 +1554,15 @@ func validateSparseEncoderManifest(path string, m sparseEncoderExportManifest) e
 }
 
 func sparseEncoderAuditFields(path string, m sparseEncoderExportManifest) map[string]string {
-	return map[string]string{
+	fields := map[string]string{
 		"manifest":                                  path,
 		"tokenizer_max_sequence_original":           strconv.Itoa(m.TokenizerMaxSequenceOriginal),
 		"tokenizer_max_sequence_effective":          strconv.Itoa(m.TokenizerMaxSequenceEffective),
 		"tokenizer_max_sequence_override":           strconv.Itoa(m.TokenizerMaxSequenceOverride),
+		"route_block_size":                         strconv.Itoa(m.RouteBlockSize),
+		"route_top_blocks":                         strconv.Itoa(m.RouteTopBlocks),
+		"routing":                                  m.AttentionMode,
+		"observed_doc_tokens":                      strconv.Itoa(m.DocumentTokenizerOutput.MaxObservedTokens),
 		"sparse_top_k_configured":                   strconv.Itoa(m.SparseTopKConfigured),
 		"sparse_top_k":                              strconv.Itoa(m.SparseTopK),
 		"sparse_top_k_effective_max_observed_doc":   strconv.Itoa(m.SparseTopKEffectiveMaxObservedDoc),
@@ -1539,6 +1571,16 @@ func sparseEncoderAuditFields(path string, m sparseEncoderExportManifest) map[st
 		"candidate_key_budget_max_observed_doc":     strconv.Itoa(m.CandidateKeyBudgetMaxObservedDoc),
 		"source_manifest_carries_sparse_plan_audit": "true",
 	}
+	if m.MaxObservedDocPlan != nil {
+		fields["max_observed_doc_tokens"] = strconv.Itoa(m.MaxObservedDocPlan.KeyLen)
+		fields["route_block_count"] = strconv.Itoa(m.MaxObservedDocPlan.RouteBlockCount)
+		fields["selected_route_blocks"] = strconv.Itoa(m.MaxObservedDocPlan.SelectedRouteBlocks)
+		fields["candidate_key_budget"] = strconv.Itoa(m.MaxObservedDocPlan.CandidateKeyBudget)
+		fields["score_fraction"] = strconv.FormatFloat(m.MaxObservedDocPlan.ScoreCountFraction, 'g', -1, 64)
+		fields["subquadratic"] = strconv.FormatBool(m.MaxObservedDocPlan.SubquadraticScorePlan)
+		fields["plan_routing"] = m.MaxObservedDocPlan.Routing
+	}
+	return fields
 }
 
 func appendCaps(args []string, maxDocs int, maxQueries int) []string {
@@ -1547,6 +1589,16 @@ func appendCaps(args []string, maxDocs int, maxQueries int) []string {
 	}
 	if maxQueries > 0 {
 		args = append(args, "--max-queries", strconv.Itoa(maxQueries))
+	}
+	return args
+}
+
+func appendRouteBlockArgs(args []string, routeBlockSize int, routeTopBlocks int) []string {
+	if routeBlockSize > 0 {
+		args = append(args, "--route-block-size", strconv.Itoa(routeBlockSize))
+	}
+	if routeTopBlocks > 0 {
+		args = append(args, "--route-top-blocks", strconv.Itoa(routeTopBlocks))
 	}
 	return args
 }
@@ -1734,6 +1786,24 @@ func main() {
 		os.Exit(1)
 	}
 	sparseTopK, _ := parseIntEnv("EOS_LC_WEDGE_SPARSE_TOP_K", 256)
+	routeBlockSize, err := parseIntEnv("EOS_LC_WEDGE_ROUTE_BLOCK_SIZE", 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	routeTopBlocks, err := parseIntEnv("EOS_LC_WEDGE_ROUTE_TOP_BLOCKS", 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if routeBlockSize < 0 {
+		fmt.Fprintln(os.Stderr, "EOS_LC_WEDGE_ROUTE_BLOCK_SIZE must be non-negative")
+		os.Exit(1)
+	}
+	if routeTopBlocks < 0 {
+		fmt.Fprintln(os.Stderr, "EOS_LC_WEDGE_ROUTE_TOP_BLOCKS must be non-negative")
+		os.Exit(1)
+	}
 	tokenSpanResume := enabledByDefaultEnv("EOS_LC_WEDGE_TOKEN_SPAN_RESUME")
 	tokenSpanProgressEvery, _ := parseIntEnv("EOS_LC_WEDGE_TOKEN_SPAN_PROGRESS_EVERY", 10)
 	quantizerSeed, err := parseInt64Env("EOS_LC_WEDGE_QUANTIZER_SEED", defaultQuantizerSeed)
@@ -1825,6 +1895,7 @@ func main() {
 	if sparseExportMaxSeq > 0 {
 		exportSparseArgs = append(exportSparseArgs, "--tokenizer-max-seq", strconv.Itoa(sparseExportMaxSeq))
 	}
+	exportSparseArgs = appendRouteBlockArgs(exportSparseArgs, routeBlockSize, routeTopBlocks)
 	if tokenSpanResume {
 		exportSparseArgs = append(exportSparseArgs, "--resume")
 	}
@@ -1907,6 +1978,7 @@ func main() {
 		if sparseExportMaxSeq > 0 {
 			exportSparseEncoderArgs = append(exportSparseEncoderArgs, "--tokenizer-max-seq", strconv.Itoa(sparseExportMaxSeq))
 		}
+		exportSparseEncoderArgs = appendRouteBlockArgs(exportSparseEncoderArgs, routeBlockSize, routeTopBlocks)
 		exportSparseEncoderArgs = appendCaps(exportSparseEncoderArgs, maxDocs, maxQueries)
 		exportSparseEncoderArgs = append(exportSparseEncoderArgs, evalArtifact, datasetDir, sparseEncoderDir)
 		rec, err = runCmd(root, "Export Eos sparse-encoder parent vectors", filepath.Join(logDir, "export-eos-sparse-encoder-parent.log"), eosBin, exportSparseEncoderArgs)
