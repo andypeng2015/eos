@@ -439,6 +439,7 @@ Grow the training/evaluation signal before increasing model size:
 - Add scored teacher batches from BGE, Qwen, Jina, Voyage, Cohere, and OpenAI.
 - Keep provider outputs as vector caches or scorer batches, not as provider SDK dependencies inside Eos.
 - For Qwen3/mxbai hard-negative distillation, run `eos audit-teacher-scores`, then `eos filter-teacher-scores` before training. The next Qwen3 guarded shape should use agreement-filtered `teacher_scores` so teacher loss applies only where the teacher ranks the labeled positive above the negatives; static source-weight-only shaping already failed to balance SciFact gains against NFCorpus/FiQA regressions.
+- Current prepared Qwen3/mxbai short-set input: `runs/eos-shortset-agreement-teacher-prep-v1-20260621T000000Z/shortset.qwen3-mxbai.agreement-filtered.train-hard-negatives.jsonl`. It preserves all `4919` hard-negative examples and keeps averaged agreement `teacher_scores` for `2154` rows: SciFact `667/919`, NFCorpus `373/2000`, FiQA `1114/2000`. Combined audit reports positive top-1 rate `1.000000`, mean positive margin `0.130634`, and `2765` unscored preserved examples. FiQA coverage is exportable-text coverage with explicit empty raw corpus text skipping in the bridge manifests, not raw-row-complete or judged-coverage-complete evidence. The next training descriptor should use this file with guarded retrieval gates.
 - Use hard negatives and retrieval-error mining to target the weakest datasets in the matrix.
 - Try Matryoshka-style dimension slicing before moving to larger embedding dimensions, so CorkScrewDB can trade quality for memory and scoring cost.
 
@@ -469,4 +470,4 @@ Optional hybrid retrieval-policy gate:
 
 1. Optionally extend evidence to remote CorkScrewDB mode, HNSW, or federation before making any claims about those surfaces; the current release and BM25-dot hybrid rows are local packaging/local flat API evidence only.
 2. Keep the full short-set external matrix current, with Qwen3 FiQA labeled as full exportable-text rather than raw-row-complete or judged-coverage complete.
-3. Continue the next model-improvement lane through agreement-filtered external teacher scores, larger-model bootstrap work, and Matryoshka-style dimension slicing rather than treating BM25-dot hybrid retrieval rows as dense model improvement.
+3. Continue the next model-improvement lane by training one guarded candidate from the prepared Qwen3/mxbai agreement-filtered short-set file, then continue larger-model bootstrap work and Matryoshka-style dimension slicing rather than treating BM25-dot hybrid retrieval rows as dense model improvement.

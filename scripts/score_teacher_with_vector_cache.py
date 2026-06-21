@@ -73,6 +73,11 @@ def parse_args() -> argparse.Namespace:
         help="Write rows without teacher_scores when text/vector coverage is incomplete.",
     )
     parser.add_argument(
+        "--skip-empty-beir-text",
+        action="store_true",
+        help="Skip empty BEIR corpus/query rows instead of failing before scoring.",
+    )
+    parser.add_argument(
         "--missing-sample-limit",
         type=int,
         default=20,
@@ -116,21 +121,25 @@ def row_id(row: dict[str, Any], path: Path, line_number: int) -> str:
     return str(value)
 
 
-def load_text_ids(path: Path, text_fn) -> tuple[dict[str, str], int, int]:
+def load_text_ids(path: Path, text_fn, skip_empty: bool) -> tuple[dict[str, str], int, int, int]:
     by_text: dict[str, str] = {}
     duplicate_texts = 0
+    empty_texts = 0
     rows = 0
     for line_number, row in iter_jsonl(path):
         rows += 1
         item_id = row_id(row, path, line_number)
         text = stable_text(text_fn(row))
         if not text:
+            empty_texts += 1
+            if skip_empty:
+                continue
             raise ValueError(f"{path}:{line_number}: empty text for id={item_id!r}")
         if text in by_text:
             duplicate_texts += 1
             continue
         by_text[text] = item_id
-    return by_text, rows, duplicate_texts
+    return by_text, rows, duplicate_texts, empty_texts
 
 
 def vector_norm(vector: list[float]) -> float:
@@ -228,8 +237,12 @@ def main() -> int:
     args.scores_jsonl.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
-    query_text_to_id, query_rows, duplicate_queries = load_text_ids(queries_path, query_text)
-    doc_text_to_id, doc_rows, duplicate_docs = load_text_ids(corpus_path, corpus_text)
+    query_text_to_id, query_rows, duplicate_queries, empty_queries = load_text_ids(
+        queries_path, query_text, args.skip_empty_beir_text
+    )
+    doc_text_to_id, doc_rows, duplicate_docs, empty_docs = load_text_ids(
+        corpus_path, corpus_text, args.skip_empty_beir_text
+    )
     normalize_vectors = args.score == "cosine"
     doc_vectors, doc_vector_rows, zero_doc_vectors = load_vectors(
         args.doc_vectors, normalize_vectors
@@ -388,6 +401,9 @@ def main() -> int:
             "corpus_rows": doc_rows,
             "duplicate_query_texts": duplicate_queries,
             "duplicate_doc_texts": duplicate_docs,
+            "empty_query_texts_skipped": empty_queries if args.skip_empty_beir_text else 0,
+            "empty_doc_texts_skipped": empty_docs if args.skip_empty_beir_text else 0,
+            "empty_text_skip_enabled": args.skip_empty_beir_text,
         },
         "vectors": {
             "doc_vector_rows": doc_vector_rows,
