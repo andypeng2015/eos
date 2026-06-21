@@ -449,6 +449,8 @@ For API-level dense+sparse policy translation evidence, run `scripts/smoke_eos_c
 | `runs/eos-corkscrewdb-hybrid-policy-smoke-20260620T232130Z/` | 8 | 600 | 20 | 22 | 0.729755 / 0.950000 | 0.928080 / 1.000000 | pass |
 | `runs/eos-corkscrewdb-hybrid-policy-full-scifact-v1-20260620T232832Z/` | 8 | 5,183 | 300 | 339 | 0.565375 / 0.796444 | 0.703644 / 0.934556 | pass |
 | `runs/eos-corkscrewdb-hybrid-policy-full-scifact-q4-v1-20260620T000000Z/` | 4 | 5,183 | 300 | 339 | 0.550000 / 0.799111 | 0.695287 / 0.936222 | pass |
+| `runs/eos-corkscrewdb-hybrid-policy-full-nfcorpus-q4-v1-20260620T000000Z/` | 4 | 3,633 | 323 | 12,334 | 0.203265 / 0.241053 | 0.301358 / 0.293417 | pass |
+| `runs/eos-corkscrewdb-hybrid-policy-full-fiqa-q4-v1-20260620T000000Z/` | 4 | 57,600 | 648 | 1,705 | 0.119637 / 0.345019 | 0.189401 / 0.482542 | pass |
 | `runs/eos-corkscrewdb-hybrid-policy-full-scifact-q2-v1-20260620T000000Z/` | 2 | 5,183 | 300 | 339 | 0.472358 / 0.760889 | 0.688250 / 0.924556 | pass |
 
 Treat this as CorkScrewDB API translation evidence with lexical sparse features; the sparse side is TF-IDF over loaded BEIR corpus/query text, not exact `eval-retrieval-hybrid` BM25 parity. q2 still passes the hybrid-vs-dense API gate, but direct dense-only quality drops versus q8, so keep q2 framed as compact diagnostic evidence rather than a default-quality direct-vector profile. It is not default asset or alias promotion.
