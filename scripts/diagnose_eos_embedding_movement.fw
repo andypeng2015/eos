@@ -1,0 +1,813 @@
+package main
+
+import (
+	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type textRow struct {
+	ID    string `json:"_id"`
+	Title string `json:"title,omitempty"`
+	Text  string `json:"text"`
+}
+
+type vectorRow struct {
+	ID        string    `json:"id,omitempty"`
+	ParentID  string    `json:"parent_id,omitempty"`
+	ChildID   string    `json:"child_id,omitempty"`
+	Embedding []float64 `json:"embedding"`
+}
+
+type exportManifest struct {
+	Dimension       int    `json:"dimension"`
+	ModelDimension  int    `json:"model_dimension"`
+	OutputDimension int    `json:"output_dimension"`
+	DocVectorPath   string `json:"doc_vector_path"`
+	QueryVectorPath string `json:"query_vector_path"`
+	Documents       int    `json:"documents"`
+	Queries         int    `json:"queries"`
+}
+
+type commandRecord struct {
+	Label string   `json:"label"`
+	Args  []string `json:"args"`
+	Log   string   `json:"log,omitempty"`
+}
+
+type movementRow struct {
+	DimLabel              string  `json:"dim_label"`
+	RequestedOutputDim    int     `json:"requested_output_dim,omitempty"`
+	OutputDim             int     `json:"output_dim"`
+	ModelDim              int     `json:"model_dim"`
+	VectorKind            string  `json:"vector_kind"`
+	VectorCount           int     `json:"vector_count"`
+	ChangedVectorCount    int     `json:"changed_vector_count"`
+	MeanCosine            float64 `json:"mean_cosine"`
+	MinCosine             float64 `json:"min_cosine"`
+	MeanL2Delta           float64 `json:"mean_l2_delta"`
+	MaxL2Delta            float64 `json:"max_l2_delta"`
+	MaxAbsDelta           float64 `json:"max_abs_delta"`
+	MeanComponentAbsDelta float64 `json:"mean_component_abs_delta"`
+}
+
+type rankRow struct {
+	DimLabel             string  `json:"dim_label"`
+	QueryID              string  `json:"query_id"`
+	BaselineTopK         []string `json:"baseline_top_k"`
+	CandidateTopK        []string `json:"candidate_top_k"`
+	SameTopKOrder        bool    `json:"same_top_k_order"`
+	OverlapAtK          int     `json:"overlap_at_k"`
+	BaselineTopScore     float64 `json:"baseline_top_score"`
+	CandidateTopScore    float64 `json:"candidate_top_score"`
+	TopScoreDelta        float64 `json:"top_score_delta"`
+}
+
+type summary struct {
+	Schema       string            `json:"schema"`
+	GeneratedAt  string            `json:"generated_at"`
+	RepoRoot     string            `json:"repo_root"`
+	RunDir       string            `json:"run_dir"`
+	PlanOnly     bool              `json:"plan_only"`
+	Inputs       map[string]string `json:"inputs"`
+	BaselineSHA  string            `json:"baseline_sha256,omitempty"`
+	CandidateSHA string            `json:"candidate_sha256,omitempty"`
+	Commands     []commandRecord   `json:"commands"`
+	Rows         []movementRow     `json:"rows"`
+	RankRows     []rankRow         `json:"rank_rows"`
+	Caveats      []string          `json:"caveats"`
+}
+
+type config struct {
+	Root        string
+	RunRoot     string
+	RunID       string
+	RunDir      string
+	LogDir      string
+	BinPath     string
+	DatasetDir  string
+	Baseline    string
+	Candidate   string
+	Dims        []int
+	DimLabels   []string
+	BatchSize   string
+	TopK        int
+	Epsilon     float64
+	PlanOnly    bool
+	SummaryJSON string
+	SummaryTSV  string
+}
+
+func usage() {
+	fmt.Println(`Diagnose effective embedding movement between two Eos MLL artifacts.
+
+Required for real runs:
+  EOS_MOVEMENT_BASELINE_ARTIFACT=/path/to/start-or-baseline.mll
+  EOS_MOVEMENT_CANDIDATE_ARTIFACT=/path/to/candidate.mll
+
+Optional:
+  EOS_REPO_ROOT=$PWD
+  EOS_MOVEMENT_DIMS=64,128,full
+  EOS_MOVEMENT_BATCH_SIZE=64
+  EOS_MOVEMENT_TOP_K=5
+  EOS_MOVEMENT_EPSILON=1e-7
+  EOS_MOVEMENT_RUN_ROOT=$PWD/runs
+  EOS_MOVEMENT_RUN_ID=eos-embedding-movement-<timestamp>
+  EOS_MOVEMENT_PLAN_ONLY=1`)
+}
+
+func getenv(name string, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cmd", "eos", "main.go")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findRoot() (string, error) {
+	if explicit := os.Getenv("EOS_REPO_ROOT"); hasRepoRoot(explicit) {
+		return filepath.Abs(explicit)
+	}
+	if pwd := os.Getenv("PWD"); hasRepoRoot(pwd) {
+		return filepath.Abs(pwd)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if hasRepoRoot(cwd) {
+		return filepath.Abs(cwd)
+	}
+	return "", fmt.Errorf("could not find repo root; set EOS_REPO_ROOT")
+}
+
+func parseDims(raw string) ([]int, []string, error) {
+	dims := []int{}
+	labels := []string{}
+	for _, part := range strings.Split(raw, ",") {
+		item := strings.TrimSpace(strings.ToLower(part))
+		if item == "" {
+			continue
+		}
+		if item == "full" || item == "0" {
+			dims = append(dims, 0)
+			labels = append(labels, "full")
+			continue
+		}
+		value, err := strconv.Atoi(item)
+		if err != nil || value <= 0 {
+			return nil, nil, fmt.Errorf("invalid EOS_MOVEMENT_DIMS item: %q", part)
+		}
+		dims = append(dims, value)
+		labels = append(labels, strconv.Itoa(value))
+	}
+	if len(dims) == 0 {
+		return nil, nil, fmt.Errorf("EOS_MOVEMENT_DIMS is empty")
+	}
+	return dims, labels, nil
+}
+
+func parseFloatEnv(name string, fallback float64) (float64, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || value < 0 {
+		return 0, fmt.Errorf("%s must be a non-negative float", name)
+	}
+	return value, nil
+}
+
+func parseIntEnv(name string, fallback int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", name)
+	}
+	return value, nil
+}
+
+func prepareConfig(root string) (config, error) {
+	planOnly := getenv("EOS_MOVEMENT_PLAN_ONLY", "0") == "1"
+	baseline := os.Getenv("EOS_MOVEMENT_BASELINE_ARTIFACT")
+	candidate := os.Getenv("EOS_MOVEMENT_CANDIDATE_ARTIFACT")
+	if baseline == "" || candidate == "" {
+		if planOnly {
+			baseline = "/path/to/baseline.mll"
+			candidate = "/path/to/candidate.mll"
+		} else {
+			return config{}, fmt.Errorf("EOS_MOVEMENT_BASELINE_ARTIFACT and EOS_MOVEMENT_CANDIDATE_ARTIFACT are required")
+		}
+	}
+	baselineAbs, err := filepath.Abs(baseline)
+	if err != nil {
+		return config{}, err
+	}
+	candidateAbs, err := filepath.Abs(candidate)
+	if err != nil {
+		return config{}, err
+	}
+	if !planOnly {
+		if _, err := os.Stat(baselineAbs); err != nil {
+			return config{}, fmt.Errorf("baseline artifact does not exist: %s", baselineAbs)
+		}
+		if _, err := os.Stat(candidateAbs); err != nil {
+			return config{}, fmt.Errorf("candidate artifact does not exist: %s", candidateAbs)
+		}
+	}
+	dims, labels, err := parseDims(getenv("EOS_MOVEMENT_DIMS", "64,128,full"))
+	if err != nil {
+		return config{}, err
+	}
+	topK, err := parseIntEnv("EOS_MOVEMENT_TOP_K", 5)
+	if err != nil {
+		return config{}, err
+	}
+	epsilon, err := parseFloatEnv("EOS_MOVEMENT_EPSILON", 1e-7)
+	if err != nil {
+		return config{}, err
+	}
+	runID := getenv("EOS_MOVEMENT_RUN_ID", "eos-embedding-movement-"+time.Now().UTC().Format("20060102T150405Z"))
+	runRoot := getenv("EOS_MOVEMENT_RUN_ROOT", filepath.Join(root, "runs"))
+	runDir, err := filepath.Abs(filepath.Join(runRoot, runID))
+	if err != nil {
+		return config{}, err
+	}
+	if !planOnly {
+		if entries, err := os.ReadDir(runDir); err == nil && len(entries) > 0 {
+			return config{}, fmt.Errorf("run directory already exists and is not empty: %s", runDir)
+		}
+	}
+	return config{
+		Root:        root,
+		RunRoot:     runRoot,
+		RunID:       runID,
+		RunDir:      runDir,
+		LogDir:      filepath.Join(runDir, "logs"),
+		BinPath:     filepath.Join(runDir, "bin", "eos"),
+		DatasetDir:  filepath.Join(runDir, "movement-fixture"),
+		Baseline:    baselineAbs,
+		Candidate:   candidateAbs,
+		Dims:        dims,
+		DimLabels:   labels,
+		BatchSize:   getenv("EOS_MOVEMENT_BATCH_SIZE", "64"),
+		TopK:        topK,
+		Epsilon:     epsilon,
+		PlanOnly:    planOnly,
+		SummaryJSON: filepath.Join(runDir, "embedding-movement.summary.json"),
+		SummaryTSV:  filepath.Join(runDir, "embedding-movement.summary.tsv"),
+	}, nil
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if strings.ContainsAny(value, " \t\n'\"\\$`!*?[]{}()<>|&;") {
+		return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	}
+	return value
+}
+
+func renderCommand(args []string) string {
+	parts := []string{}
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func runOrRecord(cfg config, commands *[]commandRecord, label string, logName string, args []string) error {
+	logPath := ""
+	if logName != "" {
+		logPath = filepath.Join(cfg.LogDir, logName)
+	}
+	*commands = append(*commands, commandRecord{Label: label, Args: args, Log: logPath})
+	fmt.Println("+ " + renderCommand(args))
+	if cfg.PlanOnly {
+		return nil
+	}
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = cfg.Root
+	out, err := cmd.CombinedOutput()
+	if logPath != "" {
+		_ = os.WriteFile(logPath+".cmd", []byte(renderCommand(args)+"\n"), 0o644)
+		_ = os.WriteFile(logPath, out, 0o644)
+	}
+	if err != nil {
+		return fmt.Errorf("%s failed: %w; see %s", label, err, logPath)
+	}
+	return nil
+}
+
+func writeJSONL(path string, rows []textRow) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	enc := json.NewEncoder(file)
+	for _, row := range rows {
+		if err := enc.Encode(row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeFixture(cfg config) error {
+	if err := os.MkdirAll(filepath.Join(cfg.DatasetDir, "qrels"), 0o755); err != nil {
+		return err
+	}
+	docs := []textRow{
+		{ID: "doc-sci-graphene", Title: "Graphene membranes", Text: "Graphene oxide membranes separate water molecules from salt ions using narrow nanoscale channels and hydrophilic surface chemistry."},
+		{ID: "doc-fin-bond", Title: "Municipal bond risk", Text: "Municipal bond portfolios balance coupon income, default risk, duration exposure, and tax treatment for long term investors."},
+		{ID: "doc-med-trial", Title: "Clinical trial endpoints", Text: "Randomized clinical trials compare treatment and control arms with prespecified endpoints, confidence intervals, and adverse event monitoring."},
+		{ID: "doc-code-cache", Title: "Vector cache export", Text: "A retrieval vector cache stores normalized document embeddings and query embeddings for deterministic offline scoring."},
+		{ID: "doc-law-contract", Title: "Contract remedies", Text: "Contract remedies include expectation damages, specific performance, mitigation, and liquidated damages clauses."},
+		{ID: "doc-ops-incident", Title: "Incident review", Text: "Service incident reviews reconstruct timelines, alerts, mitigations, contributing factors, and follow up action items."},
+		{ID: "doc-bio-protein", Title: "Protein folding", Text: "Protein folding depends on amino acid sequence, hydrophobic interactions, hydrogen bonds, and cellular chaperone systems."},
+		{ID: "doc-energy-grid", Title: "Grid storage", Text: "Battery grid storage smooths renewable generation, provides frequency regulation, and shifts energy across peak demand windows."},
+	}
+	queries := []textRow{
+		{ID: "q-membrane", Text: "water desalination through graphene membrane channels"},
+		{ID: "q-bond", Text: "tax advantaged municipal bonds duration default risk"},
+		{ID: "q-trial", Text: "randomized trial endpoint adverse events treatment arm"},
+		{ID: "q-cache", Text: "normalized embeddings query document vector cache export"},
+		{ID: "q-incident", Text: "incident timeline mitigations alerts follow up actions"},
+		{ID: "q-grid", Text: "battery storage renewable grid peak demand frequency regulation"},
+	}
+	if err := writeJSONL(filepath.Join(cfg.DatasetDir, "corpus.jsonl"), docs); err != nil {
+		return err
+	}
+	if err := writeJSONL(filepath.Join(cfg.DatasetDir, "queries.jsonl"), queries); err != nil {
+		return err
+	}
+	var b strings.Builder
+	b.WriteString("query-id\tcorpus-id\tscore\n")
+	for _, q := range queries {
+		for _, d := range docs {
+			b.WriteString(q.ID)
+			b.WriteByte('\t')
+			b.WriteString(d.ID)
+			b.WriteString("\t1\n")
+		}
+	}
+	return os.WriteFile(filepath.Join(cfg.DatasetDir, "qrels", "test.tsv"), []byte(b.String()), 0o644)
+}
+
+func readManifest(path string) (exportManifest, error) {
+	var manifest exportManifest
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return manifest, err
+	}
+	return manifest, json.Unmarshal(data, &manifest)
+}
+
+func vectorID(row vectorRow) string {
+	if row.ID != "" {
+		return row.ID
+	}
+	if row.ChildID != "" {
+		return row.ChildID
+	}
+	return row.ParentID
+}
+
+func readVectors(path string) (map[string][]float64, []string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer file.Close()
+	vectors := map[string][]float64{}
+	order := []string{}
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024), 16*1024*1024)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var row vectorRow
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			return nil, nil, fmt.Errorf("%s:%d: %w", path, lineNo, err)
+		}
+		id := vectorID(row)
+		if id == "" {
+			return nil, nil, fmt.Errorf("%s:%d: vector row has no id", path, lineNo)
+		}
+		vectors[id] = row.Embedding
+		order = append(order, id)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, nil, err
+	}
+	return vectors, order, nil
+}
+
+func cosine(a []float64, b []float64) float64 {
+	dot := 0.0
+	aa := 0.0
+	bb := 0.0
+	for i := range a {
+		dot += a[i] * b[i]
+		aa += a[i] * a[i]
+		bb += b[i] * b[i]
+	}
+	if aa == 0 || bb == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(aa) * math.Sqrt(bb))
+}
+
+func compareVectors(dimLabel string, requestedDim int, outputDim int, modelDim int, kind string, baseline map[string][]float64, candidate map[string][]float64, epsilon float64) (movementRow, error) {
+	ids := []string{}
+	for id := range baseline {
+		if _, ok := candidate[id]; ok {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	if len(ids) == 0 {
+		return movementRow{}, fmt.Errorf("no overlapping %s vectors", kind)
+	}
+	row := movementRow{
+		DimLabel:           dimLabel,
+		RequestedOutputDim: requestedDim,
+		OutputDim:          outputDim,
+		ModelDim:           modelDim,
+		VectorKind:         kind,
+		VectorCount:        len(ids),
+		MinCosine:          1,
+	}
+	totalComponentAbs := 0.0
+	totalComponents := 0
+	for _, id := range ids {
+		a := baseline[id]
+		b := candidate[id]
+		if len(a) != len(b) {
+			return movementRow{}, fmt.Errorf("%s vector %s dimension mismatch: %d vs %d", kind, id, len(a), len(b))
+		}
+		cos := cosine(a, b)
+		row.MeanCosine += cos
+		if cos < row.MinCosine {
+			row.MinCosine = cos
+		}
+		sumSq := 0.0
+		maxAbs := 0.0
+		for i := range a {
+			delta := math.Abs(a[i] - b[i])
+			sumSq += delta * delta
+			totalComponentAbs += delta
+			totalComponents++
+			if delta > maxAbs {
+				maxAbs = delta
+			}
+		}
+		l2 := math.Sqrt(sumSq)
+		row.MeanL2Delta += l2
+		if l2 > row.MaxL2Delta {
+			row.MaxL2Delta = l2
+		}
+		if maxAbs > row.MaxAbsDelta {
+			row.MaxAbsDelta = maxAbs
+		}
+		if l2 > epsilon || maxAbs > epsilon {
+			row.ChangedVectorCount++
+		}
+	}
+	row.MeanCosine /= float64(len(ids))
+	row.MeanL2Delta /= float64(len(ids))
+	if totalComponents > 0 {
+		row.MeanComponentAbsDelta = totalComponentAbs / float64(totalComponents)
+	}
+	return row, nil
+}
+
+type scoredDoc struct {
+	ID    string
+	Score float64
+}
+
+func topDocs(query []float64, docs map[string][]float64, k int) []scoredDoc {
+	rows := []scoredDoc{}
+	for id, doc := range docs {
+		if len(query) != len(doc) {
+			continue
+		}
+		rows = append(rows, scoredDoc{ID: id, Score: cosine(query, doc)})
+	}
+	sort.Slice(rows, func(i int, j int) bool {
+		if rows[i].Score == rows[j].Score {
+			return rows[i].ID < rows[j].ID
+		}
+		return rows[i].Score > rows[j].Score
+	})
+	if len(rows) > k {
+		return rows[:k]
+	}
+	return rows
+}
+
+func idsOnly(rows []scoredDoc) []string {
+	ids := []string{}
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+	return ids
+}
+
+func sameStrings(a []string, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func overlap(a []string, b []string) int {
+	seen := map[string]bool{}
+	for _, id := range a {
+		seen[id] = true
+	}
+	count := 0
+	for _, id := range b {
+		if seen[id] {
+			count++
+		}
+	}
+	return count
+}
+
+func compareRanks(dimLabel string, baselineDocs map[string][]float64, baselineQueries map[string][]float64, candidateDocs map[string][]float64, candidateQueries map[string][]float64, topK int) []rankRow {
+	queryIDs := []string{}
+	for id := range baselineQueries {
+		if _, ok := candidateQueries[id]; ok {
+			queryIDs = append(queryIDs, id)
+		}
+	}
+	sort.Strings(queryIDs)
+	rows := []rankRow{}
+	for _, qid := range queryIDs {
+		baseTop := topDocs(baselineQueries[qid], baselineDocs, topK)
+		candTop := topDocs(candidateQueries[qid], candidateDocs, topK)
+		baseIDs := idsOnly(baseTop)
+		candIDs := idsOnly(candTop)
+		row := rankRow{
+			DimLabel:      dimLabel,
+			QueryID:       qid,
+			BaselineTopK:  baseIDs,
+			CandidateTopK: candIDs,
+			SameTopKOrder: sameStrings(baseIDs, candIDs),
+			OverlapAtK:   overlap(baseIDs, candIDs),
+		}
+		if len(baseTop) > 0 {
+			row.BaselineTopScore = baseTop[0].Score
+		}
+		if len(candTop) > 0 {
+			row.CandidateTopScore = candTop[0].Score
+		}
+		row.TopScoreDelta = row.CandidateTopScore - row.BaselineTopScore
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+func fileSHA256(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func appendSummaryTSV(path string, rows []movementRow) error {
+	var b strings.Builder
+	b.WriteString("dim_label\trequested_output_dim\toutput_dim\tmodel_dim\tvector_kind\tvector_count\tchanged_vector_count\tmean_cosine\tmin_cosine\tmean_l2_delta\tmax_l2_delta\tmax_abs_delta\tmean_component_abs_delta\n")
+	for _, row := range rows {
+		b.WriteString(fmt.Sprintf("%s\t%d\t%d\t%d\t%s\t%d\t%d\t%.12f\t%.12f\t%.12g\t%.12g\t%.12g\t%.12g\n",
+			row.DimLabel,
+			row.RequestedOutputDim,
+			row.OutputDim,
+			row.ModelDim,
+			row.VectorKind,
+			row.VectorCount,
+			row.ChangedVectorCount,
+			row.MeanCosine,
+			row.MinCosine,
+			row.MeanL2Delta,
+			row.MaxL2Delta,
+			row.MaxAbsDelta,
+			row.MeanComponentAbsDelta,
+		))
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func writeSummary(cfg config, commands []commandRecord, rows []movementRow, rankRows []rankRow) error {
+	baselineSHA := ""
+	candidateSHA := ""
+	if !cfg.PlanOnly {
+		baselineSHA, _ = fileSHA256(cfg.Baseline)
+		candidateSHA, _ = fileSHA256(cfg.Candidate)
+	}
+	doc := summary{
+		Schema:       "eos.embedding_movement_diagnostic.v1",
+		GeneratedAt:  time.Now().UTC().Format(time.RFC3339),
+		RepoRoot:     cfg.Root,
+		RunDir:       cfg.RunDir,
+		PlanOnly:     cfg.PlanOnly,
+		BaselineSHA:  baselineSHA,
+		CandidateSHA: candidateSHA,
+		Inputs: map[string]string{
+			"baseline_artifact":  cfg.Baseline,
+			"candidate_artifact": cfg.Candidate,
+			"dims":               strings.Join(cfg.DimLabels, ","),
+			"batch_size":         cfg.BatchSize,
+			"top_k":              strconv.Itoa(cfg.TopK),
+			"epsilon":            strconv.FormatFloat(cfg.Epsilon, 'g', -1, 64),
+			"dataset_dir":        cfg.DatasetDir,
+		},
+		Commands: commands,
+		Rows:     rows,
+		RankRows: rankRows,
+		Caveats: []string{
+			"The diagnostic compares vectors after export-retrieval-vectors tokenization, prefix truncation, and L2 normalization.",
+			"The fixture is deterministic and intentionally small; movement magnitude is artifact-surface evidence, not benchmark quality evidence.",
+			"Full dimension is requested by omitting --output-dim, so the exported output dimension comes from the artifact manifest/runtime.",
+			"Rank deltas are cosine top-k order changes over the synthetic fixture only.",
+		},
+	}
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(cfg.SummaryJSON, data, 0o644); err != nil {
+		return err
+	}
+	return appendSummaryTSV(cfg.SummaryTSV, rows)
+}
+
+func exportArtifact(cfg config, commands *[]commandRecord, role string, artifact string, dim int, label string) (exportManifest, map[string][]float64, map[string][]float64, error) {
+	outDir := filepath.Join(cfg.RunDir, "exports", label, role)
+	manifestPath := filepath.Join(outDir, "manifest.json")
+	args := []string{
+		cfg.BinPath,
+		"export-retrieval-vectors",
+		"--dataset", "movement-fixture",
+		"--split", "test",
+		"--batch-size", cfg.BatchSize,
+		"--manifest-json", manifestPath,
+	}
+	if dim > 0 {
+		args = append(args, "--output-dim", strconv.Itoa(dim))
+	}
+	args = append(args, artifact, cfg.DatasetDir, outDir)
+	if err := runOrRecord(cfg, commands, fmt.Sprintf("Export %s dim %s", role, label), fmt.Sprintf("export-%s-%s.log", label, role), args); err != nil {
+		return exportManifest{}, nil, nil, err
+	}
+	if cfg.PlanOnly {
+		return exportManifest{}, map[string][]float64{}, map[string][]float64{}, nil
+	}
+	manifest, err := readManifest(manifestPath)
+	if err != nil {
+		return exportManifest{}, nil, nil, err
+	}
+	docVectors, _, err := readVectors(filepath.Join(outDir, "doc-vectors.jsonl"))
+	if err != nil {
+		return exportManifest{}, nil, nil, err
+	}
+	queryVectors, _, err := readVectors(filepath.Join(outDir, "query-vectors.jsonl"))
+	if err != nil {
+		return exportManifest{}, nil, nil, err
+	}
+	return manifest, docVectors, queryVectors, nil
+}
+
+func runDiagnostic(cfg config) error {
+	if err := os.MkdirAll(filepath.Join(cfg.RunDir, "bin"), 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(cfg.LogDir, 0o755); err != nil {
+		return err
+	}
+	if !cfg.PlanOnly {
+		if err := writeFixture(cfg); err != nil {
+			return err
+		}
+	}
+	commands := []commandRecord{}
+	rows := []movementRow{}
+	rankRows := []rankRow{}
+	if err := runOrRecord(cfg, &commands, "Build eos CLI", "go-build.log", []string{"go", "build", "-trimpath", "-o", cfg.BinPath, "./cmd/eos"}); err != nil {
+		return err
+	}
+	for i, dim := range cfg.Dims {
+		label := cfg.DimLabels[i]
+		baseManifest, baseDocs, baseQueries, err := exportArtifact(cfg, &commands, "baseline", cfg.Baseline, dim, label)
+		if err != nil {
+			return err
+		}
+		candManifest, candDocs, candQueries, err := exportArtifact(cfg, &commands, "candidate", cfg.Candidate, dim, label)
+		if err != nil {
+			return err
+		}
+		if cfg.PlanOnly {
+			rows = append(rows,
+				movementRow{DimLabel: label, RequestedOutputDim: dim, VectorKind: "doc"},
+				movementRow{DimLabel: label, RequestedOutputDim: dim, VectorKind: "query"},
+			)
+			continue
+		}
+		outputDim := baseManifest.OutputDimension
+		if outputDim == 0 {
+			outputDim = baseManifest.Dimension
+		}
+		modelDim := baseManifest.ModelDimension
+		if modelDim == 0 {
+			modelDim = baseManifest.Dimension
+		}
+		candOutputDim := candManifest.OutputDimension
+		if candOutputDim == 0 {
+			candOutputDim = candManifest.Dimension
+		}
+		if outputDim != candOutputDim {
+			return fmt.Errorf("exported output dimension mismatch for %s: baseline=%d candidate=%d", label, outputDim, candOutputDim)
+		}
+		docRow, err := compareVectors(label, dim, outputDim, modelDim, "doc", baseDocs, candDocs, cfg.Epsilon)
+		if err != nil {
+			return err
+		}
+		queryRow, err := compareVectors(label, dim, outputDim, modelDim, "query", baseQueries, candQueries, cfg.Epsilon)
+		if err != nil {
+			return err
+		}
+		rows = append(rows, docRow, queryRow)
+		rankRows = append(rankRows, compareRanks(label, baseDocs, baseQueries, candDocs, candQueries, cfg.TopK)...)
+	}
+	if err := writeSummary(cfg, commands, rows, rankRows); err != nil {
+		return err
+	}
+	fmt.Printf("wrote %s\n", cfg.SummaryJSON)
+	fmt.Printf("wrote %s\n", cfg.SummaryTSV)
+	return nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help" || os.Args[1] == "help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	cfg, err := prepareConfig(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n\n", err)
+		usage()
+		os.Exit(1)
+	}
+	if err := runDiagnostic(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
