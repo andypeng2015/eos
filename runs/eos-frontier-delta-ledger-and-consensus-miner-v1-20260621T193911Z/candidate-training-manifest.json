@@ -1,0 +1,84 @@
+{
+  "artifacts": {
+    "fiqa.consensus_relabel": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/fiqa.consensus-relabel-candidates.jsonl",
+    "fiqa.drop_or_review": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/fiqa.disagreement-drop-cases.jsonl",
+    "frontier_ledger_summary_json": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/frontier-ledger-summary.json",
+    "frontier_ledger_summary_tsv": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/frontier-ledger-summary.tsv",
+    "nfcorpus.consensus_relabel": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/nfcorpus.consensus-relabel-candidates.jsonl",
+    "nfcorpus.drop_or_review": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/nfcorpus.disagreement-drop-cases.jsonl",
+    "scifact.consensus_relabel": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/scifact.consensus-relabel-candidates.jsonl",
+    "scifact.drop_or_review": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/scifact.disagreement-drop-cases.jsonl",
+    "protection_query_outcomes": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/protection-query-outcomes.jsonl"
+  },
+  "caveats": [
+    "External models are consumed only as local vector-cache scorer boundaries.",
+    "FiQA Qwen3 cache is full exportable-text/sanitized-cache evidence, not a raw-row-complete claim.",
+    "Consensus artifacts are selection/relabel/drop candidates only; they are not soft teacher-loss targets."
+  ],
+  "datasets": {
+    "fiqa": {
+      "candidate_files": {
+        "consensus_relabel": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/fiqa.consensus-relabel-candidates.jsonl",
+        "drop_or_review": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/fiqa.disagreement-drop-cases.jsonl"
+      },
+      "consensus_relabel_candidates": 259,
+      "drop_or_review_cases": 430,
+      "missing_sources": [],
+      "qrel_queries": 648,
+      "row_count_mismatches": {}
+    },
+    "nfcorpus": {
+      "candidate_files": {
+        "consensus_relabel": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/nfcorpus.consensus-relabel-candidates.jsonl",
+        "drop_or_review": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/nfcorpus.disagreement-drop-cases.jsonl"
+      },
+      "consensus_relabel_candidates": 80,
+      "drop_or_review_cases": 202,
+      "missing_sources": [],
+      "qrel_queries": 323,
+      "row_count_mismatches": {}
+    },
+    "scifact": {
+      "candidate_files": {
+        "consensus_relabel": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/scifact.consensus-relabel-candidates.jsonl",
+        "drop_or_review": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/scifact.disagreement-drop-cases.jsonl"
+      },
+      "consensus_relabel_candidates": 69,
+      "drop_or_review_cases": 104,
+      "missing_sources": [],
+      "qrel_queries": 300,
+      "row_count_mismatches": {}
+    }
+  },
+  "eligible_for_later_candidate": true,
+  "inputs": {
+    "fiqa.bm25.per_query_jsonl": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/per-query/fiqa.bm25.per-query.jsonl",
+    "fiqa.eos_compact_q4_fp16_o200.per_query_jsonl": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/per-query/fiqa.eos_compact_q4_fp16_o200.per-query.jsonl",
+    "fiqa.eos_dense.per_query_jsonl": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/per-query/fiqa.eos_dense.per-query.jsonl",
+    "fiqa.hybrid_minmax_blend_a050.per_query_jsonl": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/per-query/fiqa.hybrid_minmax_blend_a050.per-query.jsonl",
+    "fiqa.mxbai.per_query_jsonl": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/per-query/fiqa.mxbai.per-query.jsonl",
+    "fiqa.qwen3.per_query_jsonl": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/per-query/fiqa.qwen3.per-query.jsonl",
+    "nfcorpus.bm25.per_query_jsonl": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/per-query/nfcorpus.bm25.per-query.jsonl",
+    "nfcorpus.eos_compact_q4_fp16_o200.per_query_jsonl": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/per-query/nfcorpus.eos_compact_q4_fp16_o200.per-query.jsonl",
+    "nfcorpus.eos_dense.per_query_jsonl": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/per-query/nfcorpus.eos_dense.per-query.jsonl",
+    "nfcorpus.hybrid_minmax_blend_a050.per_query_jsonl": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/per-query/nfcorpus.hybrid_minmax_blend_a050.per-query.jsonl",
+    "nfcorpus.mxbai.per_query_jsonl": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/per-query/nfcorpus.mxbai.per-query.jsonl",
+    "nfcorpus.qwen3.per_query_jsonl": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/per-query/nfcorpus.qwen3.per-query.jsonl",
+    "scifact.bm25.per_query_jsonl": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/per-query/scifact.bm25.per-query.jsonl",
+    "scifact.eos_compact_q4_fp16_o200.per_query_jsonl": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/per-query/scifact.eos_compact_q4_fp16_o200.per-query.jsonl",
+    "scifact.eos_dense.per_query_jsonl": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/per-query/scifact.eos_dense.per-query.jsonl",
+    "scifact.hybrid_minmax_blend_a050.per_query_jsonl": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/per-query/scifact.hybrid_minmax_blend_a050.per-query.jsonl",
+    "scifact.mxbai.per_query_jsonl": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/per-query/scifact.mxbai.per-query.jsonl",
+    "scifact.qwen3.per_query_jsonl": "runs/eos-frontier-delta-ledger-and-consensus-miner-v1-20260621T193911Z/per-query/scifact.qwen3.per-query.jsonl"
+  },
+  "recommended_training_descriptor": "eos-consensus-mined-no-soft-teacher-candidate",
+  "recommended_use": "Enough silver/protection rows for a bounded no-soft-teacher candidate.",
+  "schema": "eos.consensus_mined_no_soft_teacher_manifest.v1",
+  "teacher_loss_weight_required": 0,
+  "totals": {
+    "consensus_relabel_candidates": 408,
+    "drop_or_review_cases": 736,
+    "ledger_rows": 1271,
+    "qrel_queries": 1271
+  }
+}
