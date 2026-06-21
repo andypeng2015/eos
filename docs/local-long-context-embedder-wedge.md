@@ -282,12 +282,15 @@ The same `eval-retrieval-multivector-turboquant` path exposes diagnostic parent 
 
 Official LongEmbed capped token-span evidence is now available for four real-task slices using span `256`, overlap `64`, q4 token-span caches, external baselines disabled, and `quality_claim=false` throughout. The resumable sparse token-vector export capability that made the QMSum, NarrativeQA, and 2WikiMQA runs practical was checkpointed as `a5e18786` (`add: Add resumable sparse token vector export with progress sidecars`); it adds `--resume`, `--progress-every`, and progress sidecars for child document and query vector JSONL outputs. The SummScreenFD row is a complete audited legacy/pre-resume artifact, so it has no resume/progress sidecars even though its artifact set is complete.
 
-The promoted s40 current-default package has a fresh capped official comparison against cached Qwen3 0.6B and mxbai-large child-vector baselines. These rows are still diagnostic: `quality_claim=false`, capped `real-doc20` slices, and external rows use many more child vectors and higher storage than Eos token-span rows.
+The promoted s40 current-default package has a fresh capped official comparison matrix against cached Qwen3 0.6B and mxbai-large child-vector baselines. These rows are still diagnostic: `quality_claim=false`, capped official slices, and external rows use many more child vectors and higher storage than Eos token-span rows.
 
-| Dataset | Best Eos row | Eos nDCG@10 | Qwen3 q4 nDCG@10 | mxbai q4 nDCG@10 | Caveat |
-| --- | --- | ---: | ---: | ---: | --- |
-| `qmsum` | token-span q4 | 0.560693 | 0.848162 | 0.828480 | Eos uses 416 token-span children; external cached rows use 2,577 children. |
-| `2wikimqa` | fusion RRF | 0.745700 | 1.000000 | 0.981546 | Eos uses 426 fusion children; external cached rows use 1,771 children. |
+| Dataset | Best Eos row | Eos nDCG@10 | Qwen3 q4 nDCG@10 | mxbai q4 nDCG@10 | Gap vs best external | Caveat |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| `qmsum` | fusion | 0.514699 | 0.848546 | 0.770933 | -0.333847 | official real-doc capped slice with external cache rows |
+| `2wikimqa` | fusion | 0.603155 | 0.987698 | 0.957080 | -0.384542 | official real-doc capped slice with external cache rows |
+| `passkey4096` | fusion | 0.605428 | 0.477549 | 0.357039 | +0.127878 | synthetic fullslice task; diagnostic only |
+
+The current matrix result is negative for the real-doc product claim. On comparable real-doc rows (`qmsum` + `2wikimqa`), best Eos macro nDCG@10 is `0.558927`, while Qwen3 q4 is `0.918122` and mxbai q4 is `0.864007`; Eos-best minus best external is `-0.359194`, with the biggest gap on `2wikimqa` at `-0.384542`. The synthetic `passkey4096` Eos fusion win of `+0.127878` is useful for diagnosis but must not be described as product-quality proof. Before any product-quality long-context claim, either change the long-context model/objective or add more comparable real-doc external rows that close this gap.
 
 | Dataset | Slice | Direct nDCG@10 | q4 token-span nDCG@10 | Best fusion nDCG@10 | Conservative fusion nDCG@10 | q4 child count | q4 storage multiple | Interpretation |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
