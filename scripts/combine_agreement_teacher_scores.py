@@ -71,6 +71,14 @@ def parse_args() -> argparse.Namespace:
         default=30,
         help="Maximum cleared-example diagnostics to include in the manifest.",
     )
+    parser.add_argument(
+        "--default-source",
+        default="",
+        help=(
+            "Source label to write for output rows that lack source. Rows with an existing "
+            "different source are rejected instead of relabeled."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -120,6 +128,18 @@ def example_signature(row: dict[str, Any]) -> tuple[str, str, str, tuple[str, ..
         stable_text(row.get("positive")),
         tuple(stable_text(value) for value in row.get("negatives") or []),
     )
+
+
+def labeled_source(row: dict[str, Any], default_source: str, index: int) -> str:
+    source = stable_text(row.get("source"))
+    if source == "":
+        return default_source
+    if default_source and source != default_source:
+        raise SystemExit(
+            f"base line {index + 1}: existing source {source!r} does not match "
+            f"--default-source {default_source!r}"
+        )
+    return source
 
 
 def sha256_file(path: Path) -> str:
@@ -190,6 +210,7 @@ def main() -> int:
         raise SystemExit("--missing-sample-limit must be non-negative")
     if not math.isfinite(args.min_margin):
         raise SystemExit("--min-margin must be finite")
+    args.default_source = args.default_source.strip()
 
     teacher_specs = parse_teacher_specs(args.teacher)
     input_paths = [args.base] + [path for _, path in teacher_specs]
@@ -243,7 +264,7 @@ def main() -> int:
     try:
         with args.output_jsonl.open("w", encoding="utf-8") as out_handle:
             for index, base in enumerate(base_rows):
-                source = str(base.get("source") or "")
+                source = labeled_source(base, args.default_source, index)
                 candidates = [str(base.get("positive") or "")] + [
                     str(value or "") for value in base.get("negatives") or []
                 ]
@@ -251,6 +272,8 @@ def main() -> int:
                 source_bucket["examples"] += 1
 
                 row_out = dict(base)
+                if source:
+                    row_out["source"] = source
                 row_out.pop("teacher_scores", None)
                 per_teacher_scores: dict[str, list[float]] = {}
                 teacher_reasons: dict[str, str] = {}
@@ -360,6 +383,7 @@ def main() -> int:
         "output_jsonl": str(args.output_jsonl),
         "scores_jsonl": str(scores_path) if scores_path is not None else "",
         "min_margin": args.min_margin,
+        "default_source": args.default_source,
         "teachers": teacher_manifest,
         "inputs_sha256": {str(path): sha256_file(path) for path in input_paths},
         "coverage": {
