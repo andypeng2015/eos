@@ -13,8 +13,8 @@ import (
 )
 
 const defaultCorkScrewDBRepo = "/home/draco/work/corkscrewdb"
-const defaultHybridArtifact = "runs/eos-s40-longembed-balanced-anchor-sweep-v1-20260620T195017Z/candidates/fiqa24-nf48/candidate/eos-embed-v1.sealed.mll"
-const defaultPolicyLabel = "fiqa24-nf48-minmax-blend-alpha0.5-top100"
+const defaultHybridArtifact = "assets/corkscrewdb-default-embedder/corkscrewdb-default-embedder.mll"
+const defaultPolicyLabel = "current-default-minmax-blend-alpha0.5-top100"
 const defaultFusionAlpha = 0.5
 const defaultTopK = 100
 const sparseMethodTFIDFL2 = "tfidf_l2"
@@ -362,6 +362,9 @@ func main() {
 	}
 
 	runDir := getenv("EOS_CORKSCREW_HYBRID_SMOKE_RUN_DIR", filepath.Join(root, "runs", "eos-corkscrewdb-hybrid-policy-smoke-"+time.Now().UTC().Format("20060102T150405Z")))
+	if !filepath.IsAbs(runDir) {
+		runDir = filepath.Join(root, runDir)
+	}
 	runDir, err = filepath.Abs(runDir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -598,7 +601,7 @@ func main() {
 			SparseWeight:     defaultFusionAlpha,
 			TopK:             topK,
 			DenseProtectTopK: 0,
-			Decision:         "api_translation_smoke_only",
+			Decision:         "current_default_policy_evidence_for_eos_hybrid",
 		},
 		Inputs: map[string]any{
 			"documents":          metrics.Documents,

@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const defaultHybridArtifact = "runs/eos-s40-longembed-balanced-anchor-sweep-v1-20260620T195017Z/candidates/fiqa24-nf48/candidate/eos-embed-v1.sealed.mll"
+const defaultHybridArtifact = "assets/corkscrewdb-default-embedder/corkscrewdb-default-embedder.mll"
 const defaultHybridMethod = "minmax_blend"
 const defaultHybridAlpha = 0.5
 const defaultHybridRRFK = 60.0
@@ -324,6 +324,14 @@ func main() {
 	}
 
 	runRoot := getenv("EOS_HYBRID_SERVE_SMOKE_RUN_ROOT", filepath.Join(root, "runs", "eos-hybrid-retrieval-serving-smoke-"+time.Now().UTC().Format("20060102T150405Z")))
+	if !filepath.IsAbs(runRoot) {
+		runRoot = filepath.Join(root, runRoot)
+	}
+	runRoot, err = filepath.Abs(runRoot)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	if err := os.MkdirAll(runRoot, 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -493,7 +501,7 @@ func main() {
 		OverallPass: overallPass,
 		Caveats:     caveats,
 		SelectedPolicy: policyIdentity{
-			Label:            "fiqa24-nf48-minmax-blend-alpha0.5-top100",
+			Label:            "current-default-minmax-blend-alpha0.5-top100",
 			Artifact:         artifact,
 			Method:           method,
 			Alpha:            alpha,
@@ -501,7 +509,7 @@ func main() {
 			RRFLambda:        rrfLambda,
 			TopK:             topK,
 			DenseProtectTopK: denseProtectTopK,
-			Decision:         "candidate_policy_evidence_for_eos_hybrid",
+			Decision:         "current_default_policy_evidence_for_eos_hybrid",
 		},
 	}
 	if parseBoolEnv("EOS_HYBRID_SERVE_SMOKE_PER_QUERY", true) {
