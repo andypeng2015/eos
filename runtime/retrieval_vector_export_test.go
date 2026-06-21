@@ -283,6 +283,98 @@ func TestSparseTokenPoolRetrievalVectorExportMinObservedDocTokensGuard(t *testin
 	}
 }
 
+func TestEmbeddingModelTokenizerMaxSequenceOverrideIsExportOnly(t *testing.T) {
+	model, _ := loadTinySparseTokenPoolExportModel(t)
+	longText := "one alpha beta one alpha beta one alpha beta one alpha beta"
+	tokens, _, err := model.TokenizeText(longText)
+	if err != nil {
+		t.Fatalf("tokenize original model: %v", err)
+	}
+	if len(tokens) != 8 {
+		t.Fatalf("original token length = %d, want capped at 8", len(tokens))
+	}
+
+	overridden, err := model.WithTokenizerMaxSequenceOverride(12)
+	if err != nil {
+		t.Fatalf("override tokenizer max sequence: %v", err)
+	}
+	overrideTokens, _, err := overridden.TokenizeText(longText)
+	if err != nil {
+		t.Fatalf("tokenize overridden model: %v", err)
+	}
+	if len(overrideTokens) != 12 {
+		t.Fatalf("overridden token length = %d, want capped at 12", len(overrideTokens))
+	}
+	if model.Manifest().Tokenizer.MaxSequence != 8 {
+		t.Fatalf("original model manifest max_sequence = %d, want unchanged 8", model.Manifest().Tokenizer.MaxSequence)
+	}
+	if overridden.Manifest().Tokenizer.MaxSequence != 12 {
+		t.Fatalf("overridden model manifest max_sequence = %d, want 12", overridden.Manifest().Tokenizer.MaxSequence)
+	}
+	if _, err := model.WithTokenizerMaxSequenceOverride(-1); err == nil || !strings.Contains(err.Error(), "non-negative") {
+		t.Fatalf("negative override error = %v, want non-negative", err)
+	}
+}
+
+func TestSparseTokenPoolRetrievalVectorExportAuditsTokenizerMaxSequenceOverride(t *testing.T) {
+	model, artifactPath := loadTinySparseTokenPoolExportModel(t)
+	dir := t.TempDir()
+	datasetDir := writeTinyRetrievalExportDataset(t, dir)
+	outputDir := filepath.Join(dir, "sparse-override-vectors")
+	manifestPath := filepath.Join(dir, "sparse-override.manifest.json")
+	corpusPath, queriesPath, qrelsPath := BEIRRetrievalPaths(datasetDir, "test")
+
+	summary, err := ExportSparseTokenPoolRetrievalVectors(context.Background(), model, SparseTokenPoolRetrievalVectorExportConfig{
+		DatasetName:                  "tiny-sparse-override",
+		ArtifactPath:                 artifactPath,
+		CorpusPath:                   corpusPath,
+		QueriesPath:                  queriesPath,
+		QrelsPath:                    qrelsPath,
+		OutputDir:                    outputDir,
+		BatchSize:                    1,
+		MaxDocs:                      1,
+		MaxQueries:                   1,
+		OutputDim:                    2,
+		ManifestJSONPath:             manifestPath,
+		TopK:                         1,
+		Bits:                         2,
+		Seed:                         17,
+		TokenizerMaxSequenceOverride: 12,
+		MinObservedDocTokens:         9,
+	})
+	if err != nil {
+		t.Fatalf("export sparse token pool vectors with tokenizer max sequence override: %v", err)
+	}
+	if summary.TokenizerMaxSequenceOriginal != 8 || summary.TokenizerMaxSequenceEffective != 12 || summary.TokenizerMaxSequenceOverride != 12 {
+		t.Fatalf("summary tokenizer max sequence audit = original:%d effective:%d override:%d", summary.TokenizerMaxSequenceOriginal, summary.TokenizerMaxSequenceEffective, summary.TokenizerMaxSequenceOverride)
+	}
+	if summary.DocumentTokenizerOutput.MaxObservedTokens <= 8 {
+		t.Fatalf("summary max observed doc tokens = %d, want override to exceed original cap", summary.DocumentTokenizerOutput.MaxObservedTokens)
+	}
+	if summary.QualityClaim {
+		t.Fatal("summary quality_claim=true, want false")
+	}
+	caveats := strings.Join(summary.Caveats, "\n")
+	if !strings.Contains(caveats, "tokenizer_max_sequence_override=12") || !strings.Contains(caveats, "quality_claim=false") {
+		t.Fatalf("summary caveats missing override/quality claim: %q", caveats)
+	}
+
+	var manifest SparseTokenPoolRetrievalVectorExportSummary
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if manifest.TokenizerMaxSequenceOriginal != summary.TokenizerMaxSequenceOriginal || manifest.TokenizerMaxSequenceEffective != summary.TokenizerMaxSequenceEffective || manifest.TokenizerMaxSequenceOverride != summary.TokenizerMaxSequenceOverride {
+		t.Fatalf("manifest tokenizer max sequence audit = %+v, summary = %+v", manifest, summary)
+	}
+	if model.Manifest().Tokenizer.MaxSequence != 8 {
+		t.Fatalf("source model manifest max_sequence = %d, want unchanged 8", model.Manifest().Tokenizer.MaxSequence)
+	}
+}
+
 func TestSparseTokenPoolRetrievalVectorExportSparseEncoderManifest(t *testing.T) {
 	model, artifactPath := loadTinySparseTokenPoolFFNExportModel(t)
 	dir := t.TempDir()

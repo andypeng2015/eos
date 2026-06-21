@@ -219,14 +219,27 @@ func TestRunDoctorReportsRuntimeFacts(t *testing.T) {
 }
 
 func TestExportSparseTokenPoolVectorsAcceptsResumeProgressFlags(t *testing.T) {
-	err := runExportSparseTokenPoolVectors([]string{"--resume", "--progress-every", "7"})
+	err := runExportSparseTokenPoolVectors([]string{"--resume", "--progress-every", "7", "--tokenizer-max-seq", "4096"})
 	if err == nil {
 		t.Fatal("runExportSparseTokenPoolVectors succeeded without positional args, want usage error")
 	}
 	if strings.Contains(err.Error(), "flag provided but not defined") {
-		t.Fatalf("resume/progress flags were not registered: %v", err)
+		t.Fatalf("sparse token-pool flags were not registered: %v", err)
 	}
 	if !strings.Contains(err.Error(), "usage: eos export-sparse-token-pool-vectors") {
+		t.Fatalf("error = %v, want usage error after parsing flags", err)
+	}
+}
+
+func TestExportSparseEncoderVectorsAcceptsTokenizerMaxSequenceFlag(t *testing.T) {
+	err := runExportSparseEncoderVectors([]string{"--tokenizer-max-seq", "4096"})
+	if err == nil {
+		t.Fatal("runExportSparseEncoderVectors succeeded without positional args, want usage error")
+	}
+	if strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatalf("sparse encoder tokenizer max sequence flag was not registered: %v", err)
+	}
+	if !strings.Contains(err.Error(), "usage: eos export-sparse-encoder-vectors") {
 		t.Fatalf("error = %v, want usage error after parsing flags", err)
 	}
 }

@@ -325,6 +325,35 @@ func (m *EmbeddingModel) TokenizerFile() (TokenizerFile, bool) {
 	return cloneTokenizerFile(*m.tokenizerFile), true
 }
 
+// WithTokenizerMaxSequenceOverride returns a cloned model handle whose
+// tokenizer contract is raised for diagnostic export paths.
+func (m *EmbeddingModel) WithTokenizerMaxSequenceOverride(maxSeq int) (*EmbeddingModel, error) {
+	if maxSeq < 0 {
+		return nil, fmt.Errorf("tokenizer max sequence override must be non-negative")
+	}
+	if m == nil {
+		return nil, fmt.Errorf("embedding model is not loaded")
+	}
+	if maxSeq == 0 {
+		return m, nil
+	}
+	current := m.manifest.Tokenizer.MaxSequence
+	if current == 0 || maxSeq <= current {
+		return m, nil
+	}
+	cloned := *m
+	cloned.manifest = m.manifest
+	cloned.manifest.Tokenizer.MaxSequence = maxSeq
+	cloned.tokenizer = nil
+	cloned.tokenizerFile = nil
+	if m.tokenizerFile != nil {
+		if err := cloned.attachTokenizer(*m.tokenizerFile); err != nil {
+			return nil, err
+		}
+	}
+	return &cloned, nil
+}
+
 // TokenizeText tokenizes text with the tokenizer packaged beside or inside the model.
 func (m *EmbeddingModel) TokenizeText(text string) ([]int32, []int32, error) {
 	if m == nil {

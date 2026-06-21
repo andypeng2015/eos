@@ -585,6 +585,7 @@ func runExportSparseTokenPoolVectors(args []string) error {
 	valueBits := fs.Int("value-bits", 0, "TurboQuant value bits override: 0 inherits --bits; supported: 2, 4, or 8")
 	seed := fs.Int64("seed", 0x4d697261, "TurboQuant Hadamard seed")
 	maxTokens := fs.Int("max-tokens", 0, "truncate tokenized text to at most this many tokens after tokenizer limits; 0 keeps tokenizer output")
+	tokenizerMaxSeq := fs.Int("tokenizer-max-seq", 0, "export-time tokenizer max_sequence override for diagnostic sparse retrieval-cache exports; 0 keeps artifact tokenizer contract")
 	minObservedDocTokens := fs.Int("min-observed-doc-tokens", 0, "fail when max observed document tokenizer-output tokens consumed by the sparse-token-pool encoder is below this threshold; 0 disables")
 	attentionMode := fs.String("attention-mode", eosruntime.SparseTokenPoolAttentionModeTurboQuantSparse, "attention implementation: turboquant_sparse or dense")
 	resume := fs.Bool("resume", false, "resume JSONL vector export from per-file progress sidecars, truncating partial output to the last completed record before appending")
@@ -617,38 +618,39 @@ func runExportSparseTokenPoolVectors(args []string) error {
 		return err
 	}
 	summary, err := eosruntime.ExportSparseTokenPoolRetrievalVectors(context.Background(), model, eosruntime.SparseTokenPoolRetrievalVectorExportConfig{
-		DatasetName:           *datasetName,
-		ArtifactPath:          artifactPath,
-		WeightFilePath:        resolvedWeightPath,
-		CorpusPath:            corpusPath,
-		QueriesPath:           queriesPath,
-		QrelsPath:             *qrelsPath,
-		OutputDir:             outputDir,
-		BatchSize:             *batchSize,
-		MaxDocs:               *maxDocs,
-		MaxQueries:            *maxQueries,
-		OutputDim:             *outputDim,
-		DocumentChunkWords:    *documentChunkWords,
-		DocumentChunkOverlap:  *documentChunkOverlap,
-		DocumentChunkMinWords: *documentChunkMinWords,
-		TokenSpanTokens:       *tokenSpanTokens,
-		TokenSpanOverlap:      *tokenSpanOverlap,
-		TokenSpanMinTokens:    *tokenSpanMinTokens,
-		DocumentPrefix:        *documentPrefix,
-		QueryPrefix:           *queryPrefix,
-		ManifestJSONPath:      *manifestPath,
-		TopK:                  *topK,
-		RouteBlockSize:        *routeBlockSize,
-		RouteTopBlocks:        *routeTopBlocks,
-		Bits:                  *bits,
-		KeyBits:               *keyBits,
-		ValueBits:             *valueBits,
-		Seed:                  *seed,
-		MaxTokens:             *maxTokens,
-		MinObservedDocTokens:  *minObservedDocTokens,
-		AttentionMode:         *attentionMode,
-		Resume:                *resume,
-		ProgressEvery:         *progressEvery,
+		DatasetName:                  *datasetName,
+		ArtifactPath:                 artifactPath,
+		WeightFilePath:               resolvedWeightPath,
+		CorpusPath:                   corpusPath,
+		QueriesPath:                  queriesPath,
+		QrelsPath:                    *qrelsPath,
+		OutputDir:                    outputDir,
+		BatchSize:                    *batchSize,
+		MaxDocs:                      *maxDocs,
+		MaxQueries:                   *maxQueries,
+		OutputDim:                    *outputDim,
+		DocumentChunkWords:           *documentChunkWords,
+		DocumentChunkOverlap:         *documentChunkOverlap,
+		DocumentChunkMinWords:        *documentChunkMinWords,
+		TokenSpanTokens:              *tokenSpanTokens,
+		TokenSpanOverlap:             *tokenSpanOverlap,
+		TokenSpanMinTokens:           *tokenSpanMinTokens,
+		DocumentPrefix:               *documentPrefix,
+		QueryPrefix:                  *queryPrefix,
+		ManifestJSONPath:             *manifestPath,
+		TopK:                         *topK,
+		RouteBlockSize:               *routeBlockSize,
+		RouteTopBlocks:               *routeTopBlocks,
+		Bits:                         *bits,
+		KeyBits:                      *keyBits,
+		ValueBits:                    *valueBits,
+		Seed:                         *seed,
+		MaxTokens:                    *maxTokens,
+		TokenizerMaxSequenceOverride: *tokenizerMaxSeq,
+		MinObservedDocTokens:         *minObservedDocTokens,
+		AttentionMode:                *attentionMode,
+		Resume:                       *resume,
+		ProgressEvery:                *progressEvery,
 	})
 	if err != nil {
 		return err
@@ -665,6 +667,9 @@ func runExportSparseTokenPoolVectors(args []string) error {
 	}
 	if summary.ResumeEnabled || summary.ProgressEvery > 0 {
 		fmt.Printf("resume: enabled=%t progress_every=%d resumed_document_records=%d resumed_child_vectors=%d resumed_query_records=%d\n", summary.ResumeEnabled, summary.ProgressEvery, summary.ResumedDocumentRecords, summary.ResumedChildVectors, summary.ResumedQueryRecords)
+	}
+	if summary.TokenizerMaxSequenceOverride > 0 {
+		fmt.Printf("tokenizer_max_sequence: original=%d effective=%d override=%d\n", summary.TokenizerMaxSequenceOriginal, summary.TokenizerMaxSequenceEffective, summary.TokenizerMaxSequenceOverride)
 	}
 	fmt.Printf("tokenizer_output: doc_records=%d doc_max_tokens=%d doc_mean_tokens=%.2f doc_total_tokens=%d doc_truncated_by_max_tokens=%d query_records=%d query_max_tokens=%d query_mean_tokens=%.2f query_total_tokens=%d query_truncated_by_max_tokens=%d\n", summary.DocumentTokenizerOutput.RecordCount, summary.DocumentTokenizerOutput.MaxObservedTokens, summary.DocumentTokenizerOutput.MeanObservedTokens, summary.DocumentTokenizerOutput.TotalTokens, summary.DocumentTokenizerOutput.TruncatedByMaxTokensCount, summary.QueryTokenizerOutput.RecordCount, summary.QueryTokenizerOutput.MaxObservedTokens, summary.QueryTokenizerOutput.MeanObservedTokens, summary.QueryTokenizerOutput.TotalTokens, summary.QueryTokenizerOutput.TruncatedByMaxTokensCount)
 	fmt.Printf("weights: attention=%t attention_output=%t hidden_projection=%t projection=%t dense_kv_materialized=%t\n", summary.AttentionWeightsApplied, summary.AttentionOutputApplied, summary.HiddenProjectionApplied, summary.ProjectionApplied, summary.DenseKVMaterialized)
@@ -702,6 +707,7 @@ func runExportSparseEncoderVectors(args []string) error {
 	valueBits := fs.Int("value-bits", 0, "TurboQuant value bits override: 0 inherits --bits; supported: 2, 4, or 8")
 	seed := fs.Int64("seed", 0x4d697261, "TurboQuant Hadamard seed")
 	maxTokens := fs.Int("max-tokens", 0, "truncate tokenized text to at most this many tokens after tokenizer limits; 0 keeps tokenizer output")
+	tokenizerMaxSeq := fs.Int("tokenizer-max-seq", 0, "export-time tokenizer max_sequence override for diagnostic sparse retrieval-cache exports; 0 keeps artifact tokenizer contract")
 	minObservedDocTokens := fs.Int("min-observed-doc-tokens", 0, "fail when max observed document tokenizer-output tokens consumed by the sparse encoder is below this threshold; 0 disables")
 	attentionMode := fs.String("attention-mode", eosruntime.SparseTokenPoolAttentionModeTurboQuantSparse, "attention implementation: turboquant_sparse or dense")
 	weightPath := fs.String("weights", "", "explicit sibling weight file path; default is <artifact>.weights.mll")
@@ -732,34 +738,35 @@ func runExportSparseEncoderVectors(args []string) error {
 		return err
 	}
 	summary, err := eosruntime.ExportSparseTokenPoolRetrievalVectors(context.Background(), model, eosruntime.SparseTokenPoolRetrievalVectorExportConfig{
-		DatasetName:          *datasetName,
-		ArtifactPath:         artifactPath,
-		WeightFilePath:       resolvedWeightPath,
-		CorpusPath:           corpusPath,
-		QueriesPath:          queriesPath,
-		QrelsPath:            *qrelsPath,
-		OutputDir:            outputDir,
-		BatchSize:            *batchSize,
-		MaxDocs:              *maxDocs,
-		MaxQueries:           *maxQueries,
-		OutputDim:            *outputDim,
-		DocumentPrefix:       *documentPrefix,
-		QueryPrefix:          *queryPrefix,
-		ManifestJSONPath:     *manifestPath,
-		TopK:                 *topK,
-		RouteBlockSize:       *routeBlockSize,
-		RouteTopBlocks:       *routeTopBlocks,
-		Bits:                 *bits,
-		KeyBits:              *keyBits,
-		ValueBits:            *valueBits,
-		Seed:                 *seed,
-		MaxTokens:            *maxTokens,
-		MinObservedDocTokens: *minObservedDocTokens,
-		AttentionMode:        *attentionMode,
-		RequireFullEncoder:   true,
-		Method:               "experimental_sparse_encoder_host_reference",
-		EvidenceLevel:        "retrieval_cache_host_reference_sparse_encoder",
-		ClaimBoundary:        "Prototype host-reference sparse encoder retrieval-cache evidence only; not a trained sparse/LongEmbed encoder, not sealed runtime inference, and not production quality evidence.",
+		DatasetName:                  *datasetName,
+		ArtifactPath:                 artifactPath,
+		WeightFilePath:               resolvedWeightPath,
+		CorpusPath:                   corpusPath,
+		QueriesPath:                  queriesPath,
+		QrelsPath:                    *qrelsPath,
+		OutputDir:                    outputDir,
+		BatchSize:                    *batchSize,
+		MaxDocs:                      *maxDocs,
+		MaxQueries:                   *maxQueries,
+		OutputDim:                    *outputDim,
+		DocumentPrefix:               *documentPrefix,
+		QueryPrefix:                  *queryPrefix,
+		ManifestJSONPath:             *manifestPath,
+		TopK:                         *topK,
+		RouteBlockSize:               *routeBlockSize,
+		RouteTopBlocks:               *routeTopBlocks,
+		Bits:                         *bits,
+		KeyBits:                      *keyBits,
+		ValueBits:                    *valueBits,
+		Seed:                         *seed,
+		MaxTokens:                    *maxTokens,
+		TokenizerMaxSequenceOverride: *tokenizerMaxSeq,
+		MinObservedDocTokens:         *minObservedDocTokens,
+		AttentionMode:                *attentionMode,
+		RequireFullEncoder:           true,
+		Method:                       "experimental_sparse_encoder_host_reference",
+		EvidenceLevel:                "retrieval_cache_host_reference_sparse_encoder",
+		ClaimBoundary:                "Prototype host-reference sparse encoder retrieval-cache evidence only; not a trained sparse/LongEmbed encoder, not sealed runtime inference, and not production quality evidence.",
 	})
 	if err != nil {
 		return err
@@ -771,6 +778,9 @@ func runExportSparseEncoderVectors(args []string) error {
 	fmt.Printf("attention: mode=%s turboquant_kv_applied=%t dense_kv_materialized=%t kv_decode=%s top_k=%d route_block_size=%d route_top_blocks=%d bits=%d key_bits=%d value_bits=%d seed=%d\n", summary.AttentionMode, summary.TurboQuantKVApplied, summary.DenseKVMaterialized, summary.KVDecode, summary.TopK, summary.RouteBlockSize, summary.RouteTopBlocks, summary.Bits, summary.KeyBits, summary.ValueBits, summary.QuantizerSeed)
 	if summary.MaxObservedDocPlan != nil {
 		fmt.Printf("sparse_plan_max_doc: key_len=%d candidate_key_budget=%d score_fraction=%.6f subquadratic=%t\n", summary.MaxObservedDocPlan.KeyLen, summary.MaxObservedDocPlan.CandidateKeyBudget, summary.MaxObservedDocPlan.ScoreCountFraction, summary.MaxObservedDocPlan.SubquadraticScorePlan)
+	}
+	if summary.TokenizerMaxSequenceOverride > 0 {
+		fmt.Printf("tokenizer_max_sequence: original=%d effective=%d override=%d\n", summary.TokenizerMaxSequenceOriginal, summary.TokenizerMaxSequenceEffective, summary.TokenizerMaxSequenceOverride)
 	}
 	fmt.Printf("tokenizer_output: doc_records=%d doc_max_tokens=%d doc_mean_tokens=%.2f doc_total_tokens=%d doc_truncated_by_max_tokens=%d query_records=%d query_max_tokens=%d query_mean_tokens=%.2f query_total_tokens=%d query_truncated_by_max_tokens=%d\n", summary.DocumentTokenizerOutput.RecordCount, summary.DocumentTokenizerOutput.MaxObservedTokens, summary.DocumentTokenizerOutput.MeanObservedTokens, summary.DocumentTokenizerOutput.TotalTokens, summary.DocumentTokenizerOutput.TruncatedByMaxTokensCount, summary.QueryTokenizerOutput.RecordCount, summary.QueryTokenizerOutput.MaxObservedTokens, summary.QueryTokenizerOutput.MeanObservedTokens, summary.QueryTokenizerOutput.TotalTokens, summary.QueryTokenizerOutput.TruncatedByMaxTokensCount)
 	fmt.Printf("doc_vectors: %s\n", summary.DocVectorPath)

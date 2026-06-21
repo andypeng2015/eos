@@ -75,6 +75,9 @@ type sparseExportManifest struct {
 	TokenSpanTokens int      `json:"token_span_tokens"`
 	TokenSpanOverlap int     `json:"token_span_overlap"`
 	MaxTokens       int      `json:"max_tokens"`
+	TokenizerMaxSequenceOriginal  int      `json:"tokenizer_max_sequence_original"`
+	TokenizerMaxSequenceEffective int      `json:"tokenizer_max_sequence_effective"`
+	TokenizerMaxSequenceOverride  int      `json:"tokenizer_max_sequence_override"`
 	Caveats         []string `json:"caveats"`
 }
 
@@ -94,6 +97,9 @@ type sparseEncoderExportManifest struct {
 	DocVectorPath                       string   `json:"doc_vector_path"`
 	QueryVectorPath                     string   `json:"query_vector_path"`
 	MaxTokens                           int      `json:"max_tokens"`
+	TokenizerMaxSequenceOriginal       int      `json:"tokenizer_max_sequence_original"`
+	TokenizerMaxSequenceEffective      int      `json:"tokenizer_max_sequence_effective"`
+	TokenizerMaxSequenceOverride       int      `json:"tokenizer_max_sequence_override"`
 	MinObservedDocTokens                int      `json:"min_observed_doc_tokens"`
 	TopKConfigured                      int      `json:"top_k_configured"`
 	TopK                                int      `json:"top_k"`
@@ -1522,6 +1528,9 @@ func validateSparseEncoderManifest(path string, m sparseEncoderExportManifest) e
 func sparseEncoderAuditFields(path string, m sparseEncoderExportManifest) map[string]string {
 	return map[string]string{
 		"manifest":                                  path,
+		"tokenizer_max_sequence_original":           strconv.Itoa(m.TokenizerMaxSequenceOriginal),
+		"tokenizer_max_sequence_effective":          strconv.Itoa(m.TokenizerMaxSequenceEffective),
+		"tokenizer_max_sequence_override":           strconv.Itoa(m.TokenizerMaxSequenceOverride),
 		"sparse_top_k_configured":                   strconv.Itoa(m.SparseTopKConfigured),
 		"sparse_top_k":                              strconv.Itoa(m.SparseTopK),
 		"sparse_top_k_effective_max_observed_doc":   strconv.Itoa(m.SparseTopKEffectiveMaxObservedDoc),
@@ -1718,7 +1727,12 @@ func main() {
 	tokenSpan, _ := parseIntEnv("EOS_LC_WEDGE_TOKEN_SPAN", 48)
 	tokenOverlap, _ := parseIntEnv("EOS_LC_WEDGE_TOKEN_OVERLAP", 12)
 	maxTokens, _ := parseIntEnv("EOS_LC_WEDGE_MAX_TOKENS", retargetMaxSeq)
+	sparseExportMaxSeq, _ := parseIntEnv("EOS_LC_WEDGE_SPARSE_EXPORT_MAX_SEQ", 0)
 	minObservedTokens, _ := parseIntEnv("EOS_LC_WEDGE_MIN_OBSERVED_DOC_TOKENS", 512)
+	if sparseExportMaxSeq < 0 {
+		fmt.Fprintln(os.Stderr, "EOS_LC_WEDGE_SPARSE_EXPORT_MAX_SEQ must be non-negative")
+		os.Exit(1)
+	}
 	sparseTopK, _ := parseIntEnv("EOS_LC_WEDGE_SPARSE_TOP_K", 256)
 	tokenSpanResume := enabledByDefaultEnv("EOS_LC_WEDGE_TOKEN_SPAN_RESUME")
 	tokenSpanProgressEvery, _ := parseIntEnv("EOS_LC_WEDGE_TOKEN_SPAN_PROGRESS_EVERY", 10)
@@ -1808,6 +1822,9 @@ func main() {
 		"--progress-every", strconv.Itoa(tokenSpanProgressEvery),
 		"--manifest-json", sparseManifestPath,
 	}
+	if sparseExportMaxSeq > 0 {
+		exportSparseArgs = append(exportSparseArgs, "--tokenizer-max-seq", strconv.Itoa(sparseExportMaxSeq))
+	}
 	if tokenSpanResume {
 		exportSparseArgs = append(exportSparseArgs, "--resume")
 	}
@@ -1886,6 +1903,9 @@ func main() {
 			"--bits", "4",
 			"--seed", strconv.FormatInt(quantizerSeed, 10),
 			"--manifest-json", sparseEncoderManifestPath,
+		}
+		if sparseExportMaxSeq > 0 {
+			exportSparseEncoderArgs = append(exportSparseEncoderArgs, "--tokenizer-max-seq", strconv.Itoa(sparseExportMaxSeq))
 		}
 		exportSparseEncoderArgs = appendCaps(exportSparseEncoderArgs, maxDocs, maxQueries)
 		exportSparseEncoderArgs = append(exportSparseEncoderArgs, evalArtifact, datasetDir, sparseEncoderDir)

@@ -24,42 +24,43 @@ const (
 // vector-cache export that pools token embeddings through routed TurboQuant
 // sparse attention. It is a prototype path, not the production embedding model.
 type SparseTokenPoolRetrievalVectorExportConfig struct {
-	DatasetName           string
-	ArtifactPath          string
-	WeightFilePath        string
-	CorpusPath            string
-	QueriesPath           string
-	QrelsPath             string
-	OutputDir             string
-	BatchSize             int
-	MaxDocs               int
-	MaxQueries            int
-	OutputDim             int
-	DocumentChunkWords    int
-	DocumentChunkOverlap  int
-	DocumentChunkMinWords int
-	TokenSpanTokens       int
-	TokenSpanOverlap      int
-	TokenSpanMinTokens    int
-	DocumentPrefix        string
-	QueryPrefix           string
-	ManifestJSONPath      string
-	TopK                  int
-	RouteBlockSize        int
-	RouteTopBlocks        int
-	Bits                  int
-	KeyBits               int
-	ValueBits             int
-	Seed                  int64
-	MaxTokens             int
-	MinObservedDocTokens  int
-	AttentionMode         string
-	RequireFullEncoder    bool
-	Method                string
-	EvidenceLevel         string
-	ClaimBoundary         string
-	Resume                bool
-	ProgressEvery         int
+	DatasetName                  string
+	ArtifactPath                 string
+	WeightFilePath               string
+	CorpusPath                   string
+	QueriesPath                  string
+	QrelsPath                    string
+	OutputDir                    string
+	BatchSize                    int
+	MaxDocs                      int
+	MaxQueries                   int
+	OutputDim                    int
+	DocumentChunkWords           int
+	DocumentChunkOverlap         int
+	DocumentChunkMinWords        int
+	TokenSpanTokens              int
+	TokenSpanOverlap             int
+	TokenSpanMinTokens           int
+	DocumentPrefix               string
+	QueryPrefix                  string
+	ManifestJSONPath             string
+	TopK                         int
+	RouteBlockSize               int
+	RouteTopBlocks               int
+	Bits                         int
+	KeyBits                      int
+	ValueBits                    int
+	Seed                         int64
+	MaxTokens                    int
+	TokenizerMaxSequenceOverride int
+	MinObservedDocTokens         int
+	AttentionMode                string
+	RequireFullEncoder           bool
+	Method                       string
+	EvidenceLevel                string
+	ClaimBoundary                string
+	Resume                       bool
+	ProgressEvery                int
 }
 
 // SparseTokenPoolRetrievalVectorExportSummary is the manifest written beside
@@ -99,6 +100,9 @@ type SparseTokenPoolRetrievalVectorExportSummary struct {
 	MaxDocs                             int                       `json:"max_docs,omitempty"`
 	MaxQueries                          int                       `json:"max_queries,omitempty"`
 	MaxTokens                           int                       `json:"max_tokens,omitempty"`
+	TokenizerMaxSequenceOriginal        int                       `json:"tokenizer_max_sequence_original,omitempty"`
+	TokenizerMaxSequenceEffective       int                       `json:"tokenizer_max_sequence_effective,omitempty"`
+	TokenizerMaxSequenceOverride        int                       `json:"tokenizer_max_sequence_override,omitempty"`
 	MinObservedDocTokens                int                       `json:"min_observed_doc_tokens,omitempty"`
 	CorpusPath                          string                    `json:"corpus_path,omitempty"`
 	QueriesPath                         string                    `json:"queries_path,omitempty"`
@@ -242,6 +246,21 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 	if err := validateSparseTokenPoolExportConfig(cfg); err != nil {
 		return SparseTokenPoolRetrievalVectorExportSummary{}, err
 	}
+	tokenizerMaxSequenceOriginal := 0
+	if model != nil {
+		tokenizerMaxSequenceOriginal = model.Manifest().Tokenizer.MaxSequence
+	}
+	if cfg.TokenizerMaxSequenceOverride > 0 {
+		var err error
+		model, err = model.WithTokenizerMaxSequenceOverride(cfg.TokenizerMaxSequenceOverride)
+		if err != nil {
+			return SparseTokenPoolRetrievalVectorExportSummary{}, err
+		}
+	}
+	tokenizerMaxSequenceEffective := 0
+	if model != nil {
+		tokenizerMaxSequenceEffective = model.Manifest().Tokenizer.MaxSequence
+	}
 	weights, err := ReadWeightFile(cfg.WeightFilePath)
 	if err != nil {
 		return SparseTokenPoolRetrievalVectorExportSummary{}, fmt.Errorf("read weights: %w", err)
@@ -337,83 +356,86 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 		effectiveTopK = maxObservedDocPlan.TopK
 	}
 	summary := SparseTokenPoolRetrievalVectorExportSummary{
-		Schema:                  SparseTokenPoolRetrievalVectorExportManifestSchema,
-		Method:                  method,
-		Experimental:            true,
-		QualityClaim:            false,
-		EvidenceLevel:           cfg.EvidenceLevel,
-		ClaimBoundary:           claimBoundary,
-		Dataset:                 cfg.DatasetName,
-		Artifact:                cfg.ArtifactPath,
-		WeightFile:              cfg.WeightFilePath,
-		TokenizerPresent:        model.HasTokenizer(),
-		Documents:               len(corpus),
-		Queries:                 len(queries),
-		ChildVectors:            childCount,
-		Dimension:               dim,
-		ModelDimension:          modelDim,
-		OutputDimension:         dim,
-		DocVectorPath:           docVectorPath,
-		ChildDocVectorPath:      childDocVectorPath,
-		QueryVectorPath:         queryVectorPath,
-		ResumeEnabled:           cfg.Resume,
-		ProgressEvery:           cfg.ProgressEvery,
-		ResumedDocumentRecords:  docResume.RecordsReused,
-		ResumedChildVectors:     docResume.RowsReused,
-		ResumedQueryRecords:     queryResume.RecordsReused,
-		DocumentChunkWords:      cfg.DocumentChunkWords,
-		DocumentChunkOverlap:    cfg.DocumentChunkOverlap,
-		DocumentChunkMinWords:   cfg.DocumentChunkMinWords,
-		TokenSpanTokens:         cfg.TokenSpanTokens,
-		TokenSpanOverlap:        cfg.TokenSpanOverlap,
-		TokenSpanMinTokens:      cfg.TokenSpanMinTokens,
-		BatchSize:               cfg.BatchSize,
-		MaxDocs:                 cfg.MaxDocs,
-		MaxQueries:              cfg.MaxQueries,
-		MaxTokens:               cfg.MaxTokens,
-		MinObservedDocTokens:    cfg.MinObservedDocTokens,
-		CorpusPath:              cfg.CorpusPath,
-		QueriesPath:             cfg.QueriesPath,
-		QrelsPath:               cfg.QrelsPath,
-		TopKConfigured:          cfg.TopK,
-		TopK:                    effectiveTopK,
-		RouteBlockSize:          cfg.RouteBlockSize,
-		RouteTopBlocks:          cfg.RouteTopBlocks,
-		Bits:                    cfg.Bits,
-		KeyBits:                 cfg.KeyBits,
-		ValueBits:               cfg.ValueBits,
-		QuantizerSeed:           cfg.Seed,
-		AttentionMode:           cfg.AttentionMode,
-		SparseTopKConfigured:    cfg.TopK,
-		SparseTopK:              effectiveTopK,
-		TurboQuantKVApplied:     cfg.AttentionMode == SparseTokenPoolAttentionModeTurboQuantSparse,
-		DenseKVMaterialized:     true,
-		KVDecode:                encoder.kvDecode(),
-		RequireFullEncoder:      cfg.RequireFullEncoder,
-		FullEncoderApplied:      encoder.fullEncoderOK,
-		MaxObservedDocPlan:      maxObservedDocPlan,
-		AttentionWeightsApplied: encoder.attentionWeightsOK,
-		AttentionOutputApplied:  encoder.attentionOutputOK,
-		HiddenProjectionApplied: encoder.hiddenProjectionOK,
-		ProjectionApplied:       encoder.projectionOK,
-		EncoderRepeatsApplied:   encoder.encoderRepeatsApplied(),
-		AttentionResidual:       encoder.manifest.AttentionResidual,
-		AttentionLayerNorm:      encoder.manifest.AttentionLayerNorm,
-		FFNResidual:             encoder.manifest.FFNResidual,
-		FFNLayerNorm:            encoder.manifest.FFNLayerNorm,
-		TokenEmbeddingParam:     encoder.manifest.TokenEmbeddingParam,
-		AttentionQueryParam:     encoder.manifest.AttentionQueryParam,
-		AttentionKeyParam:       encoder.manifest.AttentionKeyParam,
-		AttentionValueParam:     encoder.manifest.AttentionValueParam,
-		AttentionOutputParam:    encoder.manifest.AttentionOutputParam,
-		HiddenProjectionParam:   encoder.manifest.HiddenProjectionParam,
-		ProjectionParam:         encoder.manifest.ProjectionParam,
-		SkippedWeights:          encoder.skippedWeights,
-		DocumentTokenizerOutput: docTokenStats.summary(),
-		QueryTokenizerOutput:    queryTokenStats.summary(),
-		Caveats:                 encoder.caveats(),
-		ElapsedSeconds:          time.Since(start).Seconds(),
-		CreatedAt:               time.Now().UTC(),
+		Schema:                        SparseTokenPoolRetrievalVectorExportManifestSchema,
+		Method:                        method,
+		Experimental:                  true,
+		QualityClaim:                  false,
+		EvidenceLevel:                 cfg.EvidenceLevel,
+		ClaimBoundary:                 claimBoundary,
+		Dataset:                       cfg.DatasetName,
+		Artifact:                      cfg.ArtifactPath,
+		WeightFile:                    cfg.WeightFilePath,
+		TokenizerPresent:              model.HasTokenizer(),
+		Documents:                     len(corpus),
+		Queries:                       len(queries),
+		ChildVectors:                  childCount,
+		Dimension:                     dim,
+		ModelDimension:                modelDim,
+		OutputDimension:               dim,
+		DocVectorPath:                 docVectorPath,
+		ChildDocVectorPath:            childDocVectorPath,
+		QueryVectorPath:               queryVectorPath,
+		ResumeEnabled:                 cfg.Resume,
+		ProgressEvery:                 cfg.ProgressEvery,
+		ResumedDocumentRecords:        docResume.RecordsReused,
+		ResumedChildVectors:           docResume.RowsReused,
+		ResumedQueryRecords:           queryResume.RecordsReused,
+		DocumentChunkWords:            cfg.DocumentChunkWords,
+		DocumentChunkOverlap:          cfg.DocumentChunkOverlap,
+		DocumentChunkMinWords:         cfg.DocumentChunkMinWords,
+		TokenSpanTokens:               cfg.TokenSpanTokens,
+		TokenSpanOverlap:              cfg.TokenSpanOverlap,
+		TokenSpanMinTokens:            cfg.TokenSpanMinTokens,
+		BatchSize:                     cfg.BatchSize,
+		MaxDocs:                       cfg.MaxDocs,
+		MaxQueries:                    cfg.MaxQueries,
+		MaxTokens:                     cfg.MaxTokens,
+		TokenizerMaxSequenceOriginal:  tokenizerMaxSequenceOriginal,
+		TokenizerMaxSequenceEffective: tokenizerMaxSequenceEffective,
+		TokenizerMaxSequenceOverride:  cfg.TokenizerMaxSequenceOverride,
+		MinObservedDocTokens:          cfg.MinObservedDocTokens,
+		CorpusPath:                    cfg.CorpusPath,
+		QueriesPath:                   cfg.QueriesPath,
+		QrelsPath:                     cfg.QrelsPath,
+		TopKConfigured:                cfg.TopK,
+		TopK:                          effectiveTopK,
+		RouteBlockSize:                cfg.RouteBlockSize,
+		RouteTopBlocks:                cfg.RouteTopBlocks,
+		Bits:                          cfg.Bits,
+		KeyBits:                       cfg.KeyBits,
+		ValueBits:                     cfg.ValueBits,
+		QuantizerSeed:                 cfg.Seed,
+		AttentionMode:                 cfg.AttentionMode,
+		SparseTopKConfigured:          cfg.TopK,
+		SparseTopK:                    effectiveTopK,
+		TurboQuantKVApplied:           cfg.AttentionMode == SparseTokenPoolAttentionModeTurboQuantSparse,
+		DenseKVMaterialized:           true,
+		KVDecode:                      encoder.kvDecode(),
+		RequireFullEncoder:            cfg.RequireFullEncoder,
+		FullEncoderApplied:            encoder.fullEncoderOK,
+		MaxObservedDocPlan:            maxObservedDocPlan,
+		AttentionWeightsApplied:       encoder.attentionWeightsOK,
+		AttentionOutputApplied:        encoder.attentionOutputOK,
+		HiddenProjectionApplied:       encoder.hiddenProjectionOK,
+		ProjectionApplied:             encoder.projectionOK,
+		EncoderRepeatsApplied:         encoder.encoderRepeatsApplied(),
+		AttentionResidual:             encoder.manifest.AttentionResidual,
+		AttentionLayerNorm:            encoder.manifest.AttentionLayerNorm,
+		FFNResidual:                   encoder.manifest.FFNResidual,
+		FFNLayerNorm:                  encoder.manifest.FFNLayerNorm,
+		TokenEmbeddingParam:           encoder.manifest.TokenEmbeddingParam,
+		AttentionQueryParam:           encoder.manifest.AttentionQueryParam,
+		AttentionKeyParam:             encoder.manifest.AttentionKeyParam,
+		AttentionValueParam:           encoder.manifest.AttentionValueParam,
+		AttentionOutputParam:          encoder.manifest.AttentionOutputParam,
+		HiddenProjectionParam:         encoder.manifest.HiddenProjectionParam,
+		ProjectionParam:               encoder.manifest.ProjectionParam,
+		SkippedWeights:                encoder.skippedWeights,
+		DocumentTokenizerOutput:       docTokenStats.summary(),
+		QueryTokenizerOutput:          queryTokenStats.summary(),
+		Caveats:                       encoder.caveats(),
+		ElapsedSeconds:                time.Since(start).Seconds(),
+		CreatedAt:                     time.Now().UTC(),
 	}
 	if maxObservedDocPlan != nil {
 		summary.ScoreFractionMaxObservedDoc = maxObservedDocPlan.ScoreCountFraction
@@ -422,6 +444,9 @@ func ExportSparseTokenPoolRetrievalVectors(ctx context.Context, model *Embedding
 		if cfg.AttentionMode == SparseTokenPoolAttentionModeTurboQuantSparse {
 			summary.SparseTopKEffectiveMaxObservedDoc = maxObservedDocPlan.TopK
 		}
+	}
+	if cfg.TokenizerMaxSequenceOverride > 0 {
+		summary.Caveats = append(summary.Caveats, fmt.Sprintf("tokenizer_max_sequence_override=%d is export-time diagnostic sparse retrieval-cache evidence only; it does not mutate the artifact and quality_claim=false remains unchanged", cfg.TokenizerMaxSequenceOverride))
 	}
 	if len(summary.Caveats) == 0 {
 		summary.Caveats = []string{
@@ -551,8 +576,8 @@ func validateSparseTokenPoolExportConfig(cfg SparseTokenPoolRetrievalVectorExpor
 	if cfg.ValueBits != 2 && cfg.ValueBits != 4 && cfg.ValueBits != 8 {
 		return fmt.Errorf("value-bits must be 0, 2, 4, or 8")
 	}
-	if cfg.TopK < 0 || cfg.RouteBlockSize < 0 || cfg.RouteTopBlocks < 0 || cfg.MaxTokens < 0 || cfg.MinObservedDocTokens < 0 || cfg.ProgressEvery < 0 {
-		return fmt.Errorf("top-k, route-block-size, route-top-blocks, max-tokens, min-observed-doc-tokens, and progress-every must be non-negative")
+	if cfg.TopK < 0 || cfg.RouteBlockSize < 0 || cfg.RouteTopBlocks < 0 || cfg.MaxTokens < 0 || cfg.TokenizerMaxSequenceOverride < 0 || cfg.MinObservedDocTokens < 0 || cfg.ProgressEvery < 0 {
+		return fmt.Errorf("top-k, route-block-size, route-top-blocks, max-tokens, tokenizer-max-seq, min-observed-doc-tokens, and progress-every must be non-negative")
 	}
 	switch cfg.AttentionMode {
 	case SparseTokenPoolAttentionModeTurboQuantSparse, SparseTokenPoolAttentionModeDense:
