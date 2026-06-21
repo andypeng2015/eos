@@ -1710,11 +1710,6 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	if !fileExists(siblingWeightPath(evalArtifact)) {
-		fmt.Fprintf(os.Stderr, "required sibling weights for sparse-token-span export are missing: %s\n", siblingWeightPath(evalArtifact))
-		os.Exit(1)
-	}
-
 	topK, _ := parseIntEnv("EOS_LC_WEDGE_TOP_K", 100)
 	maxDocs, _ := parseIntEnv("EOS_LC_WEDGE_MAX_DOCS", 0)
 	maxQueries, _ := parseIntEnv("EOS_LC_WEDGE_MAX_QUERIES", 0)
@@ -1733,6 +1728,25 @@ func main() {
 		os.Exit(1)
 	}
 	bits := getenv("EOS_LC_WEDGE_BITS", "2,4,8")
+
+	if !fileExists(siblingWeightPath(evalArtifact)) {
+		inspectLog := filepath.Join(logDir, "inspect-eos-artifact.log")
+		rec, err = runCmd(root, "Inspect Eos artifact package", inspectLog, eosBin, []string{"inspect", evalArtifact})
+		commands = append(commands, rec)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		inspectOut, readErr := os.ReadFile(inspectLog)
+		if readErr != nil {
+			fmt.Fprintln(os.Stderr, readErr)
+			os.Exit(1)
+		}
+		if !strings.Contains(string(inspectOut), "package: embedded sealed MLL") {
+			fmt.Fprintf(os.Stderr, "required sibling weights for sparse-token-span export are missing: %s\n", siblingWeightPath(evalArtifact))
+			os.Exit(1)
+		}
+	}
 	fusionEnabled := parentSpanFusionEnabled()
 	parentAggregation, err := parseParentAggregationEnv()
 	if err != nil {

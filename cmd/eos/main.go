@@ -599,6 +599,10 @@ func runExportSparseTokenPoolVectors(args []string) error {
 	artifactPath := fs.Arg(0)
 	datasetDir := fs.Arg(1)
 	outputDir := fs.Arg(2)
+	resolvedWeightPath, err := resolveSparseExportWeightPath(artifactPath, outputDir, *weightPath)
+	if err != nil {
+		return err
+	}
 	corpusPath, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
 	if *qrelsPath == "" {
 		*qrelsPath = defaultQrelsPath
@@ -615,7 +619,7 @@ func runExportSparseTokenPoolVectors(args []string) error {
 	summary, err := eosruntime.ExportSparseTokenPoolRetrievalVectors(context.Background(), model, eosruntime.SparseTokenPoolRetrievalVectorExportConfig{
 		DatasetName:           *datasetName,
 		ArtifactPath:          artifactPath,
-		WeightFilePath:        *weightPath,
+		WeightFilePath:        resolvedWeightPath,
 		CorpusPath:            corpusPath,
 		QueriesPath:           queriesPath,
 		QrelsPath:             *qrelsPath,
@@ -710,6 +714,10 @@ func runExportSparseEncoderVectors(args []string) error {
 	artifactPath := fs.Arg(0)
 	datasetDir := fs.Arg(1)
 	outputDir := fs.Arg(2)
+	resolvedWeightPath, err := resolveSparseExportWeightPath(artifactPath, outputDir, *weightPath)
+	if err != nil {
+		return err
+	}
 	corpusPath, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
 	if *qrelsPath == "" {
 		*qrelsPath = defaultQrelsPath
@@ -726,7 +734,7 @@ func runExportSparseEncoderVectors(args []string) error {
 	summary, err := eosruntime.ExportSparseTokenPoolRetrievalVectors(context.Background(), model, eosruntime.SparseTokenPoolRetrievalVectorExportConfig{
 		DatasetName:          *datasetName,
 		ArtifactPath:         artifactPath,
-		WeightFilePath:       *weightPath,
+		WeightFilePath:       resolvedWeightPath,
 		CorpusPath:           corpusPath,
 		QueriesPath:          queriesPath,
 		QrelsPath:            *qrelsPath,
@@ -771,6 +779,30 @@ func runExportSparseEncoderVectors(args []string) error {
 		fmt.Printf("manifest: %s\n", *manifestPath)
 	}
 	return nil
+}
+
+func resolveSparseExportWeightPath(artifactPath, outputDir, explicitPath string) (string, error) {
+	if explicitPath != "" {
+		return explicitPath, nil
+	}
+	defaultPath := eosruntime.DefaultWeightFilePath(artifactPath)
+	if _, err := os.Stat(defaultPath); err == nil {
+		return defaultPath, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	pkg, err := eosruntime.ReadSealedEmbeddingPackage(artifactPath)
+	if err != nil {
+		return defaultPath, nil
+	}
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return "", err
+	}
+	sealedWeightPath := filepath.Join(outputDir, "sealed-weights.mll")
+	if err := pkg.Weights.WriteFile(sealedWeightPath); err != nil {
+		return "", err
+	}
+	return sealedWeightPath, nil
 }
 
 func runExportTimeSeriesVectors(args []string) error {
