@@ -17,6 +17,10 @@ const defaultHybridArtifact = "runs/eos-s40-longembed-balanced-anchor-sweep-v1-2
 const defaultPolicyLabel = "fiqa24-nf48-minmax-blend-alpha0.5-top100"
 const defaultFusionAlpha = 0.5
 const defaultTopK = 100
+const sparseMethodTFIDFL2 = "tfidf_l2"
+const sparseMethodBM25Dot = "bm25_dot"
+const sparseMethodTFIDFL2Label = "lexical_tf_idf_l2_vocab_from_loaded_beir_docs_and_queries"
+const sparseMethodBM25DotLabel = "lexical_bm25_dot_k1_0.9_b_0.4_vocab_from_loaded_beir_docs"
 
 type qualityMetrics struct {
 	NDCGAt10    float64 `json:"ndcg_at_10"`
@@ -147,6 +151,7 @@ Environment:
   EOS_CORKSCREW_HYBRID_SMOKE_TOP_K=100
   EOS_CORKSCREW_HYBRID_SMOKE_BATCH_SIZE=64
   EOS_CORKSCREW_HYBRID_SMOKE_BITS=8
+  EOS_CORKSCREW_HYBRID_SMOKE_SPARSE_METHOD=tfidf_l2|bm25_dot
   EOS_CORKSCREW_HYBRID_SMOKE_FAIL_ON_GATE=0`)
 }
 
@@ -176,6 +181,21 @@ func envBool(name string, fallback bool) bool {
 		return fallback
 	}
 	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func normalizeSparseMethod(value string) (string, error) {
+	method := strings.ToLower(strings.TrimSpace(value))
+	if method == "" {
+		method = sparseMethodTFIDFL2
+	}
+	switch method {
+	case sparseMethodTFIDFL2, "tfidf", "tf_idf_l2", sparseMethodTFIDFL2Label:
+		return sparseMethodTFIDFL2, nil
+	case sparseMethodBM25Dot, "bm25", sparseMethodBM25DotLabel:
+		return sparseMethodBM25Dot, nil
+	default:
+		return "", fmt.Errorf("EOS_CORKSCREW_HYBRID_SMOKE_SPARSE_METHOD must be %s or %s, got %q", sparseMethodTFIDFL2, sparseMethodBM25Dot, value)
+	}
 }
 
 func hasRepoRoot(dir string) bool {
@@ -412,6 +432,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	sparseMethod, err := normalizeSparseMethod(os.Getenv("EOS_CORKSCREW_HYBRID_SMOKE_SPARSE_METHOD"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	artifact := getenv("EOS_CORKSCREW_HYBRID_SMOKE_ARTIFACT", filepath.Join(root, defaultHybridArtifact))
 	docVectors := os.Getenv("EOS_CORKSCREW_HYBRID_SMOKE_DOC_VECTORS")
@@ -483,6 +508,7 @@ func main() {
 		"--db", dbPath,
 		"--bits", strconv.Itoa(bits),
 		"--top-k", strconv.Itoa(topK),
+		"--sparse-method", sparseMethod,
 		"--metrics-json", harnessMetricsPath,
 	}
 	entry, err = runCommand(harnessDir, logDir, "harness-searchmulti", harnessArgs, os.Environ())
@@ -521,8 +547,15 @@ func main() {
 	}
 	caveats := []string{
 		"API-level CorkScrewDB smoke only: this proves the selected policy can be translated to WithSparse plus SearchMulti WeightedFusion through the public API.",
-		"The sparse channel is lexical TF-IDF derived from the same BEIR corpus/query text; it is not BM25 and is not exact eval-retrieval-hybrid parity.",
 		"No Eos dense default asset or CorkScrewDB default alias is changed.",
+	}
+	if metrics.SparseMethod == sparseMethodBM25DotLabel {
+		caveats = append(caveats,
+			"The sparse channel encodes BM25-compatible document weights (k1=0.9, b=0.4, loaded-corpus avgdl) and query term frequencies so CorkScrewDB sparse dot matches the in-repo BM25 scoring formula modulo float32 rounding.",
+			"The dense channel is CorkScrewDB quantized when bits < 32; this is not byte-for-byte parity with command-side float dense evaluation.",
+		)
+	} else {
+		caveats = append(caveats, "The sparse channel is lexical TF-IDF derived from the same BEIR corpus/query text; it is not BM25 and is not exact eval-retrieval-hybrid parity.")
 	}
 	if maxDocs != 0 || maxQueries != 0 {
 		caveats = append(caveats, "This run used max-docs or max-queries limits; use max-docs=0 and max-queries=0 for full SciFact evidence.")
@@ -629,13 +662,20 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	corkscrewdb "m31labs.dev/corkscrewdb"
 )
+
+const sparseMethodTFIDFL2 = "tfidf_l2"
+const sparseMethodBM25Dot = "bm25_dot"
+const sparseMethodTFIDFL2Label = "lexical_tf_idf_l2_vocab_from_loaded_beir_docs_and_queries"
+const sparseMethodBM25DotLabel = "lexical_bm25_dot_k1_0.9_b_0.4_vocab_from_loaded_beir_docs"
+const defaultBM25K1 = 0.9
+const defaultBM25B = 0.4
 
 type vectorRow struct {
 	ID        string
@@ -685,8 +725,6 @@ type metrics struct {
 	Gates               map[string]bool
 	Caveats             []string
 }
-
-var tokenRE = regexp.MustCompile("[a-z0-9]+")
 
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
@@ -861,17 +899,61 @@ func strconvParseFloat(value string) (float64, error) {
 }
 
 func tokens(text string) []string {
-	return tokenRE.FindAllString(strings.ToLower(text), -1)
+	text = strings.ToLower(text)
+	out := []string{}
+	var b strings.Builder
+	for _, r := range text {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+			continue
+		}
+		if b.Len() > 0 {
+			out = append(out, b.String())
+			b.Reset()
+		}
+	}
+	if b.Len() > 0 {
+		out = append(out, b.String())
+	}
+	return out
 }
 
-func buildSparse(corpus map[string]textRow, docIDs []string, queries map[string]textRow, queryIDs []string) (map[string]sparseVector, map[string]sparseVector, int) {
+func rowText(row textRow) string {
+	return strings.TrimSpace(row.Title + " " + row.Text)
+}
+
+func normalizeSparseMethod(method string) (string, string, error) {
+	switch strings.ToLower(strings.TrimSpace(method)) {
+	case "", sparseMethodTFIDFL2, "tfidf", "tf_idf_l2", sparseMethodTFIDFL2Label:
+		return sparseMethodTFIDFL2, sparseMethodTFIDFL2Label, nil
+	case sparseMethodBM25Dot, "bm25", sparseMethodBM25DotLabel:
+		return sparseMethodBM25Dot, sparseMethodBM25DotLabel, nil
+	default:
+		return "", "", fmt.Errorf("unsupported sparse method %q", method)
+	}
+}
+
+func buildSparse(method string, corpus map[string]textRow, docIDs []string, queries map[string]textRow, queryIDs []string) (map[string]sparseVector, map[string]sparseVector, int, string, error) {
+	normalized, label, err := normalizeSparseMethod(method)
+	if err != nil {
+		return nil, nil, 0, "", err
+	}
+	if normalized == sparseMethodBM25Dot {
+		docSparse, querySparse, vocabTerms := buildBM25DotSparse(corpus, docIDs, queries, queryIDs)
+		return docSparse, querySparse, vocabTerms, label, nil
+	}
+	docSparse, querySparse, vocabTerms := buildTFIDFL2Sparse(corpus, docIDs, queries, queryIDs)
+	return docSparse, querySparse, vocabTerms, label, nil
+}
+
+func buildTFIDFL2Sparse(corpus map[string]textRow, docIDs []string, queries map[string]textRow, queryIDs []string) (map[string]sparseVector, map[string]sparseVector, int) {
 	termID := map[string]uint32{}
 	docFreq := map[string]int{}
 	docTerms := map[string][]string{}
 	queryTerms := map[string][]string{}
 	for _, id := range docIDs {
 		row := corpus[id]
-		terms := tokens(row.Title + " " + row.Text)
+		terms := tokens(rowText(row))
 		docTerms[id] = terms
 		seen := map[string]bool{}
 		for _, term := range terms {
@@ -886,7 +968,7 @@ func buildSparse(corpus map[string]textRow, docIDs []string, queries map[string]
 	}
 	for _, id := range queryIDs {
 		row := queries[id]
-		terms := tokens(row.Title + " " + row.Text)
+		terms := tokens(rowText(row))
 		queryTerms[id] = terms
 		for _, term := range terms {
 			if _, ok := termID[term]; !ok {
@@ -904,6 +986,113 @@ func buildSparse(corpus map[string]textRow, docIDs []string, queries map[string]
 		querySparse[id] = termsToSparse(terms, termID, docFreq, nDocs)
 	}
 	return docSparse, querySparse, len(termID)
+}
+
+type bm25DocTerms struct {
+	length int
+	tf     map[string]int
+}
+
+func buildBM25DotSparse(corpus map[string]textRow, docIDs []string, queries map[string]textRow, queryIDs []string) (map[string]sparseVector, map[string]sparseVector, int) {
+	termID := map[string]uint32{}
+	docFreq := map[string]int{}
+	docTerms := map[string]bm25DocTerms{}
+	totalLength := 0
+	for _, id := range docIDs {
+		row := corpus[id]
+		terms := tokens(rowText(row))
+		if len(terms) == 0 {
+			terms = []string{""}
+		}
+		tf := map[string]int{}
+		seen := map[string]bool{}
+		for _, term := range terms {
+			tf[term]++
+			if _, ok := termID[term]; !ok {
+				termID[term] = uint32(len(termID) + 1)
+			}
+			if !seen[term] {
+				docFreq[term]++
+				seen[term] = true
+			}
+		}
+		docTerms[id] = bm25DocTerms{length: len(terms), tf: tf}
+		totalLength += len(terms)
+	}
+	avgLength := 0.0
+	if len(docIDs) > 0 {
+		avgLength = float64(totalLength) / float64(len(docIDs))
+	}
+	nDocs := float64(len(docIDs))
+	docSparse := map[string]sparseVector{}
+	for id, terms := range docTerms {
+		docSparse[id] = bm25DocToSparse(terms, termID, docFreq, nDocs, avgLength)
+	}
+	querySparse := map[string]sparseVector{}
+	for _, id := range queryIDs {
+		row := queries[id]
+		querySparse[id] = bm25QueryToSparse(tokens(rowText(row)), termID)
+	}
+	return docSparse, querySparse, len(termID)
+}
+
+func bm25DocToSparse(doc bm25DocTerms, termID map[string]uint32, docFreq map[string]int, nDocs float64, avgLength float64) sparseVector {
+	if nDocs == 0 || avgLength == 0 {
+		return sparseVector{}
+	}
+	type pair struct {
+		index uint32
+		value float64
+	}
+	pairs := []pair{}
+	lengthNorm := defaultBM25K1 * (1 - defaultBM25B + defaultBM25B*float64(doc.length)/avgLength)
+	for term, tf := range doc.tf {
+		if term == "" {
+			continue
+		}
+		df := float64(docFreq[term])
+		if df == 0 {
+			continue
+		}
+		idf := math.Log(1 + (nDocs-df+0.5)/(df+0.5))
+		tfWeight := (float64(tf) * (defaultBM25K1 + 1)) / (float64(tf) + lengthNorm)
+		pairs = append(pairs, pair{index: termID[term], value: idf * tfWeight})
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].index < pairs[j].index })
+	out := sparseVector{indices: make([]uint32, len(pairs)), values: make([]float32, len(pairs))}
+	for i, pair := range pairs {
+		out.indices[i] = pair.index
+		out.values[i] = float32(pair.value)
+	}
+	return out
+}
+
+func bm25QueryToSparse(terms []string, termID map[string]uint32) sparseVector {
+	tf := map[string]int{}
+	for _, term := range terms {
+		if term != "" {
+			tf[term]++
+		}
+	}
+	type pair struct {
+		index uint32
+		value int
+	}
+	pairs := []pair{}
+	for term, count := range tf {
+		index, ok := termID[term]
+		if !ok {
+			continue
+		}
+		pairs = append(pairs, pair{index: index, value: count})
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].index < pairs[j].index })
+	out := sparseVector{indices: make([]uint32, len(pairs)), values: make([]float32, len(pairs))}
+	for i, pair := range pairs {
+		out.indices[i] = pair.index
+		out.values[i] = float32(pair.value)
+	}
+	return out
 }
 
 func termsToSparse(terms []string, termID map[string]uint32, docFreq map[string]int, nDocs float64) sparseVector {
@@ -1045,6 +1234,7 @@ func main() {
 	dbPath := flag.String("db", "", "CorkScrewDB path")
 	bits := flag.Int("bits", 8, "CorkScrewDB bit width")
 	topK := flag.Int("top-k", 100, "retrieval top K")
+	sparseMethod := flag.String("sparse-method", sparseMethodTFIDFL2, "sparse encoding method: tfidf_l2 or bm25_dot")
 	collection := flag.String("collection", "eos_hybrid_policy_smoke", "collection name")
 	metricsPath := flag.String("metrics-json", "", "metrics JSON output")
 	flag.Parse()
@@ -1091,7 +1281,10 @@ func main() {
 			querySet[id] = true
 		}
 	}
-	docSparse, querySparse, vocabTerms := buildSparse(corpus, docIDs, queries, queryIDs)
+	docSparse, querySparse, vocabTerms, sparseMethodLabel, err := buildSparse(*sparseMethod, corpus, docIDs, queries, queryIDs)
+	if err != nil {
+		fatalf("build sparse vectors: %v", err)
+	}
 	if err := os.RemoveAll(*dbPath); err != nil {
 		fatalf("clear db: %v", err)
 	}
@@ -1109,7 +1302,7 @@ func main() {
 		}
 		if err := coll.Put(id, corkscrewdb.Entry{
 			Vector: docVectors[id],
-			Text: strings.TrimSpace(row.Title + " " + row.Text),
+			Text: rowText(row),
 			Sparse: sparse,
 			Metadata: map[string]string{"dataset": *dataset},
 		}); err != nil {
@@ -1185,7 +1378,7 @@ func main() {
 		TopK: *topK,
 		FusionDenseWeight: 0.5,
 		FusionSparseWeight: 0.5,
-		SparseMethod: "lexical_tf_idf_l2_vocab_from_loaded_beir_docs_and_queries",
+		SparseMethod: sparseMethodLabel,
 		LoadSeconds: loadSeconds,
 		DenseSearchSeconds: denseSeconds,
 		HybridSearchSeconds: hybridSeconds,
