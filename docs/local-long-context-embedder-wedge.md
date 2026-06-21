@@ -282,6 +282,13 @@ The same `eval-retrieval-multivector-turboquant` path exposes diagnostic parent 
 
 Official LongEmbed capped token-span evidence is now available for four real-task slices using span `256`, overlap `64`, q4 token-span caches, external baselines disabled, and `quality_claim=false` throughout. The resumable sparse token-vector export capability that made the QMSum, NarrativeQA, and 2WikiMQA runs practical was checkpointed as `a5e18786` (`add: Add resumable sparse token vector export with progress sidecars`); it adds `--resume`, `--progress-every`, and progress sidecars for child document and query vector JSONL outputs. The SummScreenFD row is a complete audited legacy/pre-resume artifact, so it has no resume/progress sidecars even though its artifact set is complete.
 
+The promoted s40 current-default package has a fresh capped official comparison against cached Qwen3 0.6B and mxbai-large child-vector baselines. These rows are still diagnostic: `quality_claim=false`, capped `real-doc20` slices, and external rows use many more child vectors and higher storage than Eos token-span rows.
+
+| Dataset | Best Eos row | Eos nDCG@10 | Qwen3 q4 nDCG@10 | mxbai q4 nDCG@10 | Caveat |
+| --- | --- | ---: | ---: | ---: | --- |
+| `qmsum` | token-span q4 | 0.560693 | 0.848162 | 0.828480 | Eos uses 416 token-span children; external cached rows use 2,577 children. |
+| `2wikimqa` | fusion RRF | 0.745700 | 1.000000 | 0.981546 | Eos uses 426 fusion children; external cached rows use 1,771 children. |
+
 | Dataset | Slice | Direct nDCG@10 | q4 token-span nDCG@10 | Best fusion nDCG@10 | Conservative fusion nDCG@10 | q4 child count | q4 storage multiple | Interpretation |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | `qmsum` | doc40/query20 | 0.396104612 | 0.359794187 | 0.407512308 | 0.396826356 | 200 | 0.083007812 | q4 token-span alone regressed; conservative fusion gives a tiny no-regression lift; less-conservative fusion lifts aggregate but has per-query regressions. |
@@ -289,7 +296,21 @@ Official LongEmbed capped token-span evidence is now available for four real-tas
 | `2wikimqa` | doc20/query20 | 0.648352471 | 0.550567431 | 0.648352471 | 0.648352471 | 100 | 0.083007812 | q4 token-span alone regressed; only the conservative fusion recipe ties direct with no per-query regressions. |
 | `summ_screen_fd` | doc20/query20 | 0.843996310 | 0.760026850 | 0.843996310 | 0.843996310 | 417 | 0.346142578125 | q4 token-span alone regressed; conservative fusion ties direct; less-conservative dense-protect k10 regressed. |
 
-Interpret q4 token-span alone as compact storage and evaluation-path evidence, not default quality evidence: it regressed aggregate nDCG@10 versus direct single-vector retrieval on all four official span256/64 capped slices. The current conservative diagnostic recipe is `direct_token_span_fusion_dense_protect_n1_rrf_k60_lambda010`: QMSum gets a slight aggregate lift, NarrativeQA ties direct exactly, 2WikiMQA ties direct exactly, SummScreenFD ties direct exactly, and none of the post-resume capped runs had per-query nDCG@10 regressions under that recipe. Less-conservative fusion can lift some datasets, especially QMSum, but regresses others, so keep fusion diagnostic until cross-dataset stability improves. The next evidence spend should be another non-QMSum capped slice or a larger QMSum slice only after an explicit cost decision; the stronger product path is trained compact, Matryoshka, or token-span quality rather than defaulting raw q4 token-span.
+Interpret q4 token-span alone as compact storage and evaluation-path evidence, not default quality evidence: it regressed aggregate nDCG@10 versus direct single-vector retrieval on all four official span256/64 capped slices. The current conservative diagnostic recipe is `direct_token_span_fusion_dense_protect_n1_rrf_k60_lambda010`: QMSum gets a slight aggregate lift, NarrativeQA ties direct exactly, 2WikiMQA ties direct exactly, SummScreenFD ties direct exactly, and none of the post-resume capped runs had per-query nDCG@10 regressions under that recipe. Less-conservative fusion can lift some datasets, especially QMSum, but regresses others, so keep fusion diagnostic until cross-dataset stability improves. Do not promote from these capped LongEmbed rows. The local replay lane around the exact s40 LongEmbed teacher batch and anchor mix is closed: further replay/source-weight/FIQA padding did not clear the strict short-set gate, so the next Eos improvement should change signal family or objective.
+
+Rejected s40 LongEmbed replay probes:
+
+| Probe | Outcome |
+| --- | --- |
+| LongEmbed teacher batch | Rejected on NFCorpus nDCG `-0.000197`; QMSum q4 lifted, but 2Wiki drifted. |
+| Anchor-protected continuation | Rejected on NFCorpus recall `-0.000054` and FIQA nDCG `-0.000107`; QMSum q4/fusion stayed positive but with less lift. |
+| Balanced anchor sweep best `fiqa24-nf48` | Rejected only on FIQA nDCG `-0.000057`; NFCorpus recall was preserved at `+0.000007`, but the useful QMSum q4/fusion signal fell below s40 and prior probes. |
+| FIQA targeted replay with fallback anchors | Rejected on NFCorpus recall `-0.000047` and FIQA nDCG `-0.000057`; the aggregate FIQA miss came from only query `6133`, doc `7733`, rank `2 -> 3`. |
+| FIQA single replay | Rejected with the same NFCorpus recall and FIQA nDCG failures; embeddings moved slightly, but the diagnostic fixture rank order stayed unchanged. |
+
+Next LongEmbed work should use a new non-test FIQA-compatible teacher or synthetic signal, a trained compact/Matryoshka objective with a movement gate, or a larger-model/bootstrap path. If LongEmbed remains the target, use a new non-test signal or objective rather than more eval-slice replay micro-tuning around this protected batch.
+
+`scripts/diagnose_eos_embedding_movement.fw` is now the required cheap preflight before expensive compact-head or tiny-continuation sweeps. It compares two Eos artifacts through the retrieval export surface and reports vector movement plus synthetic rank-order changes. The Matryoshka-only 128d probe was exactly pinned at 64d, 128d, and full dimensions, while the TurboQuant-prefix branch moved slightly. Require movement-positive and no-restore evidence before spending another compact-head sweep.
 
 Use `eos eval-retrieval-vectors-turboquant` on those same caches to compare q2/q4/q8 TurboQuant IP document-vector indexes without adding provider SDKs. This is the key CorkScrewDB default-promotion comparison surface because every candidate, including external BGE/Qwen/Jina/Voyage/Cohere/OpenAI caches and sealed local Eos embeddings, can be judged by dense quality plus compressed vector-index quality and cost.
 Enable `EOS_SCOREBOARD_HYBRID_RETRIEVAL=1` to add lexical+dense hybrid rows without removing dense, BM25, or TurboQuant rows. The harness runs `eos eval-retrieval-hybrid` for local Eos rows and `eos eval-retrieval-vectors-hybrid` for external vector caches, using `EOS_SCOREBOARD_HYBRID_METHOD`, `EOS_SCOREBOARD_HYBRID_ALPHA`, `EOS_SCOREBOARD_HYBRID_RRF_K`, and `EOS_SCOREBOARD_HYBRID_RRF_LAMBDA`. Treat the FiQA dev-selected `minmax`/`alpha=0.75` setting as guarded hybrid retrieval evidence only; it does not promote the dense embedder.
