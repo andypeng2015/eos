@@ -147,15 +147,15 @@ ferrous-wheel run scripts/score_manta_embed_v1_baselines.fw
 
 The scoreboard run writes `scoreboard.tsv`, `scoreboard.json`, per-task metrics JSON, command logs, and a run-local `eos` binary under `runs/<run-id>/`. Dense local rows default to `baseline=eos`; hybrid rows default to `baseline=eos-hybrid`; local TurboQuant rows use `eos-turboquant` for direct quantized scoring and `eos-turboquant-rerank` for quantized candidate overfetch plus rerank storage modes such as fp16; external TurboQuant rows use `<external>-turboquant`; external child-vector rows use `<external>-dense-child` for dense child max and `<external>-turboquant-child` for q-bit child max rows. Set `EOS_SCOREBOARD_BASELINE_LABEL=manta` and `EOS_SCOREBOARD_HYBRID_BASELINE_LABEL=manta-hybrid` only when intentionally producing a legacy-labeled scoreboard. Pairwise rows use `EOS_SCOREBOARD_PAIRWISE_ARTIFACT` when set, or infer the sibling trainable package from a sealed artifact path. Add `EOS_SCOREBOARD_LONG_ROOT` and `EOS_SCOREBOARD_LONG_DATASETS` when long-document retrieval datasets are prepared.
 
-Current command-level hybrid short-retrieval evidence uses `runs/eos-s40-longembed-balanced-anchor-sweep-v1-20260620T195017Z/candidates/fiqa24-nf48/candidate/eos-embed-v1.sealed.mll` with `eval-retrieval-hybrid --method minmax_blend --alpha 0.5 --top-k 100`, recorded in `runs/eos-s40-command-hybrid-validation-v1-20260620T224155Z/command-hybrid-validation.json`. It is ranking-policy evidence for `eos-hybrid`, not dense `eos` promotion and not a default asset change. Use `scripts/smoke_eos_hybrid_retrieval_serving.fw` to repeat the selected policy as repo-local serving evidence with manifest, quality gates, caveats, and policy identity.
+Current-default command-level hybrid short-retrieval evidence uses `assets/corkscrewdb-default-embedder/corkscrewdb-default-embedder.mll`, SHA256 `f494915a0d78b24205d5018bb701bf40cabbedee4bc8b96b6a1920b19131da5a`, with `eval-retrieval-hybrid --method minmax_blend --alpha 0.5 --top-k 100`, recorded in `runs/eos-s40-current-default-hybrid-policy-v1-20260621T103500Z/command-level-summary.tsv`. It is ranking-policy evidence for `eos-hybrid`, not dense `eos` promotion and not a default asset change. The same run includes full uncapped CorkScrewDB BM25-dot `SearchMulti` smokes in `runs/eos-s40-current-default-hybrid-policy-v1-20260621T103500Z/api-smoke-summary.tsv`.
 
 | Dataset | Hybrid nDCG@10 | Hybrid recall@100 | Gate |
 | --- | ---: | ---: | --- |
 | SciFact | 0.717644867485 | 0.932888888889 | pass |
-| NFCorpus | 0.311158654714 | 0.290278895553 | pass |
-| FiQA | 0.219415915378 | 0.500980325402 | pass |
+| NFCorpus | 0.311170830256 | 0.290149896585 | pass |
+| FiQA | 0.219415915378 | 0.500671683426 | pass |
 
-NFCorpus command nDCG@10 is lower than the prior offline simulation by `0.002670461567`, but the command-level gate is unaffected.
+Full uncapped BM25-dot `SearchMulti` API smokes passed with SciFact `0.724378172602`/`0.932888888889`, NFCorpus `0.315090347196`/`0.293990495284`, and FiQA `0.223742712175`/`0.504002444743` hybrid nDCG@10/recall@100, all `overall_pass=true`. Treat these as local lexical+dense policy rows only, not dense model promotion, remote mode, HNSW, federation, or hosted parity.
 
 Run the parent/single-vector prefix-dimension compact-quality harness when the question is "how much quality does the current default artifact keep after prefix truncation plus direct q-bit vector-index compression?":
 
@@ -467,7 +467,15 @@ BM25-dot sparse q4 API rows:
 | `runs/eos-corkscrewdb-hybrid-policy-full-nfcorpus-q4-bm25dot-v1-20260620T000000Z/` | 4 | 3,633 | 323 | 12,334 | 0.201400 / 0.233861 | 0.311750 / 0.291122 | pass |
 | `runs/eos-corkscrewdb-hybrid-policy-full-fiqa-q4-bm25dot-v1-20260620T000000Z/` | 4 | 57,600 | 648 | 1,705 | 0.118427 / 0.341251 | 0.223099 / 0.499790 | pass |
 
-The BM25-dot rows are BM25-compatible sparse-dot API evidence: the sparse dot product matches the in-repo BM25 scoring formula for matching terms modulo float32 rounding, then CorkScrewDB applies its public `WeightedFusion` min-max normalization. The dense channel remains CorkScrewDB quantized q4, so this is not byte-for-byte parity with command-side float dense evaluation. These rows do not change default assets or aliases and do not prove remote mode, HNSW, federation, or hosted-model parity.
+Current-default BM25-dot SearchMulti rows for `assets/corkscrewdb-default-embedder/corkscrewdb-default-embedder.mll`, SHA256 `f494915a0d78b24205d5018bb701bf40cabbedee4bc8b96b6a1920b19131da5a`, run root `runs/eos-s40-current-default-hybrid-policy-v1-20260621T103500Z/`:
+
+| Dataset | Docs | Queries | Dense-only nDCG@10 / recall@100 | Hybrid nDCG@10 / recall@100 | overall_pass |
+| --- | ---: | ---: | ---: | ---: | --- |
+| SciFact | 5,183 | 300 | 0.560000301382 / 0.799777777778 | 0.724378172602 / 0.932888888889 | true |
+| NFCorpus | 3,633 | 323 | 0.205106071529 / 0.242729344406 | 0.315090347196 / 0.293990495284 | true |
+| FiQA | 57,600 | 648 | 0.121205765861 / 0.352411233314 | 0.223742712175 / 0.504002444743 | true |
+
+The BM25-dot rows are BM25-compatible sparse-dot API evidence: the sparse dot product matches the in-repo BM25 scoring formula for matching terms modulo float32 rounding, then CorkScrewDB applies its public `WeightedFusion` min-max normalization. The current-default run is local lexical+dense ranking-policy evidence over the existing default dense asset. These rows do not change default assets or aliases and do not prove remote mode, HNSW, federation, or hosted-model parity.
 
 The same wrapper also supports `EOS_CORKSCREW_BUDGET_QUALITY_LAYOUT=single_parent_vectors` for a real document-span layout baseline. On the existing full Eos SciFact child cache at `runs/eos-vector-caches/eos-embed-v1-scifact-child-w128-o32-full/scifact/`, the wrapper compared q4/q8 packed `none`/`ordinal` parent multivectors with mean-pooled single-parent vectors over `5,183` parents, `12,468` child spans, `300` queries, and `256d` vectors. Packed run `runs/eos-real-scifact-full-packed-none-ordinal-q4q8-diagnostic2-20260616T000000Z/` recorded q4 `ndcg@10=0.449435`, `recall@100=0.773111`, DB directory multiple `0.032900x`, and p95 `15.934540ms`; q8 recorded `0.461862`, `0.774778`, `0.057958x`, and `30.366188ms`. Single-parent run `runs/eos-real-scifact-full-single-parent-q4q8-diagnostic-20260616T000000Z/` recorded q4 `ndcg@10=0.406498`, `recall@100=0.743111`, DB directory multiple `0.022411x`, and p95 `7.075771ms`; q8 recorded `0.422597`, `0.745889`, `0.032827x`, and `13.242884ms`. Treat this as real local flat document-span layout evidence: packed preserves child-span evidence better at higher storage/latency, while single-parent is smaller and faster but mean-pools span structure away. The diagnostic run disabled old q4 quality/storage/planner floors; it does not claim remote mode, HNSW, federation, or native Matryoshka behavior.
 
