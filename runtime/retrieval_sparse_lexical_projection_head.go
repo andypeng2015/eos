@@ -13,6 +13,12 @@ import (
 
 const SparseLexicalProjectionHeadSchema = "manta.sparse_lexical_projection_head.v1"
 
+const (
+	SparseLexicalProjectionPrototypeRankSupport     = "support"
+	SparseLexicalProjectionPrototypeRankTotalWeight = "total_weight"
+	SparseLexicalProjectionPrototypeRankAvgWeight   = "avg_weight"
+)
+
 type SparseLexicalProjectionHeadFitConfig struct {
 	DatasetName       string
 	Split             string
@@ -23,6 +29,7 @@ type SparseLexicalProjectionHeadFitConfig struct {
 	HashBins          int
 	MaxPrototypes     int
 	MaxPredictedTerms int
+	PrototypeRank     string
 }
 
 type SparseLexicalProjectionHeadEvalConfig struct {
@@ -67,6 +74,7 @@ type SparseLexicalProjectionHeadParams struct {
 	HashBins          int    `json:"hash_bins"`
 	MaxPrototypes     int    `json:"max_prototypes"`
 	MaxPredictedTerms int    `json:"max_predicted_terms"`
+	PrototypeRank     string `json:"prototype_rank"`
 	PrototypeSource   string `json:"prototype_source"`
 	Normalization     string `json:"normalization"`
 }
@@ -99,6 +107,10 @@ type sparseLexicalProjectionAccumulator struct {
 func FitSparseLexicalProjectionHead(cfg SparseLexicalProjectionHeadFitConfig) (SparseLexicalProjectionHead, error) {
 	if cfg.LabelsPath == "" || cfg.DocVectorPath == "" || cfg.QueryVectorPath == "" || cfg.HeadPath == "" {
 		return SparseLexicalProjectionHead{}, fmt.Errorf("labels, doc-vectors, query-vectors, and head-json paths are required")
+	}
+	prototypeRank, err := normalizeSparseLexicalProjectionPrototypeRank(cfg.PrototypeRank)
+	if err != nil {
+		return SparseLexicalProjectionHead{}, err
 	}
 	if cfg.HashBins <= 0 {
 		return SparseLexicalProjectionHead{}, fmt.Errorf("hash bins must be positive, got %d", cfg.HashBins)
@@ -167,7 +179,7 @@ func FitSparseLexicalProjectionHead(cfg SparseLexicalProjectionHeadFitConfig) (S
 			}
 		}
 	}
-	prototypes := sparseLexicalProjectionPrototypes(accumulators, cfg.MaxPrototypes)
+	prototypes := sparseLexicalProjectionPrototypes(accumulators, cfg.MaxPrototypes, prototypeRank)
 	if len(prototypes) == 0 {
 		return SparseLexicalProjectionHead{}, fmt.Errorf("no non-zero sparse lexical projection prototypes were learned")
 	}
@@ -189,6 +201,7 @@ func FitSparseLexicalProjectionHead(cfg SparseLexicalProjectionHeadFitConfig) (S
 			HashBins:          cfg.HashBins,
 			MaxPrototypes:     cfg.MaxPrototypes,
 			MaxPredictedTerms: cfg.MaxPredictedTerms,
+			PrototypeRank:     prototypeRank,
 			PrototypeSource:   "label_weighted_dense_doc_query_centroids",
 			Normalization:     "input_l2_and_prototype_l2",
 		},
@@ -389,6 +402,11 @@ func ReadSparseLexicalProjectionHead(path string) (SparseLexicalProjectionHead, 
 	if head.Config.MaxPredictedTerms <= 0 {
 		return SparseLexicalProjectionHead{}, fmt.Errorf("sparse lexical projection head max predicted terms must be positive, got %d", head.Config.MaxPredictedTerms)
 	}
+	prototypeRank, err := normalizeSparseLexicalProjectionPrototypeRank(head.Config.PrototypeRank)
+	if err != nil {
+		return SparseLexicalProjectionHead{}, fmt.Errorf("sparse lexical projection head has invalid prototype_rank: %w", err)
+	}
+	head.Config.PrototypeRank = prototypeRank
 	if len(head.Prototypes) == 0 {
 		return SparseLexicalProjectionHead{}, fmt.Errorf("sparse lexical projection head has no prototypes")
 	}
@@ -443,28 +461,53 @@ func addSparseLexicalProjectionExample(acc map[uint32]*sparseLexicalProjectionAc
 	return nil
 }
 
-func sparseLexicalProjectionPrototypes(acc map[uint32]*sparseLexicalProjectionAccumulator, maxPrototypes int) []SparseLexicalProjectionPrototype {
+func normalizeSparseLexicalProjectionPrototypeRank(policy string) (string, error) {
+	if policy == "" {
+		return SparseLexicalProjectionPrototypeRankSupport, nil
+	}
+	switch policy {
+	case SparseLexicalProjectionPrototypeRankSupport,
+		SparseLexicalProjectionPrototypeRankTotalWeight,
+		SparseLexicalProjectionPrototypeRankAvgWeight:
+		return policy, nil
+	default:
+		return "", fmt.Errorf("prototype rank must be one of support, total_weight, avg_weight; got %q", policy)
+	}
+}
+
+func sparseLexicalProjectionPrototypes(acc map[uint32]*sparseLexicalProjectionAccumulator, maxPrototypes int, prototypeRank string) []SparseLexicalProjectionPrototype {
 	items := make([]*sparseLexicalProjectionAccumulator, 0, len(acc))
 	for _, item := range acc {
 		items = append(items, item)
 	}
 	slices.SortFunc(items, func(a, b *sparseLexicalProjectionAccumulator) int {
-		if a.Support != b.Support {
-			return b.Support - a.Support
+		switch prototypeRank {
+		case SparseLexicalProjectionPrototypeRankTotalWeight:
+			if cmp := compareSparseLexicalProjectionTotalWeight(a, b); cmp != 0 {
+				return cmp
+			}
+			if cmp := compareSparseLexicalProjectionSupport(a, b); cmp != 0 {
+				return cmp
+			}
+		case SparseLexicalProjectionPrototypeRankAvgWeight:
+			if cmp := compareSparseLexicalProjectionAvgWeight(a, b); cmp != 0 {
+				return cmp
+			}
+			if cmp := compareSparseLexicalProjectionSupport(a, b); cmp != 0 {
+				return cmp
+			}
+			if cmp := compareSparseLexicalProjectionTotalWeight(a, b); cmp != 0 {
+				return cmp
+			}
+		default:
+			if cmp := compareSparseLexicalProjectionSupport(a, b); cmp != 0 {
+				return cmp
+			}
+			if cmp := compareSparseLexicalProjectionTotalWeight(a, b); cmp != 0 {
+				return cmp
+			}
 		}
-		if a.TotalWeight > b.TotalWeight {
-			return -1
-		}
-		if a.TotalWeight < b.TotalWeight {
-			return 1
-		}
-		if a.Bin < b.Bin {
-			return -1
-		}
-		if a.Bin > b.Bin {
-			return 1
-		}
-		return 0
+		return compareSparseLexicalProjectionBin(a, b)
 	})
 	if len(items) > maxPrototypes {
 		items = items[:maxPrototypes]
@@ -492,6 +535,51 @@ func sparseLexicalProjectionPrototypes(acc map[uint32]*sparseLexicalProjectionAc
 		return 0
 	})
 	return prototypes
+}
+
+func compareSparseLexicalProjectionSupport(a, b *sparseLexicalProjectionAccumulator) int {
+	if a.Support != b.Support {
+		return b.Support - a.Support
+	}
+	return 0
+}
+
+func compareSparseLexicalProjectionTotalWeight(a, b *sparseLexicalProjectionAccumulator) int {
+	if a.TotalWeight > b.TotalWeight {
+		return -1
+	}
+	if a.TotalWeight < b.TotalWeight {
+		return 1
+	}
+	return 0
+}
+
+func compareSparseLexicalProjectionAvgWeight(a, b *sparseLexicalProjectionAccumulator) int {
+	aAvg := 0.0
+	if a.Support > 0 {
+		aAvg = a.TotalWeight / float64(a.Support)
+	}
+	bAvg := 0.0
+	if b.Support > 0 {
+		bAvg = b.TotalWeight / float64(b.Support)
+	}
+	if aAvg > bAvg {
+		return -1
+	}
+	if aAvg < bAvg {
+		return 1
+	}
+	return 0
+}
+
+func compareSparseLexicalProjectionBin(a, b *sparseLexicalProjectionAccumulator) int {
+	if a.Bin < b.Bin {
+		return -1
+	}
+	if a.Bin > b.Bin {
+		return 1
+	}
+	return 0
 }
 
 func normalizeSparseLexicalProjectionPrototype(vector []float64) []float32 {

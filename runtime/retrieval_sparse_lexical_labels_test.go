@@ -474,11 +474,14 @@ func TestFitSparseLexicalProjectionHeadRejectsInvalidConfig(t *testing.T) {
 	if head.Schema != SparseLexicalProjectionHeadSchema || head.Config.Dimension != 2 || head.Config.HashBins != 16 || head.Config.MaxPrototypes != 4 || head.Config.MaxPredictedTerms != 2 || head.Stats.StoredPrototypes == 0 {
 		t.Fatalf("projection head = %+v", head)
 	}
+	if head.Config.PrototypeRank != SparseLexicalProjectionPrototypeRankSupport {
+		t.Fatalf("prototype rank = %q, want support", head.Config.PrototypeRank)
+	}
 	loaded, err := ReadSparseLexicalProjectionHead(valid.HeadPath)
 	if err != nil {
 		t.Fatalf("read projection head: %v", err)
 	}
-	if loaded.Schema != SparseLexicalProjectionHeadSchema || loaded.Config.Normalization != "input_l2_and_prototype_l2" {
+	if loaded.Schema != SparseLexicalProjectionHeadSchema || loaded.Config.Normalization != "input_l2_and_prototype_l2" || loaded.Config.PrototypeRank != SparseLexicalProjectionPrototypeRankSupport {
 		t.Fatalf("loaded projection head = %+v", loaded)
 	}
 
@@ -508,6 +511,11 @@ func TestFitSparseLexicalProjectionHeadRejectsInvalidConfig(t *testing.T) {
 			},
 			want: "dimension",
 		},
+		{
+			name: "bad prototype rank",
+			edit: func(cfg *SparseLexicalProjectionHeadFitConfig) { cfg.PrototypeRank = "score_magic" },
+			want: "prototype rank must be one of support, total_weight, avg_weight",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := valid
@@ -516,6 +524,63 @@ func TestFitSparseLexicalProjectionHeadRejectsInvalidConfig(t *testing.T) {
 			_, err := FitSparseLexicalProjectionHead(cfg)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestFitSparseLexicalProjectionHeadPrototypeRankPolicy(t *testing.T) {
+	dir := t.TempDir()
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	docVectorsPath := filepath.Join(dir, "doc-vectors.jsonl")
+	queryVectorsPath := filepath.Join(dir, "query-vectors.jsonl")
+	if err := os.WriteFile(labelsPath, []byte(
+		`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d1","nonzeros":1,"terms":[{"term":"","hash_bin":1,"weight":1}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d2","nonzeros":1,"terms":[{"term":"","hash_bin":1,"weight":1}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d3","nonzeros":1,"terms":[{"term":"","hash_bin":2,"weight":5}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"query","dataset":"tiny","split":"train","id":"q1","nonzeros":0,"terms":[]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write labels: %v", err)
+	}
+	if err := os.WriteFile(docVectorsPath, []byte(
+		`{"_id":"d1","embedding":[1,0]}`+"\n"+
+			`{"_id":"d2","embedding":[1,0]}`+"\n"+
+			`{"_id":"d3","embedding":[0,1]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write doc vectors: %v", err)
+	}
+	if err := os.WriteFile(queryVectorsPath, []byte(`{"_id":"q1","embedding":[0,0]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write query vectors: %v", err)
+	}
+
+	base := SparseLexicalProjectionHeadFitConfig{
+		DatasetName:       "tiny",
+		Split:             "train",
+		LabelsPath:        labelsPath,
+		DocVectorPath:     docVectorsPath,
+		QueryVectorPath:   queryVectorsPath,
+		HashBins:          16,
+		MaxPrototypes:     1,
+		MaxPredictedTerms: 2,
+	}
+	for _, tt := range []struct {
+		name string
+		rank string
+		bin  uint32
+	}{
+		{name: "default support", rank: "", bin: 1},
+		{name: "explicit support", rank: SparseLexicalProjectionPrototypeRankSupport, bin: 1},
+		{name: "total weight", rank: SparseLexicalProjectionPrototypeRankTotalWeight, bin: 2},
+		{name: "avg weight", rank: SparseLexicalProjectionPrototypeRankAvgWeight, bin: 2},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base
+			cfg.PrototypeRank = tt.rank
+			cfg.HeadPath = filepath.Join(dir, strings.ReplaceAll(tt.name, " ", "-")+".json")
+			head, err := FitSparseLexicalProjectionHead(cfg)
+			if err != nil {
+				t.Fatalf("fit projection head: %v", err)
+			}
+			if len(head.Prototypes) != 1 || head.Prototypes[0].Bin != tt.bin {
+				t.Fatalf("retained prototypes = %+v, want only bin %d", head.Prototypes, tt.bin)
 			}
 		})
 	}

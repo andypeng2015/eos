@@ -1401,6 +1401,7 @@ func runFitSparseLexicalProjectionHead(args []string) error {
 	hashBins := fs.Int("hash-bins", 65536, "deterministic FNV-1a hashed sparse bins")
 	maxPrototypes := fs.Int("max-prototypes", 4096, "maximum learned hashed-bin prototypes to store")
 	maxTerms := fs.Int("max-terms", 32, "maximum positive predicted sparse bins per vector")
+	prototypeRank := fs.String("prototype-rank", "support", "prototype retention rank policy: support, total_weight, or avg_weight")
 	headPath := fs.String("head-json", "", "write experimental sparse lexical projection head JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1430,12 +1431,13 @@ func runFitSparseLexicalProjectionHead(args []string) error {
 		HashBins:          *hashBins,
 		MaxPrototypes:     *maxPrototypes,
 		MaxPredictedTerms: *maxTerms,
+		PrototypeRank:     *prototypeRank,
 	})
 	if err != nil {
 		return err
 	}
-	fmt.Printf("fit sparse lexical projection head: schema=%s experimental=%t dataset=%s split=%s dim=%d hash_bins=%d prototypes=%d max_terms=%d\n",
-		head.Schema, head.Experimental, head.Dataset, head.Split, head.Config.Dimension, head.Hashing.Bins, len(head.Prototypes), head.Config.MaxPredictedTerms)
+	fmt.Printf("fit sparse lexical projection head: schema=%s experimental=%t dataset=%s split=%s dim=%d hash_bins=%d prototypes=%d max_terms=%d prototype_rank=%s\n",
+		head.Schema, head.Experimental, head.Dataset, head.Split, head.Config.Dimension, head.Hashing.Bins, len(head.Prototypes), head.Config.MaxPredictedTerms, head.Config.PrototypeRank)
 	fmt.Printf("fit_vectors: documents=%d queries=%d missing_documents=%d missing_queries=%d candidate_prototypes=%d stored_prototypes=%d normalization=%s\n",
 		head.Stats.DocumentVectors, head.Stats.QueryVectors, head.Stats.MissingDocVectors, head.Stats.MissingQueryVectors, head.Stats.CandidatePrototypes, head.Stats.StoredPrototypes, head.Config.Normalization)
 	fmt.Printf("labels: %s\n", *labelsPath)

@@ -2320,6 +2320,7 @@ func TestRunSparseLexicalProjectionHeadWritesMetricsJSON(t *testing.T) {
 	for _, want := range []string{
 		"fit sparse lexical projection head: schema=manta.sparse_lexical_projection_head.v1 experimental=true dataset=tiny split=train",
 		"dim=3 hash_bins=65536 prototypes=1 max_terms=4",
+		"prototype_rank=support",
 		"labels: " + labelsPath,
 		"doc_vectors: " + docVectorsPath,
 		"query_vectors: " + fitQueryVectorsPath,
@@ -2328,6 +2329,27 @@ func TestRunSparseLexicalProjectionHeadWritesMetricsJSON(t *testing.T) {
 		if !strings.Contains(fitOutput, want) {
 			t.Fatalf("fit-sparse-lexical-projection-head output missing %q\noutput:\n%s", want, fitOutput)
 		}
+	}
+	var head eosruntime.SparseLexicalProjectionHead
+	headData, err := os.ReadFile(headPath)
+	if err != nil {
+		t.Fatalf("read projection head: %v", err)
+	}
+	if err := json.Unmarshal(headData, &head); err != nil {
+		t.Fatalf("decode projection head: %v", err)
+	}
+	if head.Config.PrototypeRank != eosruntime.SparseLexicalProjectionPrototypeRankSupport {
+		t.Fatalf("prototype_rank = %q, want support", head.Config.PrototypeRank)
+	}
+	if _, err := captureRunOutputAndError(t, []string{
+		"fit-sparse-lexical-projection-head",
+		"--labels", labelsPath,
+		"--doc-vectors", docVectorsPath,
+		"--query-vectors", fitQueryVectorsPath,
+		"--head-json", filepath.Join(dir, "bad-projection-head.json"),
+		"--prototype-rank", "score_magic",
+	}); err == nil || !strings.Contains(err.Error(), "prototype rank must be one of support, total_weight, avg_weight") {
+		t.Fatalf("invalid prototype rank err = %v", err)
 	}
 
 	metricsPath := filepath.Join(dir, "projection.metrics.json")
