@@ -218,6 +218,130 @@ func TestEvaluateSparseLexicalHashHeadVectorHybridRecoversDenseMiss(t *testing.T
 	}
 }
 
+func TestEvaluateSparseLexicalProjectionHeadVectorHybridPredictsSparseRecovery(t *testing.T) {
+	dir := t.TempDir()
+	datasetDir := filepath.Join(dir, "dataset")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	corpusPath := filepath.Join(datasetDir, "corpus.jsonl")
+	queriesPath := filepath.Join(datasetDir, "queries.jsonl")
+	qrelsPath := filepath.Join(datasetDir, "qrels", "test.tsv")
+	if err := os.WriteFile(corpusPath, []byte(
+		`{"_id":"d1","text":"alpha exact target"}`+"\n"+
+			`{"_id":"d2","text":"dense distractor"}`+"\n"+
+			`{"_id":"d3","text":"fallback"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(queriesPath, []byte(`{"_id":"q1","text":"alpha"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(qrelsPath, []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	docVectorsPath := filepath.Join(dir, "doc-vectors.jsonl")
+	fitQueryVectorsPath := filepath.Join(dir, "fit-query-vectors.jsonl")
+	evalQueryVectorsPath := filepath.Join(dir, "eval-query-vectors.jsonl")
+	if err := os.WriteFile(docVectorsPath, []byte(
+		`{"_id":"d1","embedding":[0,1,0]}`+"\n"+
+			`{"_id":"d2","embedding":[1,0.1,0]}`+"\n"+
+			`{"_id":"d3","embedding":[1,0,0]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write doc vectors: %v", err)
+	}
+	if err := os.WriteFile(fitQueryVectorsPath, []byte(`{"_id":"q1","embedding":[0,1,0]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write fit query vectors: %v", err)
+	}
+	if err := os.WriteFile(evalQueryVectorsPath, []byte(`{"_id":"q1","embedding":[1,1,0]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write eval query vectors: %v", err)
+	}
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	if err := os.WriteFile(labelsPath, []byte(
+		`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d1","nonzeros":1,"terms":[{"term":"alpha","weight":3}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d2","nonzeros":0,"terms":[]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d3","nonzeros":0,"terms":[]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"query","dataset":"tiny","split":"train","id":"q1","nonzeros":1,"terms":[{"term":"alpha","weight":1}]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write labels: %v", err)
+	}
+	headPath := filepath.Join(dir, "projection-head.json")
+	head, err := FitSparseLexicalProjectionHead(SparseLexicalProjectionHeadFitConfig{
+		DatasetName:       "tiny",
+		Split:             "train",
+		LabelsPath:        labelsPath,
+		DocVectorPath:     docVectorsPath,
+		QueryVectorPath:   fitQueryVectorsPath,
+		HeadPath:          headPath,
+		HashBins:          65536,
+		MaxPrototypes:     8,
+		MaxPredictedTerms: 4,
+	})
+	if err != nil {
+		t.Fatalf("fit projection head: %v", err)
+	}
+	if head.Schema != SparseLexicalProjectionHeadSchema || !head.Experimental || head.Split != "train" || head.Config.Dimension != 3 || head.Hashing.Bins != 65536 || len(head.Prototypes) != 1 {
+		t.Fatalf("projection head = %+v", head)
+	}
+	if _, err := ReadSparseLexicalProjectionHead(headPath); err != nil {
+		t.Fatalf("read projection head: %v", err)
+	}
+
+	denseMetrics, err := EvaluateVectorCacheRetrieval(context.Background(), RetrievalEvalConfig{
+		DatasetName:     "tiny",
+		CorpusPath:      corpusPath,
+		QueriesPath:     queriesPath,
+		QrelsPath:       qrelsPath,
+		DocVectorPath:   docVectorsPath,
+		QueryVectorPath: evalQueryVectorsPath,
+		TopK:            100,
+	})
+	if err != nil {
+		t.Fatalf("evaluate dense vectors: %v", err)
+	}
+	if denseMetrics.Quality.NDCGAt10 >= 1 || denseMetrics.Quality.MRRAt10 >= 1 {
+		t.Fatalf("dense metrics = %+v, want imperfect dense ranking", denseMetrics.Quality)
+	}
+
+	perQueryPath := filepath.Join(dir, "projection.per-query.jsonl")
+	metrics, err := EvaluateSparseLexicalProjectionHeadVectorHybrid(context.Background(), SparseLexicalProjectionHeadEvalConfig{
+		DatasetName:       "tiny",
+		Split:             "test",
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         qrelsPath,
+		HeadPath:          headPath,
+		DocVectorPath:     docVectorsPath,
+		QueryVectorPath:   evalQueryVectorsPath,
+		TopK:              100,
+		PerQueryJSONLPath: perQueryPath,
+		Hybrid:            RetrievalEvalHybridConfig{Method: "minmax", Alpha: 0.75, AlphaSet: true},
+	})
+	if err != nil {
+		t.Fatalf("evaluate projection hybrid: %v", err)
+	}
+	if metrics.Backend != "sparse_lexical_projection_head_vectors_hybrid" || metrics.Inputs.LabelPath != "" || metrics.Inputs.HeadPath != headPath {
+		t.Fatalf("metrics identity/inputs = %+v", metrics)
+	}
+	if metrics.Config.Hybrid == nil || metrics.Config.Hybrid.Method != "minmax_blend" || metrics.SparseLexical == nil || metrics.SparseLexical.HashBins != 65536 {
+		t.Fatalf("hybrid/sparse stats missing: hybrid=%+v sparse=%+v", metrics.Config.Hybrid, metrics.SparseLexical)
+	}
+	if metrics.Quality.NDCGAt10 != 1 || metrics.Quality.MRRAt10 != 1 {
+		t.Fatalf("projection hybrid quality = %+v, want recovered top hit", metrics.Quality)
+	}
+	data, err := os.ReadFile(perQueryPath)
+	if err != nil {
+		t.Fatalf("read per-query: %v", err)
+	}
+	var row RetrievalEvalPerQueryRow
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &row); err != nil {
+		t.Fatalf("decode per-query row: %v", err)
+	}
+	if row.FirstRelevantRank != 1 || len(row.TopK) == 0 || row.TopK[0].DocID != "d1" {
+		t.Fatalf("per-query row = %+v", row)
+	}
+	if row.TopK[0].DenseRank == nil || *row.TopK[0].DenseRank != 2 || row.TopK[0].BM25Rank == nil || *row.TopK[0].BM25Rank != 1 {
+		t.Fatalf("component ranks = dense:%v sparse:%v, want 2/1", row.TopK[0].DenseRank, row.TopK[0].BM25Rank)
+	}
+}
+
 func TestFuseHybridScoresDefaultLeavesFusedOrder(t *testing.T) {
 	denseScores := []retrievalScoredDoc{
 		{ID: "dense-winner", Score: 1},

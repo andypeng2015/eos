@@ -428,6 +428,99 @@ func TestSparseLexicalHashHeadRejectsIncompatibleLabelHashBins(t *testing.T) {
 	}
 }
 
+func TestFitSparseLexicalProjectionHeadRejectsInvalidConfig(t *testing.T) {
+	dir, _, _, _ := writeSparseLexicalDataset(t)
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	if _, err := ExportSparseLexicalLabels(context.Background(), SparseLexicalLabelExportConfig{
+		DatasetName: "tiny",
+		Split:       "train",
+		CorpusPath:  filepath.Join(dir, "corpus.jsonl"),
+		QueriesPath: filepath.Join(dir, "queries.jsonl"),
+		QrelsPath:   filepath.Join(dir, "qrels", "train.tsv"),
+		OutputPath:  labelsPath,
+		TopTerms:    2,
+		OracleTopK:  100,
+	}); err != nil {
+		t.Fatalf("export labels: %v", err)
+	}
+	docVectorsPath := filepath.Join(dir, "doc-vectors.jsonl")
+	queryVectorsPath := filepath.Join(dir, "query-vectors.jsonl")
+	if err := os.WriteFile(docVectorsPath, []byte(
+		`{"_id":"d1","embedding":[1,0]}`+"\n"+
+			`{"_id":"d2","embedding":[0,1]}`+"\n"+
+			`{"_id":"d3","embedding":[1,1]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write doc vectors: %v", err)
+	}
+	if err := os.WriteFile(queryVectorsPath, []byte(
+		`{"_id":"q1","embedding":[1,0]}`+"\n"+
+			`{"_id":"q2","embedding":[0,1]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write query vectors: %v", err)
+	}
+	valid := SparseLexicalProjectionHeadFitConfig{
+		DatasetName:       "tiny",
+		Split:             "train",
+		LabelsPath:        labelsPath,
+		DocVectorPath:     docVectorsPath,
+		QueryVectorPath:   queryVectorsPath,
+		HeadPath:          filepath.Join(dir, "projection-head.json"),
+		HashBins:          16,
+		MaxPrototypes:     4,
+		MaxPredictedTerms: 2,
+	}
+	head, err := FitSparseLexicalProjectionHead(valid)
+	if err != nil {
+		t.Fatalf("fit valid projection head: %v", err)
+	}
+	if head.Schema != SparseLexicalProjectionHeadSchema || head.Config.Dimension != 2 || head.Config.HashBins != 16 || head.Config.MaxPrototypes != 4 || head.Config.MaxPredictedTerms != 2 || head.Stats.StoredPrototypes == 0 {
+		t.Fatalf("projection head = %+v", head)
+	}
+	loaded, err := ReadSparseLexicalProjectionHead(valid.HeadPath)
+	if err != nil {
+		t.Fatalf("read projection head: %v", err)
+	}
+	if loaded.Schema != SparseLexicalProjectionHeadSchema || loaded.Config.Normalization != "input_l2_and_prototype_l2" {
+		t.Fatalf("loaded projection head = %+v", loaded)
+	}
+
+	for _, tt := range []struct {
+		name string
+		edit func(*SparseLexicalProjectionHeadFitConfig)
+		want string
+	}{
+		{
+			name: "bad hash bins",
+			edit: func(cfg *SparseLexicalProjectionHeadFitConfig) { cfg.HashBins = 0 },
+			want: "hash bins must be positive",
+		},
+		{
+			name: "bad max prototypes",
+			edit: func(cfg *SparseLexicalProjectionHeadFitConfig) { cfg.MaxPrototypes = 0 },
+			want: "max prototypes must be positive",
+		},
+		{
+			name: "dimension mismatch",
+			edit: func(cfg *SparseLexicalProjectionHeadFitConfig) {
+				path := filepath.Join(dir, "bad-query-vectors.jsonl")
+				if err := os.WriteFile(path, []byte(`{"_id":"q1","embedding":[1,0,0]}`+"\n"), 0o644); err != nil {
+					t.Fatalf("write bad query vectors: %v", err)
+				}
+				cfg.QueryVectorPath = path
+			},
+			want: "dimension",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := valid
+			cfg.HeadPath = filepath.Join(dir, tt.name+".json")
+			tt.edit(&cfg)
+			_, err := FitSparseLexicalProjectionHead(cfg)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func writeSparseLexicalDataset(t *testing.T) (dir, corpusPath, queriesPath, qrelsPath string) {
 	t.Helper()
 	dir = t.TempDir()
