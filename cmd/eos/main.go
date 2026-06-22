@@ -1568,6 +1568,7 @@ func runFitSparseLexicalLinearHead(args []string) error {
 	epochs := fs.Int("epochs", 3, "deterministic SGD epochs")
 	learningRate := fs.Float64("learning-rate", 0.05, "deterministic SGD learning rate")
 	negativeRatio := fs.Int("negative-ratio", 2, "deterministic zero-target bins per training example")
+	targetTransform := fs.String("target-transform", "identity", "fit-time target transform: identity or log1p")
 	headPath := fs.String("head-json", "", "write experimental sparse lexical linear head JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1601,12 +1602,13 @@ func runFitSparseLexicalLinearHead(args []string) error {
 		Epochs:            *epochs,
 		LearningRate:      *learningRate,
 		NegativeRatio:     *negativeRatio,
+		TargetTransform:   *targetTransform,
 	})
 	if err != nil {
 		return err
 	}
-	fmt.Printf("fit sparse lexical linear head: schema=%s experimental=%t dataset=%s split=%s dim=%d hash_bins=%d bins=%d max_terms=%d bin_rank=%s epochs=%d learning_rate=%g negative_ratio=%d\n",
-		head.Schema, head.Experimental, head.Dataset, head.Split, head.Config.Dimension, head.Hashing.Bins, len(head.Bins), head.Config.MaxPredictedTerms, head.Config.BinRank, head.Config.Epochs, head.Config.LearningRate, head.Config.NegativeRatio)
+	fmt.Printf("fit sparse lexical linear head: schema=%s experimental=%t dataset=%s split=%s dim=%d hash_bins=%d bins=%d max_terms=%d bin_rank=%s epochs=%d learning_rate=%g negative_ratio=%d target_transform=%s\n",
+		head.Schema, head.Experimental, head.Dataset, head.Split, head.Config.Dimension, head.Hashing.Bins, len(head.Bins), head.Config.MaxPredictedTerms, head.Config.BinRank, head.Config.Epochs, head.Config.LearningRate, head.Config.NegativeRatio, head.Config.TargetTransform)
 	fmt.Printf("fit_vectors: documents=%d queries=%d missing_documents=%d missing_queries=%d candidate_bins=%d stored_bins=%d updates=%d final_mse=%.6f normalization=%s\n",
 		head.Stats.DocumentVectors, head.Stats.QueryVectors, head.Stats.MissingDocVectors, head.Stats.MissingQueryVectors, head.Stats.CandidateBins, head.Stats.StoredBins, head.Stats.TrainingUpdates, head.Stats.FinalMSE, head.Config.Normalization)
 	fmt.Printf("labels: %s\n", *labelsPath)
@@ -1629,6 +1631,9 @@ func runEvalSparseLexicalLinearHeadVectorsHybrid(args []string) error {
 	topK := fs.Int("top-k", 100, "retrieval depth for scoring")
 	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks")
 	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
+	docMaxTerms := fs.Int("doc-max-terms", 0, "maximum predicted sparse bins per document vector; 0 uses head artifact max terms")
+	queryMaxTerms := fs.Int("query-max-terms", 0, "maximum predicted sparse bins per query vector; 0 uses head artifact max terms")
+	scoreThreshold := fs.Float64("score-threshold", 0, "minimum predicted sparse score; predictions require score > threshold")
 	method := fs.String("method", "minmax", "fusion method: sparse_only, minmax, minmax_blend, zscore, zscore_blend, or rrf")
 	alpha := fs.Float64("alpha", 0.75, "linear-head sparse weight for minmax/zscore hybrid blending")
 	rrfK := fs.Float64("rrf-k", 60, "RRF rank constant")
@@ -1673,6 +1678,9 @@ func runEvalSparseLexicalLinearHeadVectorsHybrid(args []string) error {
 		TopK:              *topK,
 		MaxDocs:           *maxDocs,
 		MaxQueries:        *maxQueries,
+		DocMaxTerms:       *docMaxTerms,
+		QueryMaxTerms:     *queryMaxTerms,
+		ScoreThreshold:    *scoreThreshold,
 		PerQueryJSONLPath: *perQueryPath,
 		Hybrid: eosruntime.RetrievalEvalHybridConfig{
 			Method:              *method,
@@ -1701,8 +1709,8 @@ func runEvalSparseLexicalLinearHeadVectorsHybrid(args []string) error {
 		metrics.Dataset, metrics.Backend, metrics.Inputs.Documents, metrics.Inputs.Queries, metrics.Inputs.RelevantPairs, metrics.Inputs.ScoredPairs)
 	printRetrievalHybridConfig(metrics)
 	if metrics.SparseLexical != nil {
-		fmt.Printf("sparse_linear_head: hash_bins=%d predicted_doc_terms_max=%d predicted_query_terms_max=%d representation=%s\n",
-			metrics.SparseLexical.HashBins, metrics.SparseLexical.DocumentMaxHashNNZ, metrics.SparseLexical.QueryMaxHashNNZ, metrics.SparseLexical.Representation)
+		fmt.Printf("sparse_linear_head: hash_bins=%d predicted_doc_terms_max=%d predicted_query_terms_max=%d score_threshold=%g representation=%s\n",
+			metrics.SparseLexical.HashBins, metrics.SparseLexical.DocumentMaxHashNNZ, metrics.SparseLexical.QueryMaxHashNNZ, metrics.SparseLexical.ScoreThreshold, metrics.SparseLexical.Representation)
 	}
 	fmt.Printf("quality: ndcg@10=%.6f ndcg@100=%.6f mrr@10=%.6f p@1=%.6f p@5=%.6f p@10=%.6f hit@1=%.6f hit@5=%.6f hit@10=%.6f map@10=%.6f map@100=%.6f recall@10=%.6f recall@100=%.6f\n",
 		metrics.Quality.NDCGAt10, metrics.Quality.NDCGAt100, metrics.Quality.MRRAt10, metrics.Quality.PrecisionAt1, metrics.Quality.PrecisionAt5, metrics.Quality.PrecisionAt10, metrics.Quality.HitAt1, metrics.Quality.HitAt5, metrics.Quality.HitAt10, metrics.Quality.MAPAt10, metrics.Quality.MAPAt100, metrics.Quality.RecallAt10, metrics.Quality.RecallAt100)

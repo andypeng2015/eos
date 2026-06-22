@@ -2460,12 +2460,14 @@ func TestRunSparseLexicalLinearHeadWritesMetricsJSONWithoutEvalLabels(t *testing
 		"--epochs", "12",
 		"--learning-rate", "0.1",
 		"--negative-ratio", "1",
+		"--target-transform", "log1p",
 		"--head-json", headPath,
 	})
 	for _, want := range []string{
 		"fit sparse lexical linear head: schema=manta.sparse_lexical_linear_head.v1 experimental=true dataset=tiny split=train",
 		"dim=3 hash_bins=65536 bins=1 max_terms=4",
 		"bin_rank=support",
+		"target_transform=log1p",
 		"labels: " + labelsPath,
 		"doc_vectors: " + docVectorsPath,
 		"query_vectors: " + fitQueryVectorsPath,
@@ -2483,7 +2485,7 @@ func TestRunSparseLexicalLinearHeadWritesMetricsJSONWithoutEvalLabels(t *testing
 	if err := json.Unmarshal(headData, &head); err != nil {
 		t.Fatalf("decode linear head: %v", err)
 	}
-	if head.Config.BinRank != eosruntime.SparseLexicalProjectionPrototypeRankSupport || len(head.Bins) != 1 || len(head.Bins[0].Weights) != 3 {
+	if head.Config.BinRank != eosruntime.SparseLexicalProjectionPrototypeRankSupport || head.Config.TargetTransform != eosruntime.SparseLexicalLinearHeadTargetTransformLog1p || len(head.Bins) != 1 || len(head.Bins[0].Weights) != 3 {
 		t.Fatalf("linear head = %+v", head)
 	}
 	if _, err := captureRunOutputAndError(t, []string{
@@ -2495,6 +2497,16 @@ func TestRunSparseLexicalLinearHeadWritesMetricsJSONWithoutEvalLabels(t *testing
 		"--bin-rank", "score_magic",
 	}); err == nil || !strings.Contains(err.Error(), "bin rank must be one of support, total_weight, avg_weight") {
 		t.Fatalf("invalid bin rank err = %v", err)
+	}
+	if _, err := captureRunOutputAndError(t, []string{
+		"fit-sparse-lexical-linear-head",
+		"--labels", labelsPath,
+		"--doc-vectors", docVectorsPath,
+		"--query-vectors", fitQueryVectorsPath,
+		"--head-json", filepath.Join(dir, "bad-transform-linear-head.json"),
+		"--target-transform", "sqrt",
+	}); err == nil || !strings.Contains(err.Error(), "target transform must be one of identity, log1p") {
+		t.Fatalf("invalid target transform err = %v", err)
 	}
 	if err := os.Remove(labelsPath); err != nil {
 		t.Fatalf("remove fit labels before eval: %v", err)
@@ -2512,6 +2524,9 @@ func TestRunSparseLexicalLinearHeadWritesMetricsJSONWithoutEvalLabels(t *testing
 		"--split", "test",
 		"--method", "minmax",
 		"--alpha", "0.75",
+		"--doc-max-terms", "2",
+		"--query-max-terms", "1",
+		"--score-threshold", "0.000001",
 		"--dense-candidates-only",
 		"--metrics-json", metricsPath,
 		"--per-query-jsonl", perQueryPath,
@@ -2522,6 +2537,7 @@ func TestRunSparseLexicalLinearHeadWritesMetricsJSONWithoutEvalLabels(t *testing
 		"hybrid: method=minmax_blend alpha=0.75",
 		"dense_candidates_only=true",
 		"sparse_linear_head: hash_bins=65536",
+		"predicted_doc_terms_max=2 predicted_query_terms_max=1 score_threshold=1e-06",
 		"representation=experimental_sparse_lexical_linear_head",
 		"quality: ndcg@10=1.000000",
 		"head: " + headPath,
@@ -2548,6 +2564,9 @@ func TestRunSparseLexicalLinearHeadWritesMetricsJSONWithoutEvalLabels(t *testing
 	}
 	if metrics.Config.Hybrid == nil || metrics.Config.Hybrid.Method != "minmax_blend" || !metrics.Config.Hybrid.DenseCandidatesOnly || metrics.SparseLexical == nil || metrics.SparseLexical.Representation != "experimental_sparse_lexical_linear_head" {
 		t.Fatalf("hybrid/sparse config = hybrid:%+v sparse:%+v", metrics.Config.Hybrid, metrics.SparseLexical)
+	}
+	if metrics.SparseLexical.DocumentMaxHashNNZ != 2 || metrics.SparseLexical.QueryMaxHashNNZ != 1 || metrics.SparseLexical.ScoreThreshold != 0.000001 {
+		t.Fatalf("sparse calibration stats = %+v", metrics.SparseLexical)
 	}
 	if metrics.Quality.NDCGAt10 != 1 || metrics.Quality.MRRAt10 != 1 {
 		t.Fatalf("quality = %+v, want recovered top hit", metrics.Quality)

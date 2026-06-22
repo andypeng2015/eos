@@ -7,10 +7,16 @@ import (
 	"math"
 	"os"
 	"slices"
+	"strings"
 	"time"
 )
 
 const SparseLexicalLinearHeadSchema = "manta.sparse_lexical_linear_head.v1"
+
+const (
+	SparseLexicalLinearHeadTargetTransformIdentity = "identity"
+	SparseLexicalLinearHeadTargetTransformLog1p    = "log1p"
+)
 
 type SparseLexicalLinearHeadFitConfig struct {
 	DatasetName       string
@@ -26,6 +32,7 @@ type SparseLexicalLinearHeadFitConfig struct {
 	Epochs            int
 	LearningRate      float64
 	NegativeRatio     int
+	TargetTransform   string
 }
 
 type SparseLexicalLinearHeadEvalConfig struct {
@@ -42,6 +49,9 @@ type SparseLexicalLinearHeadEvalConfig struct {
 	MaxDocs           int
 	MaxQueries        int
 	PerQueryJSONLPath string
+	DocMaxTerms       int
+	QueryMaxTerms     int
+	ScoreThreshold    float64
 	Hybrid            RetrievalEvalHybridConfig
 }
 
@@ -149,6 +159,11 @@ func FitSparseLexicalLinearHead(cfg SparseLexicalLinearHeadFitConfig) (SparseLex
 	if cfg.NegativeRatio < 0 {
 		return SparseLexicalLinearHead{}, fmt.Errorf("negative ratio must be non-negative, got %d", cfg.NegativeRatio)
 	}
+	targetTransform, err := normalizeSparseLexicalLinearHeadTargetTransform(cfg.TargetTransform)
+	if err != nil {
+		return SparseLexicalLinearHead{}, err
+	}
+	cfg.TargetTransform = targetTransform
 	if sameSparseLexicalOutputPath(cfg.LabelsPath, cfg.HeadPath) {
 		return SparseLexicalLinearHead{}, fmt.Errorf("labels path and head-json path must differ: %s", cfg.LabelsPath)
 	}
@@ -209,7 +224,7 @@ func FitSparseLexicalLinearHead(cfg SparseLexicalLinearHeadFitConfig) (SparseLex
 	for _, item := range retained {
 		retainedSet[item.Bin] = true
 	}
-	examples, err := sparseLexicalLinearExamples(labels, docVectors, queryVectors, queryIDs, cfg.HashBins, retainedSet)
+	examples, err := sparseLexicalLinearExamples(labels, docVectors, queryVectors, queryIDs, cfg.HashBins, retainedSet, cfg.TargetTransform)
 	if err != nil {
 		return SparseLexicalLinearHead{}, err
 	}
@@ -243,7 +258,7 @@ func FitSparseLexicalLinearHead(cfg SparseLexicalLinearHeadFitConfig) (SparseLex
 			LearningRate:      cfg.LearningRate,
 			NegativeRatio:     cfg.NegativeRatio,
 			Loss:              "per_bin_mse_sgd",
-			TargetTransform:   "identity",
+			TargetTransform:   cfg.TargetTransform,
 			Normalization:     "input_l2",
 		},
 		Stats: SparseLexicalLinearHeadStats{
@@ -285,6 +300,15 @@ func EvaluateSparseLexicalLinearHeadVectorHybrid(ctx context.Context, cfg Sparse
 	}
 	if cfg.TopK < 100 {
 		cfg.TopK = 100
+	}
+	if cfg.DocMaxTerms < 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("doc max terms must be non-negative, got %d", cfg.DocMaxTerms)
+	}
+	if cfg.QueryMaxTerms < 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("query max terms must be non-negative, got %d", cfg.QueryMaxTerms)
+	}
+	if math.IsNaN(cfg.ScoreThreshold) || math.IsInf(cfg.ScoreThreshold, 0) {
+		return RetrievalEvalMetrics{}, fmt.Errorf("score threshold must be finite, got %g", cfg.ScoreThreshold)
 	}
 	sparseOnly := sparseLexicalProjectionSparseOnlyMethod(cfg.Hybrid.Method)
 	hybridCfg := cfg.Hybrid
@@ -344,13 +368,21 @@ func EvaluateSparseLexicalLinearHeadVectorHybrid(ctx context.Context, cfg Sparse
 	if docDim != head.Config.Dimension {
 		return RetrievalEvalMetrics{}, fmt.Errorf("vector dimension %d does not match linear head dimension %d", docDim, head.Config.Dimension)
 	}
+	docMaxTerms := cfg.DocMaxTerms
+	if docMaxTerms == 0 {
+		docMaxTerms = head.Config.MaxPredictedTerms
+	}
+	queryMaxTerms := cfg.QueryMaxTerms
+	if queryMaxTerms == 0 {
+		queryMaxTerms = head.Config.MaxPredictedTerms
+	}
 	sparseDocs := make([]sparseLexicalHashedVector, 0, len(docVectors))
 	for _, doc := range docVectors {
-		sparseDocs = append(sparseDocs, predictSparseLexicalLinearVector(doc.ID, doc.Vector, head))
+		sparseDocs = append(sparseDocs, predictSparseLexicalLinearVector(doc.ID, doc.Vector, head, docMaxTerms, cfg.ScoreThreshold))
 	}
 	sparseQueries := make(map[string]sparseLexicalHashedVector, len(queryVectors))
 	for _, query := range queryVectors {
-		sparseQueries[query.ID] = predictSparseLexicalLinearVector(query.ID, query.Vector, head)
+		sparseQueries[query.ID] = predictSparseLexicalLinearVector(query.ID, query.Vector, head, queryMaxTerms, cfg.ScoreThreshold)
 	}
 	loadDuration := time.Since(loadStart)
 
@@ -371,8 +403,9 @@ func EvaluateSparseLexicalLinearHeadVectorHybrid(ctx context.Context, cfg Sparse
 		HashBins:           head.Hashing.Bins,
 		DocumentLabels:     len(sparseDocs),
 		QueryLabels:        len(sparseQueries),
-		DocumentMaxHashNNZ: head.Config.MaxPredictedTerms,
-		QueryMaxHashNNZ:    head.Config.MaxPredictedTerms,
+		DocumentMaxHashNNZ: docMaxTerms,
+		QueryMaxHashNNZ:    queryMaxTerms,
+		ScoreThreshold:     cfg.ScoreThreshold,
 	}
 	metricsHybrid := retrievalEvalHybridMetrics(hybridCfg)
 	if sparseOnly {
@@ -455,6 +488,11 @@ func ReadSparseLexicalLinearHead(path string) (SparseLexicalLinearHead, error) {
 	if head.Config.NegativeRatio < 0 {
 		return SparseLexicalLinearHead{}, fmt.Errorf("sparse lexical linear head negative ratio must be non-negative, got %d", head.Config.NegativeRatio)
 	}
+	targetTransform, err := normalizeSparseLexicalLinearHeadTargetTransform(head.Config.TargetTransform)
+	if err != nil {
+		return SparseLexicalLinearHead{}, fmt.Errorf("sparse lexical linear head has invalid target_transform: %w", err)
+	}
+	head.Config.TargetTransform = targetTransform
 	binRank, err := normalizeSparseLexicalProjectionPrototypeRank(head.Config.BinRank)
 	if err != nil {
 		return SparseLexicalLinearHead{}, fmt.Errorf("sparse lexical linear head has invalid bin_rank: %w", err)
@@ -472,6 +510,26 @@ func ReadSparseLexicalLinearHead(path string) (SparseLexicalLinearHead, error) {
 		}
 	}
 	return head, nil
+}
+
+func normalizeSparseLexicalLinearHeadTargetTransform(transform string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(transform)) {
+	case "", SparseLexicalLinearHeadTargetTransformIdentity:
+		return SparseLexicalLinearHeadTargetTransformIdentity, nil
+	case SparseLexicalLinearHeadTargetTransformLog1p:
+		return SparseLexicalLinearHeadTargetTransformLog1p, nil
+	default:
+		return "", fmt.Errorf("target transform must be one of identity, log1p; got %q", transform)
+	}
+}
+
+func sparseLexicalLinearTransformTarget(weight float64, transform string) float64 {
+	switch transform {
+	case SparseLexicalLinearHeadTargetTransformLog1p:
+		return math.Log1p(weight)
+	default:
+		return weight
+	}
 }
 
 func sparseLexicalLinearRetainedBins(acc map[uint32]*sparseLexicalProjectionAccumulator, maxBins int, binRank string) []*sparseLexicalProjectionAccumulator {
@@ -534,7 +592,7 @@ func addSparseLexicalLinearLabelAccumulator(acc map[uint32]*sparseLexicalProject
 	return nil
 }
 
-func sparseLexicalLinearExamples(labels sparseLexicalLabelSet, docVectors, queryVectors []retrievalVectorRecord, queryIDs []string, hashBins int, retained map[uint32]bool) ([]sparseLexicalLinearExample, error) {
+func sparseLexicalLinearExamples(labels sparseLexicalLabelSet, docVectors, queryVectors []retrievalVectorRecord, queryIDs []string, hashBins int, retained map[uint32]bool, targetTransform string) ([]sparseLexicalLinearExample, error) {
 	examples := make([]sparseLexicalLinearExample, 0, len(docVectors)+len(queryVectors))
 	docVectorMap := retrievalVectorMap(docVectors)
 	for _, label := range labels.documentsOrdered {
@@ -542,7 +600,7 @@ func sparseLexicalLinearExamples(labels sparseLexicalLabelSet, docVectors, query
 		if !ok {
 			continue
 		}
-		targets, err := sparseLexicalLinearTargets(label, hashBins, retained)
+		targets, err := sparseLexicalLinearTargets(label, hashBins, retained, targetTransform)
 		if err != nil {
 			return nil, err
 		}
@@ -554,7 +612,7 @@ func sparseLexicalLinearExamples(labels sparseLexicalLabelSet, docVectors, query
 		if !ok {
 			continue
 		}
-		targets, err := sparseLexicalLinearTargets(labels.queries[id], hashBins, retained)
+		targets, err := sparseLexicalLinearTargets(labels.queries[id], hashBins, retained, targetTransform)
 		if err != nil {
 			return nil, err
 		}
@@ -563,7 +621,7 @@ func sparseLexicalLinearExamples(labels sparseLexicalLabelSet, docVectors, query
 	return examples, nil
 }
 
-func sparseLexicalLinearTargets(label SparseLexicalLabelRecord, hashBins int, retained map[uint32]bool) (map[uint32]float64, error) {
+func sparseLexicalLinearTargets(label SparseLexicalLabelRecord, hashBins int, retained map[uint32]bool, targetTransform string) (map[uint32]float64, error) {
 	hashed, _, err := sparseLexicalHashRecord(label, hashBins)
 	if err != nil {
 		return nil, err
@@ -571,7 +629,7 @@ func sparseLexicalLinearTargets(label SparseLexicalLabelRecord, hashBins int, re
 	targets := make(map[uint32]float64)
 	for _, term := range hashed.Terms {
 		if term.Weight > 0 && retained[term.Bin] {
-			targets[term.Bin] = term.Weight
+			targets[term.Bin] = sparseLexicalLinearTransformTarget(term.Weight, targetTransform)
 		}
 	}
 	return targets, nil
@@ -656,11 +714,11 @@ func sparseLexicalLinearMSE(bins []SparseLexicalLinearHeadBin, examples []sparse
 	return sum / float64(count)
 }
 
-func predictSparseLexicalLinearVector(id string, vector []float32, head SparseLexicalLinearHead) sparseLexicalHashedVector {
+func predictSparseLexicalLinearVector(id string, vector []float32, head SparseLexicalLinearHead, maxTerms int, scoreThreshold float64) sparseLexicalHashedVector {
 	candidates := make([]sparseLexicalHashedTerm, 0, len(head.Bins))
 	for _, bin := range head.Bins {
 		score := sparseLexicalLinearScore(vector, bin)
-		if score > 0 {
+		if score > scoreThreshold {
 			candidates = append(candidates, sparseLexicalHashedTerm{Bin: bin.Bin, Weight: score})
 		}
 	}
@@ -679,8 +737,8 @@ func predictSparseLexicalLinearVector(id string, vector []float32, head SparseLe
 		}
 		return 0
 	})
-	if len(candidates) > head.Config.MaxPredictedTerms {
-		candidates = candidates[:head.Config.MaxPredictedTerms]
+	if len(candidates) > maxTerms {
+		candidates = candidates[:maxTerms]
 	}
 	slices.SortFunc(candidates, func(a, b sparseLexicalHashedTerm) int {
 		if a.Bin < b.Bin {

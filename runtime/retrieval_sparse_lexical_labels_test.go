@@ -638,12 +638,32 @@ func TestFitSparseLexicalLinearHeadWritesArtifactAndRejectsInvalidConfig(t *test
 	if head.Config.BinRank != SparseLexicalProjectionPrototypeRankSupport || head.Config.Loss != "per_bin_mse_sgd" || head.Config.Normalization != "input_l2" || head.Stats.TrainingUpdates == 0 {
 		t.Fatalf("linear head config/stats = config:%+v stats:%+v", head.Config, head.Stats)
 	}
+	if head.Config.TargetTransform != SparseLexicalLinearHeadTargetTransformIdentity {
+		t.Fatalf("default target transform = %q, want identity", head.Config.TargetTransform)
+	}
 	loaded, err := ReadSparseLexicalLinearHead(valid.HeadPath)
 	if err != nil {
 		t.Fatalf("read linear head: %v", err)
 	}
 	if loaded.Schema != SparseLexicalLinearHeadSchema || len(loaded.Bins[0].Weights) != 2 {
 		t.Fatalf("loaded linear head = %+v", loaded)
+	}
+	logCfg := valid
+	logCfg.HeadPath = filepath.Join(dir, "linear-head-log1p.json")
+	logCfg.TargetTransform = "LOG1P"
+	logHead, err := FitSparseLexicalLinearHead(logCfg)
+	if err != nil {
+		t.Fatalf("fit log1p linear head: %v", err)
+	}
+	if logHead.Config.TargetTransform != SparseLexicalLinearHeadTargetTransformLog1p {
+		t.Fatalf("log1p target transform = %q", logHead.Config.TargetTransform)
+	}
+	loadedLogHead, err := ReadSparseLexicalLinearHead(logCfg.HeadPath)
+	if err != nil {
+		t.Fatalf("read log1p linear head: %v", err)
+	}
+	if loadedLogHead.Config.TargetTransform != SparseLexicalLinearHeadTargetTransformLog1p {
+		t.Fatalf("loaded log1p target transform = %q", loadedLogHead.Config.TargetTransform)
 	}
 
 	for _, tt := range []struct {
@@ -681,6 +701,11 @@ func TestFitSparseLexicalLinearHeadWritesArtifactAndRejectsInvalidConfig(t *test
 			name: "bad bin rank",
 			edit: func(cfg *SparseLexicalLinearHeadFitConfig) { cfg.BinRank = "score_magic" },
 			want: "bin rank must be one of support, total_weight, avg_weight",
+		},
+		{
+			name: "bad target transform",
+			edit: func(cfg *SparseLexicalLinearHeadFitConfig) { cfg.TargetTransform = "sqrt" },
+			want: "target transform must be one of identity, log1p",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

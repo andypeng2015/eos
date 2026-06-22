@@ -436,8 +436,33 @@ func TestEvaluateSparseLexicalLinearHeadVectorHybridPredictsSparseRecoveryWithou
 	if metrics.Config.Hybrid == nil || metrics.Config.Hybrid.Method != "minmax_blend" || metrics.SparseLexical == nil || metrics.SparseLexical.Representation != "experimental_sparse_lexical_linear_head" || metrics.SparseLexical.HashBins != 65536 {
 		t.Fatalf("hybrid/sparse stats missing: hybrid=%+v sparse=%+v", metrics.Config.Hybrid, metrics.SparseLexical)
 	}
+	if metrics.SparseLexical.DocumentMaxHashNNZ != 4 || metrics.SparseLexical.QueryMaxHashNNZ != 4 || metrics.SparseLexical.ScoreThreshold != 0 {
+		t.Fatalf("default sparse calibration stats = %+v", metrics.SparseLexical)
+	}
 	if metrics.Quality.NDCGAt10 != 1 || metrics.Quality.MRRAt10 != 1 {
 		t.Fatalf("linear hybrid quality = %+v, want recovered top hit", metrics.Quality)
+	}
+
+	calibratedMetrics, err := EvaluateSparseLexicalLinearHeadVectorHybrid(context.Background(), SparseLexicalLinearHeadEvalConfig{
+		DatasetName:     "tiny",
+		Split:           "test",
+		CorpusPath:      corpusPath,
+		QueriesPath:     queriesPath,
+		QrelsPath:       qrelsPath,
+		HeadPath:        headPath,
+		DocVectorPath:   docVectorsPath,
+		QueryVectorPath: evalQueryVectorsPath,
+		TopK:            100,
+		DocMaxTerms:     2,
+		QueryMaxTerms:   1,
+		ScoreThreshold:  0.000001,
+		Hybrid:          RetrievalEvalHybridConfig{Method: "minmax", Alpha: 0.75, AlphaSet: true},
+	})
+	if err != nil {
+		t.Fatalf("evaluate calibrated linear hybrid: %v", err)
+	}
+	if calibratedMetrics.SparseLexical == nil || calibratedMetrics.SparseLexical.DocumentMaxHashNNZ != 2 || calibratedMetrics.SparseLexical.QueryMaxHashNNZ != 1 || calibratedMetrics.SparseLexical.ScoreThreshold != 0.000001 {
+		t.Fatalf("calibrated sparse stats = %+v", calibratedMetrics.SparseLexical)
 	}
 
 	badHead := head

@@ -107,6 +107,7 @@ type SparseLexicalLabelEvalStats struct {
 	QueryMaxHashNNZ    int     `json:"query_max_hashed_nonzeros,omitempty"`
 	DocumentMergedBins int     `json:"document_merged_bins,omitempty"`
 	QueryMergedBins    int     `json:"query_merged_bins,omitempty"`
+	ScoreThreshold     float64 `json:"score_threshold,omitempty"`
 	MissingQueryLabels int     `json:"missing_query_labels"`
 	MissingDocLabels   int     `json:"missing_doc_labels"`
 }
