@@ -96,6 +96,8 @@ Movement diagnostics are now part of promotion discipline for compact-head and t
 
 2026-06-22 Matryoshka q4 status: the s40 continuation at `runs/eos-matryoshka-128q4-no-clear-child-quality-v1-seed5581486560434873699-20260622T035557Z/` used valid explicit replacement semantics for `EOS_MATRYOSHKA_DIMS=64,128`, `EOS_MATRYOSHKA_WEIGHTS=1,1`, and `EOS_TURBOQUANT_PREFIX_OBJECTIVES=128:4=0.05` with prepared-IP scoring and no clear-prefix flag. The run was movement-positive at 64d, 128d, and full dimensions, but quality was negative: repo-docs 128d child q4 nDCG@10 regressed from `0.603952` to `0.593129`, and the dense short-set gate failed versus s40 on SciFact nDCG@10, NFCorpus nDCG@10, and NFCorpus recall@100. Do not promote this candidate and do not repeat this exact no-clear Matryoshka 64/128 + q4 prepared-IP recipe; the next compact-child attempt needs a changed signal, data mix, or objective.
 
+2026-06-22 teacher-guided q4 child-rank status: the compact continuation at `runs/eos-teacher-guided-128q4-child-rankmargin-v1-20260622T044411Z/` started from s40, used teacher-guided 128d q4 child-rank objectives, and was mechanically valid and movement-positive at 64d, 128d, and full dimensions. Quality did not pass: the dense short gate failed versus s40 on NFCorpus recall@100 and FiQA nDCG@10, and repo-docs 128d q4 child nDCG@10 was `0.593812`, below the bridge `0.603952` and target `0.608952`. Do not promote this candidate and do not repeat this exact teacher-guided q4 child-rank recipe; the next compact-child run must change the signal family or protection strategy rather than tune this same objective.
+
 Historical rejected probes from the prior sealed-anchor lane:
 
 | Probe | Macro | Reason |
@@ -394,7 +396,7 @@ loss = full_loss + sum(prefix_loss[d] * weight[d])
 
 This makes Eos vectors cheaper to store, gives CorkScrewDB multiple latency/quality modes, and aligns with SOTA embedding compression practice.
 
-Status: implementation is available, but the exact s40 Matryoshka 64/128 plus `128:4=0.05` TurboQuant prepared-IP no-clear recipe is quality-negative as of 2026-06-22. It moved embeddings but regressed repo-docs q4 child quality and failed dense short-set guards, so further Lane H work should change the training signal/data objective instead of repeating that recipe.
+Status: implementation is available, but the exact s40 Matryoshka 64/128 plus `128:4=0.05` TurboQuant prepared-IP no-clear recipe is quality-negative as of 2026-06-22. It moved embeddings but regressed repo-docs q4 child quality and failed dense short-set guards, so further Lane H work should change the training signal/data objective instead of repeating that recipe. The teacher-guided q4 child-rank continuation from s40 also moved and was mechanically valid, but failed dense short guards and stayed below the repo-docs q4 bridge; do not retune that same compact-child objective without changing signal family or protection strategy.
 
 ### Lane I: Sparse Lexical Head
 
