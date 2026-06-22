@@ -409,6 +409,12 @@ Minimum version:
 - teacher scores from BM25 and/or SPLADE-like external teacher
 - hybrid retrieval scoreboard: dense only, sparse only, dense+sparse
 
+Status: the first sparse lexical label exporter and capped-label evaluator are committed as non-default tooling. `eos export-sparse-lexical-labels` emits `manta.sparse_lexical_labels.v1` JSONL plus a manifest, and `eos eval-sparse-lexical-labels` evaluates sparse dot retrieval over the emitted capped labels. On SciFact train, the full exporter run used `5,183` documents and `809` queries with top-128 document labels and 65,536 hashed bins. Average/max nonzeros were `110.9085`/`128` for documents and `12.2905`/`32` for queries. The unbounded internal BM25 sparse oracle reached nDCG@10 `0.6638196190681942` and recall@100 `0.9012772970745775`; the capped top-128 exported-label evaluator reached nDCG@10 `0.657699123151907` and recall@100 `0.9012772970745775`, a capped-label delta of nDCG `-0.0061204959162872` and recall delta `0`.
+
+Caveat: this is BM25 sparse lexical label/oracle evidence, not dense model promotion, not a trained sparse head, and not a default asset or alias change. The oracle exactness comes from unbounded internal BM25 reconstruction, while the exported top-128 labels truncate documents; `2,039` document records omitted `59,106` terms, so exported labels are intentionally not exact full-document BM25 state.
+
+Next scaffold: train the first non-default sparse lexical head as a sidecar experiment that consumes `manta.sparse_lexical_labels.v1` records. Start with hashed lexical bins rather than a full vocabulary head, predict sparse document/query weights with explicit sparsity regularization, and evaluate both sparse-only retrieval and dense+sparse fusion against the current s40 dense default. The run should emit a separate experimental artifact and metrics under `runs/`, keep `.mll` default output and shipped assets unchanged, and require quality proof before any alias/default discussion. Minimum gate: sparse-only must preserve most of the capped-label BM25 signal on SciFact train/dev, dense+sparse must beat dense-only without violating per-dataset floors on the short retrieval set, and reports must state whether gains come from trained sparse output or from lexical labels/oracle baselines.
+
 ### Lane J: Multi-Vector Late Interaction
 
 Add span/token vector outputs and a late-interaction scorer.
