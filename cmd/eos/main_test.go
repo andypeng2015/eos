@@ -2342,6 +2342,7 @@ func TestRunSparseLexicalProjectionHeadWritesMetricsJSON(t *testing.T) {
 		"--split", "test",
 		"--method", "minmax",
 		"--alpha", "0.75",
+		"--dense-candidates-only",
 		"--metrics-json", metricsPath,
 		"--per-query-jsonl", perQueryPath,
 		datasetDir,
@@ -2349,6 +2350,7 @@ func TestRunSparseLexicalProjectionHeadWritesMetricsJSON(t *testing.T) {
 	for _, want := range []string{
 		"retrieval sparse lexical projection head vectors hybrid: dataset=tiny backend=sparse_lexical_projection_head_vectors_hybrid",
 		"hybrid: method=minmax_blend alpha=0.75",
+		"dense_candidates_only=true",
 		"sparse_projection_head: hash_bins=65536",
 		"quality: ndcg@10=1.000000",
 		"head: " + headPath,
@@ -2373,7 +2375,7 @@ func TestRunSparseLexicalProjectionHeadWritesMetricsJSON(t *testing.T) {
 	if metrics.Inputs.LabelPath != "" || metrics.Inputs.HeadPath != headPath || metrics.Inputs.DocVectorPath != docVectorsPath || metrics.Inputs.QueryVectorPath != evalQueryVectorsPath {
 		t.Fatalf("input metrics = %+v", metrics.Inputs)
 	}
-	if metrics.Config.Hybrid == nil || metrics.Config.Hybrid.Method != "minmax_blend" || metrics.SparseLexical == nil || metrics.SparseLexical.HashBins != 65536 {
+	if metrics.Config.Hybrid == nil || metrics.Config.Hybrid.Method != "minmax_blend" || !metrics.Config.Hybrid.DenseCandidatesOnly || metrics.SparseLexical == nil || metrics.SparseLexical.HashBins != 65536 {
 		t.Fatalf("hybrid/sparse config = hybrid:%+v sparse:%+v", metrics.Config.Hybrid, metrics.SparseLexical)
 	}
 	if metrics.Quality.NDCGAt10 != 1 || metrics.Quality.MRRAt10 != 1 {

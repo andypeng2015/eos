@@ -47,12 +47,13 @@ type RetrievalEvalConfig struct {
 }
 
 type RetrievalEvalHybridConfig struct {
-	Method           string
-	Alpha            float64
-	AlphaSet         bool
-	RRFK             float64
-	RRFLambda        float64
-	DenseProtectTopK int
+	Method              string
+	Alpha               float64
+	AlphaSet            bool
+	RRFK                float64
+	RRFLambda           float64
+	DenseProtectTopK    int
+	DenseCandidatesOnly bool
 }
 
 // RetrievalEvalMetrics records standard retrieval metrics for one dataset split.
@@ -92,11 +93,12 @@ type RetrievalEvalConfigMetrics struct {
 }
 
 type RetrievalEvalHybridMetrics struct {
-	Method           string  `json:"method"`
-	Alpha            float64 `json:"alpha,omitempty"`
-	RRFK             float64 `json:"rrf_k,omitempty"`
-	RRFLambda        float64 `json:"rrf_lambda,omitempty"`
-	DenseProtectTopK int     `json:"dense_protect_top_k"`
+	Method              string  `json:"method"`
+	Alpha               float64 `json:"alpha,omitempty"`
+	RRFK                float64 `json:"rrf_k,omitempty"`
+	RRFLambda           float64 `json:"rrf_lambda,omitempty"`
+	DenseProtectTopK    int     `json:"dense_protect_top_k"`
+	DenseCandidatesOnly bool    `json:"dense_candidates_only"`
 }
 
 type RetrievalEvalQualityMetrics struct {

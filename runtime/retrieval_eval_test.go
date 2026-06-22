@@ -415,6 +415,44 @@ func TestFuseHybridScoresDenseProtectTopKPreservesDensePrefix(t *testing.T) {
 	}
 }
 
+func TestFuseHybridScoresDenseCandidatesOnlyReranksDenseSet(t *testing.T) {
+	denseScores := []retrievalScoredDoc{
+		{ID: "dense-winner", Score: 1},
+		{ID: "dense-tail", Score: 0.9},
+	}
+	bm25Scores := []retrievalScoredDoc{
+		{ID: "sparse-only", Score: 100},
+		{ID: "dense-tail", Score: 50},
+		{ID: "dense-winner", Score: 0},
+	}
+
+	got := fuseHybridScores(denseScores, bm25Scores, 2, RetrievalEvalHybridConfig{
+		Method:              "minmax_blend",
+		Alpha:               0.75,
+		DenseCandidatesOnly: true,
+	})
+	if len(got) != 2 {
+		t.Fatalf("fused length = %d, want dense top-k length 2: %+v", len(got), got)
+	}
+	want := []string{"dense-tail", "dense-winner"}
+	for i, id := range want {
+		if got[i].ID != id {
+			t.Fatalf("dense-candidates-only fused[%d] = %q, want %q; got=%+v", i, got[i].ID, id, got)
+		}
+	}
+	for _, score := range got {
+		if score.ID == "sparse-only" {
+			t.Fatalf("sparse-only candidate entered dense-candidates-only result: %+v", got)
+		}
+	}
+	if got[0].DenseRank != 2 || got[0].BM25Rank != 2 {
+		t.Fatalf("reranked dense tail component ranks = dense:%d bm25:%d, want 2/2", got[0].DenseRank, got[0].BM25Rank)
+	}
+	if got[0].DenseScore == nil || math.Abs(*got[0].DenseScore-0.9) > 1e-6 || got[0].BM25Score == nil || *got[0].BM25Score != 50 {
+		t.Fatalf("reranked dense tail component scores = dense:%v bm25:%v, want 0.9/50", got[0].DenseScore, got[0].BM25Score)
+	}
+}
+
 func TestEvaluateTurboQuantVectorRetrievalReportsQualityAndCost(t *testing.T) {
 	docs := []retrievalVectorRecord{
 		{ID: "d1", Vector: normalizeRetrievalVector([]float32{1, 0, 0, 0, 0, 0, 0, 0})},

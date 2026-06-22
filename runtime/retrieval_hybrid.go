@@ -291,11 +291,12 @@ func normalizeRetrievalEvalHybridConfig(cfg RetrievalEvalHybridConfig) (Retrieva
 
 func retrievalEvalHybridMetrics(cfg RetrievalEvalHybridConfig) *RetrievalEvalHybridMetrics {
 	return &RetrievalEvalHybridMetrics{
-		Method:           cfg.Method,
-		Alpha:            cfg.Alpha,
-		RRFK:             cfg.RRFK,
-		RRFLambda:        cfg.RRFLambda,
-		DenseProtectTopK: cfg.DenseProtectTopK,
+		Method:              cfg.Method,
+		Alpha:               cfg.Alpha,
+		RRFK:                cfg.RRFK,
+		RRFLambda:           cfg.RRFLambda,
+		DenseProtectTopK:    cfg.DenseProtectTopK,
+		DenseCandidatesOnly: cfg.DenseCandidatesOnly,
 	}
 }
 
@@ -392,8 +393,10 @@ func fuseHybridScores(denseScores, bm25Scores []retrievalScoredDoc, topK int, cf
 	for _, score := range denseScores {
 		addCandidate(score.ID)
 	}
-	for _, score := range bm25Scores {
-		addCandidate(score.ID)
+	if !cfg.DenseCandidatesOnly {
+		for _, score := range bm25Scores {
+			addCandidate(score.ID)
+		}
 	}
 
 	denseNorm := map[string]float64{}
