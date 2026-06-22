@@ -860,6 +860,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 
 func trainCommonArgs(cfg candidateConfig) []string {
 	args := []string{
+		"--seed", cfg.InitSeed,
 		"--epochs", cfg.Epochs,
 		"--batch-size", cfg.BatchSize,
 		"--lr", cfg.LR,
@@ -1154,7 +1155,7 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 
 	evalCandidate, err := copyPackageForEval(cfg, "validation")
 	guard err == nil else return cfg, err
-	evalArgs := []string{"train-embed", "--eval-only", "--metrics-json", cfg.FinalEvalMetricsJSON}
+	evalArgs := []string{"train-embed", "--eval-only", "--metrics-json", cfg.FinalEvalMetricsJSON, "--seed", cfg.InitSeed}
 	evalArgs = appendEvalModeArgs(evalArgs, cfg)
 	if evalTokenizer != "" {
 		evalArgs = append(evalArgs, "--tokenizer", evalTokenizer)
@@ -1173,7 +1174,7 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	if hardEvalJSONLForRun != "" {
 		hardCandidate, err := copyPackageForEval(cfg, "hard")
 		guard err == nil else return cfg, err
-		hardArgs := []string{"train-embed", "--eval-only", "--metrics-json", cfg.HardEvalMetricsJSON}
+		hardArgs := []string{"train-embed", "--eval-only", "--metrics-json", cfg.HardEvalMetricsJSON, "--seed", cfg.InitSeed}
 		hardArgs = appendEvalModeArgs(hardArgs, cfg)
 		if evalTokenizer != "" {
 			hardArgs = append(hardArgs, "--tokenizer", evalTokenizer)

@@ -94,6 +94,8 @@ The local s40 LongEmbed replay lane is closed. The LongEmbed teacher batch candi
 
 Movement diagnostics are now part of promotion discipline for compact-head and tiny-continuation lanes. `scripts/diagnose_eos_embedding_movement.fw` compares two Eos packages through the retrieval export surface before expensive sweeps. It showed the Matryoshka-only 128d probe was exactly pinned at 64d, 128d, and full dimensions, while the TurboQuant-prefix branch moved slightly. Require movement-positive/no-restore checks before spending another compact-head or micro-continuation sweep.
 
+2026-06-22 Matryoshka q4 status: the s40 continuation at `runs/eos-matryoshka-128q4-no-clear-child-quality-v1-seed5581486560434873699-20260622T035557Z/` used valid explicit replacement semantics for `EOS_MATRYOSHKA_DIMS=64,128`, `EOS_MATRYOSHKA_WEIGHTS=1,1`, and `EOS_TURBOQUANT_PREFIX_OBJECTIVES=128:4=0.05` with prepared-IP scoring and no clear-prefix flag. The run was movement-positive at 64d, 128d, and full dimensions, but quality was negative: repo-docs 128d child q4 nDCG@10 regressed from `0.603952` to `0.593129`, and the dense short-set gate failed versus s40 on SciFact nDCG@10, NFCorpus nDCG@10, and NFCorpus recall@100. Do not promote this candidate and do not repeat this exact no-clear Matryoshka 64/128 + q4 prepared-IP recipe; the next compact-child attempt needs a changed signal, data mix, or objective.
+
 Historical rejected probes from the prior sealed-anchor lane:
 
 | Probe | Macro | Reason |
@@ -243,7 +245,7 @@ The earlier half-frontier triple-SciFact guard run is `runs/eos-embed-m-half-fro
 
 The prior protective replay continuation is `runs/eos-embed-m-fiqa-dev-toprank-protective-replay-probe-20260615T000000Z/`. It starts from the balanced Stage B baseline and trains one LR `0.000002`, HN3, no-teacher continuation on a 96-row blend: `48` FiQA dev top-rank rows, `24` SciFact replay rows, and `24` NFCorpus replay rows.
 
-Negative findings for this branch: FiQA source oversampling regressed; the test-selected microrepair was diagnostic only; dev-heldout top-rank selection generalized directionally but was weaker without protective replay; the larger scale96 blend was worse than the 96-row protective blend on macro and FiQA nDCG; and target80/scifact240 shows that increasing all target row counts can improve FiQA while failing macro and the SciFact guard. Future `embed-m` work should change one data-quality lever around target64/scifact192 rather than increasing all row counts again. Heavy runs are temporarily blocked until cleanup or artifact movement frees space: the safe cleanup report still showed the filesystem at `100%` usage with only `153M` free.
+Negative findings for this branch: FiQA source oversampling regressed; the test-selected microrepair was diagnostic only; dev-heldout top-rank selection generalized directionally but was weaker without protective replay; the larger scale96 blend was worse than the 96-row protective blend on macro and FiQA nDCG; and target80/scifact240 shows that increasing all target row counts can improve FiQA while failing macro and the SciFact guard. Future `embed-m` work should change one data-quality lever around target64/scifact192 rather than increasing all row counts again.
 
 ### Lane E: TurboQuant And Weight Precision
 
@@ -391,6 +393,8 @@ loss = full_loss + sum(prefix_loss[d] * weight[d])
 ```
 
 This makes Eos vectors cheaper to store, gives CorkScrewDB multiple latency/quality modes, and aligns with SOTA embedding compression practice.
+
+Status: implementation is available, but the exact s40 Matryoshka 64/128 plus `128:4=0.05` TurboQuant prepared-IP no-clear recipe is quality-negative as of 2026-06-22. It moved embeddings but regressed repo-docs q4 child quality and failed dense short-set guards, so further Lane H work should change the training signal/data objective instead of repeating that recipe.
 
 ### Lane I: Sparse Lexical Head
 
