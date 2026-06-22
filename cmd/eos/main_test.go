@@ -1792,6 +1792,131 @@ func TestRunEvalSparseLexicalLabelsRejectsSmallTopK(t *testing.T) {
 	}
 }
 
+func TestRunSparseLexicalHashHeadWritesHeadAndMetricsJSON(t *testing.T) {
+	dir := t.TempDir()
+	datasetDir := filepath.Join(dir, "dataset")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "queries.jsonl"), []byte(
+		`{"_id":"q1","text":"alpha"}`+"\n"+
+			`{"_id":"q2","text":"gamma"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "qrels", "train.tsv"), []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\nq2\td3\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	if err := os.WriteFile(labelsPath, []byte(
+		`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d1","nonzeros":2,"terms":[{"term":"alpha","weight":2},{"term":"finance","weight":1}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d2","nonzeros":1,"terms":[{"term":"alpha","weight":0.1}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d3","nonzeros":1,"terms":[{"term":"gamma","weight":3}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"query","dataset":"tiny","split":"train","id":"q1","nonzeros":1,"terms":[{"term":"alpha","weight":1}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"query","dataset":"tiny","split":"train","id":"q2","nonzeros":1,"terms":[{"term":"gamma","weight":1}]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write labels: %v", err)
+	}
+	headPath := filepath.Join(dir, "head.json")
+	fitOutput := captureRunOutput(t, []string{
+		"fit-sparse-lexical-head",
+		"--dataset", "tiny",
+		"--split", "train",
+		"--labels", labelsPath,
+		"--hash-bins", "65536",
+		"--head-json", headPath,
+	})
+	for _, want := range []string{
+		"fit sparse lexical hash head: schema=manta.sparse_lexical_hash_head.v1 experimental=true dataset=tiny split=train hash_bins=65536",
+		"labels: documents=3 queries=2",
+		"head: " + headPath,
+	} {
+		if !strings.Contains(fitOutput, want) {
+			t.Fatalf("fit-sparse-lexical-head output missing %q\noutput:\n%s", want, fitOutput)
+		}
+	}
+	var head eosruntime.SparseLexicalHashHead
+	headData, err := os.ReadFile(headPath)
+	if err != nil {
+		t.Fatalf("read head: %v", err)
+	}
+	if err := json.Unmarshal(headData, &head); err != nil {
+		t.Fatalf("decode head: %v", err)
+	}
+	if head.Schema != eosruntime.SparseLexicalHashHeadSchema || !head.Experimental || head.Hashing.Bins != 65536 {
+		t.Fatalf("head = %+v", head)
+	}
+	metricsPath := filepath.Join(dir, "hash-head.metrics.json")
+	evalOutput := captureRunOutput(t, []string{
+		"eval-sparse-lexical-head",
+		"--dataset", "tiny",
+		"--split", "train",
+		"--labels", labelsPath,
+		"--head-json", headPath,
+		"--metrics-json", metricsPath,
+		datasetDir,
+	})
+	for _, want := range []string{
+		"retrieval sparse lexical hash head: dataset=tiny backend=sparse_lexical_hash_head docs=3 queries=2",
+		"head: hash_bins=65536 documents=3 queries=2",
+		"representation=experimental_hashed_sparse_lexical_head",
+		"quality: ndcg@10=1.000000",
+		"metrics: " + metricsPath,
+	} {
+		if !strings.Contains(evalOutput, want) {
+			t.Fatalf("eval-sparse-lexical-head output missing %q\noutput:\n%s", want, evalOutput)
+		}
+	}
+	var metrics eosruntime.RetrievalEvalMetrics
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		t.Fatalf("decode metrics: %v", err)
+	}
+	if metrics.Schema != eosruntime.RetrievalEvalMetricsSchema || metrics.Backend != "sparse_lexical_hash_head" || metrics.Inputs.HeadPath != headPath || metrics.Quality.NDCGAt10 != 1 {
+		t.Fatalf("metrics = %+v", metrics)
+	}
+	if metrics.SparseLexical == nil || metrics.SparseLexical.HashBins != 65536 || metrics.SparseLexical.DocumentLabels != 3 {
+		t.Fatalf("sparse lexical stats = %+v", metrics.SparseLexical)
+	}
+}
+
+func TestRunSparseLexicalHashHeadRejectsInvalidArgs(t *testing.T) {
+	dir := t.TempDir()
+	datasetDir := filepath.Join(dir, "dataset")
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	headPath := filepath.Join(dir, "head.json")
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "fit missing head",
+			args: []string{"fit-sparse-lexical-head", "--labels", labelsPath},
+			want: "head-json is required",
+		},
+		{
+			name: "fit zero hash bins",
+			args: []string{"fit-sparse-lexical-head", "--labels", labelsPath, "--head-json", headPath, "--hash-bins", "0"},
+			want: "hash bins must be positive",
+		},
+		{
+			name: "eval small top k",
+			args: []string{"eval-sparse-lexical-head", "--labels", labelsPath, "--head-json", headPath, "--top-k", "99", datasetDir},
+			want: "top-k must be at least 100",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output, err := captureRunOutputAndError(t, tt.args)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, output = %q, want err containing %q", err, output, tt.want)
+			}
+		})
+	}
+}
+
 func TestRunEvalRetrievalVectorsWritesMetricsJSON(t *testing.T) {
 	dir := t.TempDir()
 	datasetDir := filepath.Join(dir, "dataset")

@@ -74,6 +74,7 @@ type RetrievalEvalInputMetrics struct {
 	QueriesPath     string `json:"queries_path,omitempty"`
 	QrelsPath       string `json:"qrels_path,omitempty"`
 	LabelPath       string `json:"label_path,omitempty"`
+	HeadPath        string `json:"head_path,omitempty"`
 	DocVectorPath   string `json:"doc_vector_path,omitempty"`
 	QueryVectorPath string `json:"query_vector_path,omitempty"`
 	Documents       int    `json:"documents"`

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -259,6 +260,121 @@ func TestEvaluateSparseLexicalLabelsRejectsInvalidSchema(t *testing.T) {
 	}
 }
 
+func TestFitSparseLexicalHashHeadWritesExperimentalArtifact(t *testing.T) {
+	dir, _, _, _ := writeSparseLexicalDataset(t)
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	headPath := filepath.Join(dir, "head.json")
+	writeHashHeadEvalLabels(t, labelsPath, false, false)
+	head, err := FitSparseLexicalHashHead(SparseLexicalHashHeadFitConfig{
+		DatasetName: "tiny",
+		Split:       "train",
+		LabelsPath:  labelsPath,
+		HeadPath:    headPath,
+		HashBins:    1,
+	})
+	if err != nil {
+		t.Fatalf("fit hash head: %v", err)
+	}
+	if head.Schema != SparseLexicalHashHeadSchema || !head.Experimental || head.Hashing.Bins != 1 {
+		t.Fatalf("head identity = %+v", head)
+	}
+	if head.Stats.DocumentLabels != 3 || head.Stats.QueryLabels != 2 || head.Stats.DocumentMaxHashNNZ != 1 || head.Stats.DocumentMergedBins == 0 {
+		t.Fatalf("head stats = %+v", head.Stats)
+	}
+	loaded, err := ReadSparseLexicalHashHead(headPath)
+	if err != nil {
+		t.Fatalf("read head: %v", err)
+	}
+	if loaded.Schema != SparseLexicalHashHeadSchema || loaded.Hashing.Bins != 1 {
+		t.Fatalf("loaded head = %+v", loaded)
+	}
+}
+
+func TestEvaluateSparseLexicalHashHeadRanksHashedLabels(t *testing.T) {
+	dir, _, queriesPath, qrelsPath := writeSparseLexicalDataset(t)
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	headPath := filepath.Join(dir, "head.json")
+	writeHashHeadEvalLabels(t, labelsPath, true, false)
+	if _, err := FitSparseLexicalHashHead(SparseLexicalHashHeadFitConfig{
+		DatasetName: "tiny",
+		Split:       "train",
+		LabelsPath:  labelsPath,
+		HeadPath:    headPath,
+		HashBins:    65536,
+	}); err != nil {
+		t.Fatalf("fit hash head: %v", err)
+	}
+	metrics, err := EvaluateSparseLexicalHashHead(context.Background(), SparseLexicalHashHeadEvalConfig{
+		DatasetName: "tiny",
+		Split:       "train",
+		QueriesPath: queriesPath,
+		QrelsPath:   qrelsPath,
+		LabelsPath:  labelsPath,
+		HeadPath:    headPath,
+		TopK:        100,
+	})
+	if err != nil {
+		t.Fatalf("eval hash head: %v", err)
+	}
+	if metrics.Backend != "sparse_lexical_hash_head" || metrics.Inputs.LabelPath != labelsPath || metrics.Inputs.HeadPath != headPath || metrics.Inputs.Documents != 3 || metrics.Inputs.Queries != 2 {
+		t.Fatalf("metrics identity/inputs = %+v", metrics)
+	}
+	if metrics.Quality.NDCGAt10 != 1 || metrics.Quality.RecallAt100 != 1 {
+		t.Fatalf("quality = %+v", metrics.Quality)
+	}
+	if metrics.SparseLexical == nil || metrics.SparseLexical.HashBins != 65536 || metrics.SparseLexical.DocumentMaxHashNNZ != 2 || metrics.SparseLexical.Representation != "experimental_hashed_sparse_lexical_head" {
+		t.Fatalf("sparse stats = %+v", metrics.SparseLexical)
+	}
+}
+
+func TestSparseLexicalHashHeadRejectsInvalidHeadAndHashBins(t *testing.T) {
+	dir, _, queriesPath, qrelsPath := writeSparseLexicalDataset(t)
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	headPath := filepath.Join(dir, "head.json")
+	writeHashHeadEvalLabels(t, labelsPath, true, false)
+	if _, err := FitSparseLexicalHashHead(SparseLexicalHashHeadFitConfig{
+		DatasetName: "tiny",
+		Split:       "train",
+		LabelsPath:  labelsPath,
+		HeadPath:    headPath,
+		HashBins:    0,
+	}); err == nil || !strings.Contains(err.Error(), "hash bins must be positive") {
+		t.Fatalf("fit err = %v, want positive hash bins", err)
+	}
+	if err := os.WriteFile(headPath, []byte(`{"schema":"manta.other.v1","hashing":{"algorithm":"fnv1a32","bins":16}}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write bad head: %v", err)
+	}
+	_, err := EvaluateSparseLexicalHashHead(context.Background(), SparseLexicalHashHeadEvalConfig{
+		DatasetName: "tiny",
+		Split:       "train",
+		QueriesPath: queriesPath,
+		QrelsPath:   qrelsPath,
+		LabelsPath:  labelsPath,
+		HeadPath:    headPath,
+		TopK:        100,
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported schema") {
+		t.Fatalf("eval err = %v, want unsupported schema", err)
+	}
+}
+
+func TestSparseLexicalHashHeadRejectsIncompatibleLabelHashBins(t *testing.T) {
+	dir, _, _, _ := writeSparseLexicalDataset(t)
+	labelsPath := filepath.Join(dir, "bad-hash-labels.jsonl")
+	headPath := filepath.Join(dir, "head.json")
+	writeHashHeadEvalLabels(t, labelsPath, true, true)
+	_, err := FitSparseLexicalHashHead(SparseLexicalHashHeadFitConfig{
+		DatasetName: "tiny",
+		Split:       "train",
+		LabelsPath:  labelsPath,
+		HeadPath:    headPath,
+		HashBins:    65536,
+	})
+	if err == nil || !strings.Contains(err.Error(), "incompatible") {
+		t.Fatalf("err = %v, want incompatible hash_bin", err)
+	}
+}
+
 func writeSparseLexicalDataset(t *testing.T) (dir, corpusPath, queriesPath, qrelsPath string) {
 	t.Helper()
 	dir = t.TempDir()
@@ -305,4 +421,24 @@ func readSparseLexicalRecords(t *testing.T, path string) []SparseLexicalLabelRec
 		t.Fatalf("scan labels: %v", err)
 	}
 	return records
+}
+
+func writeHashHeadEvalLabels(t *testing.T, labelsPath string, includeHash, incompatibleHash bool) {
+	t.Helper()
+	alphaTerm := `{"term":"alpha","weight":2}`
+	if includeHash {
+		alphaHash := *sparseLexicalHashBin("alpha", 65536)
+		if incompatibleHash {
+			alphaHash++
+		}
+		alphaTerm = fmt.Sprintf(`{"term":"alpha","weight":2,"hash_bin":%d}`, alphaHash)
+	}
+	if err := os.WriteFile(labelsPath, []byte(
+		fmt.Sprintf(`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d1","nonzeros":2,"terms":[%s,{"term":"finance","weight":1}]}`+"\n", alphaTerm)+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d2","nonzeros":1,"terms":[{"term":"alpha","weight":0.1}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d3","nonzeros":1,"terms":[{"term":"gamma","weight":3}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"query","dataset":"tiny","split":"train","id":"q1","nonzeros":1,"terms":[{"term":"alpha","weight":1}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"query","dataset":"tiny","split":"train","id":"q2","nonzeros":1,"terms":[{"term":"gamma","weight":1}]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write labels: %v", err)
+	}
 }

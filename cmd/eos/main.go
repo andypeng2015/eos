@@ -119,6 +119,10 @@ func run(args []string) error {
 		return runExportSparseLexicalLabels(args[1:])
 	case "eval-sparse-lexical-labels":
 		return runEvalSparseLexicalLabels(args[1:])
+	case "fit-sparse-lexical-head":
+		return runFitSparseLexicalHead(args[1:])
+	case "eval-sparse-lexical-head":
+		return runEvalSparseLexicalHead(args[1:])
 	case "export-timeseries-vectors":
 		return runExportTimeSeriesVectors(args[1:])
 	case "export-event-trace-vectors":
@@ -1973,6 +1977,122 @@ func runEvalSparseLexicalLabels(args []string) error {
 	fmt.Printf("throughput: elapsed=%.3fs labels/s=%.2f queries/s=%.2f scores/s=%.2f\n",
 		metrics.Throughput.ElapsedSeconds, metrics.Throughput.DocumentsPerSecond, metrics.Throughput.QueriesPerSecond, metrics.Throughput.ScoresPerSecond)
 	fmt.Printf("labels: %s\n", *labelsPath)
+	if *metricsPath != "" {
+		fmt.Printf("metrics: %s\n", *metricsPath)
+	}
+	if *perQueryPath != "" {
+		fmt.Printf("per_query: %s\n", *perQueryPath)
+	}
+	return nil
+}
+
+func runFitSparseLexicalHead(args []string) error {
+	fs := flag.NewFlagSet("fit-sparse-lexical-head", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	datasetName := fs.String("dataset", "", "dataset name for head metadata")
+	split := fs.String("split", "train", "label split for validation")
+	labelsPath := fs.String("labels", "", "sparse lexical label JSONL from export-sparse-lexical-labels")
+	hashBins := fs.Int("hash-bins", 65536, "deterministic FNV-1a hashed sparse head bins")
+	headPath := fs.String("head-json", "", "write experimental sparse lexical hash head JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: eos fit-sparse-lexical-head --labels labels.jsonl --hash-bins 65536 --head-json head.json")
+	}
+	if *labelsPath == "" {
+		return fmt.Errorf("labels is required")
+	}
+	if *headPath == "" {
+		return fmt.Errorf("head-json is required")
+	}
+	head, err := eosruntime.FitSparseLexicalHashHead(eosruntime.SparseLexicalHashHeadFitConfig{
+		DatasetName: *datasetName,
+		Split:       *split,
+		LabelsPath:  *labelsPath,
+		HeadPath:    *headPath,
+		HashBins:    *hashBins,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("fit sparse lexical hash head: schema=%s experimental=%t dataset=%s split=%s hash_bins=%d\n",
+		head.Schema, head.Experimental, head.Dataset, head.Split, head.Hashing.Bins)
+	fmt.Printf("labels: documents=%d queries=%d doc_avg_hash_nonzeros=%.2f doc_max_hash_nonzeros=%d query_avg_hash_nonzeros=%.2f query_max_hash_nonzeros=%d doc_merged_bins=%d query_merged_bins=%d\n",
+		head.Stats.DocumentLabels, head.Stats.QueryLabels, head.Stats.DocumentAvgHashNNZ, head.Stats.DocumentMaxHashNNZ, head.Stats.QueryAvgHashNNZ, head.Stats.QueryMaxHashNNZ, head.Stats.DocumentMergedBins, head.Stats.QueryMergedBins)
+	fmt.Printf("labels: %s\n", *labelsPath)
+	fmt.Printf("head: %s\n", *headPath)
+	return nil
+}
+
+func runEvalSparseLexicalHead(args []string) error {
+	fs := flag.NewFlagSet("eval-sparse-lexical-head", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	datasetName := fs.String("dataset", "", "dataset name for metrics output")
+	split := fs.String("split", "test", "qrels split under <dataset-dir>/qrels")
+	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path")
+	labelsPath := fs.String("labels", "", "sparse lexical label JSONL document/query universe from export-sparse-lexical-labels")
+	headPath := fs.String("head-json", "", "experimental sparse lexical hash head JSON")
+	topK := fs.Int("top-k", 100, "retrieval depth over label-file document records")
+	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
+	metricsPath := fs.String("metrics-json", "", "write retrieval metrics JSON")
+	perQueryPath := fs.String("per-query-jsonl", "", "write one retrieval diagnostics JSONL row per evaluated query")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || fs.Arg(0) == "" {
+		return fmt.Errorf("usage: eos eval-sparse-lexical-head [flags] --labels labels.jsonl --head-json head.json <beir-dataset-dir>")
+	}
+	if *labelsPath == "" {
+		return fmt.Errorf("labels is required")
+	}
+	if *headPath == "" {
+		return fmt.Errorf("head-json is required")
+	}
+	datasetDir := fs.Arg(0)
+	_, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
+	if *qrelsPath == "" {
+		*qrelsPath = defaultQrelsPath
+	}
+	if *datasetName == "" {
+		*datasetName = filepath.Base(datasetDir)
+	}
+	metrics, err := eosruntime.EvaluateSparseLexicalHashHead(context.Background(), eosruntime.SparseLexicalHashHeadEvalConfig{
+		DatasetName:       *datasetName,
+		Split:             *split,
+		QueriesPath:       queriesPath,
+		QrelsPath:         *qrelsPath,
+		LabelsPath:        *labelsPath,
+		HeadPath:          *headPath,
+		TopK:              *topK,
+		MaxQueries:        *maxQueries,
+		PerQueryJSONLPath: *perQueryPath,
+	})
+	if err != nil {
+		return err
+	}
+	if *metricsPath != "" {
+		data, err := json.MarshalIndent(metrics, "", "  ")
+		if err != nil {
+			return err
+		}
+		data = append(data, '\n')
+		if err := os.WriteFile(*metricsPath, data, 0o644); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("retrieval sparse lexical hash head: dataset=%s backend=%s docs=%d queries=%d relevant_pairs=%d scored_pairs=%d top_k=%d\n",
+		metrics.Dataset, metrics.Backend, metrics.Inputs.Documents, metrics.Inputs.Queries, metrics.Inputs.RelevantPairs, metrics.Inputs.ScoredPairs, metrics.Config.TopK)
+	if metrics.SparseLexical != nil {
+		fmt.Printf("head: hash_bins=%d documents=%d queries=%d doc_avg_hash_nonzeros=%.2f doc_max_hash_nonzeros=%d query_avg_hash_nonzeros=%.2f query_max_hash_nonzeros=%d doc_merged_bins=%d query_merged_bins=%d representation=%s\n",
+			metrics.SparseLexical.HashBins, metrics.SparseLexical.DocumentLabels, metrics.SparseLexical.QueryLabels, metrics.SparseLexical.DocumentAvgHashNNZ, metrics.SparseLexical.DocumentMaxHashNNZ, metrics.SparseLexical.QueryAvgHashNNZ, metrics.SparseLexical.QueryMaxHashNNZ, metrics.SparseLexical.DocumentMergedBins, metrics.SparseLexical.QueryMergedBins, metrics.SparseLexical.Representation)
+	}
+	fmt.Printf("quality: ndcg@10=%.6f ndcg@100=%.6f mrr@10=%.6f p@1=%.6f p@5=%.6f p@10=%.6f hit@1=%.6f hit@5=%.6f hit@10=%.6f map@10=%.6f map@100=%.6f recall@10=%.6f recall@100=%.6f\n",
+		metrics.Quality.NDCGAt10, metrics.Quality.NDCGAt100, metrics.Quality.MRRAt10, metrics.Quality.PrecisionAt1, metrics.Quality.PrecisionAt5, metrics.Quality.PrecisionAt10, metrics.Quality.HitAt1, metrics.Quality.HitAt5, metrics.Quality.HitAt10, metrics.Quality.MAPAt10, metrics.Quality.MAPAt100, metrics.Quality.RecallAt10, metrics.Quality.RecallAt100)
+	fmt.Printf("throughput: elapsed=%.3fs labels/s=%.2f queries/s=%.2f scores/s=%.2f\n",
+		metrics.Throughput.ElapsedSeconds, metrics.Throughput.DocumentsPerSecond, metrics.Throughput.QueriesPerSecond, metrics.Throughput.ScoresPerSecond)
+	fmt.Printf("labels: %s\n", *labelsPath)
+	fmt.Printf("head: %s\n", *headPath)
 	if *metricsPath != "" {
 		fmt.Printf("metrics: %s\n", *metricsPath)
 	}
@@ -6892,6 +7012,7 @@ func printUsage() {
 	fmt.Println("  eos export-sparse-token-pool-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
 	fmt.Println("  eos export-sparse-encoder-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
 	fmt.Println("  eos export-sparse-lexical-labels [flags] <beir-dataset-dir> <labels.jsonl>")
+	fmt.Println("  eos fit-sparse-lexical-head --labels labels.jsonl --hash-bins 65536 --head-json head.json")
 	fmt.Println("  eos export-timeseries-vectors [flags] <artifact.mll> <series.jsonl> <queries.jsonl> <output-dir>")
 	fmt.Println("  eos export-event-trace-vectors [flags] <artifact.mll> <traces.jsonl> <queries.jsonl> <output-dir>")
 	fmt.Println("  eos eval-retrieval [flags] <artifact.mll> <beir-dataset-dir>")
@@ -6903,6 +7024,7 @@ func printUsage() {
 	fmt.Println("  eos eval-retrieval-multivector-turboquant [flags] --doc-vectors child-docs.jsonl --query-vectors queries.jsonl <beir-dataset-dir>")
 	fmt.Println("  eos eval-retrieval-bm25 [flags] <beir-dataset-dir>")
 	fmt.Println("  eos eval-sparse-lexical-labels [flags] --labels labels.jsonl <beir-dataset-dir>")
+	fmt.Println("  eos eval-sparse-lexical-head [flags] --labels labels.jsonl --head-json head.json <beir-dataset-dir>")
 	fmt.Println("  eos mine-retrieval-hard-negatives [flags] <beir-dataset-dir> <output.jsonl>")
 	fmt.Println("  eos mine-retrieval-model-hard-negatives [flags] <artifact.mll> <beir-dataset-dir> <output.jsonl>")
 	fmt.Println("  eos mine-retrieval-compact-hard-negatives [flags] --per-query-jsonl diagnostics.jsonl <beir-dataset-dir> <output.jsonl>")
@@ -6945,6 +7067,7 @@ func printUsage() {
 	fmt.Println("export-sparse-token-pool-vectors writes experimental_sparse_token_pool BEIR vector caches from tokenizer ids, token_embedding rows, and host-reference attention (--attention-mode turboquant_sparse|dense); --token-span-tokens emits child vectors from one encoded document pass; quality_claim=false; --min-observed-doc-tokens can fail runs that never consume the requested document token length.")
 	fmt.Println("export-sparse-encoder-vectors writes parent doc/query vector caches as experimental_sparse_encoder_host_reference; it requires full manifest encoder weights, records retrieval_cache_host_reference_sparse_encoder evidence, and keeps quality_claim=false.")
 	fmt.Println("export-sparse-lexical-labels writes deterministic BM25 sparse lexical document/query labels plus an oracle manifest; it is non-training and does not modify embedding assets.")
+	fmt.Println("fit-sparse-lexical-head writes an experimental non-default hashed-bin sparse lexical sidecar from manta.sparse_lexical_labels.v1 labels.")
 	fmt.Println("export-timeseries-vectors writes text-rendered time-series window child-vector caches plus query vectors for the multivector TurboQuant quality harness.")
 	fmt.Println("export-event-trace-vectors writes text-rendered event/trace child-vector caches plus query vectors for the multivector TurboQuant quality harness.")
 	fmt.Println("eval-retrieval scores a sealed embedding .mll on BEIR-style corpus/query/qrels files with nDCG/MRR/Recall metrics.")
@@ -6956,6 +7079,7 @@ func printUsage() {
 	fmt.Println("eval-retrieval-multivector-turboquant compares dense and direct TurboQuant child-vector scoring aggregated by max child score per parent.")
 	fmt.Println("eval-retrieval-bm25 scores the same BEIR files with an in-repo BM25 lexical baseline.")
 	fmt.Println("eval-sparse-lexical-labels scores capped exported manta.sparse_lexical_labels.v1 query labels against the label-file document universe and BEIR qrels.")
+	fmt.Println("eval-sparse-lexical-head scores the experimental hashed-bin sparse lexical sidecar over the label-file document universe and BEIR qrels.")
 	fmt.Println("mine-retrieval-hard-negatives creates text hard-negative training JSONL from BEIR qrels using the BM25 baseline.")
 	fmt.Println("mine-retrieval-model-hard-negatives creates text hard-negative training JSONL from BEIR qrels using a Eos embedding model's own misses.")
 	fmt.Println("mine-retrieval-compact-hard-negatives creates text hard-negative JSONL from compact TurboQuant per-query diagnostics and rejects test-split train selection by default.")

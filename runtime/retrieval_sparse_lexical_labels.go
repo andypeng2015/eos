@@ -93,12 +93,20 @@ type SparseLexicalLabelExportStats struct {
 type SparseLexicalLabelEvalStats struct {
 	Representation     string  `json:"representation"`
 	LabelsPath         string  `json:"labels_path"`
+	HeadPath           string  `json:"head_path,omitempty"`
+	HashBins           int     `json:"hash_bins,omitempty"`
 	DocumentLabels     int     `json:"document_labels"`
 	QueryLabels        int     `json:"query_labels"`
 	DocumentAvgNNZ     float64 `json:"document_avg_nonzeros"`
 	DocumentMaxNNZ     int     `json:"document_max_nonzeros"`
 	QueryAvgNNZ        float64 `json:"query_avg_nonzeros"`
 	QueryMaxNNZ        int     `json:"query_max_nonzeros"`
+	DocumentAvgHashNNZ float64 `json:"document_avg_hashed_nonzeros,omitempty"`
+	DocumentMaxHashNNZ int     `json:"document_max_hashed_nonzeros,omitempty"`
+	QueryAvgHashNNZ    float64 `json:"query_avg_hashed_nonzeros,omitempty"`
+	QueryMaxHashNNZ    int     `json:"query_max_hashed_nonzeros,omitempty"`
+	DocumentMergedBins int     `json:"document_merged_bins,omitempty"`
+	QueryMergedBins    int     `json:"query_merged_bins,omitempty"`
 	MissingQueryLabels int     `json:"missing_query_labels"`
 	MissingDocLabels   int     `json:"missing_doc_labels"`
 }
