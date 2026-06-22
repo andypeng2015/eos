@@ -586,6 +586,115 @@ func TestFitSparseLexicalProjectionHeadPrototypeRankPolicy(t *testing.T) {
 	}
 }
 
+func TestFitSparseLexicalLinearHeadWritesArtifactAndRejectsInvalidConfig(t *testing.T) {
+	dir, _, _, _ := writeSparseLexicalDataset(t)
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	if _, err := ExportSparseLexicalLabels(context.Background(), SparseLexicalLabelExportConfig{
+		DatasetName: "tiny",
+		Split:       "train",
+		CorpusPath:  filepath.Join(dir, "corpus.jsonl"),
+		QueriesPath: filepath.Join(dir, "queries.jsonl"),
+		QrelsPath:   filepath.Join(dir, "qrels", "train.tsv"),
+		OutputPath:  labelsPath,
+		TopTerms:    2,
+		OracleTopK:  100,
+	}); err != nil {
+		t.Fatalf("export labels: %v", err)
+	}
+	docVectorsPath := filepath.Join(dir, "doc-vectors.jsonl")
+	queryVectorsPath := filepath.Join(dir, "query-vectors.jsonl")
+	if err := os.WriteFile(docVectorsPath, []byte(
+		`{"_id":"d1","embedding":[1,0]}`+"\n"+
+			`{"_id":"d2","embedding":[0,1]}`+"\n"+
+			`{"_id":"d3","embedding":[1,1]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write doc vectors: %v", err)
+	}
+	if err := os.WriteFile(queryVectorsPath, []byte(
+		`{"_id":"q1","embedding":[1,0]}`+"\n"+
+			`{"_id":"q2","embedding":[0,1]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write query vectors: %v", err)
+	}
+	valid := SparseLexicalLinearHeadFitConfig{
+		DatasetName:       "tiny",
+		Split:             "train",
+		LabelsPath:        labelsPath,
+		DocVectorPath:     docVectorsPath,
+		QueryVectorPath:   queryVectorsPath,
+		HeadPath:          filepath.Join(dir, "linear-head.json"),
+		HashBins:          16,
+		MaxBins:           4,
+		MaxPredictedTerms: 2,
+		Epochs:            2,
+		LearningRate:      0.05,
+		NegativeRatio:     1,
+	}
+	head, err := FitSparseLexicalLinearHead(valid)
+	if err != nil {
+		t.Fatalf("fit valid linear head: %v", err)
+	}
+	if head.Schema != SparseLexicalLinearHeadSchema || !head.Experimental || head.Config.Dimension != 2 || head.Config.HashBins != 16 || head.Config.MaxBins != 4 || head.Config.MaxPredictedTerms != 2 || head.Stats.StoredBins == 0 || len(head.Bins) == 0 {
+		t.Fatalf("linear head = %+v", head)
+	}
+	if head.Config.BinRank != SparseLexicalProjectionPrototypeRankSupport || head.Config.Loss != "per_bin_mse_sgd" || head.Config.Normalization != "input_l2" || head.Stats.TrainingUpdates == 0 {
+		t.Fatalf("linear head config/stats = config:%+v stats:%+v", head.Config, head.Stats)
+	}
+	loaded, err := ReadSparseLexicalLinearHead(valid.HeadPath)
+	if err != nil {
+		t.Fatalf("read linear head: %v", err)
+	}
+	if loaded.Schema != SparseLexicalLinearHeadSchema || len(loaded.Bins[0].Weights) != 2 {
+		t.Fatalf("loaded linear head = %+v", loaded)
+	}
+
+	for _, tt := range []struct {
+		name string
+		edit func(*SparseLexicalLinearHeadFitConfig)
+		want string
+	}{
+		{
+			name: "bad hash bins",
+			edit: func(cfg *SparseLexicalLinearHeadFitConfig) { cfg.HashBins = 0 },
+			want: "hash bins must be positive",
+		},
+		{
+			name: "bad max bins",
+			edit: func(cfg *SparseLexicalLinearHeadFitConfig) { cfg.MaxBins = 0 },
+			want: "max bins must be positive",
+		},
+		{
+			name: "bad learning rate",
+			edit: func(cfg *SparseLexicalLinearHeadFitConfig) { cfg.LearningRate = -0.1 },
+			want: "learning rate must be finite and positive",
+		},
+		{
+			name: "dimension mismatch",
+			edit: func(cfg *SparseLexicalLinearHeadFitConfig) {
+				path := filepath.Join(dir, "bad-linear-query-vectors.jsonl")
+				if err := os.WriteFile(path, []byte(`{"_id":"q1","embedding":[1,0,0]}`+"\n"), 0o644); err != nil {
+					t.Fatalf("write bad query vectors: %v", err)
+				}
+				cfg.QueryVectorPath = path
+			},
+			want: "dimension",
+		},
+		{
+			name: "bad bin rank",
+			edit: func(cfg *SparseLexicalLinearHeadFitConfig) { cfg.BinRank = "score_magic" },
+			want: "bin rank must be one of support, total_weight, avg_weight",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := valid
+			cfg.HeadPath = filepath.Join(dir, tt.name+".json")
+			tt.edit(&cfg)
+			_, err := FitSparseLexicalLinearHead(cfg)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func writeSparseLexicalDataset(t *testing.T) (dir, corpusPath, queriesPath, qrelsPath string) {
 	t.Helper()
 	dir = t.TempDir()

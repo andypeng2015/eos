@@ -129,6 +129,10 @@ func run(args []string) error {
 		return runFitSparseLexicalProjectionHead(args[1:])
 	case "eval-sparse-lexical-projection-head-vectors-hybrid":
 		return runEvalSparseLexicalProjectionHeadVectorsHybrid(args[1:])
+	case "fit-sparse-lexical-linear-head":
+		return runFitSparseLexicalLinearHead(args[1:])
+	case "eval-sparse-lexical-linear-head-vectors-hybrid":
+		return runEvalSparseLexicalLinearHeadVectorsHybrid(args[1:])
 	case "export-timeseries-vectors":
 		return runExportTimeSeriesVectors(args[1:])
 	case "export-event-trace-vectors":
@@ -1533,6 +1537,171 @@ func runEvalSparseLexicalProjectionHeadVectorsHybrid(args []string) error {
 	printRetrievalHybridConfig(metrics)
 	if metrics.SparseLexical != nil {
 		fmt.Printf("sparse_projection_head: hash_bins=%d predicted_doc_terms_max=%d predicted_query_terms_max=%d representation=%s\n",
+			metrics.SparseLexical.HashBins, metrics.SparseLexical.DocumentMaxHashNNZ, metrics.SparseLexical.QueryMaxHashNNZ, metrics.SparseLexical.Representation)
+	}
+	fmt.Printf("quality: ndcg@10=%.6f ndcg@100=%.6f mrr@10=%.6f p@1=%.6f p@5=%.6f p@10=%.6f hit@1=%.6f hit@5=%.6f hit@10=%.6f map@10=%.6f map@100=%.6f recall@10=%.6f recall@100=%.6f\n",
+		metrics.Quality.NDCGAt10, metrics.Quality.NDCGAt100, metrics.Quality.MRRAt10, metrics.Quality.PrecisionAt1, metrics.Quality.PrecisionAt5, metrics.Quality.PrecisionAt10, metrics.Quality.HitAt1, metrics.Quality.HitAt5, metrics.Quality.HitAt10, metrics.Quality.MAPAt10, metrics.Quality.MAPAt100, metrics.Quality.RecallAt10, metrics.Quality.RecallAt100)
+	fmt.Printf("throughput: elapsed=%.3fs docs/s=%.2f queries/s=%.2f scores/s=%.2f\n",
+		metrics.Throughput.ElapsedSeconds, metrics.Throughput.DocumentsPerSecond, metrics.Throughput.QueriesPerSecond, metrics.Throughput.ScoresPerSecond)
+	fmt.Printf("head: %s\n", *headPath)
+	if *metricsPath != "" {
+		fmt.Printf("metrics: %s\n", *metricsPath)
+	}
+	if *perQueryPath != "" {
+		fmt.Printf("per_query: %s\n", *perQueryPath)
+	}
+	return nil
+}
+
+func runFitSparseLexicalLinearHead(args []string) error {
+	fs := flag.NewFlagSet("fit-sparse-lexical-linear-head", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	datasetName := fs.String("dataset", "", "dataset name for head metadata")
+	split := fs.String("split", "train", "label split for validation")
+	labelsPath := fs.String("labels", "", "sparse lexical label JSONL used as fit-time supervision")
+	docVectorsPath := fs.String("doc-vectors", "", "train document vector cache JSONL")
+	queryVectorsPath := fs.String("query-vectors", "", "train query vector cache JSONL")
+	hashBins := fs.Int("hash-bins", 65536, "deterministic FNV-1a hashed sparse bins")
+	maxBins := fs.Int("max-bins", 4096, "maximum retained hashed output bins to train and store")
+	maxTerms := fs.Int("max-terms", 32, "maximum positive predicted sparse bins per vector")
+	binRank := fs.String("bin-rank", "support", "retained-bin rank policy: support, total_weight, or avg_weight")
+	epochs := fs.Int("epochs", 3, "deterministic SGD epochs")
+	learningRate := fs.Float64("learning-rate", 0.05, "deterministic SGD learning rate")
+	negativeRatio := fs.Int("negative-ratio", 2, "deterministic zero-target bins per training example")
+	headPath := fs.String("head-json", "", "write experimental sparse lexical linear head JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: eos fit-sparse-lexical-linear-head --labels labels.jsonl --doc-vectors docs.jsonl --query-vectors queries.jsonl --hash-bins 65536 --max-bins 4096 --max-terms 32 --head-json head.json")
+	}
+	if *labelsPath == "" {
+		return fmt.Errorf("labels is required")
+	}
+	if *docVectorsPath == "" {
+		return fmt.Errorf("doc-vectors is required")
+	}
+	if *queryVectorsPath == "" {
+		return fmt.Errorf("query-vectors is required")
+	}
+	if *headPath == "" {
+		return fmt.Errorf("head-json is required")
+	}
+	head, err := eosruntime.FitSparseLexicalLinearHead(eosruntime.SparseLexicalLinearHeadFitConfig{
+		DatasetName:       *datasetName,
+		Split:             *split,
+		LabelsPath:        *labelsPath,
+		DocVectorPath:     *docVectorsPath,
+		QueryVectorPath:   *queryVectorsPath,
+		HeadPath:          *headPath,
+		HashBins:          *hashBins,
+		MaxBins:           *maxBins,
+		MaxPredictedTerms: *maxTerms,
+		BinRank:           *binRank,
+		Epochs:            *epochs,
+		LearningRate:      *learningRate,
+		NegativeRatio:     *negativeRatio,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("fit sparse lexical linear head: schema=%s experimental=%t dataset=%s split=%s dim=%d hash_bins=%d bins=%d max_terms=%d bin_rank=%s epochs=%d learning_rate=%g negative_ratio=%d\n",
+		head.Schema, head.Experimental, head.Dataset, head.Split, head.Config.Dimension, head.Hashing.Bins, len(head.Bins), head.Config.MaxPredictedTerms, head.Config.BinRank, head.Config.Epochs, head.Config.LearningRate, head.Config.NegativeRatio)
+	fmt.Printf("fit_vectors: documents=%d queries=%d missing_documents=%d missing_queries=%d candidate_bins=%d stored_bins=%d updates=%d final_mse=%.6f normalization=%s\n",
+		head.Stats.DocumentVectors, head.Stats.QueryVectors, head.Stats.MissingDocVectors, head.Stats.MissingQueryVectors, head.Stats.CandidateBins, head.Stats.StoredBins, head.Stats.TrainingUpdates, head.Stats.FinalMSE, head.Config.Normalization)
+	fmt.Printf("labels: %s\n", *labelsPath)
+	fmt.Printf("doc_vectors: %s\n", *docVectorsPath)
+	fmt.Printf("query_vectors: %s\n", *queryVectorsPath)
+	fmt.Printf("head: %s\n", *headPath)
+	return nil
+}
+
+func runEvalSparseLexicalLinearHeadVectorsHybrid(args []string) error {
+	fs := flag.NewFlagSet("eval-sparse-lexical-linear-head-vectors-hybrid", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	datasetName := fs.String("dataset", "", "dataset name for metrics output")
+	split := fs.String("split", "test", "qrels split under <dataset-dir>/qrels")
+	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path")
+	headPath := fs.String("head-json", "", "experimental sparse lexical linear head JSON")
+	docVectorsPath := fs.String("doc-vectors", "", "document vector cache JSONL")
+	queryVectorsPath := fs.String("query-vectors", "", "query vector cache JSONL")
+	artifactLabel := fs.String("artifact", "", "external artifact/model label for metrics output")
+	topK := fs.Int("top-k", 100, "retrieval depth for scoring")
+	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks")
+	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
+	method := fs.String("method", "minmax", "fusion method: sparse_only, minmax, minmax_blend, zscore, zscore_blend, or rrf")
+	alpha := fs.Float64("alpha", 0.75, "linear-head sparse weight for minmax/zscore hybrid blending")
+	rrfK := fs.Float64("rrf-k", 60, "RRF rank constant")
+	rrfLambda := fs.Float64("rrf-lambda", 1.0, "linear-head sparse contribution multiplier for RRF")
+	denseProtectTopK := fs.Int("dense-protect-top-k", 0, "preserve the dense top-N prefix before appending fused hybrid tail candidates")
+	denseCandidatesOnly := fs.Bool("dense-candidates-only", false, "experimental rerank mode: only dense top-k candidates may appear in hybrid results")
+	metricsPath := fs.String("metrics-json", "", "write retrieval metrics JSON")
+	perQueryPath := fs.String("per-query-jsonl", "", "write one retrieval diagnostics JSONL row per evaluated query")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || fs.Arg(0) == "" {
+		return fmt.Errorf("usage: eos eval-sparse-lexical-linear-head-vectors-hybrid [flags] --doc-vectors docs.jsonl --query-vectors queries.jsonl --head-json head.json <beir-dataset-dir>")
+	}
+	if *docVectorsPath == "" {
+		return fmt.Errorf("doc-vectors is required")
+	}
+	if *queryVectorsPath == "" {
+		return fmt.Errorf("query-vectors is required")
+	}
+	if *headPath == "" {
+		return fmt.Errorf("head-json is required")
+	}
+	datasetDir := fs.Arg(0)
+	corpusPath, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
+	if *qrelsPath == "" {
+		*qrelsPath = defaultQrelsPath
+	}
+	if *datasetName == "" {
+		*datasetName = filepath.Base(datasetDir)
+	}
+	metrics, err := eosruntime.EvaluateSparseLexicalLinearHeadVectorHybrid(context.Background(), eosruntime.SparseLexicalLinearHeadEvalConfig{
+		DatasetName:       *datasetName,
+		Split:             *split,
+		ArtifactPath:      *artifactLabel,
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         *qrelsPath,
+		HeadPath:          *headPath,
+		DocVectorPath:     *docVectorsPath,
+		QueryVectorPath:   *queryVectorsPath,
+		TopK:              *topK,
+		MaxDocs:           *maxDocs,
+		MaxQueries:        *maxQueries,
+		PerQueryJSONLPath: *perQueryPath,
+		Hybrid: eosruntime.RetrievalEvalHybridConfig{
+			Method:              *method,
+			Alpha:               *alpha,
+			AlphaSet:            true,
+			RRFK:                *rrfK,
+			RRFLambda:           *rrfLambda,
+			DenseProtectTopK:    *denseProtectTopK,
+			DenseCandidatesOnly: *denseCandidatesOnly,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if *metricsPath != "" {
+		data, err := json.MarshalIndent(metrics, "", "  ")
+		if err != nil {
+			return err
+		}
+		data = append(data, '\n')
+		if err := os.WriteFile(*metricsPath, data, 0o644); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("retrieval sparse lexical linear head vectors hybrid: dataset=%s backend=%s docs=%d queries=%d relevant_pairs=%d scored_pairs=%d\n",
+		metrics.Dataset, metrics.Backend, metrics.Inputs.Documents, metrics.Inputs.Queries, metrics.Inputs.RelevantPairs, metrics.Inputs.ScoredPairs)
+	printRetrievalHybridConfig(metrics)
+	if metrics.SparseLexical != nil {
+		fmt.Printf("sparse_linear_head: hash_bins=%d predicted_doc_terms_max=%d predicted_query_terms_max=%d representation=%s\n",
 			metrics.SparseLexical.HashBins, metrics.SparseLexical.DocumentMaxHashNNZ, metrics.SparseLexical.QueryMaxHashNNZ, metrics.SparseLexical.Representation)
 	}
 	fmt.Printf("quality: ndcg@10=%.6f ndcg@100=%.6f mrr@10=%.6f p@1=%.6f p@5=%.6f p@10=%.6f hit@1=%.6f hit@5=%.6f hit@10=%.6f map@10=%.6f map@100=%.6f recall@10=%.6f recall@100=%.6f\n",
@@ -7291,6 +7460,7 @@ func printUsage() {
 	fmt.Println("  eos export-sparse-lexical-labels [flags] <beir-dataset-dir> <labels.jsonl>")
 	fmt.Println("  eos fit-sparse-lexical-head --labels labels.jsonl --hash-bins 65536 --head-json head.json")
 	fmt.Println("  eos fit-sparse-lexical-projection-head --labels labels.jsonl --doc-vectors docs.jsonl --query-vectors queries.jsonl --head-json head.json")
+	fmt.Println("  eos fit-sparse-lexical-linear-head --labels labels.jsonl --doc-vectors docs.jsonl --query-vectors queries.jsonl --head-json head.json")
 	fmt.Println("  eos export-timeseries-vectors [flags] <artifact.mll> <series.jsonl> <queries.jsonl> <output-dir>")
 	fmt.Println("  eos export-event-trace-vectors [flags] <artifact.mll> <traces.jsonl> <queries.jsonl> <output-dir>")
 	fmt.Println("  eos eval-retrieval [flags] <artifact.mll> <beir-dataset-dir>")
@@ -7300,6 +7470,7 @@ func printUsage() {
 	fmt.Println("  eos eval-retrieval-vectors-hybrid [flags] --doc-vectors docs.jsonl --query-vectors queries.jsonl <beir-dataset-dir>")
 	fmt.Println("  eos eval-sparse-lexical-head-vectors-hybrid [flags] --doc-vectors docs.jsonl --query-vectors queries.jsonl --labels labels.jsonl --head-json head.json <beir-dataset-dir>")
 	fmt.Println("  eos eval-sparse-lexical-projection-head-vectors-hybrid [flags] --doc-vectors docs.jsonl --query-vectors queries.jsonl --head-json head.json <beir-dataset-dir>")
+	fmt.Println("  eos eval-sparse-lexical-linear-head-vectors-hybrid [flags] --doc-vectors docs.jsonl --query-vectors queries.jsonl --head-json head.json <beir-dataset-dir>")
 	fmt.Println("  eos eval-retrieval-vectors-turboquant [flags] --doc-vectors docs.jsonl --query-vectors queries.jsonl <beir-dataset-dir>")
 	fmt.Println("  eos eval-retrieval-multivector-turboquant [flags] --doc-vectors child-docs.jsonl --query-vectors queries.jsonl <beir-dataset-dir>")
 	fmt.Println("  eos eval-retrieval-bm25 [flags] <beir-dataset-dir>")
@@ -7349,6 +7520,7 @@ func printUsage() {
 	fmt.Println("export-sparse-lexical-labels writes deterministic BM25 sparse lexical document/query labels plus an oracle manifest; it is non-training and does not modify embedding assets.")
 	fmt.Println("fit-sparse-lexical-head writes an experimental non-default hashed-bin sparse lexical sidecar from manta.sparse_lexical_labels.v1 labels.")
 	fmt.Println("fit-sparse-lexical-projection-head writes an experimental non-default prototype projection sidecar that learns hashed sparse-bin prototypes from labels plus dense vector caches.")
+	fmt.Println("fit-sparse-lexical-linear-head writes an experimental non-default trainable linear sidecar that learns retained hashed sparse bins from labels plus dense vector caches.")
 	fmt.Println("export-timeseries-vectors writes text-rendered time-series window child-vector caches plus query vectors for the multivector TurboQuant quality harness.")
 	fmt.Println("export-event-trace-vectors writes text-rendered event/trace child-vector caches plus query vectors for the multivector TurboQuant quality harness.")
 	fmt.Println("eval-retrieval scores a sealed embedding .mll on BEIR-style corpus/query/qrels files with nDCG/MRR/Recall metrics.")
@@ -7358,6 +7530,7 @@ func printUsage() {
 	fmt.Println("eval-retrieval-vectors-hybrid fuses external dense vector caches with BM25 top-k over the same BEIR files.")
 	fmt.Println("eval-sparse-lexical-head-vectors-hybrid fuses external dense vector caches with the experimental hashed-bin sparse lexical sidecar.")
 	fmt.Println("eval-sparse-lexical-projection-head-vectors-hybrid predicts sparse bins from dense vectors using the experimental projection sidecar, without eval-time sparse labels.")
+	fmt.Println("eval-sparse-lexical-linear-head-vectors-hybrid predicts sparse bins from dense vectors using the experimental linear sidecar, without eval-time sparse labels.")
 	fmt.Println("eval-retrieval-vectors-turboquant compares external vector caches against TurboQuant IP-preserving document-vector compression.")
 	fmt.Println("eval-retrieval-multivector-turboquant compares dense and direct TurboQuant child-vector scoring aggregated by max child score per parent.")
 	fmt.Println("eval-retrieval-bm25 scores the same BEIR files with an in-repo BM25 lexical baseline.")
