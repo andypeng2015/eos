@@ -287,7 +287,7 @@ func ExportSparseLexicalLabels(ctx context.Context, cfg SparseLexicalLabelExport
 	if err != nil {
 		return SparseLexicalLabelExportSummary{}, err
 	}
-	corpus, err := readBEIRCorpusWithRelevant(cfg.CorpusPath, cfg.MaxDocs, qrels)
+	corpus, err := readBEIRCorpusWithRelevantIncludingEmpty(cfg.CorpusPath, cfg.MaxDocs, qrels)
 	if err != nil {
 		return SparseLexicalLabelExportSummary{}, err
 	}

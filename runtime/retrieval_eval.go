@@ -438,6 +438,10 @@ func readBEIRCorpus(path string, limit int) ([]retrievalTextRecord, error) {
 	return readBEIRTextFile(path, nil, limit)
 }
 
+func readBEIRCorpusWithRelevantIncludingEmpty(path string, limit int, qrels retrievalQrels) ([]retrievalTextRecord, error) {
+	return readBEIRCorpusWithRelevantOptions(path, limit, qrels, true)
+}
+
 // readBEIRCorpusWithRelevant reads the corpus capped to `limit` documents, but
 // guarantees every qrels-relevant document is included regardless of its
 // position in the file. A naive first-N cap can drop all relevant docs (their
@@ -446,8 +450,12 @@ func readBEIRCorpus(path string, limit int) ([]retrievalTextRecord, error) {
 // filled with non-relevant distractors up to `limit`. With limit<=0 the full
 // corpus is read.
 func readBEIRCorpusWithRelevant(path string, limit int, qrels retrievalQrels) ([]retrievalTextRecord, error) {
+	return readBEIRCorpusWithRelevantOptions(path, limit, qrels, false)
+}
+
+func readBEIRCorpusWithRelevantOptions(path string, limit int, qrels retrievalQrels, includeEmpty bool) ([]retrievalTextRecord, error) {
 	if limit <= 0 {
-		return readBEIRTextFile(path, nil, 0)
+		return readBEIRTextFileOptions(path, nil, 0, includeEmpty)
 	}
 	relevant := make(map[string]bool)
 	for _, docs := range qrels {
@@ -456,9 +464,9 @@ func readBEIRCorpusWithRelevant(path string, limit int, qrels retrievalQrels) ([
 		}
 	}
 	if len(relevant) == 0 {
-		return readBEIRTextFile(path, nil, limit)
+		return readBEIRTextFileOptions(path, nil, limit, includeEmpty)
 	}
-	all, err := readBEIRTextFile(path, nil, 0)
+	all, err := readBEIRTextFileOptions(path, nil, 0, includeEmpty)
 	if err != nil {
 		return nil, err
 	}
@@ -495,6 +503,10 @@ func readBEIRQueries(path string, qrels retrievalQrels, limit int) ([]retrievalT
 }
 
 func readBEIRTextFile(path string, ids map[string]bool, limit int) ([]retrievalTextRecord, error) {
+	return readBEIRTextFileOptions(path, ids, limit, false)
+}
+
+func readBEIRTextFileOptions(path string, ids map[string]bool, limit int, includeEmpty bool) ([]retrievalTextRecord, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -522,7 +534,7 @@ func readBEIRTextFile(path string, ids map[string]bool, limit int) ([]retrievalT
 			continue
 		}
 		text := strings.TrimSpace(strings.Join([]string{record.Title, record.Text}, "\n"))
-		if text == "" {
+		if text == "" && !includeEmpty {
 			continue
 		}
 		out = append(out, retrievalTextRecord{ID: record.ID, Text: text})

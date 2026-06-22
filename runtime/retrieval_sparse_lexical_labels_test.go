@@ -128,6 +128,59 @@ func TestExportSparseLexicalLabelsRecordsExportTruncation(t *testing.T) {
 	}
 }
 
+func TestExportSparseLexicalLabelsIncludesRelevantEmptyDocument(t *testing.T) {
+	dir, corpusPath, queriesPath, qrelsPath := writeSparseLexicalDatasetWithEmptyRelevantDocument(t)
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	summary, err := ExportSparseLexicalLabels(context.Background(), SparseLexicalLabelExportConfig{
+		DatasetName:  "tiny",
+		Split:        "train",
+		CorpusPath:   corpusPath,
+		QueriesPath:  queriesPath,
+		QrelsPath:    qrelsPath,
+		OutputPath:   labelsPath,
+		ManifestPath: filepath.Join(dir, "manifest.json"),
+		TopTerms:     8,
+		OracleTopK:   100,
+	})
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if summary.Stats.Documents != 3 || summary.BM25.Documents != 3 {
+		t.Fatalf("summary document counts = stats:%d bm25:%d, want 3", summary.Stats.Documents, summary.BM25.Documents)
+	}
+
+	records := readSparseLexicalRecords(t, labelsPath)
+	var emptyDoc *SparseLexicalLabelRecord
+	for i := range records {
+		record := &records[i]
+		if record.RecordType == "document" && record.ID == "d-empty" {
+			emptyDoc = record
+			break
+		}
+	}
+	if emptyDoc == nil {
+		t.Fatalf("missing sparse lexical label for qrels-relevant empty document")
+	}
+	if emptyDoc.NonZeros != 0 || len(emptyDoc.Terms) != 0 {
+		t.Fatalf("empty document label = %+v, want zero terms", *emptyDoc)
+	}
+
+	metrics, err := EvaluateSparseLexicalLabels(context.Background(), SparseLexicalLabelEvalConfig{
+		DatasetName: "tiny",
+		Split:       "train",
+		QueriesPath: queriesPath,
+		QrelsPath:   qrelsPath,
+		LabelsPath:  labelsPath,
+		TopK:        100,
+	})
+	if err != nil {
+		t.Fatalf("eval labels: %v", err)
+	}
+	if metrics.SparseLexical == nil || metrics.SparseLexical.MissingDocLabels != 0 || metrics.SparseLexical.DocumentLabels != 3 {
+		t.Fatalf("sparse eval stats = %+v", metrics.SparseLexical)
+	}
+}
+
 func TestExportSparseLexicalLabelsRejectsInvalidConfig(t *testing.T) {
 	dir, corpusPath, queriesPath, qrelsPath := writeSparseLexicalDataset(t)
 	base := SparseLexicalLabelExportConfig{
@@ -396,6 +449,30 @@ func writeSparseLexicalDataset(t *testing.T) (dir, corpusPath, queriesPath, qrel
 		t.Fatalf("write queries: %v", err)
 	}
 	if err := os.WriteFile(qrelsPath, []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\nq2\td3\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	return dir, corpusPath, queriesPath, qrelsPath
+}
+
+func writeSparseLexicalDatasetWithEmptyRelevantDocument(t *testing.T) (dir, corpusPath, queriesPath, qrelsPath string) {
+	t.Helper()
+	dir = t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir qrels: %v", err)
+	}
+	corpusPath = filepath.Join(dir, "corpus.jsonl")
+	queriesPath = filepath.Join(dir, "queries.jsonl")
+	qrelsPath = filepath.Join(dir, "qrels", "train.tsv")
+	if err := os.WriteFile(corpusPath, []byte(
+		`{"_id":"d1","text":"alpha finance"}`+"\n"+
+			`{"_id":"d-empty","title":"","text":""}`+"\n"+
+			`{"_id":"d2","text":"beta medicine"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(queriesPath, []byte(`{"_id":"q1","text":"alpha"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(qrelsPath, []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\nq1\td-empty\t1\n"), 0o644); err != nil {
 		t.Fatalf("write qrels: %v", err)
 	}
 	return dir, corpusPath, queriesPath, qrelsPath
