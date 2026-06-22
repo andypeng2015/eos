@@ -2151,6 +2151,118 @@ func TestRunEvalRetrievalVectorsHybridWritesMetricsJSON(t *testing.T) {
 	}
 }
 
+func TestRunEvalSparseLexicalHeadVectorsHybridWritesMetricsJSON(t *testing.T) {
+	dir := t.TempDir()
+	datasetDir := filepath.Join(dir, "dataset")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "corpus.jsonl"), []byte(
+		`{"_id":"d1","text":"alpha exact target"}`+"\n"+
+			`{"_id":"d2","text":"beta dense distractor"}`+"\n"+
+			`{"_id":"d3","text":"gamma fallback"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "queries.jsonl"), []byte(`{"_id":"q1","text":"alpha"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "qrels", "test.tsv"), []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	docVectorsPath := filepath.Join(dir, "doc-vectors.jsonl")
+	queryVectorsPath := filepath.Join(dir, "query-vectors.jsonl")
+	if err := os.WriteFile(docVectorsPath, []byte(
+		`{"_id":"d1","embedding":[0,1]}`+"\n"+
+			`{"_id":"d2","embedding":[1,0]}`+"\n"+
+			`{"_id":"d3","embedding":[0.5,0]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write doc vectors: %v", err)
+	}
+	if err := os.WriteFile(queryVectorsPath, []byte(`{"_id":"q1","embedding":[1,0]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write query vectors: %v", err)
+	}
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	if err := os.WriteFile(labelsPath, []byte(
+		`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"test","id":"d1","nonzeros":1,"terms":[{"term":"alpha","weight":3}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"test","id":"d2","nonzeros":1,"terms":[{"term":"beta","weight":1}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"test","id":"d3","nonzeros":1,"terms":[{"term":"gamma","weight":1}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"query","dataset":"tiny","split":"test","id":"q1","nonzeros":1,"terms":[{"term":"alpha","weight":1}]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write labels: %v", err)
+	}
+	headPath := filepath.Join(dir, "head.json")
+	captureRunOutput(t, []string{
+		"fit-sparse-lexical-head",
+		"--dataset", "tiny",
+		"--split", "test",
+		"--labels", labelsPath,
+		"--hash-bins", "65536",
+		"--head-json", headPath,
+	})
+	metricsPath := filepath.Join(dir, "sparse-head.vectors.hybrid.metrics.json")
+	perQueryPath := filepath.Join(dir, "sparse-head.vectors.hybrid.per-query.jsonl")
+	output := captureRunOutput(t, []string{
+		"eval-sparse-lexical-head-vectors-hybrid",
+		"--dataset", "tiny",
+		"--artifact", "qwen3-embedding",
+		"--doc-vectors", docVectorsPath,
+		"--query-vectors", queryVectorsPath,
+		"--labels", labelsPath,
+		"--head-json", headPath,
+		"--method", "minmax",
+		"--alpha", "0.75",
+		"--metrics-json", metricsPath,
+		"--per-query-jsonl", perQueryPath,
+		datasetDir,
+	})
+	for _, want := range []string{
+		"retrieval sparse lexical hash head vectors hybrid: dataset=tiny backend=sparse_lexical_hash_head_vectors_hybrid",
+		"hybrid: method=minmax_blend alpha=0.75",
+		"sparse_hash_head: hash_bins=65536",
+		"quality: ndcg@10=1.000000",
+		"labels: " + labelsPath,
+		"head: " + headPath,
+		"metrics: " + metricsPath,
+		"per_query: " + perQueryPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("eval-sparse-lexical-head-vectors-hybrid output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	var metrics eosruntime.RetrievalEvalMetrics
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		t.Fatalf("decode metrics: %v", err)
+	}
+	if metrics.Schema != eosruntime.RetrievalEvalMetricsSchema || metrics.Backend != "sparse_lexical_hash_head_vectors_hybrid" || metrics.Artifact != "qwen3-embedding" {
+		t.Fatalf("metrics identity = %+v", metrics)
+	}
+	if metrics.Inputs.DocVectorPath != docVectorsPath || metrics.Inputs.QueryVectorPath != queryVectorsPath || metrics.Inputs.LabelPath != labelsPath || metrics.Inputs.HeadPath != headPath {
+		t.Fatalf("input metrics = %+v", metrics.Inputs)
+	}
+	if metrics.Config.Hybrid == nil || metrics.Config.Hybrid.Method != "minmax_blend" || metrics.SparseLexical == nil || metrics.SparseLexical.HashBins != 65536 {
+		t.Fatalf("hybrid/sparse config = hybrid:%+v sparse:%+v", metrics.Config.Hybrid, metrics.SparseLexical)
+	}
+	if metrics.Quality.NDCGAt10 != 1 || metrics.Quality.MRRAt10 != 1 {
+		t.Fatalf("quality = %+v, want recovered top hit", metrics.Quality)
+	}
+	perQueryData, err := os.ReadFile(perQueryPath)
+	if err != nil {
+		t.Fatalf("read per-query JSONL: %v", err)
+	}
+	var row eosruntime.RetrievalEvalPerQueryRow
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(perQueryData))), &row); err != nil {
+		t.Fatalf("decode per-query row: %v", err)
+	}
+	if row.FirstRelevantRank != 1 || len(row.TopK) == 0 || row.TopK[0].DocID != "d1" {
+		t.Fatalf("per-query row = %+v", row)
+	}
+	if row.TopK[0].DenseRank == nil || *row.TopK[0].DenseRank != 3 || row.TopK[0].BM25Rank == nil || *row.TopK[0].BM25Rank != 1 {
+		t.Fatalf("component ranks = dense:%v sparse:%v, want 3/1", row.TopK[0].DenseRank, row.TopK[0].BM25Rank)
+	}
+}
+
 func TestRunEvalRetrievalVectorsTurboQuantWritesMetricsJSONAndTSV(t *testing.T) {
 	dir := t.TempDir()
 	datasetDir := filepath.Join(dir, "dataset")

@@ -24,13 +24,19 @@ type SparseLexicalHashHeadFitConfig struct {
 type SparseLexicalHashHeadEvalConfig struct {
 	DatasetName       string
 	Split             string
+	CorpusPath        string
 	QueriesPath       string
 	QrelsPath         string
 	LabelsPath        string
 	HeadPath          string
+	DocVectorPath     string
+	QueryVectorPath   string
+	ArtifactPath      string
 	TopK              int
+	MaxDocs           int
 	MaxQueries        int
 	PerQueryJSONLPath string
+	Hybrid            RetrievalEvalHybridConfig
 }
 
 type SparseLexicalHashHead struct {
@@ -230,6 +236,185 @@ func EvaluateSparseLexicalHashHead(ctx context.Context, cfg SparseLexicalHashHea
 	}, nil
 }
 
+// EvaluateSparseLexicalHashHeadVectorHybrid evaluates precomputed dense vectors
+// fused with the experimental hashed-bin sparse lexical sidecar.
+func EvaluateSparseLexicalHashHeadVectorHybrid(ctx context.Context, cfg SparseLexicalHashHeadEvalConfig) (RetrievalEvalMetrics, error) {
+	if cfg.CorpusPath == "" || cfg.QueriesPath == "" || cfg.QrelsPath == "" || cfg.LabelsPath == "" || cfg.HeadPath == "" {
+		return RetrievalEvalMetrics{}, fmt.Errorf("corpus, queries, qrels, labels, and head-json paths are required")
+	}
+	if cfg.DocVectorPath == "" || cfg.QueryVectorPath == "" {
+		return RetrievalEvalMetrics{}, fmt.Errorf("document and query vector paths are required")
+	}
+	if cfg.TopK == 0 {
+		cfg.TopK = 100
+	}
+	if cfg.TopK < 100 {
+		cfg.TopK = 100
+	}
+	hybridCfg, err := normalizeRetrievalEvalHybridConfig(cfg.Hybrid)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
+	start := time.Now()
+	head, err := ReadSparseLexicalHashHead(cfg.HeadPath)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
+	if cfg.DatasetName != "" && head.Dataset != "" && head.Dataset != cfg.DatasetName {
+		return RetrievalEvalMetrics{}, fmt.Errorf("sparse lexical hash head dataset=%q, want %q", head.Dataset, cfg.DatasetName)
+	}
+	if cfg.Split != "" && head.Split != "" && head.Split != cfg.Split {
+		return RetrievalEvalMetrics{}, fmt.Errorf("sparse lexical hash head split=%q, want %q", head.Split, cfg.Split)
+	}
+	qrels, err := readBEIRQrels(cfg.QrelsPath)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
+	corpus, err := readBEIRCorpusWithRelevant(cfg.CorpusPath, cfg.MaxDocs, qrels)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
+	queries, skippedQueries, err := readBEIRQueries(cfg.QueriesPath, qrels, cfg.MaxQueries)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
+	if len(corpus) == 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("corpus is empty")
+	}
+	if len(queries) == 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("no qrels queries found in queries file")
+	}
+
+	loadStart := time.Now()
+	labels, stats, err := readSparseLexicalLabelFile(cfg.LabelsPath, cfg.DatasetName, cfg.Split)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
+	sparseDocs, sparseQueryMap, err := sparseLexicalHashVectors(labels, head.Hashing.Bins, &stats)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
+	if len(sparseDocs) == 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("no document sparse lexical labels found")
+	}
+	if len(sparseQueryMap) == 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("no query sparse lexical labels found")
+	}
+	stats.Representation = "experimental_hashed_sparse_lexical_head"
+	stats.LabelsPath = cfg.LabelsPath
+	stats.HeadPath = cfg.HeadPath
+	stats.HashBins = head.Hashing.Bins
+
+	docVectors, missingDocVectors, docDim, err := readRetrievalVectorCache(cfg.DocVectorPath, retrievalIDs(corpus))
+	if err != nil {
+		return RetrievalEvalMetrics{}, fmt.Errorf("read document vectors: %w", err)
+	}
+	if len(docVectors) == 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("document vector cache has no vectors for the evaluated corpus")
+	}
+	queryVectors, missingQueryVectors, queryDim, err := readRetrievalVectorCache(cfg.QueryVectorPath, retrievalIDs(queries))
+	if err != nil {
+		return RetrievalEvalMetrics{}, fmt.Errorf("read query vectors: %w", err)
+	}
+	if len(queryVectors) == 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("query vector cache has no vectors for qrels queries")
+	}
+	if docDim != queryDim {
+		return RetrievalEvalMetrics{}, fmt.Errorf("document vectors have dimension %d but query vectors have dimension %d", docDim, queryDim)
+	}
+
+	sparseDocMap := make(map[string]sparseLexicalHashedVector, len(sparseDocs))
+	for _, doc := range sparseDocs {
+		sparseDocMap[doc.ID] = doc
+	}
+	evalSparseDocs := make([]sparseLexicalHashedVector, 0, len(docVectors))
+	for _, doc := range docVectors {
+		sparseDoc, ok := sparseDocMap[doc.ID]
+		if !ok {
+			continue
+		}
+		evalSparseDocs = append(evalSparseDocs, sparseDoc)
+	}
+	evalSparseQueries := make(map[string]sparseLexicalHashedVector, len(queryVectors))
+	for _, query := range queryVectors {
+		sparseQuery, ok := sparseQueryMap[query.ID]
+		if !ok {
+			continue
+		}
+		evalSparseQueries[query.ID] = sparseQuery
+	}
+	requiredSparseQueries := make([]sparseLexicalHashedVector, 0, len(queries))
+	missingQueryLabels := 0
+	for _, query := range queries {
+		if sparseQuery, ok := sparseQueryMap[query.ID]; ok {
+			requiredSparseQueries = append(requiredSparseQueries, sparseQuery)
+		} else {
+			missingQueryLabels++
+		}
+	}
+	stats.MissingQueryLabels = missingQueryLabels
+	stats.MissingDocLabels = countMissingSparseLexicalHashedRelevantDocs(requiredSparseQueries, qrels, sparseDocMap)
+	if stats.MissingQueryLabels > 0 || stats.MissingDocLabels > 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("sparse lexical hash head labels missing required qrels/vector coverage: query_labels=%d relevant_doc_labels=%d", stats.MissingQueryLabels, stats.MissingDocLabels)
+	}
+	loadDuration := time.Since(loadStart)
+
+	scoreStart := time.Now()
+	quality, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, err := computeSparseLexicalHashVectorHybridQuality(ctx, queryVectors, docVectors, evalSparseQueries, evalSparseDocs, qrels, cfg.TopK, cfg.DatasetName, cfg.PerQueryJSONLPath, hybridCfg)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
+	scoreDuration := time.Since(scoreStart)
+	if evaluatedQueries == 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("no queries had relevant documents in the evaluated vector cache")
+	}
+	elapsed := time.Since(start)
+	scoredPairs := int64(evaluatedQueries) * int64(len(docVectors))
+	return RetrievalEvalMetrics{
+		Schema:   RetrievalEvalMetricsSchema,
+		Dataset:  cfg.DatasetName,
+		Artifact: cfg.ArtifactPath,
+		Backend:  "sparse_lexical_hash_head_vectors_hybrid",
+		Inputs: RetrievalEvalInputMetrics{
+			CorpusPath:      cfg.CorpusPath,
+			QueriesPath:     cfg.QueriesPath,
+			QrelsPath:       cfg.QrelsPath,
+			LabelPath:       cfg.LabelsPath,
+			HeadPath:        cfg.HeadPath,
+			DocVectorPath:   cfg.DocVectorPath,
+			QueryVectorPath: cfg.QueryVectorPath,
+			Documents:       len(docVectors),
+			Queries:         evaluatedQueries,
+			RelevantPairs:   relevantPairs,
+			ScoredPairs:     scoredPairs,
+		},
+		Config: RetrievalEvalConfigMetrics{
+			TopK:       cfg.TopK,
+			MaxDocs:    cfg.MaxDocs,
+			MaxQueries: cfg.MaxQueries,
+			Hybrid:     retrievalEvalHybridMetrics(hybridCfg),
+		},
+		Quality: quality,
+		Throughput: RetrievalEvalThroughput{
+			ElapsedSeconds:       elapsed.Seconds(),
+			DocumentEmbedSeconds: loadDuration.Seconds(),
+			QueryEmbedSeconds:    loadDuration.Seconds(),
+			ScoreSeconds:         scoreDuration.Seconds(),
+			DocumentsPerSecond:   ratePerSecond(float64(len(docVectors)), loadDuration),
+			QueriesPerSecond:     ratePerSecond(float64(len(queryVectors)), loadDuration),
+			ScoresPerSecond:      ratePerSecond(float64(scoredPairs), scoreDuration),
+		},
+		SkippedCounts: RetrievalEvalSkippedCounts{
+			QueriesWithoutText:         skippedQueries,
+			RelevantDocsWithoutText:    skippedRelevantDocs,
+			QueriesWithoutRelevantDocs: skippedNoRelevant,
+			QueriesWithoutVector:       missingQueryVectors,
+			DocumentsWithoutVector:     missingDocVectors,
+		},
+		SparseLexical: &stats,
+	}, nil
+}
+
 func ReadSparseLexicalHashHead(path string) (SparseLexicalHashHead, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -400,6 +585,60 @@ func computeSparseLexicalHashRetrievalQuality(ctx context.Context, queries, docs
 	}
 	averageRetrievalQuality(&totals, evaluatedQueries)
 	return totals, evaluatedQueries, relevantPairs, nil
+}
+
+func computeSparseLexicalHashVectorHybridQuality(ctx context.Context, queries, docs []retrievalVectorRecord, sparseQueries map[string]sparseLexicalHashedVector, sparseDocs []sparseLexicalHashedVector, qrels retrievalQrels, topK int, datasetName, perQueryJSONLPath string, cfg RetrievalEvalHybridConfig) (RetrievalEvalQualityMetrics, int, int, int, int, error) {
+	docIDSet := make(map[string]bool, len(docs))
+	for _, doc := range docs {
+		docIDSet[doc.ID] = true
+	}
+	if topK < 100 {
+		topK = 100
+	}
+	writer, err := newRetrievalPerQueryWriter(perQueryJSONLPath)
+	if err != nil {
+		return RetrievalEvalQualityMetrics{}, 0, 0, 0, 0, err
+	}
+	defer writer.Close()
+	var totals RetrievalEvalQualityMetrics
+	evaluatedQueries := 0
+	relevantPairs := 0
+	skippedRelevantDocs := 0
+	skippedNoRelevant := 0
+	for _, query := range queries {
+		if err := ctx.Err(); err != nil {
+			return RetrievalEvalQualityMetrics{}, 0, 0, 0, 0, err
+		}
+		rels := qrels[query.ID]
+		filteredRels := make(map[string]float64, len(rels))
+		for docID, rel := range rels {
+			if docIDSet[docID] {
+				filteredRels[docID] = rel
+			} else {
+				skippedRelevantDocs++
+			}
+		}
+		if len(filteredRels) == 0 {
+			skippedNoRelevant++
+			continue
+		}
+		sparseQuery := sparseQueries[query.ID]
+		denseScores := topRetrievalScores(query.Vector, docs, topK)
+		sparseScores := topSparseLexicalHashScores(sparseQuery.Terms, sparseDocs, topK)
+		scores := fuseHybridScores(denseScores, sparseScores, topK, cfg)
+		evaluatedQueries++
+		relevantPairs += len(filteredRels)
+		row := buildRetrievalPerQueryRow(datasetName, query.ID, scores, filteredRels)
+		addRetrievalPerQueryQuality(&totals, row.Quality)
+		if err := writer.Write(row); err != nil {
+			return RetrievalEvalQualityMetrics{}, 0, 0, 0, 0, err
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return RetrievalEvalQualityMetrics{}, 0, 0, 0, 0, err
+	}
+	averageRetrievalQuality(&totals, evaluatedQueries)
+	return totals, evaluatedQueries, relevantPairs, skippedRelevantDocs, skippedNoRelevant, nil
 }
 
 func topSparseLexicalHashScores(query []sparseLexicalHashedTerm, docs []sparseLexicalHashedVector, topK int) []retrievalScoredDoc {
