@@ -184,6 +184,81 @@ func TestExportSparseLexicalLabelsRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+func TestEvaluateSparseLexicalLabelsRanksCappedLabels(t *testing.T) {
+	dir, _, queriesPath, qrelsPath := writeSparseLexicalDataset(t)
+	labelsPath := filepath.Join(dir, "eval-labels.jsonl")
+	if err := os.WriteFile(labelsPath, []byte(
+		`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d1","nonzeros":2,"terms":[{"term":"alpha","weight":2},{"term":"finance","weight":1}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d2","nonzeros":1,"terms":[{"term":"alpha","weight":0.1}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d3","nonzeros":1,"terms":[{"term":"gamma","weight":3}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"query","dataset":"tiny","split":"train","id":"q1","nonzeros":1,"terms":[{"term":"alpha","weight":1}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"query","dataset":"tiny","split":"train","id":"q2","nonzeros":1,"terms":[{"term":"gamma","weight":1}]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write labels: %v", err)
+	}
+	metrics, err := EvaluateSparseLexicalLabels(context.Background(), SparseLexicalLabelEvalConfig{
+		DatasetName: "tiny",
+		Split:       "train",
+		QueriesPath: queriesPath,
+		QrelsPath:   qrelsPath,
+		LabelsPath:  labelsPath,
+		TopK:        100,
+	})
+	if err != nil {
+		t.Fatalf("eval labels: %v", err)
+	}
+	if metrics.Backend != "sparse_lexical_labels_capped" || metrics.Inputs.LabelPath != labelsPath || metrics.Inputs.Documents != 3 || metrics.Inputs.Queries != 2 {
+		t.Fatalf("metrics identity/inputs = %+v", metrics)
+	}
+	if metrics.Quality.NDCGAt10 != 1 || metrics.Quality.RecallAt100 != 1 {
+		t.Fatalf("quality = %+v", metrics.Quality)
+	}
+	if metrics.SparseLexical == nil || metrics.SparseLexical.DocumentLabels != 3 || metrics.SparseLexical.QueryLabels != 2 || metrics.SparseLexical.Representation != "capped_exported_sparse_lexical_labels" {
+		t.Fatalf("sparse stats = %+v", metrics.SparseLexical)
+	}
+}
+
+func TestEvaluateSparseLexicalLabelsRejectsMissingRequiredLabels(t *testing.T) {
+	dir, _, queriesPath, qrelsPath := writeSparseLexicalDataset(t)
+	labelsPath := filepath.Join(dir, "missing-labels.jsonl")
+	if err := os.WriteFile(labelsPath, []byte(
+		`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d1","nonzeros":1,"terms":[{"term":"alpha","weight":1}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d2","nonzeros":1,"terms":[{"term":"beta","weight":1}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"query","dataset":"tiny","split":"train","id":"q1","nonzeros":1,"terms":[{"term":"alpha","weight":1}]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write labels: %v", err)
+	}
+	_, err := EvaluateSparseLexicalLabels(context.Background(), SparseLexicalLabelEvalConfig{
+		DatasetName: "tiny",
+		Split:       "train",
+		QueriesPath: queriesPath,
+		QrelsPath:   qrelsPath,
+		LabelsPath:  labelsPath,
+		TopK:        100,
+	})
+	if err == nil || !strings.Contains(err.Error(), "missing required qrels coverage") {
+		t.Fatalf("err = %v, want missing required qrels coverage", err)
+	}
+}
+
+func TestEvaluateSparseLexicalLabelsRejectsInvalidSchema(t *testing.T) {
+	dir, _, queriesPath, qrelsPath := writeSparseLexicalDataset(t)
+	labelsPath := filepath.Join(dir, "bad-schema.jsonl")
+	if err := os.WriteFile(labelsPath, []byte(
+		`{"schema":"manta.other.v1","record_type":"document","dataset":"tiny","split":"train","id":"d1","nonzeros":0,"terms":[]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write labels: %v", err)
+	}
+	_, err := EvaluateSparseLexicalLabels(context.Background(), SparseLexicalLabelEvalConfig{
+		DatasetName: "tiny",
+		Split:       "train",
+		QueriesPath: queriesPath,
+		QrelsPath:   qrelsPath,
+		LabelsPath:  labelsPath,
+		TopK:        100,
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported schema") {
+		t.Fatalf("err = %v, want unsupported schema", err)
+	}
+}
+
 func writeSparseLexicalDataset(t *testing.T) (dir, corpusPath, queriesPath, qrelsPath string) {
 	t.Helper()
 	dir = t.TempDir()

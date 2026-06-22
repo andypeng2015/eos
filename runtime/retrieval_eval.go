@@ -57,21 +57,23 @@ type RetrievalEvalHybridConfig struct {
 
 // RetrievalEvalMetrics records standard retrieval metrics for one dataset split.
 type RetrievalEvalMetrics struct {
-	Schema        string                      `json:"schema"`
-	Dataset       string                      `json:"dataset"`
-	Artifact      string                      `json:"artifact,omitempty"`
-	Backend       string                      `json:"backend,omitempty"`
-	Inputs        RetrievalEvalInputMetrics   `json:"inputs"`
-	Config        RetrievalEvalConfigMetrics  `json:"config"`
-	Quality       RetrievalEvalQualityMetrics `json:"quality"`
-	Throughput    RetrievalEvalThroughput     `json:"throughput"`
-	SkippedCounts RetrievalEvalSkippedCounts  `json:"skipped_counts,omitempty"`
+	Schema        string                       `json:"schema"`
+	Dataset       string                       `json:"dataset"`
+	Artifact      string                       `json:"artifact,omitempty"`
+	Backend       string                       `json:"backend,omitempty"`
+	Inputs        RetrievalEvalInputMetrics    `json:"inputs"`
+	Config        RetrievalEvalConfigMetrics   `json:"config"`
+	Quality       RetrievalEvalQualityMetrics  `json:"quality"`
+	Throughput    RetrievalEvalThroughput      `json:"throughput"`
+	SkippedCounts RetrievalEvalSkippedCounts   `json:"skipped_counts,omitempty"`
+	SparseLexical *SparseLexicalLabelEvalStats `json:"sparse_lexical,omitempty"`
 }
 
 type RetrievalEvalInputMetrics struct {
 	CorpusPath      string `json:"corpus_path,omitempty"`
 	QueriesPath     string `json:"queries_path,omitempty"`
 	QrelsPath       string `json:"qrels_path,omitempty"`
+	LabelPath       string `json:"label_path,omitempty"`
 	DocVectorPath   string `json:"doc_vector_path,omitempty"`
 	QueryVectorPath string `json:"query_vector_path,omitempty"`
 	Documents       int    `json:"documents"`

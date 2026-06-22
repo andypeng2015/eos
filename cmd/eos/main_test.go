@@ -1691,6 +1691,107 @@ func TestRunExportSparseLexicalLabelsRejectsInvalidArgs(t *testing.T) {
 	}
 }
 
+func TestRunEvalSparseLexicalLabelsWritesMetricsJSON(t *testing.T) {
+	dir := t.TempDir()
+	datasetDir := filepath.Join(dir, "dataset")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "queries.jsonl"), []byte(
+		`{"_id":"q1","text":"alpha"}`+"\n"+
+			`{"_id":"q2","text":"gamma"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "qrels", "train.tsv"), []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\nq2\td3\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	if err := os.WriteFile(labelsPath, []byte(
+		`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d1","nonzeros":1,"terms":[{"term":"alpha","weight":2}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d2","nonzeros":1,"terms":[{"term":"alpha","weight":0.1}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d3","nonzeros":1,"terms":[{"term":"gamma","weight":3}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"query","dataset":"tiny","split":"train","id":"q1","nonzeros":1,"terms":[{"term":"alpha","weight":1}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"query","dataset":"tiny","split":"train","id":"q2","nonzeros":1,"terms":[{"term":"gamma","weight":1}]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write labels: %v", err)
+	}
+	metricsPath := filepath.Join(dir, "sparse-labels.retrieval.metrics.json")
+
+	output := captureRunOutput(t, []string{
+		"eval-sparse-lexical-labels",
+		"--dataset", "tiny",
+		"--split", "train",
+		"--labels", labelsPath,
+		"--metrics-json", metricsPath,
+		datasetDir,
+	})
+	for _, want := range []string{
+		"retrieval sparse lexical labels: dataset=tiny backend=sparse_lexical_labels_capped docs=3 queries=2",
+		"labels: documents=3 queries=2",
+		"representation=capped_exported_sparse_lexical_labels",
+		"quality: ndcg@10=1.000000",
+		"metrics: " + metricsPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("eval-sparse-lexical-labels output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	var metrics eosruntime.RetrievalEvalMetrics
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		t.Fatalf("decode metrics: %v", err)
+	}
+	if metrics.Schema != eosruntime.RetrievalEvalMetricsSchema || metrics.Dataset != "tiny" || metrics.Backend != "sparse_lexical_labels_capped" || metrics.Inputs.LabelPath != labelsPath || metrics.Quality.NDCGAt10 != 1 {
+		t.Fatalf("metrics = %+v", metrics)
+	}
+	if metrics.SparseLexical == nil || metrics.SparseLexical.DocumentLabels != 3 || metrics.SparseLexical.QueryLabels != 2 {
+		t.Fatalf("sparse lexical stats = %+v", metrics.SparseLexical)
+	}
+}
+
+func TestRunEvalSparseLexicalLabelsRejectsMissingLabels(t *testing.T) {
+	dir := t.TempDir()
+	datasetDir := filepath.Join(dir, "dataset")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "queries.jsonl"), []byte(`{"_id":"q1","text":"alpha"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "qrels", "train.tsv"), []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	if err := os.WriteFile(labelsPath, []byte(
+		`{"schema":"manta.sparse_lexical_labels.v1","record_type":"document","dataset":"tiny","split":"train","id":"d2","nonzeros":1,"terms":[{"term":"alpha","weight":1}]}`+"\n"+
+			`{"schema":"manta.sparse_lexical_labels.v1","record_type":"query","dataset":"tiny","split":"train","id":"q1","nonzeros":1,"terms":[{"term":"alpha","weight":1}]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write labels: %v", err)
+	}
+
+	err := run([]string{"eval-sparse-lexical-labels", "--dataset", "tiny", "--split", "train", "--labels", labelsPath, datasetDir})
+	if err == nil || !strings.Contains(err.Error(), "missing required qrels coverage") {
+		t.Fatalf("err = %v, want missing required qrels coverage", err)
+	}
+}
+
+func TestRunEvalSparseLexicalLabelsRejectsSmallTopK(t *testing.T) {
+	dir := t.TempDir()
+	datasetDir := filepath.Join(dir, "dataset")
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+
+	output, err := captureRunOutputAndError(t, []string{
+		"eval-sparse-lexical-labels",
+		"--labels", labelsPath,
+		"--top-k", "99",
+		datasetDir,
+	})
+	if err == nil || !strings.Contains(err.Error(), "top-k must be at least 100") {
+		t.Fatalf("err = %v, output = %q, want top-k minimum error", err, output)
+	}
+}
+
 func TestRunEvalRetrievalVectorsWritesMetricsJSON(t *testing.T) {
 	dir := t.TempDir()
 	datasetDir := filepath.Join(dir, "dataset")

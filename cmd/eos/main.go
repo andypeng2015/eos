@@ -117,6 +117,8 @@ func run(args []string) error {
 		return runExportSparseEncoderVectors(args[1:])
 	case "export-sparse-lexical-labels":
 		return runExportSparseLexicalLabels(args[1:])
+	case "eval-sparse-lexical-labels":
+		return runEvalSparseLexicalLabels(args[1:])
 	case "export-timeseries-vectors":
 		return runExportTimeSeriesVectors(args[1:])
 	case "export-event-trace-vectors":
@@ -1905,6 +1907,77 @@ func runExportSparseLexicalLabels(args []string) error {
 	fmt.Printf("labels: %s\n", labelsPath)
 	if *manifestPath != "" {
 		fmt.Printf("manifest: %s\n", *manifestPath)
+	}
+	return nil
+}
+
+func runEvalSparseLexicalLabels(args []string) error {
+	fs := flag.NewFlagSet("eval-sparse-lexical-labels", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	datasetName := fs.String("dataset", "", "dataset name for metrics output")
+	split := fs.String("split", "test", "qrels split under <dataset-dir>/qrels")
+	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path")
+	labelsPath := fs.String("labels", "", "sparse lexical label JSONL document/query universe from export-sparse-lexical-labels")
+	topK := fs.Int("top-k", 100, "retrieval depth over label-file document records")
+	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
+	metricsPath := fs.String("metrics-json", "", "write retrieval metrics JSON")
+	perQueryPath := fs.String("per-query-jsonl", "", "write one retrieval diagnostics JSONL row per evaluated query")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || fs.Arg(0) == "" {
+		return fmt.Errorf("usage: eos eval-sparse-lexical-labels [flags] --labels labels.jsonl <beir-dataset-dir>")
+	}
+	if *labelsPath == "" {
+		return fmt.Errorf("labels is required")
+	}
+	datasetDir := fs.Arg(0)
+	_, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
+	if *qrelsPath == "" {
+		*qrelsPath = defaultQrelsPath
+	}
+	if *datasetName == "" {
+		*datasetName = filepath.Base(datasetDir)
+	}
+	metrics, err := eosruntime.EvaluateSparseLexicalLabels(context.Background(), eosruntime.SparseLexicalLabelEvalConfig{
+		DatasetName:       *datasetName,
+		Split:             *split,
+		QueriesPath:       queriesPath,
+		QrelsPath:         *qrelsPath,
+		LabelsPath:        *labelsPath,
+		TopK:              *topK,
+		MaxQueries:        *maxQueries,
+		PerQueryJSONLPath: *perQueryPath,
+	})
+	if err != nil {
+		return err
+	}
+	if *metricsPath != "" {
+		data, err := json.MarshalIndent(metrics, "", "  ")
+		if err != nil {
+			return err
+		}
+		data = append(data, '\n')
+		if err := os.WriteFile(*metricsPath, data, 0o644); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("retrieval sparse lexical labels: dataset=%s backend=%s docs=%d queries=%d relevant_pairs=%d scored_pairs=%d top_k=%d\n",
+		metrics.Dataset, metrics.Backend, metrics.Inputs.Documents, metrics.Inputs.Queries, metrics.Inputs.RelevantPairs, metrics.Inputs.ScoredPairs, metrics.Config.TopK)
+	if metrics.SparseLexical != nil {
+		fmt.Printf("labels: documents=%d queries=%d doc_avg_nonzeros=%.2f doc_max_nonzeros=%d query_avg_nonzeros=%.2f query_max_nonzeros=%d representation=%s\n",
+			metrics.SparseLexical.DocumentLabels, metrics.SparseLexical.QueryLabels, metrics.SparseLexical.DocumentAvgNNZ, metrics.SparseLexical.DocumentMaxNNZ, metrics.SparseLexical.QueryAvgNNZ, metrics.SparseLexical.QueryMaxNNZ, metrics.SparseLexical.Representation)
+	}
+	fmt.Printf("quality: ndcg@10=%.6f ndcg@100=%.6f mrr@10=%.6f p@1=%.6f p@5=%.6f p@10=%.6f hit@1=%.6f hit@5=%.6f hit@10=%.6f map@10=%.6f map@100=%.6f recall@10=%.6f recall@100=%.6f\n",
+		metrics.Quality.NDCGAt10, metrics.Quality.NDCGAt100, metrics.Quality.MRRAt10, metrics.Quality.PrecisionAt1, metrics.Quality.PrecisionAt5, metrics.Quality.PrecisionAt10, metrics.Quality.HitAt1, metrics.Quality.HitAt5, metrics.Quality.HitAt10, metrics.Quality.MAPAt10, metrics.Quality.MAPAt100, metrics.Quality.RecallAt10, metrics.Quality.RecallAt100)
+	fmt.Printf("throughput: elapsed=%.3fs labels/s=%.2f queries/s=%.2f scores/s=%.2f\n",
+		metrics.Throughput.ElapsedSeconds, metrics.Throughput.DocumentsPerSecond, metrics.Throughput.QueriesPerSecond, metrics.Throughput.ScoresPerSecond)
+	fmt.Printf("labels: %s\n", *labelsPath)
+	if *metricsPath != "" {
+		fmt.Printf("metrics: %s\n", *metricsPath)
+	}
+	if *perQueryPath != "" {
+		fmt.Printf("per_query: %s\n", *perQueryPath)
 	}
 	return nil
 }
@@ -6829,6 +6902,7 @@ func printUsage() {
 	fmt.Println("  eos eval-retrieval-vectors-turboquant [flags] --doc-vectors docs.jsonl --query-vectors queries.jsonl <beir-dataset-dir>")
 	fmt.Println("  eos eval-retrieval-multivector-turboquant [flags] --doc-vectors child-docs.jsonl --query-vectors queries.jsonl <beir-dataset-dir>")
 	fmt.Println("  eos eval-retrieval-bm25 [flags] <beir-dataset-dir>")
+	fmt.Println("  eos eval-sparse-lexical-labels [flags] --labels labels.jsonl <beir-dataset-dir>")
 	fmt.Println("  eos mine-retrieval-hard-negatives [flags] <beir-dataset-dir> <output.jsonl>")
 	fmt.Println("  eos mine-retrieval-model-hard-negatives [flags] <artifact.mll> <beir-dataset-dir> <output.jsonl>")
 	fmt.Println("  eos mine-retrieval-compact-hard-negatives [flags] --per-query-jsonl diagnostics.jsonl <beir-dataset-dir> <output.jsonl>")
@@ -6881,6 +6955,7 @@ func printUsage() {
 	fmt.Println("eval-retrieval-vectors-turboquant compares external vector caches against TurboQuant IP-preserving document-vector compression.")
 	fmt.Println("eval-retrieval-multivector-turboquant compares dense and direct TurboQuant child-vector scoring aggregated by max child score per parent.")
 	fmt.Println("eval-retrieval-bm25 scores the same BEIR files with an in-repo BM25 lexical baseline.")
+	fmt.Println("eval-sparse-lexical-labels scores capped exported manta.sparse_lexical_labels.v1 query labels against the label-file document universe and BEIR qrels.")
 	fmt.Println("mine-retrieval-hard-negatives creates text hard-negative training JSONL from BEIR qrels using the BM25 baseline.")
 	fmt.Println("mine-retrieval-model-hard-negatives creates text hard-negative training JSONL from BEIR qrels using a Eos embedding model's own misses.")
 	fmt.Println("mine-retrieval-compact-hard-negatives creates text hard-negative JSONL from compact TurboQuant per-query diagnostics and rejects test-split train selection by default.")

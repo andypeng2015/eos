@@ -2,6 +2,7 @@ package eosruntime
 
 import (
 	"bufio"
+	"container/heap"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"time"
 )
 
 const SparseLexicalLabelsSchema = "manta.sparse_lexical_labels.v1"
@@ -28,6 +30,17 @@ type SparseLexicalLabelExportConfig struct {
 	MaxQueries       int
 	OracleTopK       int
 	OracleMaxQueries int
+}
+
+type SparseLexicalLabelEvalConfig struct {
+	DatasetName       string
+	Split             string
+	QueriesPath       string
+	QrelsPath         string
+	LabelsPath        string
+	TopK              int
+	MaxQueries        int
+	PerQueryJSONLPath string
 }
 
 type SparseLexicalLabelExportSummary struct {
@@ -77,6 +90,19 @@ type SparseLexicalLabelExportStats struct {
 	HashedCollisionPct float64 `json:"hashed_collision_pct,omitempty"`
 }
 
+type SparseLexicalLabelEvalStats struct {
+	Representation     string  `json:"representation"`
+	LabelsPath         string  `json:"labels_path"`
+	DocumentLabels     int     `json:"document_labels"`
+	QueryLabels        int     `json:"query_labels"`
+	DocumentAvgNNZ     float64 `json:"document_avg_nonzeros"`
+	DocumentMaxNNZ     int     `json:"document_max_nonzeros"`
+	QueryAvgNNZ        float64 `json:"query_avg_nonzeros"`
+	QueryMaxNNZ        int     `json:"query_max_nonzeros"`
+	MissingQueryLabels int     `json:"missing_query_labels"`
+	MissingDocLabels   int     `json:"missing_doc_labels"`
+}
+
 type SparseLexicalBM25Tokenizer struct {
 	Name        string `json:"name"`
 	Lowercase   bool   `json:"lowercase"`
@@ -123,6 +149,108 @@ type SparseLexicalLabelTerm struct {
 	Term    string  `json:"term"`
 	Weight  float64 `json:"weight"`
 	HashBin *uint32 `json:"hash_bin,omitempty"`
+}
+
+// EvaluateSparseLexicalLabels evaluates exported capped sparse lexical labels over BEIR qrels.
+func EvaluateSparseLexicalLabels(ctx context.Context, cfg SparseLexicalLabelEvalConfig) (RetrievalEvalMetrics, error) {
+	if cfg.QueriesPath == "" || cfg.QrelsPath == "" || cfg.LabelsPath == "" {
+		return RetrievalEvalMetrics{}, fmt.Errorf("queries, qrels, and labels paths are required")
+	}
+	if cfg.TopK == 0 {
+		cfg.TopK = 100
+	}
+	if cfg.TopK < 100 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("top-k must be at least 100 for recall_at_100, got %d", cfg.TopK)
+	}
+	start := time.Now()
+	qrels, err := readBEIRQrels(cfg.QrelsPath)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
+	queries, skippedQueries, err := readBEIRQueries(cfg.QueriesPath, qrels, cfg.MaxQueries)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
+	if len(queries) == 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("no qrels queries found in queries file")
+	}
+
+	loadStart := time.Now()
+	labels, stats, err := readSparseLexicalLabelFile(cfg.LabelsPath, cfg.DatasetName, cfg.Split)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
+	loadDuration := time.Since(loadStart)
+	if len(labels.documents) == 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("no document sparse lexical labels found")
+	}
+	if len(labels.queries) == 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("no query sparse lexical labels found")
+	}
+	stats.Representation = "capped_exported_sparse_lexical_labels"
+	stats.LabelsPath = cfg.LabelsPath
+
+	evalQueries := make([]SparseLexicalLabelRecord, 0, len(queries))
+	missingQueryLabels := 0
+	for _, query := range queries {
+		label, ok := labels.queries[query.ID]
+		if !ok {
+			missingQueryLabels++
+			continue
+		}
+		evalQueries = append(evalQueries, label)
+	}
+	stats.MissingQueryLabels = missingQueryLabels
+	missingDocLabels := countMissingSparseLexicalRelevantDocs(evalQueries, qrels, labels.documents)
+	stats.MissingDocLabels = missingDocLabels
+	if missingQueryLabels > 0 || missingDocLabels > 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("sparse lexical labels missing required qrels coverage: query_labels=%d relevant_doc_labels=%d", missingQueryLabels, missingDocLabels)
+	}
+
+	scoreStart := time.Now()
+	quality, evaluatedQueries, relevantPairs, err := computeSparseLexicalLabelRetrievalQuality(ctx, evalQueries, labels.documentsOrdered, qrels, cfg.TopK, cfg.DatasetName, cfg.PerQueryJSONLPath)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
+	scoreDuration := time.Since(scoreStart)
+	if evaluatedQueries == 0 {
+		return RetrievalEvalMetrics{}, fmt.Errorf("no queries had relevant documents in the evaluated labels")
+	}
+
+	elapsed := time.Since(start)
+	scoredPairs := int64(evaluatedQueries) * int64(len(labels.documentsOrdered))
+	return RetrievalEvalMetrics{
+		Schema:  RetrievalEvalMetricsSchema,
+		Dataset: cfg.DatasetName,
+		Backend: "sparse_lexical_labels_capped",
+		Inputs: RetrievalEvalInputMetrics{
+			QueriesPath:   cfg.QueriesPath,
+			QrelsPath:     cfg.QrelsPath,
+			LabelPath:     cfg.LabelsPath,
+			Documents:     len(labels.documentsOrdered),
+			Queries:       evaluatedQueries,
+			RelevantPairs: relevantPairs,
+			ScoredPairs:   scoredPairs,
+		},
+		Config: RetrievalEvalConfigMetrics{
+			TopK:       cfg.TopK,
+			MaxQueries: cfg.MaxQueries,
+		},
+		Quality: quality,
+		Throughput: RetrievalEvalThroughput{
+			ElapsedSeconds:       elapsed.Seconds(),
+			DocumentEmbedSeconds: loadDuration.Seconds(),
+			QueryEmbedSeconds:    loadDuration.Seconds(),
+			ScoreSeconds:         scoreDuration.Seconds(),
+			DocumentsPerSecond:   ratePerSecond(float64(len(labels.documentsOrdered)), loadDuration),
+			QueriesPerSecond:     ratePerSecond(float64(len(evalQueries)), loadDuration),
+			ScoresPerSecond:      ratePerSecond(float64(scoredPairs), scoreDuration),
+		},
+		SkippedCounts: RetrievalEvalSkippedCounts{
+			QueriesWithoutText: skippedQueries,
+		},
+		SparseLexical: &stats,
+	}, nil
 }
 
 func ExportSparseLexicalLabels(ctx context.Context, cfg SparseLexicalLabelExportConfig) (SparseLexicalLabelExportSummary, error) {
@@ -284,6 +412,163 @@ func ExportSparseLexicalLabels(ctx context.Context, cfg SparseLexicalLabelExport
 		}
 	}
 	return summary, nil
+}
+
+type sparseLexicalLabelSet struct {
+	documents        map[string]SparseLexicalLabelRecord
+	documentsOrdered []SparseLexicalLabelRecord
+	queries          map[string]SparseLexicalLabelRecord
+}
+
+func readSparseLexicalLabelFile(path, datasetName, split string) (sparseLexicalLabelSet, SparseLexicalLabelEvalStats, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return sparseLexicalLabelSet{}, SparseLexicalLabelEvalStats{}, fmt.Errorf("open sparse lexical labels: %w", err)
+	}
+	defer f.Close()
+	out := sparseLexicalLabelSet{
+		documents: map[string]SparseLexicalLabelRecord{},
+		queries:   map[string]SparseLexicalLabelRecord{},
+	}
+	var docNNZ, queryNNZ int
+	stats := SparseLexicalLabelEvalStats{}
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	line := 0
+	for scanner.Scan() {
+		line++
+		var record SparseLexicalLabelRecord
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			return sparseLexicalLabelSet{}, SparseLexicalLabelEvalStats{}, fmt.Errorf("decode sparse lexical labels line %d: %w", line, err)
+		}
+		if record.Schema != SparseLexicalLabelsSchema {
+			return sparseLexicalLabelSet{}, SparseLexicalLabelEvalStats{}, fmt.Errorf("sparse lexical labels line %d has unsupported schema %q", line, record.Schema)
+		}
+		if record.ID == "" {
+			return sparseLexicalLabelSet{}, SparseLexicalLabelEvalStats{}, fmt.Errorf("sparse lexical labels line %d is missing id", line)
+		}
+		if datasetName != "" && record.Dataset != "" && record.Dataset != datasetName {
+			return sparseLexicalLabelSet{}, SparseLexicalLabelEvalStats{}, fmt.Errorf("sparse lexical labels line %d dataset=%q, want %q", line, record.Dataset, datasetName)
+		}
+		if split != "" && record.Split != "" && record.Split != split {
+			return sparseLexicalLabelSet{}, SparseLexicalLabelEvalStats{}, fmt.Errorf("sparse lexical labels line %d split=%q, want %q", line, record.Split, split)
+		}
+		if record.NonZeros != len(record.Terms) {
+			return sparseLexicalLabelSet{}, SparseLexicalLabelEvalStats{}, fmt.Errorf("sparse lexical labels line %d nonzeros=%d, terms=%d", line, record.NonZeros, len(record.Terms))
+		}
+		switch record.RecordType {
+		case "document":
+			if _, ok := out.documents[record.ID]; ok {
+				return sparseLexicalLabelSet{}, SparseLexicalLabelEvalStats{}, fmt.Errorf("duplicate document sparse lexical label id %q", record.ID)
+			}
+			out.documents[record.ID] = record
+			out.documentsOrdered = append(out.documentsOrdered, record)
+			stats.DocumentLabels++
+			docNNZ += record.NonZeros
+			if record.NonZeros > stats.DocumentMaxNNZ {
+				stats.DocumentMaxNNZ = record.NonZeros
+			}
+		case "query":
+			if _, ok := out.queries[record.ID]; ok {
+				return sparseLexicalLabelSet{}, SparseLexicalLabelEvalStats{}, fmt.Errorf("duplicate query sparse lexical label id %q", record.ID)
+			}
+			out.queries[record.ID] = record
+			stats.QueryLabels++
+			queryNNZ += record.NonZeros
+			if record.NonZeros > stats.QueryMaxNNZ {
+				stats.QueryMaxNNZ = record.NonZeros
+			}
+		default:
+			return sparseLexicalLabelSet{}, SparseLexicalLabelEvalStats{}, fmt.Errorf("sparse lexical labels line %d has unsupported record_type %q", line, record.RecordType)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return sparseLexicalLabelSet{}, SparseLexicalLabelEvalStats{}, fmt.Errorf("scan sparse lexical labels: %w", err)
+	}
+	if stats.DocumentLabels > 0 {
+		stats.DocumentAvgNNZ = float64(docNNZ) / float64(stats.DocumentLabels)
+	}
+	if stats.QueryLabels > 0 {
+		stats.QueryAvgNNZ = float64(queryNNZ) / float64(stats.QueryLabels)
+	}
+	return out, stats, nil
+}
+
+func countMissingSparseLexicalRelevantDocs(queries []SparseLexicalLabelRecord, qrels retrievalQrels, documents map[string]SparseLexicalLabelRecord) int {
+	missing := 0
+	for _, query := range queries {
+		for docID := range qrels[query.ID] {
+			if _, ok := documents[docID]; !ok {
+				missing++
+			}
+		}
+	}
+	return missing
+}
+
+func computeSparseLexicalLabelRetrievalQuality(ctx context.Context, queries, docs []SparseLexicalLabelRecord, qrels retrievalQrels, topK int, datasetName, perQueryJSONLPath string) (RetrievalEvalQualityMetrics, int, int, error) {
+	if topK < 100 {
+		topK = 100
+	}
+	writer, err := newRetrievalPerQueryWriter(perQueryJSONLPath)
+	if err != nil {
+		return RetrievalEvalQualityMetrics{}, 0, 0, err
+	}
+	defer writer.Close()
+	var totals RetrievalEvalQualityMetrics
+	evaluatedQueries := 0
+	relevantPairs := 0
+	for _, query := range queries {
+		if err := ctx.Err(); err != nil {
+			return RetrievalEvalQualityMetrics{}, 0, 0, err
+		}
+		rels := qrels[query.ID]
+		if len(rels) == 0 {
+			continue
+		}
+		scores := topSparseLexicalLabelScores(query.Terms, docs, topK)
+		evaluatedQueries++
+		relevantPairs += len(rels)
+		row := buildRetrievalPerQueryRow(datasetName, query.ID, scores, rels)
+		addRetrievalPerQueryQuality(&totals, row.Quality)
+		if err := writer.Write(row); err != nil {
+			return RetrievalEvalQualityMetrics{}, 0, 0, err
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return RetrievalEvalQualityMetrics{}, 0, 0, err
+	}
+	averageRetrievalQuality(&totals, evaluatedQueries)
+	return totals, evaluatedQueries, relevantPairs, nil
+}
+
+func topSparseLexicalLabelScores(query []SparseLexicalLabelTerm, docs []SparseLexicalLabelRecord, topK int) []retrievalScoredDoc {
+	if topK <= 0 || topK > len(docs) {
+		topK = len(docs)
+	}
+	h := make(retrievalScoreHeap, 0, topK)
+	for _, doc := range docs {
+		score := retrievalScoredDoc{ID: doc.ID, Score: float32(SparseLexicalDot(query, doc.Terms))}
+		if len(h) < topK {
+			heap.Push(&h, score)
+			continue
+		}
+		if retrievalScoreBetter(score, h[0]) {
+			h[0] = score
+			heap.Fix(&h, 0)
+		}
+	}
+	scores := []retrievalScoredDoc(h)
+	slices.SortFunc(scores, func(a, b retrievalScoredDoc) int {
+		if retrievalScoreBetter(a, b) {
+			return -1
+		}
+		if retrievalScoreBetter(b, a) {
+			return 1
+		}
+		return 0
+	})
+	return scores
 }
 
 func sparseLexicalDocumentTerms(doc bm25Document, index bm25Index, topTerms, hashBins int) []SparseLexicalLabelTerm {
