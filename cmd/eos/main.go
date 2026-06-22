@@ -115,6 +115,8 @@ func run(args []string) error {
 		return runExportSparseTokenPoolVectors(args[1:])
 	case "export-sparse-encoder-vectors":
 		return runExportSparseEncoderVectors(args[1:])
+	case "export-sparse-lexical-labels":
+		return runExportSparseLexicalLabels(args[1:])
 	case "export-timeseries-vectors":
 		return runExportTimeSeriesVectors(args[1:])
 	case "export-event-trace-vectors":
@@ -1842,6 +1844,67 @@ func runEvalRetrievalBM25(args []string) error {
 	}
 	if *perQueryPath != "" {
 		fmt.Printf("per_query: %s\n", *perQueryPath)
+	}
+	return nil
+}
+
+func runExportSparseLexicalLabels(args []string) error {
+	fs := flag.NewFlagSet("export-sparse-lexical-labels", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	datasetName := fs.String("dataset", "", "dataset name for label records and manifest")
+	split := fs.String("split", "train", "qrels split under <dataset-dir>/qrels")
+	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path")
+	topTerms := fs.Int("top-terms", 128, "maximum nonzero lexical terms per document or query")
+	hashBins := fs.Int("hash-bins", 0, "optional deterministic FNV-1a hash bins recorded on each term; 0 disables")
+	manifestPath := fs.String("manifest-json", "", "write sparse lexical label manifest and oracle summary JSON")
+	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks while retaining qrels-relevant documents")
+	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
+	oracleTopK := fs.Int("oracle-top-k", 100, "top-k depth for sparse-only oracle summary")
+	oracleMaxQueries := fs.Int("oracle-max-queries", 0, "limit queries used for oracle summary; 0 uses all exported queries")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
+		return fmt.Errorf("usage: eos export-sparse-lexical-labels [flags] <beir-dataset-dir> <labels.jsonl>")
+	}
+	datasetDir := fs.Arg(0)
+	labelsPath := fs.Arg(1)
+	corpusPath, queriesPath, defaultQrelsPath := eosruntime.BEIRRetrievalPaths(datasetDir, *split)
+	if *qrelsPath == "" {
+		*qrelsPath = defaultQrelsPath
+	}
+	if *datasetName == "" {
+		*datasetName = filepath.Base(datasetDir)
+	}
+	summary, err := eosruntime.ExportSparseLexicalLabels(context.Background(), eosruntime.SparseLexicalLabelExportConfig{
+		DatasetName:      *datasetName,
+		Split:            *split,
+		CorpusPath:       corpusPath,
+		QueriesPath:      queriesPath,
+		QrelsPath:        *qrelsPath,
+		OutputPath:       labelsPath,
+		ManifestPath:     *manifestPath,
+		TopTerms:         *topTerms,
+		HashBins:         *hashBins,
+		MaxDocs:          *maxDocs,
+		MaxQueries:       *maxQueries,
+		OracleTopK:       *oracleTopK,
+		OracleMaxQueries: *oracleMaxQueries,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("exported sparse lexical labels: dataset=%s split=%s docs=%d queries=%d top_terms=%d hash_bins=%d\n",
+		summary.Dataset, summary.Split, summary.Stats.Documents, summary.Stats.Queries, summary.Config.TopTerms, summary.Config.HashBins)
+	fmt.Printf("density: doc_avg_nonzeros=%.2f doc_max_nonzeros=%d query_avg_nonzeros=%.2f query_max_nonzeros=%d\n",
+		summary.Stats.DocumentAvgNNZ, summary.Stats.DocumentMaxNNZ, summary.Stats.QueryAvgNNZ, summary.Stats.QueryMaxNNZ)
+	fmt.Printf("truncation: document_records=%d document_terms_omitted=%d query_records=%d query_terms_omitted=%d exported_terms_exact=%t\n",
+		summary.Stats.DocumentTruncated, summary.Stats.DocumentOmitted, summary.Stats.QueryTruncated, summary.Stats.QueryOmitted, summary.Oracle.ExportedTermsExact)
+	fmt.Printf("oracle: queries=%d max_abs_score_delta=%.12g exact=%t reconstruction_terms=%s ndcg@10=%.6f recall@100=%.6f\n",
+		summary.Oracle.Queries, summary.Oracle.MaxAbsScoreDelta, summary.Oracle.ExactScoreReconstruction, summary.Oracle.ReconstructionTerms, summary.Oracle.NDCGAt10, summary.Oracle.RecallAt100)
+	fmt.Printf("labels: %s\n", labelsPath)
+	if *manifestPath != "" {
+		fmt.Printf("manifest: %s\n", *manifestPath)
 	}
 	return nil
 }
@@ -6755,6 +6818,7 @@ func printUsage() {
 	fmt.Println("  eos export-retrieval-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
 	fmt.Println("  eos export-sparse-token-pool-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
 	fmt.Println("  eos export-sparse-encoder-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
+	fmt.Println("  eos export-sparse-lexical-labels [flags] <beir-dataset-dir> <labels.jsonl>")
 	fmt.Println("  eos export-timeseries-vectors [flags] <artifact.mll> <series.jsonl> <queries.jsonl> <output-dir>")
 	fmt.Println("  eos export-event-trace-vectors [flags] <artifact.mll> <traces.jsonl> <queries.jsonl> <output-dir>")
 	fmt.Println("  eos eval-retrieval [flags] <artifact.mll> <beir-dataset-dir>")
@@ -6806,6 +6870,7 @@ func printUsage() {
 	fmt.Println("export-retrieval-vectors writes BEIR document/query vector caches from a packaged or sealed Eos embedding .mll, optionally as parent-child document chunks.")
 	fmt.Println("export-sparse-token-pool-vectors writes experimental_sparse_token_pool BEIR vector caches from tokenizer ids, token_embedding rows, and host-reference attention (--attention-mode turboquant_sparse|dense); --token-span-tokens emits child vectors from one encoded document pass; quality_claim=false; --min-observed-doc-tokens can fail runs that never consume the requested document token length.")
 	fmt.Println("export-sparse-encoder-vectors writes parent doc/query vector caches as experimental_sparse_encoder_host_reference; it requires full manifest encoder weights, records retrieval_cache_host_reference_sparse_encoder evidence, and keeps quality_claim=false.")
+	fmt.Println("export-sparse-lexical-labels writes deterministic BM25 sparse lexical document/query labels plus an oracle manifest; it is non-training and does not modify embedding assets.")
 	fmt.Println("export-timeseries-vectors writes text-rendered time-series window child-vector caches plus query vectors for the multivector TurboQuant quality harness.")
 	fmt.Println("export-event-trace-vectors writes text-rendered event/trace child-vector caches plus query vectors for the multivector TurboQuant quality harness.")
 	fmt.Println("eval-retrieval scores a sealed embedding .mll on BEIR-style corpus/query/qrels files with nDCG/MRR/Recall metrics.")

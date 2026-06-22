@@ -1549,6 +1549,148 @@ func TestRunEvalRetrievalBM25WritesMetricsJSON(t *testing.T) {
 	}
 }
 
+func TestRunExportSparseLexicalLabelsWritesLabelsAndManifest(t *testing.T) {
+	dir := t.TempDir()
+	datasetDir := filepath.Join(dir, "dataset")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "corpus.jsonl"), []byte(
+		`{"_id":"d1","text":"alpha alpha finance"}`+"\n"+
+			`{"_id":"d2","text":"beta medicine"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "queries.jsonl"), []byte(`{"_id":"q1","text":"alpha finance"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "qrels", "train.tsv"), []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	manifestPath := filepath.Join(dir, "manifest.json")
+
+	output := captureRunOutput(t, []string{
+		"export-sparse-lexical-labels",
+		"--dataset", "tiny",
+		"--split", "train",
+		"--top-terms", "2",
+		"--hash-bins", "16",
+		"--manifest-json", manifestPath,
+		datasetDir,
+		labelsPath,
+	})
+	for _, want := range []string{
+		"exported sparse lexical labels: dataset=tiny split=train docs=2 queries=1 top_terms=2 hash_bins=16",
+		"density: doc_avg_nonzeros=",
+		"truncation: document_records=0 document_terms_omitted=0 query_records=0 query_terms_omitted=0 exported_terms_exact=true",
+		"oracle: queries=1 max_abs_score_delta=0 exact=true reconstruction_terms=unbounded_internal ndcg@10=1.000000 recall@100=1.000000",
+		"labels: " + labelsPath,
+		"manifest: " + manifestPath,
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("export-sparse-lexical-labels output missing %q\noutput:\n%s", want, output)
+		}
+	}
+	data, err := os.ReadFile(labelsPath)
+	if err != nil {
+		t.Fatalf("read labels: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("label lines = %d, want 3\n%s", len(lines), data)
+	}
+	var first struct {
+		Schema     string `json:"schema"`
+		RecordType string `json:"record_type"`
+		ID         string `json:"id"`
+		NonZeros   int    `json:"nonzeros"`
+		Terms      []struct {
+			Term    string  `json:"term"`
+			Weight  float64 `json:"weight"`
+			HashBin *uint32 `json:"hash_bin"`
+		} `json:"terms"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
+		t.Fatalf("decode first label: %v", err)
+	}
+	if first.Schema != eosruntime.SparseLexicalLabelsSchema || first.RecordType != "document" || first.ID != "d1" || first.NonZeros > 2 {
+		t.Fatalf("first label = %+v", first)
+	}
+	if len(first.Terms) == 0 || first.Terms[0].HashBin == nil || first.Terms[0].Weight <= 0 {
+		t.Fatalf("first label terms = %+v", first.Terms)
+	}
+	var manifest eosruntime.SparseLexicalLabelExportSummary
+	manifestData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if manifest.Schema != eosruntime.SparseLexicalLabelsSchema || manifest.Dataset != "tiny" || manifest.Config.TopTerms != 2 || manifest.Hashing.Bins != 16 {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+	if !manifest.Oracle.ExactScoreReconstruction || manifest.Stats.DocumentMaxNNZ > 2 || manifest.Stats.QueryMaxNNZ > 2 {
+		t.Fatalf("manifest oracle/stats = %+v %+v", manifest.Oracle, manifest.Stats)
+	}
+	if manifest.Oracle.ReconstructionTerms != "unbounded_internal" || !manifest.Oracle.ExportedTermsExact {
+		t.Fatalf("manifest oracle scope = %+v", manifest.Oracle)
+	}
+}
+
+func TestRunExportSparseLexicalLabelsRejectsInvalidArgs(t *testing.T) {
+	dir := t.TempDir()
+	datasetDir := filepath.Join(dir, "dataset")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "corpus.jsonl"), []byte(`{"_id":"d1","text":"alpha"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "queries.jsonl"), []byte(`{"_id":"q1","text":"alpha"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "qrels", "train.tsv"), []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "oracle top k below recall depth",
+			args: []string{"export-sparse-lexical-labels", "--oracle-top-k", "10", datasetDir, labelsPath},
+			want: "oracle top-k must be at least 100",
+		},
+		{
+			name: "same labels and manifest path",
+			args: []string{"export-sparse-lexical-labels", "--manifest-json", filepath.Join(dir, ".", "labels.jsonl"), datasetDir, labelsPath},
+			want: "labels output path and manifest path must differ",
+		},
+	}
+	if math.MaxInt > math.MaxUint32 {
+		tests = append(tests, struct {
+			name string
+			args []string
+			want string
+		}{
+			name: "oversized hash bins",
+			args: []string{"export-sparse-lexical-labels", "--hash-bins", "4294967296", datasetDir, labelsPath},
+			want: "hash bins must be <=",
+		})
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output, err := captureRunOutputAndError(t, tt.args)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, output = %q, want err containing %q", err, output, tt.want)
+			}
+		})
+	}
+}
+
 func TestRunEvalRetrievalVectorsWritesMetricsJSON(t *testing.T) {
 	dir := t.TempDir()
 	datasetDir := filepath.Join(dir, "dataset")
