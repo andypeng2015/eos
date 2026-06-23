@@ -485,6 +485,46 @@ def build_planned_env(
     }
 
 
+def build_compact_post_gate_env(
+    args: argparse.Namespace,
+    *,
+    repo_root: Path,
+    default_manifest: dict[str, Any],
+) -> dict[str, str]:
+    dense_run_dir = resolve_path(repo_root, Path(args.run_root) / args.run_id)
+    compact_run_id = args.run_id + "-compact-post-gate"
+    compact_run_dir = resolve_path(repo_root, Path(args.run_root) / compact_run_id)
+    candidate_dir = dense_run_dir / args.candidate_run_id
+    tokenizer = default_manifest["source_release"]["tokenizer"]
+    return {
+        "EOS_REPO_ROOT": str(repo_root),
+        "EOS_MODEL_NAME": "eos-embed-v1",
+        "EOS_GUARD_RUN_ID": compact_run_id,
+        "EOS_GUARD_RUN_DIR": str(compact_run_dir),
+        "EOS_GUARD_CANDIDATE_DIR": str(candidate_dir),
+        "EOS_GUARD_SKIP_TRAIN": "1",
+        "EOS_GUARD_ANCHOR_SCOREBOARD": default_manifest["compact_gate"]["current_compact_comparator"],
+        "EOS_GUARD_DATASETS": "scifact,nfcorpus,fiqa",
+        "EOS_GUARD_METRICS": "ndcg_at_10,recall_at_100,total_compression_ratio",
+        "EOS_GUARD_CATEGORY": "short_retrieval",
+        "EOS_GUARD_BASELINE": "eos-turboquant-rerank",
+        "EOS_GUARD_METHOD": "turboquant_ip_b4_overfetch200_fp16_rerank",
+        "EOS_GUARD_BITS": "4",
+        "EOS_GUARD_TOLERANCE": "0",
+        "EOS_GUARD_FAIL_ON_GATE": "0",
+        "EOS_GUARD_ALLOW_DIRTY": "1",
+        "EOS_TOKENIZER": tokenizer,
+        "EOS_PACKAGE_TOKENIZER": tokenizer,
+        "EOS_SCOREBOARD_TOKENIZER": tokenizer,
+        "EOS_SCOREBOARD_TURBOQUANT": "1",
+        "EOS_SCOREBOARD_TURBOQUANT_BITS": "4",
+        "EOS_SCOREBOARD_TURBOQUANT_RERANK_OVERFETCH": "200",
+        "EOS_SCOREBOARD_TURBOQUANT_RERANK_STORAGE": "fp16",
+        "EOS_SCOREBOARD_TURBOQUANT_BASELINE": "eos-turboquant",
+        "EOS_SCOREBOARD_TURBOQUANT_RERANK_BASELINE": "eos-turboquant-rerank",
+    }
+
+
 def decision_for(blockers: list[str]) -> str:
     if not blockers:
         return "ready"
@@ -560,6 +600,12 @@ def generate_plan(
         env=env,
         args=["ferrous-wheel", "run", "scripts/run_manta_embed_v1_guarded_candidate.fw"],
     )
+    compact_env = build_compact_post_gate_env(args, repo_root=repo_root, default_manifest=default_manifest)
+    compact_command = CommandPlan(
+        label="mandatory compact q4/fp16/rerank-overfetch=200 post-gate",
+        env=compact_env,
+        args=["ferrous-wheel", "run", "scripts/run_manta_embed_v1_guarded_candidate.fw"],
+    )
     files = {key: repo_relative(repo_root, value) for key, value in sorted(paths.items())}
 
     compact_requirement = {
@@ -605,7 +651,7 @@ def generate_plan(
         "compact_post_gate_requirement": compact_requirement,
         "planned_env": dict(sorted(env.items())),
         "planned_shell_command": command_to_shell(command),
-        "planned_commands": [command.as_json()],
+        "planned_commands": [command.as_json(), compact_command.as_json()],
         "blockers": blockers,
         "warnings": warnings,
     }

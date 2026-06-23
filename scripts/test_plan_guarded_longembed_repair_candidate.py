@@ -233,6 +233,38 @@ class PlanGuardedLongEmbedRepairCandidateTest(unittest.TestCase):
         self.assertIn("EOS_PROTECTED_LONGEMBED_EVAL_JSONL=", shell)
         self.assertIn("EOS_HARD_NEGATIVES_PER_QUERY=5", shell)
         self.assertTrue(all(line.startswith("# ") for line in plan_text.splitlines() if "ferrous-wheel run" in line))
+        self.assertEqual(len(summary["planned_commands"]), 2)
+        dense_command, compact_command = summary["planned_commands"]
+        self.assertEqual(dense_command["label"], "guarded LongEmbed repair candidate")
+        self.assertEqual(
+            compact_command["label"],
+            "mandatory compact q4/fp16/rerank-overfetch=200 post-gate",
+        )
+        compact_env = compact_command["env"]
+        self.assertEqual(
+            compact_env["EOS_GUARD_ANCHOR_SCOREBOARD"],
+            summary["compact_post_gate_requirement"]["comparator_scoreboard"],
+        )
+        self.assertEqual(
+            compact_env["EOS_GUARD_ANCHOR_SCOREBOARD"],
+            str(root / "runs/current/compact-q4-fp16-overfetch200-scoreboard/scoreboard.json"),
+        )
+        self.assertEqual(compact_env["EOS_GUARD_CANDIDATE_DIR"], str(root / "runs" / args.run_id / "candidate"))
+        self.assertEqual(compact_env["EOS_GUARD_SKIP_TRAIN"], "1")
+        self.assertEqual(compact_env["EOS_SCOREBOARD_TURBOQUANT"], "1")
+        self.assertEqual(compact_env["EOS_SCOREBOARD_TURBOQUANT_BITS"], "4")
+        self.assertEqual(compact_env["EOS_SCOREBOARD_TURBOQUANT_RERANK_OVERFETCH"], "200")
+        self.assertEqual(compact_env["EOS_SCOREBOARD_TURBOQUANT_RERANK_STORAGE"], "fp16")
+        self.assertEqual(compact_env["EOS_GUARD_BASELINE"], "eos-turboquant-rerank")
+        self.assertEqual(compact_env["EOS_GUARD_METHOD"], "turboquant_ip_b4_overfetch200_fp16_rerank")
+        self.assertEqual(compact_env["EOS_GUARD_BITS"], "4")
+        self.assertEqual(compact_env["EOS_GUARD_METRICS"], "ndcg_at_10,recall_at_100,total_compression_ratio")
+        self.assertIn("total_compression_ratio", compact_command["shell"])
+        self.assertIn("EOS_GUARD_SKIP_TRAIN=1", compact_command["shell"])
+        self.assertIn("EOS_SCOREBOARD_TURBOQUANT=1", compact_command["shell"])
+        command_lines = [line for line in plan_text.splitlines() if "ferrous-wheel run" in line]
+        self.assertEqual(len(command_lines), 2)
+        self.assertTrue(all(line.startswith("# ") for line in command_lines))
 
     def test_gap_summary_quality_claim_true_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

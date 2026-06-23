@@ -226,6 +226,27 @@ func hasScoreboardTurboQuantEnv() bool {
 	return false
 }
 
+func appendEnvIfSet(env []string, name string) []string {
+	value := os.Getenv(name)
+	if value != "" {
+		env = append(env, name+"="+value)
+	}
+	return env
+}
+
+func appendScoreboardTokenizerEnv(env []string) []string {
+	if os.Getenv("EOS_SCOREBOARD_TOKENIZER") != "" {
+		return appendEnvIfSet(env, "EOS_SCOREBOARD_TOKENIZER")
+	}
+	if tokenizer := os.Getenv("EOS_TOKENIZER"); tokenizer != "" {
+		return append(env, "EOS_SCOREBOARD_TOKENIZER="+tokenizer)
+	}
+	if tokenizer := os.Getenv("EOS_PACKAGE_TOKENIZER"); tokenizer != "" {
+		return append(env, "EOS_SCOREBOARD_TOKENIZER="+tokenizer)
+	}
+	return env
+}
+
 func inferCandidateSealed(candidateDir string) string {
 	modelName := getenv("EOS_MODEL_NAME", "eos-embed-v1")
 	return filepath.Join(candidateDir, modelName+".sealed.mll")
@@ -395,6 +416,20 @@ func scoreEnv(cfg guardedConfig) []string {
 	}
 	if cfg.TurboQuantPassthrough && os.Getenv("EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT") == "" {
 		env = append(env, "EOS_SCOREBOARD_EXTERNAL_VECTOR_TURBOQUANT=1")
+	}
+	env = appendScoreboardTokenizerEnv(env)
+	for _, name := range []string{
+		"EOS_SCOREBOARD_TURBOQUANT",
+		"EOS_SCOREBOARD_TURBOQUANT_BITS",
+		"EOS_SCOREBOARD_TURBOQUANT_RERANK_OVERFETCH",
+		"EOS_SCOREBOARD_TURBOQUANT_RERANK_STORAGE",
+		"EOS_SCOREBOARD_TURBOQUANT_BASELINE",
+		"EOS_SCOREBOARD_TURBOQUANT_RERANK_BASELINE",
+		"EOS_SCOREBOARD_BATCH_SIZE",
+		"EOS_SCOREBOARD_TOP_K",
+		"EOS_SCOREBOARD_BM25_BASELINE",
+	} {
+		env = appendEnvIfSet(env, name)
 	}
 	return env
 }
