@@ -160,6 +160,58 @@ class MineRetrievalQualityFrontierTest(unittest.TestCase):
         self.assertEqual(rows[0]["eos"]["first_relevant_rank"], 3)
         self.assertEqual(rows[0]["eos"]["top_nonrelevant"], [])
 
+    def test_hard_negatives_skip_qrels_positive_duplicate_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = root / "dataset"
+            write_jsonl(dataset / "queries.jsonl", [{"_id": "q1", "text": "query"}])
+            write_jsonl(
+                dataset / "corpus.jsonl",
+                [
+                    {"_id": "selected-positive", "text": "selected positive"},
+                    {"_id": "other-positive", "text": "duplicate positive text"},
+                    {"_id": "duplicate-negative", "text": "duplicate   positive\ntext"},
+                    {"_id": "true-negative", "title": "negative", "text": "true negative"},
+                ],
+            )
+            qrels = dataset / "qrels" / "train.tsv"
+            qrels.parent.mkdir(parents=True, exist_ok=True)
+            qrels.write_text(
+                "query-id\tcorpus-id\tscore\n"
+                "q1\tselected-positive\t1\n"
+                "q1\tother-positive\t1\n",
+                encoding="utf-8",
+            )
+            output = root / "hard-negatives.jsonl"
+            rows = [
+                {
+                    "dataset": "toy",
+                    "query_id": "q1",
+                    "eos": {
+                        "label": "eos",
+                        "top_relevant": [{"doc_id": "selected-positive"}],
+                        "top_nonrelevant": [
+                            {"doc_id": "duplicate-negative", "relevance": 0},
+                            {"doc_id": "true-negative", "relevance": 0},
+                        ],
+                    },
+                    "teacher": {
+                        "label": "teacher",
+                        "top_relevant": [{"doc_id": "selected-positive"}],
+                    },
+                    "delta": {"teacher_minus_eos_ndcg_at_10": 0.5},
+                }
+            ]
+
+            count = miner.write_hard_negatives(output, rows, dataset)
+            emitted = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(count, 1)
+        self.assertEqual(len(emitted), 1)
+        self.assertEqual(emitted[0]["negatives"], ["negative true negative"])
+        self.assertEqual(emitted[0]["metadata"]["negative_doc_ids"], ["true-negative"])
+        self.assertEqual(emitted[0]["metadata"]["duplicate_positive_text_negatives_skipped"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

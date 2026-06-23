@@ -281,6 +281,42 @@ def beir_text(row: dict[str, str]) -> str:
     return title or text
 
 
+def normalized_text_fingerprint(text: str) -> str:
+    return " ".join(str(text or "").replace("\r\n", "\n").split())
+
+
+def read_positive_qrels(dataset_dir: Path) -> dict[str, set[str]]:
+    positives: dict[str, set[str]] = {}
+    qrels_dir = dataset_dir / "qrels"
+    if not qrels_dir.is_dir():
+        return positives
+    for path in sorted(qrels_dir.glob("*.tsv")):
+        with path.open("r", encoding="utf-8") as f:
+            reader = csv.DictReader(f, delimiter="\t")
+            for row in reader:
+                query_id = str(row.get("query-id") or row.get("query_id") or "")
+                doc_id = str(row.get("corpus-id") or row.get("corpus_id") or "")
+                try:
+                    score = float(row.get("score") or 0)
+                except (TypeError, ValueError):
+                    score = 0.0
+                if not query_id or not doc_id or score <= 0:
+                    continue
+                positives.setdefault(query_id, set()).add(doc_id)
+    return positives
+
+
+def qrels_positive_text_fingerprints(
+    query_id: str, positives: dict[str, set[str]], docs: dict[str, dict[str, str]]
+) -> set[str]:
+    fingerprints: set[str] = set()
+    for doc_id in positives.get(query_id, set()):
+        fingerprint = normalized_text_fingerprint(beir_text(docs.get(doc_id, {})))
+        if fingerprint:
+            fingerprints.add(fingerprint)
+    return fingerprints
+
+
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
@@ -332,6 +368,7 @@ def write_tsv(path: Path, rows: list[dict[str, Any]]) -> None:
 def write_hard_negatives(path: Path, rows: list[dict[str, Any]], dataset_dir: Path) -> int:
     queries = read_beir_jsonl(dataset_dir / "queries.jsonl")
     docs = read_beir_jsonl(dataset_dir / "corpus.jsonl")
+    qrels_positives = read_positive_qrels(dataset_dir)
     hard_rows: list[dict[str, Any]] = []
     for row in rows:
         query = queries.get(row["query_id"])
@@ -343,15 +380,27 @@ def write_hard_negatives(path: Path, rows: list[dict[str, Any]], dataset_dir: Pa
         if not positive_doc:
             continue
         negatives = []
+        negative_doc_ids = []
         seen = set()
+        duplicate_positive_text_negatives_skipped = 0
+        positive_fingerprints = qrels_positive_text_fingerprints(
+            str(row["query_id"]), qrels_positives, docs
+        )
         for doc in row["eos"]["top_nonrelevant"]:
             doc_id = str(doc.get("doc_id", ""))
-            if not doc_id or doc_id in seen:
+            if not doc_id:
                 continue
             text = beir_text(docs.get(doc_id, {}))
             if not text:
                 continue
-            seen.add(doc_id)
+            fingerprint = normalized_text_fingerprint(text)
+            if not fingerprint or fingerprint in seen:
+                continue
+            if fingerprint in positive_fingerprints:
+                duplicate_positive_text_negatives_skipped += 1
+                continue
+            seen.add(fingerprint)
+            negative_doc_ids.append(doc_id)
             negatives.append(text)
         if not negatives:
             continue
@@ -372,6 +421,10 @@ def write_hard_negatives(path: Path, rows: list[dict[str, Any]], dataset_dir: Pa
                     "eos_top_nonrelevant_doc_ids": [
                         str(doc.get("doc_id", "")) for doc in row["eos"]["top_nonrelevant"]
                     ],
+                    "negative_doc_ids": negative_doc_ids,
+                    "duplicate_positive_text_negatives_skipped": (
+                        duplicate_positive_text_negatives_skipped
+                    ),
                     "teacher_top_relevant_doc_ids": [
                         str(doc.get("doc_id", "")) for doc in row["teacher"]["top_relevant"]
                     ],
