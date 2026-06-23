@@ -953,16 +953,6 @@ func retrievalQualityTarget(cfg candidateConfig) bool {
 	return cfg.QualityTarget == "retrieval" || cfg.QualityTarget == "both"
 }
 
-func appendEvalModeArgs(args []string, cfg candidateConfig) []string {
-	if pairwiseTrainEnabled(cfg) {
-		return append(args, "--pairwise-train")
-	}
-	if hardNegativeTrainEnabled(cfg) {
-		return append(args, "--hard-negative-train", "--hard-negatives-per-query", cfg.HardNegativesPerQuery)
-	}
-	return args
-}
-
 func applyCandidateRuntimeEnv(cfg candidateConfig) {
 	if !envEnabled("EOS_TRAIN_DISABLE_ACTIVATION_ACCEL") && cfg.ActivationAccel != "" {
 		os.Setenv("EOS_TRAIN_ENABLE_ACTIVATION_ACCEL", cfg.ActivationAccel)
@@ -1169,10 +1159,28 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		guard err == nil else return cfg, err
 	}
 
+	if cfg.PackageTokenizerPath != "" {
+		err = copyFile(cfg.PackageTokenizerPath, filepath.Join(cfg.RunDir, cfg.ModelName+".tokenizer.mll"))
+		guard err == nil else return cfg, err
+	}
+
+	err = runCmd(cfg, "Inspect training package", "inspect-package.log", cfg.MantaBin, []string{"inspect", cfg.Artifact})
+	guard err == nil else return cfg, err
+	inspectData, err := os.ReadFile(filepath.Join(cfg.LogDir, "inspect-package.log"))
+	guard err == nil else return cfg, err
+	guard strings.Contains(string(inspectData), "package verify: OK") else return cfg, fmt.Errorf("training package verification did not pass")
+
+	err = runCmd(cfg, "Export sealed MLL", "export-mll.log", cfg.MantaBin, []string{"export-mll", cfg.Artifact, cfg.SealedArtifact})
+	guard err == nil else return cfg, err
+	err = runCmd(cfg, "Inspect sealed MLL", "inspect-sealed.log", cfg.MantaBin, []string{"inspect", cfg.SealedArtifact})
+	guard err == nil else return cfg, err
+	sealedData, err := os.ReadFile(filepath.Join(cfg.LogDir, "inspect-sealed.log"))
+	guard err == nil else return cfg, err
+	guard strings.Contains(string(sealedData), "package verify: OK") else return cfg, fmt.Errorf("sealed package verification did not pass")
+
 	evalCandidate, err := copyPackageForEval(cfg, "validation")
 	guard err == nil else return cfg, err
 	evalArgs := []string{"train-embed", "--eval-only", "--metrics-json", cfg.FinalEvalMetricsJSON, "--seed", cfg.InitSeed}
-	evalArgs = appendEvalModeArgs(evalArgs, cfg)
 	if evalTokenizer != "" {
 		evalArgs = append(evalArgs, "--tokenizer", evalTokenizer)
 	} else if tokenJSONLForRun {
@@ -1191,7 +1199,6 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		hardCandidate, err := copyPackageForEval(cfg, "hard")
 		guard err == nil else return cfg, err
 		hardArgs := []string{"train-embed", "--eval-only", "--metrics-json", cfg.HardEvalMetricsJSON, "--seed", cfg.InitSeed}
-		hardArgs = appendEvalModeArgs(hardArgs, cfg)
 		if evalTokenizer != "" {
 			hardArgs = append(hardArgs, "--tokenizer", evalTokenizer)
 		} else if tokenJSONLForRun {
@@ -1214,25 +1221,6 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		err = runMetricsGate(cfg, "Candidate quality metrics gate", "quality-gate.log", "quality", gateMetrics)
 		guard err == nil else return cfg, err
 	}
-
-	if cfg.PackageTokenizerPath != "" {
-		err = copyFile(cfg.PackageTokenizerPath, filepath.Join(cfg.RunDir, cfg.ModelName+".tokenizer.mll"))
-		guard err == nil else return cfg, err
-	}
-
-	err = runCmd(cfg, "Inspect training package", "inspect-package.log", cfg.MantaBin, []string{"inspect", cfg.Artifact})
-	guard err == nil else return cfg, err
-	inspectData, err := os.ReadFile(filepath.Join(cfg.LogDir, "inspect-package.log"))
-	guard err == nil else return cfg, err
-	guard strings.Contains(string(inspectData), "package verify: OK") else return cfg, fmt.Errorf("training package verification did not pass")
-
-	err = runCmd(cfg, "Export sealed MLL", "export-mll.log", cfg.MantaBin, []string{"export-mll", cfg.Artifact, cfg.SealedArtifact})
-	guard err == nil else return cfg, err
-	err = runCmd(cfg, "Inspect sealed MLL", "inspect-sealed.log", cfg.MantaBin, []string{"inspect", cfg.SealedArtifact})
-	guard err == nil else return cfg, err
-	sealedData, err := os.ReadFile(filepath.Join(cfg.LogDir, "inspect-sealed.log"))
-	guard err == nil else return cfg, err
-	guard strings.Contains(string(sealedData), "package verify: OK") else return cfg, fmt.Errorf("sealed package verification did not pass")
 
 	if envEnabled("EOS_RETRIEVAL_EVAL") || retrievalQualityTarget(cfg) {
 		err = runRetrievalEval(cfg)
