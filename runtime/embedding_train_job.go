@@ -27,6 +27,7 @@ func TrainEmbeddingPackageFromContrastiveFiles(artifactPath, trainPath, evalPath
 	if err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 	}
+	defer trainer.Close()
 	if cfg.EvalOnly && evalPath == "" {
 		evalPath = trainPath
 		trainPath = ""
@@ -148,6 +149,7 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(artifactPath, tokenizerPath, 
 	if err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 	}
+	defer trainer.Close()
 	if cfg.EvalOnly && evalPath == "" {
 		evalPath = trainPath
 		trainPath = ""

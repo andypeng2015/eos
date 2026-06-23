@@ -75,6 +75,12 @@ func TestEstimateContrastiveTrainWorkloadWithTurboQuantPrefixes(t *testing.T) {
 	}
 }
 
+func TestContrastiveLengthBucketWindowHandlesSingletonBatch(t *testing.T) {
+	if got := contrastiveLengthBucketWindow(1, 3); got != 3 {
+		t.Fatalf("singleton-batch window = %d, want 3", got)
+	}
+}
+
 func TestEstimateContrastiveTrainWorkloadWithTurboQuantPrefixObjectives(t *testing.T) {
 	workload := EstimateContrastiveTrainWorkload(512, 128, EmbeddingTrainRunConfig{
 		Epochs:         1,

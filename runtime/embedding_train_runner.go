@@ -1808,8 +1808,11 @@ func bucketHardNegativeOrderByLength(trainSet []EmbeddingHardNegativeExample, or
 }
 
 func contrastiveLengthBucketWindow(batchSize, total int) int {
-	if batchSize <= 1 || total <= 0 {
+	if total <= 0 {
 		return 0
+	}
+	if batchSize <= 1 {
+		return total
 	}
 	windowSize := batchSize * 4
 	if raw := trainEnv("EOS_TRAIN_LENGTH_BUCKET_WINDOW"); raw != "" {
