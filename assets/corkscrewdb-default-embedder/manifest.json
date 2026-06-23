@@ -193,6 +193,41 @@
     ],
     "note": "Local long-context wedge evidence only; external baselines were disabled and quality_claim remains false."
   },
+  "long_context_evidence": {
+    "status": "current_default_synthetic_and_capped_cache_refresh",
+    "report": ".tiller/scratch/codex/eos-current-default-long-context-wedge-rerun-v1-report.md",
+    "artifact_used": "assets/corkscrewdb-default-embedder/corkscrewdb-default-embedder.mll",
+    "synthetic_late_needle": {
+      "run_dir": "runs/eos-current-default-long-context-chunked-baseline-v1-20260623T055729Z",
+      "quality_claim": false,
+      "direct_single_vector_ndcg_at_10": 0.11950202,
+      "single_vector_cache_ndcg_at_10": 0.157617787,
+      "chunked_dense_child_ndcg_at_10": 1.0,
+      "chunked_q2_ndcg_at_10": 1.0,
+      "chunked_q4_ndcg_at_10": 1.0,
+      "chunked_q8_ndcg_at_10": 1.0,
+      "recall_at_100": 1.0,
+      "caveat": "Synthetic late-needle smoke evidence only; not LongEmbed product proof or a real long-document benchmark."
+    },
+    "repo_docs_capped_cache": {
+      "run_dir": "runs/eos-current-default-long-context-wedge-cache-v1-20260623T055955Z",
+      "dataset": "datasets/longembed/repo-docs",
+      "quality_claim": false,
+      "external_mode": "cache",
+      "max_docs": 11,
+      "max_queries": 20,
+      "eos_direct_ndcg_at_10": 0.634327008,
+      "eos_token_span_dense_ndcg_at_10": 0.656691634,
+      "eos_token_span_q4_ndcg_at_10": 0.639676979,
+      "eos_best_fusion_ndcg_at_10": 0.638514924,
+      "qwen3_dense_ndcg_at_10": 0.807649216,
+      "qwen3_q4_ndcg_at_10": 0.735872282,
+      "mxbai_dense_ndcg_at_10": 0.78337096,
+      "mxbai_q4_ndcg_at_10": 0.750464207,
+      "recall_at_100": 1.0,
+      "caveat": "Capped local repo-docs cache/harness comparison only; all rows quality_claim=false, qrels are tiny and heuristic, external rows used matching local caches only, and the run does not prove long-token consumption beyond the observed tokenizer-output cap."
+    }
+  },
   "corkscrewdb_api_evidence": {
     "status": "narrow_default_main_local_flat_smoke",
     "report": ".tiller/scratch/codex/eos-narrow-default-corkscrewdb-api-refresh-v1-report.md",
@@ -263,6 +298,41 @@
     },
     "caveat": "Fresh promoted narrow default evidence covers the CorkScrewDB main local flat packed-parent API only. It does not prove remote mode, federation, HNSW, hosted parity, or a service SLO. q8 is diagnostic because target_child_fit is false and its DB directory multiple misses the q4 release gate."
   },
+  "corkscrewdb_hnsw_api_evidence": {
+    "status": "narrow_default_current_cache_hnsw_raw_smoke",
+    "report": ".tiller/scratch/codex/eos-current-default-corkscrewdb-hnsw-refresh-v1-report.md",
+    "run_dir": "runs/eos-current-default-corkscrewdb-hnsw-refresh-v1-20260623T055809Z",
+    "vector_cache": "runs/eos-vector-caches/eos-narrow-default-scifact-child-w128-o32-128d",
+    "corkscrewdb_repo": "/home/draco/work/corkscrewdb",
+    "dataset": "scifact-eos-narrow-default-128d-child-cache",
+    "index": "hnsw",
+    "vector_storage": "raw",
+    "api_scope": "local_hnsw_raw_only",
+    "bits": 4,
+    "q4_overfetch100": {
+      "ndcg_at_10": 0.445689,
+      "recall_at_100": 0.735222,
+      "vector_payload_multiple": 0.013312,
+      "db_dir_multiple": 0.243494,
+      "p95_ms": 2.32407,
+      "planner_fit": 123,
+      "target_child_fit": true,
+      "target_storage_multiple": 0.811688
+    },
+    "q4_overfetch12468": {
+      "ndcg_at_10": 0.45238,
+      "recall_at_100": 0.758556,
+      "vector_payload_multiple": 0.013312,
+      "db_dir_multiple": 0.243494,
+      "p95_ms": 49.635238,
+      "planner_fit": 123,
+      "target_child_fit": true,
+      "target_storage_multiple": 0.811688
+    },
+    "rebuild_seconds": 399.435824,
+    "q8_run": false,
+    "caveat": "Local CorkScrewDB HNSW/raw smoke only. CorkScrewDB rejects HNSW with quantized_only persistence, so DB directory multiple is raw HNSW storage cost; vector payload and planner columns are compact q4 accounting only. Does not prove remote mode, federation, hosted parity, or a service SLO."
+  },
   "corkscrewdb_hybrid_api_evidence": {
     "status": "narrow_default_full_uncapped_bm25_dot_searchmulti_smoke",
     "reports": [
@@ -318,8 +388,8 @@
     "The ignored runs/ release directory remains provenance.",
     "This promoted candidate is a short-retrieval plus compact q4/fp16/o200 improvement over the previous s40 default; s40 remains predecessor comparison provenance.",
     "Serving evidence is capped SciFact TurboQuant proxy evidence, not hosted parity or a full retrieval benchmark.",
-    "Current CorkScrewDB API evidence in this manifest covers local-flat packed-parent and local SearchMulti BM25-dot hybrid smokes for the promoted narrow default only.",
-    "Long-context wedge rows are local harness evidence with quality_claim=false and external baselines off.",
-    "No CorkScrewDB remote mode, federation, HNSW, native Matryoshka, hosted-model parity, or service SLO claim is implied."
+    "Current CorkScrewDB API evidence in this manifest covers local-flat packed-parent, local HNSW/raw, and local SearchMulti BM25-dot hybrid smokes for the promoted narrow default only.",
+    "Long-context rows are local harness/cache evidence with quality_claim=false; synthetic smoke is not product proof, and capped repo-docs rows are not LongEmbed proof.",
+    "No CorkScrewDB remote mode, federation, native Matryoshka, hosted-model parity, or service SLO claim is implied."
   ]
 }
