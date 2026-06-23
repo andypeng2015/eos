@@ -1,6 +1,7 @@
 package eosruntime
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,6 +123,77 @@ func TestEmbeddingTextHardNegativeExamplesFileRoundTripPreservesSource(t *testin
 	}
 	if len(got[0].TeacherScores) != 3 || got[0].TeacherScores[1] != 0.8 {
 		t.Fatalf("teacher scores = %+v, want preserved", got[0].TeacherScores)
+	}
+}
+
+func TestEmbeddingTextHardNegativeExamplesFileRoundTripPreservesExtraFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "text-hard-negatives.jsonl")
+	data := `{"source":"nfcorpus","query":"q","positive":"p","negatives":["n"],"request_only":true,"train_allowed":false,"dataset":"nfcorpus","source_manifest_quantizer_seed":123}` + "\n"
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write text hard-negative dataset: %v", err)
+	}
+	examples, err := ReadEmbeddingTextHardNegativeExamplesFile(path)
+	if err != nil {
+		t.Fatalf("read text hard-negative dataset: %v", err)
+	}
+	if len(examples) != 1 {
+		t.Fatalf("examples = %d, want 1", len(examples))
+	}
+	for _, key := range []string{"request_only", "train_allowed", "dataset", "source_manifest_quantizer_seed"} {
+		if len(examples[0].ExtraFields[key]) == 0 {
+			t.Fatalf("extra field %q missing from %+v", key, examples[0].ExtraFields)
+		}
+	}
+	examples[0].TeacherScores = []float32{0.8, 0.1}
+	if err := WriteEmbeddingTextHardNegativeExamplesFile(path, examples); err != nil {
+		t.Fatalf("write text hard-negative dataset: %v", err)
+	}
+	var row map[string]any
+	out, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &row); err != nil {
+		t.Fatalf("decode output row: %v\n%s", err, out)
+	}
+	if row["request_only"] != true || row["train_allowed"] != false || row["dataset"] != "nfcorpus" || row["source_manifest_quantizer_seed"] != float64(123) {
+		t.Fatalf("metadata row = %+v, want preserved bool/string/number fields", row)
+	}
+	if scores, ok := row["teacher_scores"].([]any); !ok || len(scores) != 2 {
+		t.Fatalf("teacher_scores = %+v, want two scores", row["teacher_scores"])
+	}
+}
+
+func TestEmbeddingTextHardNegativeExamplesExtraFieldsCannotOverwriteKnownFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "text-hard-negatives.jsonl")
+	examples := []EmbeddingTextHardNegativeExample{
+		{
+			Source:    "scifact",
+			Query:     "typed query",
+			Positive:  "typed positive",
+			Negatives: []string{"typed negative"},
+			ExtraFields: map[string]json.RawMessage{
+				"query":        json.RawMessage(`"extra query"`),
+				"request_only": json.RawMessage(`true`),
+			},
+		},
+	}
+	if err := WriteEmbeddingTextHardNegativeExamplesFile(path, examples); err != nil {
+		t.Fatalf("write text hard-negative dataset: %v", err)
+	}
+	var row map[string]any
+	out, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &row); err != nil {
+		t.Fatalf("decode output row: %v\n%s", err, out)
+	}
+	if row["query"] != "typed query" {
+		t.Fatalf("query = %q, want typed field to override extra", row["query"])
+	}
+	if row["request_only"] != true {
+		t.Fatalf("request_only = %+v, want preserved extra field", row["request_only"])
 	}
 }
 

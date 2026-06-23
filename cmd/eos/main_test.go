@@ -2795,9 +2795,7 @@ func TestRunMineRetrievalModelHardNegativesWritesTextJSONL(t *testing.T) {
 func TestRunImportTeacherScoresWritesVectorsAndManifest(t *testing.T) {
 	dir := t.TempDir()
 	inputPath := filepath.Join(dir, "hard-negatives.jsonl")
-	if err := eosruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []eosruntime.EmbeddingTextHardNegativeExample{
-		{Source: "scifact", Query: "alpha", Positive: "target", Negatives: []string{"distractor"}},
-	}); err != nil {
+	if err := os.WriteFile(inputPath, []byte(`{"source":"scifact","query":"alpha","positive":"target","negatives":["distractor"],"request_only":true,"train_allowed":false}`+"\n"), 0o644); err != nil {
 		t.Fatalf("write hard negatives: %v", err)
 	}
 	scoresPath := filepath.Join(dir, "scores.jsonl")
@@ -2833,6 +2831,17 @@ func TestRunImportTeacherScoresWritesVectorsAndManifest(t *testing.T) {
 	}
 	if len(examples) != 1 || len(examples[0].TeacherScores) != 2 || examples[0].TeacherScores[0] != 0.9 || examples[0].TeacherScores[1] != 0.1 {
 		t.Fatalf("teacher scores = %+v", examples)
+	}
+	var outputRow map[string]any
+	outputData, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read output jsonl: %v", err)
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(outputData))), &outputRow); err != nil {
+		t.Fatalf("decode output jsonl: %v\n%s", err, outputData)
+	}
+	if outputRow["request_only"] != true || outputRow["train_allowed"] != false {
+		t.Fatalf("output metadata = %+v, want request_only=true train_allowed=false", outputRow)
 	}
 	var manifest teacherScoreImportSummary
 	data, err := os.ReadFile(manifestPath)
@@ -3132,11 +3141,12 @@ func TestRunAuditTeacherScoresWritesSummary(t *testing.T) {
 func TestRunFilterTeacherScoresClearsUnsafeScores(t *testing.T) {
 	dir := t.TempDir()
 	inputPath := filepath.Join(dir, "hard-negatives.jsonl")
-	if err := eosruntime.WriteEmbeddingTextHardNegativeExamplesFile(inputPath, []eosruntime.EmbeddingTextHardNegativeExample{
-		{Source: "scifact", Query: "q1", Positive: "p1", Negatives: []string{"n1", "n2"}, TeacherScores: []float32{0.9, 0.1, 0.2}},
-		{Source: "fiqa", Query: "q2", Positive: "p2", Negatives: []string{"n3"}, TeacherScores: []float32{0.1, 0.8}},
-		{Source: "fiqa", Query: "q3", Positive: "p3", Negatives: []string{"n4"}},
-	}); err != nil {
+	inputRows := strings.Join([]string{
+		`{"source":"scifact","query":"q1","positive":"p1","negatives":["n1","n2"],"teacher_scores":[0.9,0.1,0.2],"request_only":true,"train_allowed":false}`,
+		`{"source":"fiqa","query":"q2","positive":"p2","negatives":["n3"],"teacher_scores":[0.1,0.8],"request_only":true,"train_allowed":false}`,
+		`{"source":"fiqa","query":"q3","positive":"p3","negatives":["n4"],"request_only":true,"train_allowed":false}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(inputPath, []byte(inputRows), 0o644); err != nil {
 		t.Fatalf("write hard negatives: %v", err)
 	}
 	outputPath := filepath.Join(dir, "filtered.jsonl")
@@ -3177,6 +3187,19 @@ func TestRunFilterTeacherScoresClearsUnsafeScores(t *testing.T) {
 	}
 	if len(examples[2].TeacherScores) != 0 {
 		t.Fatalf("missing teacher scores = %+v, want unchanged missing", examples[2].TeacherScores)
+	}
+	outputData, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read output jsonl: %v", err)
+	}
+	for i, line := range strings.Split(strings.TrimSpace(string(outputData)), "\n") {
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatalf("decode output row %d: %v\n%s", i, err, line)
+		}
+		if row["request_only"] != true || row["train_allowed"] != false {
+			t.Fatalf("output row %d metadata = %+v, want request_only=true train_allowed=false", i, row)
+		}
 	}
 	var summary teacherScoreFilterSummary
 	data, err := os.ReadFile(summaryPath)

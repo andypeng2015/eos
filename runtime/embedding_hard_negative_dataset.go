@@ -26,6 +26,7 @@ type EmbeddingTextHardNegativeExample struct {
 	Positive      string
 	Negatives     []string
 	TeacherScores []float32
+	ExtraFields   map[string]json.RawMessage
 }
 
 type embeddingHardNegativeRecord struct {
@@ -46,6 +47,85 @@ type embeddingTextHardNegativeRecord struct {
 	Document      string    `json:"document,omitempty"`
 	Negatives     []string  `json:"negatives,omitempty"`
 	TeacherScores []float32 `json:"teacher_scores,omitempty"`
+	ExtraFields   map[string]json.RawMessage
+}
+
+type embeddingTextHardNegativeKnownRecord struct {
+	Source        string    `json:"source,omitempty"`
+	Query         string    `json:"query"`
+	Positive      string    `json:"positive"`
+	Document      string    `json:"document,omitempty"`
+	Negatives     []string  `json:"negatives,omitempty"`
+	TeacherScores []float32 `json:"teacher_scores,omitempty"`
+}
+
+var embeddingTextHardNegativeKnownFields = map[string]struct{}{
+	"source":         {},
+	"query":          {},
+	"positive":       {},
+	"document":       {},
+	"negatives":      {},
+	"teacher_scores": {},
+}
+
+func (r *embeddingTextHardNegativeRecord) UnmarshalJSON(data []byte) error {
+	var known embeddingTextHardNegativeKnownRecord
+	if err := json.Unmarshal(data, &known); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for key := range embeddingTextHardNegativeKnownFields {
+		delete(fields, key)
+	}
+	r.Source = known.Source
+	r.Query = known.Query
+	r.Positive = known.Positive
+	r.Document = known.Document
+	r.Negatives = known.Negatives
+	r.TeacherScores = known.TeacherScores
+	r.ExtraFields = cloneRawMessageMap(fields)
+	return nil
+}
+
+func (r embeddingTextHardNegativeRecord) MarshalJSON() ([]byte, error) {
+	fields := cloneRawMessageMap(r.ExtraFields)
+	put := func(key string, value any, omit bool) error {
+		if omit {
+			delete(fields, key)
+			return nil
+		}
+		if fields == nil {
+			fields = map[string]json.RawMessage{}
+		}
+		data, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		fields[key] = data
+		return nil
+	}
+	if err := put("source", r.Source, r.Source == ""); err != nil {
+		return nil, err
+	}
+	if err := put("query", r.Query, false); err != nil {
+		return nil, err
+	}
+	if err := put("positive", r.Positive, false); err != nil {
+		return nil, err
+	}
+	if err := put("document", r.Document, r.Document == ""); err != nil {
+		return nil, err
+	}
+	if err := put("negatives", r.Negatives, len(r.Negatives) == 0); err != nil {
+		return nil, err
+	}
+	if err := put("teacher_scores", r.TeacherScores, len(r.TeacherScores) == 0); err != nil {
+		return nil, err
+	}
+	return json.Marshal(fields)
 }
 
 // ReadEmbeddingHardNegativeExamplesFile reads tokenized hard-negative JSONL.
@@ -546,6 +626,7 @@ func newEmbeddingTextHardNegativeRecord(example EmbeddingTextHardNegativeExample
 		Positive:      example.Positive,
 		Negatives:     append([]string(nil), example.Negatives...),
 		TeacherScores: append([]float32(nil), example.TeacherScores...),
+		ExtraFields:   cloneRawMessageMap(example.ExtraFields),
 	}, nil
 }
 
@@ -557,6 +638,7 @@ func (r embeddingTextHardNegativeRecord) example() (EmbeddingTextHardNegativeExa
 		Positive:      positive,
 		Negatives:     r.Negatives,
 		TeacherScores: r.TeacherScores,
+		ExtraFields:   r.ExtraFields,
 	})
 	if err != nil {
 		return EmbeddingTextHardNegativeExample{}, err
@@ -567,6 +649,7 @@ func (r embeddingTextHardNegativeRecord) example() (EmbeddingTextHardNegativeExa
 		Positive:      record.Positive,
 		Negatives:     record.Negatives,
 		TeacherScores: record.TeacherScores,
+		ExtraFields:   cloneRawMessageMap(record.ExtraFields),
 	}, nil
 }
 
@@ -592,6 +675,17 @@ func cloneInt32Matrix(in [][]int32) [][]int32 {
 	out := make([][]int32, len(in))
 	for i := range in {
 		out[i] = append([]int32(nil), in[i]...)
+	}
+	return out
+}
+
+func cloneRawMessageMap(in map[string]json.RawMessage) map[string]json.RawMessage {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]json.RawMessage, len(in))
+	for key, value := range in {
+		out[key] = append(json.RawMessage(nil), value...)
 	}
 	return out
 }
