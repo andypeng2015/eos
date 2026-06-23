@@ -2,6 +2,7 @@ package eosruntime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -22,14 +23,15 @@ type RetrievalHardNegativeMiningConfig struct {
 }
 
 type RetrievalHardNegativeMiningSummary struct {
-	DatasetName              string
-	Queries                  int
-	PositivePairs            int
-	Examples                 int
-	Negatives                int
-	SkippedQueriesNoText     int
-	SkippedPositiveDocs      int
-	SkippedQueriesNoNegative int
+	DatasetName                           string
+	Queries                               int
+	PositivePairs                         int
+	Examples                              int
+	Negatives                             int
+	SkippedQueriesNoText                  int
+	SkippedPositiveDocs                   int
+	SkippedQueriesNoNegative              int
+	DuplicatePositiveTextNegativesSkipped int
 }
 
 type retrievalPositiveDoc struct {
@@ -42,6 +44,11 @@ type retrievalScoredText struct {
 	ID    string
 	Score float32
 	Text  string
+}
+
+type retrievalMiningCandidateResult struct {
+	Candidates                            []retrievalScoredText
+	DuplicatePositiveTextNegativesSkipped int
 }
 
 // MineBM25TextHardNegatives mines text hard negatives from BEIR data using the same BM25 scorer as the lexical baseline.
@@ -99,8 +106,11 @@ func MineBM25TextHardNegatives(ctx context.Context, cfg RetrievalHardNegativeMin
 		for _, positive := range positives {
 			positiveIDs[positive.ID] = true
 		}
+		positiveTextFingerprints := retrievalPositiveTextFingerprints(qrels[query.ID], docText)
 		queryTokens := tokenizeBM25Text(query.Text)
-		negativeCandidates := bm25MiningNegativeCandidates(queryTokens, positiveIDs, index, docText, cfg)
+		candidateResult := bm25MiningNegativeCandidates(queryTokens, positiveIDs, positiveTextFingerprints, index, docText, cfg)
+		summary.DuplicatePositiveTextNegativesSkipped += candidateResult.DuplicatePositiveTextNegativesSkipped
+		negativeCandidates := candidateResult.Candidates
 		if len(negativeCandidates) == 0 {
 			summary.SkippedQueriesNoNegative++
 			continue
@@ -122,6 +132,7 @@ func MineBM25TextHardNegatives(ctx context.Context, cfg RetrievalHardNegativeMin
 				Positive:      positive.Text,
 				Negatives:     scoredTextValues(exampleNegatives),
 				TeacherScores: teacherScoresFromScoredTexts(positiveScore, exampleNegatives),
+				ExtraFields:   retrievalHardNegativeProvenanceFields(query.ID, positive.ID, scoredTextIDs(exampleNegatives)),
 			})
 			summary.PositivePairs++
 			summary.Negatives += len(exampleNegatives)
@@ -203,9 +214,12 @@ func MineModelTextHardNegatives(ctx context.Context, model *EmbeddingModel, cfg 
 		for _, positive := range positives {
 			positiveIDs[positive.ID] = true
 		}
+		positiveTextFingerprints := retrievalPositiveTextFingerprints(qrels[query.ID], docText)
 		candidateDepth := cfg.CandidateTopK + len(positiveIDs)
 		scores := topRetrievalScores(query.Vector, docVectors, candidateDepth)
-		negativeCandidates := modelMiningNegativeCandidates(scores, positiveIDs, docText, cfg)
+		candidateResult := modelMiningNegativeCandidates(scores, positiveIDs, positiveTextFingerprints, docText, cfg)
+		summary.DuplicatePositiveTextNegativesSkipped += candidateResult.DuplicatePositiveTextNegativesSkipped
+		negativeCandidates := candidateResult.Candidates
 		if len(negativeCandidates) == 0 {
 			summary.SkippedQueriesNoNegative++
 			continue
@@ -227,6 +241,7 @@ func MineModelTextHardNegatives(ctx context.Context, model *EmbeddingModel, cfg 
 				Positive:      positive.Text,
 				Negatives:     scoredTextValues(exampleNegatives),
 				TeacherScores: teacherScoresFromScoredTexts(positiveScore, exampleNegatives),
+				ExtraFields:   retrievalHardNegativeProvenanceFields(query.ID, positive.ID, scoredTextIDs(exampleNegatives)),
 			})
 			summary.PositivePairs++
 			summary.Negatives += len(exampleNegatives)
@@ -290,19 +305,22 @@ func bm25MiningPositiveDocs(rels map[string]float64, docText map[string]string) 
 	return positives, skipped
 }
 
-func bm25MiningNegativeCandidates(queryTokens []string, positiveIDs map[string]bool, index bm25Index, docText map[string]string, cfg RetrievalHardNegativeMiningConfig) []retrievalScoredText {
-	negatives := topBM25NonPositiveScoredTexts(queryTokens, positiveIDs, index, docText, cfg.CandidateTopK)
+func bm25MiningNegativeCandidates(queryTokens []string, positiveIDs map[string]bool, positiveTextFingerprints map[string]bool, index bm25Index, docText map[string]string, cfg RetrievalHardNegativeMiningConfig) retrievalMiningCandidateResult {
+	result := topBM25NonPositiveScoredTexts(queryTokens, positiveIDs, positiveTextFingerprints, index, docText, cfg.CandidateTopK)
+	negatives := result.Candidates
 	if len(negatives) > cfg.NegativesPerPositive {
 		negatives = negatives[:cfg.NegativesPerPositive]
 	}
-	return negatives
+	result.Candidates = negatives
+	return result
 }
 
-func modelMiningNegativeCandidates(scores []retrievalScoredDoc, positiveIDs map[string]bool, docText map[string]string, cfg RetrievalHardNegativeMiningConfig) []retrievalScoredText {
+func modelMiningNegativeCandidates(scores []retrievalScoredDoc, positiveIDs map[string]bool, positiveTextFingerprints map[string]bool, docText map[string]string, cfg RetrievalHardNegativeMiningConfig) retrievalMiningCandidateResult {
 	limit := cfg.NegativesPerPositive
 	if cfg.CandidateTopK > 0 && cfg.CandidateTopK < limit {
 		limit = cfg.CandidateTopK
 	}
+	result := retrievalMiningCandidateResult{}
 	negatives := make([]retrievalScoredText, 0, limit)
 	seen := map[string]bool{}
 	candidates := 0
@@ -311,39 +329,50 @@ func modelMiningNegativeCandidates(scores []retrievalScoredDoc, positiveIDs map[
 			continue
 		}
 		text := strings.TrimSpace(docText[score.ID])
-		if text == "" || seen[text] {
+		fingerprint := normalizeRetrievalHardNegativeTextFingerprint(text)
+		if text == "" || fingerprint == "" || seen[fingerprint] {
+			continue
+		}
+		if positiveTextFingerprints[fingerprint] {
+			result.DuplicatePositiveTextNegativesSkipped++
 			continue
 		}
 		candidates++
 		if cfg.CandidateTopK > 0 && candidates > cfg.CandidateTopK {
 			break
 		}
-		seen[text] = true
+		seen[fingerprint] = true
 		negatives = append(negatives, retrievalScoredText{ID: score.ID, Score: score.Score, Text: text})
 		if len(negatives) >= limit {
 			break
 		}
 	}
-	return negatives
+	result.Candidates = negatives
+	return result
 }
 
 func modelMiningNegativeTexts(scores []retrievalScoredDoc, positiveIDs map[string]bool, docText map[string]string, cfg RetrievalHardNegativeMiningConfig) []string {
-	return scoredTextValues(modelMiningNegativeCandidates(scores, positiveIDs, docText, cfg))
+	return scoredTextValues(modelMiningNegativeCandidates(scores, positiveIDs, nil, docText, cfg).Candidates)
 }
 
-func topBM25NonPositiveScoredTexts(queryTokens []string, positiveIDs map[string]bool, index bm25Index, docText map[string]string, topK int) []retrievalScoredText {
+func topBM25NonPositiveScoredTexts(queryTokens []string, positiveIDs map[string]bool, positiveTextFingerprints map[string]bool, index bm25Index, docText map[string]string, topK int) retrievalMiningCandidateResult {
 	scores := topBM25NonPositiveScores(queryTokens, positiveIDs, index, topK)
-	out := make([]retrievalScoredText, 0, len(scores))
+	result := retrievalMiningCandidateResult{Candidates: make([]retrievalScoredText, 0, len(scores))}
 	seen := map[string]bool{}
 	for _, score := range scores {
 		text := strings.TrimSpace(docText[score.ID])
-		if text == "" || seen[text] {
+		fingerprint := normalizeRetrievalHardNegativeTextFingerprint(text)
+		if text == "" || fingerprint == "" || seen[fingerprint] {
 			continue
 		}
-		seen[text] = true
-		out = append(out, retrievalScoredText{ID: score.ID, Score: score.Score, Text: text})
+		if positiveTextFingerprints[fingerprint] {
+			result.DuplicatePositiveTextNegativesSkipped++
+			continue
+		}
+		seen[fingerprint] = true
+		result.Candidates = append(result.Candidates, retrievalScoredText{ID: score.ID, Score: score.Score, Text: text})
 	}
-	return out
+	return result
 }
 
 func scoredTextValues(candidates []retrievalScoredText) []string {
@@ -352,6 +381,43 @@ func scoredTextValues(candidates []retrievalScoredText) []string {
 		out[i] = candidate.Text
 	}
 	return out
+}
+
+func scoredTextIDs(candidates []retrievalScoredText) []string {
+	out := make([]string, len(candidates))
+	for i, candidate := range candidates {
+		out[i] = candidate.ID
+	}
+	return out
+}
+
+func retrievalPositiveTextFingerprints(rels map[string]float64, docText map[string]string) map[string]bool {
+	out := map[string]bool{}
+	for docID := range rels {
+		fingerprint := normalizeRetrievalHardNegativeTextFingerprint(docText[docID])
+		if fingerprint != "" {
+			out[fingerprint] = true
+		}
+	}
+	return out
+}
+
+func normalizeRetrievalHardNegativeTextFingerprint(text string) string {
+	return strings.Join(strings.Fields(text), " ")
+}
+
+func retrievalHardNegativeProvenanceFields(queryID, positiveDocID string, negativeDocIDs []string) map[string]json.RawMessage {
+	fields := map[string]json.RawMessage{}
+	put := func(key string, value any) {
+		data, err := json.Marshal(value)
+		if err == nil {
+			fields[key] = data
+		}
+	}
+	put("query_id", queryID)
+	put("positive_doc_id", positiveDocID)
+	put("negative_doc_ids", append([]string(nil), negativeDocIDs...))
+	return fields
 }
 
 func teacherScoresFromScoredTexts(positiveScore float32, negatives []retrievalScoredText) []float32 {

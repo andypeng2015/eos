@@ -39,36 +39,37 @@ type CompactHardNegativeMiningConfig struct {
 }
 
 type CompactHardNegativeMiningManifest struct {
-	Schema                   string         `json:"schema"`
-	Dataset                  string         `json:"dataset"`
-	Split                    string         `json:"split"`
-	TrainSelection           bool           `json:"train_selection"`
-	TrainAllowed             bool           `json:"train_allowed"`
-	LeakGuardStatus          string         `json:"leak_guard_status"`
-	CorpusPath               string         `json:"corpus_path"`
-	QueriesPath              string         `json:"queries_path"`
-	QrelsSource              string         `json:"qrels_source"`
-	PerQueryJSONLPath        string         `json:"per_query_jsonl_path"`
-	OutputPath               string         `json:"output_path"`
-	Method                   string         `json:"method"`
-	BitWidth                 int            `json:"bit_width"`
-	Overfetch                int            `json:"overfetch,omitempty"`
-	RerankStorage            string         `json:"rerank_storage,omitempty"`
-	QuantizerSeed            int64          `json:"quantizer_seed"`
-	ArtifactSHA256           string         `json:"artifact_sha256,omitempty"`
-	PerQuerySHA256           string         `json:"per_query_sha256"`
-	HardNegativesSHA256      string         `json:"hard_negatives_sha256"`
-	RowsRead                 int            `json:"rows_read"`
-	RowsMatched              int            `json:"rows_matched"`
-	RowsEmitted              int            `json:"rows_emitted"`
-	Queries                  int            `json:"queries"`
-	PositivePairs            int            `json:"positive_pairs"`
-	Negatives                int            `json:"negatives"`
-	SkippedNoQueryText       int            `json:"skipped_no_query_text"`
-	SkippedNoPositive        int            `json:"skipped_no_positive"`
-	SkippedNoNegative        int            `json:"skipped_no_negative"`
-	QrelsRelevanceMismatches int            `json:"qrels_relevance_mismatches,omitempty"`
-	ReasonCounts             map[string]int `json:"reason_counts"`
+	Schema                                string         `json:"schema"`
+	Dataset                               string         `json:"dataset"`
+	Split                                 string         `json:"split"`
+	TrainSelection                        bool           `json:"train_selection"`
+	TrainAllowed                          bool           `json:"train_allowed"`
+	LeakGuardStatus                       string         `json:"leak_guard_status"`
+	CorpusPath                            string         `json:"corpus_path"`
+	QueriesPath                           string         `json:"queries_path"`
+	QrelsSource                           string         `json:"qrels_source"`
+	PerQueryJSONLPath                     string         `json:"per_query_jsonl_path"`
+	OutputPath                            string         `json:"output_path"`
+	Method                                string         `json:"method"`
+	BitWidth                              int            `json:"bit_width"`
+	Overfetch                             int            `json:"overfetch,omitempty"`
+	RerankStorage                         string         `json:"rerank_storage,omitempty"`
+	QuantizerSeed                         int64          `json:"quantizer_seed"`
+	ArtifactSHA256                        string         `json:"artifact_sha256,omitempty"`
+	PerQuerySHA256                        string         `json:"per_query_sha256"`
+	HardNegativesSHA256                   string         `json:"hard_negatives_sha256"`
+	RowsRead                              int            `json:"rows_read"`
+	RowsMatched                           int            `json:"rows_matched"`
+	RowsEmitted                           int            `json:"rows_emitted"`
+	Queries                               int            `json:"queries"`
+	PositivePairs                         int            `json:"positive_pairs"`
+	Negatives                             int            `json:"negatives"`
+	SkippedNoQueryText                    int            `json:"skipped_no_query_text"`
+	SkippedNoPositive                     int            `json:"skipped_no_positive"`
+	SkippedNoNegative                     int            `json:"skipped_no_negative"`
+	DuplicatePositiveTextNegativesSkipped int            `json:"duplicate_positive_text_negatives_skipped,omitempty"`
+	QrelsRelevanceMismatches              int            `json:"qrels_relevance_mismatches,omitempty"`
+	ReasonCounts                          map[string]int `json:"reason_counts"`
 }
 
 // MineCompactTextHardNegatives consumes compact per-query diagnostics and emits
@@ -153,20 +154,25 @@ func MineCompactTextHardNegatives(ctx context.Context, cfg CompactHardNegativeMi
 			manifest.SkippedNoPositive++
 			continue
 		}
-		negativeIDs, reason := compactMiningNegativeIDs(row, qrels[row.QueryID], cfg.NegativesPerRow)
+		positiveTextFingerprints := retrievalPositiveTextFingerprints(qrels[row.QueryID], docText)
+		negativeIDs, reason, duplicatePositiveTextSkipped := compactMiningNegativeIDs(row, qrels[row.QueryID], positiveTextFingerprints, docText, cfg.NegativesPerRow)
+		manifest.DuplicatePositiveTextNegativesSkipped += duplicatePositiveTextSkipped
 		if len(negativeIDs) == 0 {
 			manifest.SkippedNoNegative++
 			continue
 		}
 		negatives := make([]string, 0, len(negativeIDs))
+		emittedNegativeIDs := make([]string, 0, len(negativeIDs))
 		seenText := map[string]bool{}
 		for _, id := range negativeIDs {
 			text := strings.TrimSpace(docText[id])
-			if text == "" || seenText[text] {
+			fingerprint := normalizeRetrievalHardNegativeTextFingerprint(text)
+			if text == "" || fingerprint == "" || seenText[fingerprint] {
 				continue
 			}
-			seenText[text] = true
+			seenText[fingerprint] = true
 			negatives = append(negatives, text)
+			emittedNegativeIDs = append(emittedNegativeIDs, id)
 		}
 		if len(negatives) == 0 {
 			manifest.SkippedNoNegative++
@@ -177,10 +183,11 @@ func MineCompactTextHardNegatives(ctx context.Context, cfg CompactHardNegativeMi
 				break
 			}
 			out = append(out, EmbeddingTextHardNegativeExample{
-				Source:    fmt.Sprintf("%s:%s:%s:%s:%s", cfg.DatasetName, cfg.Split, row.QueryID, positive.ID, reason),
-				Query:     query,
-				Positive:  positive.Text,
-				Negatives: append([]string(nil), negatives...),
+				Source:      fmt.Sprintf("%s:%s:%s:%s:%s", cfg.DatasetName, cfg.Split, row.QueryID, positive.ID, reason),
+				Query:       query,
+				Positive:    positive.Text,
+				Negatives:   append([]string(nil), negatives...),
+				ExtraFields: retrievalHardNegativeProvenanceFields(row.QueryID, positive.ID, emittedNegativeIDs),
 			})
 			manifest.ReasonCounts[reason]++
 			manifest.PositivePairs++
@@ -310,17 +317,29 @@ func compactMiningRowMatches(row TurboQuantRetrievalPerQueryRow, cfg CompactHard
 	return true, nil
 }
 
-func compactMiningNegativeIDs(row TurboQuantRetrievalPerQueryRow, positiveRels map[string]float64, limit int) ([]string, string) {
+func compactMiningNegativeIDs(row TurboQuantRetrievalPerQueryRow, positiveRels map[string]float64, positiveTextFingerprints map[string]bool, docText map[string]string, limit int) ([]string, string, int) {
 	type candidate struct {
 		id     string
 		rank   int
 		reason string
 	}
 	candidates := []candidate{}
+	duplicatePositiveTextSkipped := 0
+	seenText := map[string]bool{}
 	for _, doc := range row.TopK {
 		if doc.Relevance > 0 || positiveRels[doc.DocID] > 0 {
 			continue
 		}
+		text := strings.TrimSpace(docText[doc.DocID])
+		fingerprint := normalizeRetrievalHardNegativeTextFingerprint(text)
+		if text == "" || fingerprint == "" || seenText[fingerprint] {
+			continue
+		}
+		if positiveTextFingerprints[fingerprint] {
+			duplicatePositiveTextSkipped++
+			continue
+		}
+		seenText[fingerprint] = true
 		reason := "compact_candidate"
 		if doc.Rank <= 10 {
 			reason = "top10_competitor"
@@ -346,7 +365,7 @@ func compactMiningNegativeIDs(row TurboQuantRetrievalPerQueryRow, positiveRels m
 		}
 		out = append(out, candidates[i].id)
 	}
-	return out, reason
+	return out, reason, duplicatePositiveTextSkipped
 }
 
 func compactMiningQrelsRelevanceMismatches(row TurboQuantRetrievalPerQueryRow, positiveRels map[string]float64) int {

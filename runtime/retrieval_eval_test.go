@@ -1277,6 +1277,70 @@ func TestMineCompactTextHardNegativesFiltersQrelsPositiveNegatives(t *testing.T)
 	}
 }
 
+func TestMineCompactTextHardNegativesFiltersDuplicatePositiveTextNegatives(t *testing.T) {
+	dir, corpusPath, queriesPath, qrelsPath := writeCompactMiningDataset(t,
+		[]string{
+			`{"_id":"d1","text":"alpha duplicate positive text"}`,
+			`{"_id":"d2","text":"alpha   duplicate\npositive text"}`,
+			`{"_id":"d3","title":"negative","text":"alpha true negative"}`,
+		},
+		"query-id\tcorpus-id\tscore\nq1\td1\t1\n",
+	)
+	perQueryPath := writeCompactMiningRows(t, dir, TurboQuantRetrievalPerQueryRow{
+		Schema:          TurboQuantRetrievalPerQuerySchema,
+		Dataset:         "tiny",
+		QueryID:         "q1",
+		Method:          "turboquant_ip_b4_overfetch200_fp16_rerank",
+		Bits:            4,
+		RerankOverfetch: 200,
+		RerankStorage:   TurboQuantRerankStorageFP16,
+		QuantizerSeed:   DefaultTurboQuantMultiVectorQuantizerSeed,
+		TopK: []RetrievalEvalPerQueryTopDoc{
+			{Rank: 1, DocID: "d2", Score: 0.95, Relevance: 0},
+			{Rank: 2, DocID: "d3", Score: 0.90, Relevance: 0},
+		},
+	})
+	outputPath := filepath.Join(dir, "hard-negatives.jsonl")
+	manifest, err := MineCompactTextHardNegatives(context.Background(), CompactHardNegativeMiningConfig{
+		DatasetName:       "tiny",
+		Split:             "train",
+		CorpusPath:        corpusPath,
+		QueriesPath:       queriesPath,
+		QrelsPath:         qrelsPath,
+		PerQueryJSONLPath: perQueryPath,
+		OutputPath:        outputPath,
+		BitWidth:          4,
+		Overfetch:         200,
+		RerankStorage:     TurboQuantRerankStorageFP16,
+		NegativesPerRow:   2,
+	})
+	if err != nil {
+		t.Fatalf("mine compact hard negatives: %v", err)
+	}
+	if manifest.DuplicatePositiveTextNegativesSkipped != 1 || manifest.Negatives != 1 {
+		t.Fatalf("manifest duplicate skip/negative counts = %+v", manifest)
+	}
+	examples, err := ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
+	if err != nil {
+		t.Fatalf("read mined hard negatives: %v", err)
+	}
+	if len(examples) != 1 || len(examples[0].Negatives) != 1 || !strings.Contains(examples[0].Negatives[0], "true negative") {
+		t.Fatalf("duplicate positive text leaked or expected negative missing: %+v", examples)
+	}
+	var queryID string
+	if err := json.Unmarshal(examples[0].ExtraFields["query_id"], &queryID); err != nil || queryID != "q1" {
+		t.Fatalf("query_id provenance = %q err=%v fields=%+v", queryID, err, examples[0].ExtraFields)
+	}
+	var positiveDocID string
+	if err := json.Unmarshal(examples[0].ExtraFields["positive_doc_id"], &positiveDocID); err != nil || positiveDocID != "d1" {
+		t.Fatalf("positive_doc_id provenance = %q err=%v fields=%+v", positiveDocID, err, examples[0].ExtraFields)
+	}
+	var negativeDocIDs []string
+	if err := json.Unmarshal(examples[0].ExtraFields["negative_doc_ids"], &negativeDocIDs); err != nil || len(negativeDocIDs) != 1 || negativeDocIDs[0] != "d3" {
+		t.Fatalf("negative_doc_ids provenance = %+v err=%v fields=%+v", negativeDocIDs, err, examples[0].ExtraFields)
+	}
+}
+
 func TestMineCompactTextHardNegativesQuantizerSeedDefaultAndMismatch(t *testing.T) {
 	dir, corpusPath, queriesPath, qrelsPath := writeCompactMiningDataset(t,
 		[]string{
@@ -2295,6 +2359,51 @@ func TestMineBM25TextHardNegativesUsesTopLexicalNonPositive(t *testing.T) {
 	}
 }
 
+func TestMineBM25TextHardNegativesSkipsDuplicatePositiveText(t *testing.T) {
+	dir := t.TempDir()
+	qrelsDir := filepath.Join(dir, "qrels")
+	if err := os.Mkdir(qrelsDir, 0o755); err != nil {
+		t.Fatalf("mkdir qrels: %v", err)
+	}
+	corpusPath := filepath.Join(dir, "corpus.jsonl")
+	queriesPath := filepath.Join(dir, "queries.jsonl")
+	qrelsPath := filepath.Join(qrelsDir, "train.tsv")
+	if err := os.WriteFile(corpusPath, []byte(
+		`{"_id":"d1","text":"alpha duplicate positive"}`+"\n"+
+			`{"_id":"d2","text":"alpha\tduplicate   positive"}`+"\n"+
+			`{"_id":"d3","text":"alpha true negative"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(queriesPath, []byte(`{"_id":"q1","text":"alpha"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(qrelsPath, []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+
+	examples, summary, err := MineBM25TextHardNegatives(context.Background(), RetrievalHardNegativeMiningConfig{
+		DatasetName:          "tiny",
+		CorpusPath:           corpusPath,
+		QueriesPath:          queriesPath,
+		QrelsPath:            qrelsPath,
+		NegativesPerPositive: 1,
+		CandidateTopK:        3,
+	})
+	if err != nil {
+		t.Fatalf("mine hard negatives: %v", err)
+	}
+	if summary.DuplicatePositiveTextNegativesSkipped != 1 || summary.Negatives != 1 {
+		t.Fatalf("summary duplicate skip/negative counts = %+v", summary)
+	}
+	if len(examples) != 1 || len(examples[0].Negatives) != 1 || examples[0].Negatives[0] != "alpha true negative" {
+		t.Fatalf("examples = %+v", examples)
+	}
+	var negativeDocIDs []string
+	if err := json.Unmarshal(examples[0].ExtraFields["negative_doc_ids"], &negativeDocIDs); err != nil || len(negativeDocIDs) != 1 || negativeDocIDs[0] != "d3" {
+		t.Fatalf("negative_doc_ids provenance = %+v err=%v fields=%+v", negativeDocIDs, err, examples[0].ExtraFields)
+	}
+}
+
 func TestModelMiningNegativeTextsUsesTopModelNonPositive(t *testing.T) {
 	scores := []retrievalScoredDoc{
 		{ID: "positive", Score: 0.99},
@@ -2319,5 +2428,30 @@ func TestModelMiningNegativeTextsUsesTopModelNonPositive(t *testing.T) {
 
 	if len(negatives) != 2 || negatives[0] != "hard negative" || negatives[1] != "easy negative" {
 		t.Fatalf("negatives = %+v", negatives)
+	}
+}
+
+func TestModelMiningNegativeCandidatesSkipsDuplicatePositiveText(t *testing.T) {
+	scores := []retrievalScoredDoc{
+		{ID: "duplicate-positive-text", Score: 0.99},
+		{ID: "hard", Score: 0.98},
+		{ID: "easy", Score: 0.10},
+	}
+	positives := map[string]bool{"positive": true}
+	docText := map[string]string{
+		"positive":                "target positive text",
+		"duplicate-positive-text": "target   positive\ntext",
+		"hard":                    "hard negative",
+		"easy":                    "easy negative",
+	}
+	result := modelMiningNegativeCandidates(scores, positives, retrievalPositiveTextFingerprints(map[string]float64{"positive": 1}, docText), docText, RetrievalHardNegativeMiningConfig{
+		NegativesPerPositive: 2,
+		CandidateTopK:        3,
+	})
+	if result.DuplicatePositiveTextNegativesSkipped != 1 {
+		t.Fatalf("duplicate skip count = %d, want 1", result.DuplicatePositiveTextNegativesSkipped)
+	}
+	if got := scoredTextValues(result.Candidates); len(got) != 2 || got[0] != "hard negative" || got[1] != "easy negative" {
+		t.Fatalf("negatives = %+v", got)
 	}
 }

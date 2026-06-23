@@ -2610,8 +2610,8 @@ func runMineRetrievalHardNegatives(args []string) error {
 	}
 	fmt.Printf("mined retrieval hard negatives: dataset=%s examples=%d positives=%d negatives=%d queries=%d\n",
 		summary.DatasetName, summary.Examples, summary.PositivePairs, summary.Negatives, summary.Queries)
-	fmt.Printf("skipped: queries_without_text=%d positives_without_text=%d queries_without_negatives=%d\n",
-		summary.SkippedQueriesNoText, summary.SkippedPositiveDocs, summary.SkippedQueriesNoNegative)
+	fmt.Printf("skipped: queries_without_text=%d positives_without_text=%d queries_without_negatives=%d duplicate_positive_text_negatives=%d\n",
+		summary.SkippedQueriesNoText, summary.SkippedPositiveDocs, summary.SkippedQueriesNoNegative, summary.DuplicatePositiveTextNegativesSkipped)
 	fmt.Printf("output: %s\n", outputPath)
 	return nil
 }
@@ -2681,8 +2681,8 @@ func runMineRetrievalModelHardNegatives(args []string) error {
 	}
 	fmt.Printf("mined model retrieval hard negatives: dataset=%s backend=%s examples=%d positives=%d negatives=%d queries=%d\n",
 		summary.DatasetName, model.Backend(), summary.Examples, summary.PositivePairs, summary.Negatives, summary.Queries)
-	fmt.Printf("skipped: queries_without_text=%d positives_without_text=%d queries_without_negatives=%d\n",
-		summary.SkippedQueriesNoText, summary.SkippedPositiveDocs, summary.SkippedQueriesNoNegative)
+	fmt.Printf("skipped: queries_without_text=%d positives_without_text=%d queries_without_negatives=%d duplicate_positive_text_negatives=%d\n",
+		summary.SkippedQueriesNoText, summary.SkippedPositiveDocs, summary.SkippedQueriesNoNegative, summary.DuplicatePositiveTextNegativesSkipped)
 	fmt.Printf("output: %s\n", outputPath)
 	return nil
 }
