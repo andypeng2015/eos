@@ -4988,12 +4988,6 @@ func runTrainEmbed(args []string) error {
 	if clearTurboQuantPrefix && turboQuantPrefixWeight != 0 {
 		return fmt.Errorf("--clear-turboquant-prefix is mutually exclusive with --turboquant-prefix-weight")
 	}
-	if clearTurboQuantPrefix && turboQuantPrefixSeed != 0 {
-		return fmt.Errorf("--clear-turboquant-prefix is mutually exclusive with --turboquant-prefix-seed")
-	}
-	if clearTurboQuantPrefix && strings.TrimSpace(turboQuantPrefixScoreMode) != "" {
-		return fmt.Errorf("--clear-turboquant-prefix is mutually exclusive with --turboquant-prefix-score-mode")
-	}
 	if len(parsedTurboQuantPrefixObjectives) > 0 && turboQuantPrefixWeight != 0 {
 		return fmt.Errorf("--turboquant-prefix-weight must not be set with --turboquant-prefix-objectives")
 	}
@@ -5004,6 +4998,12 @@ func runTrainEmbed(args []string) error {
 	parsedTurboQuantRankMarginObjectives, parseErr := eosruntime.ParseTurboQuantPrefixObjectives(turboQuantRankMarginObjectives)
 	if parseErr != nil {
 		return fmt.Errorf("turboquant-rank-margin-objectives: %w", parseErr)
+	}
+	if clearTurboQuantPrefix && turboQuantPrefixSeed != 0 && len(parsedTurboQuantCompactObjectives) == 0 && len(parsedTurboQuantRankMarginObjectives) == 0 {
+		return fmt.Errorf("--clear-turboquant-prefix is mutually exclusive with --turboquant-prefix-seed")
+	}
+	if clearTurboQuantPrefix && strings.TrimSpace(turboQuantPrefixScoreMode) != "" && len(parsedTurboQuantRankMarginObjectives) == 0 {
+		return fmt.Errorf("--clear-turboquant-prefix is mutually exclusive with --turboquant-prefix-score-mode")
 	}
 	if clearTurboQuantRankMargin && len(parsedTurboQuantRankMarginObjectives) > 0 {
 		return fmt.Errorf("--clear-turboquant-rank-margin is mutually exclusive with --turboquant-rank-margin-objectives")

@@ -4324,6 +4324,76 @@ func TestRunTrainEmbedClearTurboQuantPrefixAllowsRankMarginOnly(t *testing.T) {
 	}
 }
 
+func TestRunTrainEmbedClearTurboQuantPrefixAllowsCompactObjectiveSeed(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	dir := t.TempDir()
+	contrastivePath := filepath.Join(dir, "contrastive.jsonl")
+	hardTrainPath := filepath.Join(dir, "hard-train.jsonl")
+	metricsPath := filepath.Join(dir, "train.metrics.json")
+	contrastiveExamples := []eosruntime.EmbeddingContrastiveExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
+	}
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(contrastivePath, contrastiveExamples); err != nil {
+		t.Fatalf("write contrastive dataset: %v", err)
+	}
+	if err := run([]string{"train-embed", "--epochs", "1", "--batch-size", "2", "--contrastive-loss", "infonce", "--matryoshka-dims", "2", "--turboquant-prefix-objectives", "2:2=0.25", "--turboquant-prefix-score-mode", "prepared-ip", path, contrastivePath}); err != nil {
+		t.Fatalf("run initial train-embed turboquant prefix objectives: %v", err)
+	}
+	hardExamples := []eosruntime.EmbeddingHardNegativeExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}, NegativeTokens: [][]int32{{2, 3}}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}, NegativeMasks: [][]int32{{1, 1}}, TeacherScores: []float32{1, 0}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}, NegativeTokens: [][]int32{{1, 2}}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}, NegativeMasks: [][]int32{{1, 1}}, TeacherScores: []float32{1, 0}},
+	}
+	if err := eosruntime.WriteEmbeddingHardNegativeExamplesFile(hardTrainPath, hardExamples); err != nil {
+		t.Fatalf("write hard-negative dataset: %v", err)
+	}
+	if err := run([]string{"train-embed", "--hard-negative-train", "--epochs", "1", "--batch-size", "2", "--contrastive-loss", "grouped_infonce", "--clear-turboquant-prefix", "--turboquant-compact-objectives", "2:2=0.25", "--turboquant-prefix-seed", "777", "--metrics-json", metricsPath, path, hardTrainPath}); err != nil {
+		t.Fatalf("run train-embed clear prefix with compact objective seed: %v", err)
+	}
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	var metrics trainMetricsJSON
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		t.Fatalf("unmarshal metrics: %v", err)
+	}
+	if len(metrics.Config.TurboQuantPrefixBits) != 0 || len(metrics.Config.TurboQuantPrefixObjectives) != 0 {
+		t.Fatalf("metrics compact prefix config = bits:%v objectives:%+v, want cleared", metrics.Config.TurboQuantPrefixBits, metrics.Config.TurboQuantPrefixObjectives)
+	}
+	if metrics.Config.TurboQuantPrefixWeight != 0 {
+		t.Fatalf("metrics prefix weight = %f, want 0 for compact-only", metrics.Config.TurboQuantPrefixWeight)
+	}
+	if got := metrics.Config.TurboQuantCompactObjectives; len(got) != 1 || got[0].Dim != 2 || got[0].BitWidth != 2 || got[0].Weight != 0.25 {
+		t.Fatalf("metrics compact objectives = %+v, want 2:2=0.25", got)
+	}
+	if metrics.Config.TurboQuantPrefixSeed != 777 {
+		t.Fatalf("metrics prefix seed = %d, want 777", metrics.Config.TurboQuantPrefixSeed)
+	}
+	if metrics.Config.TurboQuantPrefixScoreMode != "" {
+		t.Fatalf("metrics score mode = %q, want empty for compact-only", metrics.Config.TurboQuantPrefixScoreMode)
+	}
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(eosruntime.DefaultEmbeddingCheckpointPath(path))
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if len(checkpoint.Config.TurboQuantPrefixBits) != 0 || len(checkpoint.Config.TurboQuantPrefixObjectives) != 0 {
+		t.Fatalf("checkpoint compact prefix config = bits:%v objectives:%+v, want cleared", checkpoint.Config.TurboQuantPrefixBits, checkpoint.Config.TurboQuantPrefixObjectives)
+	}
+	if got := checkpoint.Config.TurboQuantCompactObjectives; len(got) != 1 || got[0].Dim != 2 || got[0].BitWidth != 2 || got[0].Weight != 0.25 {
+		t.Fatalf("checkpoint compact objectives = %+v, want 2:2=0.25", got)
+	}
+	if checkpoint.Config.TurboQuantPrefixSeed != 777 {
+		t.Fatalf("checkpoint prefix seed = %d, want 777", checkpoint.Config.TurboQuantPrefixSeed)
+	}
+	if checkpoint.Config.TurboQuantPrefixScoreMode != "" {
+		t.Fatalf("checkpoint score mode = %q, want empty for compact-only", checkpoint.Config.TurboQuantPrefixScoreMode)
+	}
+}
+
 func TestRunTrainEmbedRejectsClearTurboQuantPrefixWithNewPrefixConfig(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
@@ -4344,6 +4414,26 @@ func TestRunTrainEmbedRejectsClearTurboQuantPrefixWithNewPrefixConfig(t *testing
 	err = run([]string{"train-embed", "--epochs", "1", "--batch-size", "2", "--matryoshka-dims", "2", "--clear-turboquant-prefix", "--turboquant-prefix-objectives", "2:2=0.25", path, trainPath})
 	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Fatalf("clear with prefix objectives error = %v, want mutually exclusive", err)
+	}
+	err = run([]string{"train-embed", "--epochs", "1", "--batch-size", "2", "--matryoshka-dims", "2", "--clear-turboquant-prefix", "--turboquant-prefix-seed", "777", path, trainPath})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("clear with prefix seed error = %v, want mutually exclusive", err)
+	}
+	err = run([]string{"train-embed", "--epochs", "1", "--batch-size", "2", "--matryoshka-dims", "2", "--clear-turboquant-prefix", "--turboquant-prefix-score-mode", "prepared-ip", path, trainPath})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("clear with prefix score mode error = %v, want mutually exclusive", err)
+	}
+	hardTrainPath := filepath.Join(t.TempDir(), "hard-train.jsonl")
+	hardExamples := []eosruntime.EmbeddingHardNegativeExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}, NegativeTokens: [][]int32{{2, 3}}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}, NegativeMasks: [][]int32{{1, 1}}, TeacherScores: []float32{1, 0}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}, NegativeTokens: [][]int32{{1, 2}}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}, NegativeMasks: [][]int32{{1, 1}}, TeacherScores: []float32{1, 0}},
+	}
+	if err := eosruntime.WriteEmbeddingHardNegativeExamplesFile(hardTrainPath, hardExamples); err != nil {
+		t.Fatalf("write hard-negative dataset: %v", err)
+	}
+	err = run([]string{"train-embed", "--hard-negative-train", "--epochs", "1", "--batch-size", "2", "--matryoshka-dims", "2", "--clear-turboquant-prefix", "--turboquant-compact-objectives", "2:2=0.25", "--turboquant-prefix-score-mode", "prepared-ip", path, hardTrainPath})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("clear with compact-only score mode error = %v, want mutually exclusive", err)
 	}
 }
 
