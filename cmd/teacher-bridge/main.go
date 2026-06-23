@@ -1,12 +1,13 @@
 // Command teacher-bridge scores eos teacher-score-request rows with a local
-// embedding model served by ollama, for offline distillation-signal generation.
+// teacher scorer, for offline distillation-signal generation.
 // It is OFFLINE TOOLING ONLY: the shipped eos model never depends on ollama or
 // any external service — the teacher is used purely to label training data.
 //
 // Pipeline:
 //
 //	eos export-teacher-score-requests <hard-negatives.jsonl> <requests.jsonl>
-//	teacher-bridge <model> <requests.jsonl> <scored.jsonl>      # <- this tool
+//	teacher-bridge <model> <requests.jsonl> <scored.jsonl>      # legacy embedding mode
+//	teacher-bridge --mode http-rerank --endpoint http://127.0.0.1:8080/score --model <model> <requests.jsonl> <scored.jsonl>
 //	eos import-teacher-scores <hard-negatives.jsonl> <scored.jsonl> <out.jsonl>
 //	eos audit-teacher-scores <out.jsonl>
 //
@@ -17,17 +18,24 @@
 // The ollama endpoint defaults to http://localhost:11434/api/embed and can be
 // overridden with OLLAMA_EMBED_URL.
 //
-// usage: teacher-bridge <model> <requests.jsonl> <scored.jsonl>
+// usage:
+//
+//	teacher-bridge <model> <requests.jsonl> <scored.jsonl>
+//	teacher-bridge --mode http-rerank --endpoint <url> --model <model> [flags] <requests.jsonl> <scored.jsonl>
 package main
 
 import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -39,16 +47,64 @@ func ollamaURL() string {
 }
 
 func main() {
-	if len(os.Args) != 4 {
-		fmt.Fprintln(os.Stderr, "usage: teacher-bridge <model> <requests.jsonl> <scored.jsonl>")
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
-	model, inPath, outPath := os.Args[1], os.Args[2], os.Args[3]
+}
 
+func run(args []string) error {
+	if len(args) == 3 && !strings.HasPrefix(args[0], "-") {
+		return runLegacyEmbedding(args[0], args[1], args[2])
+	}
+	fs := flag.NewFlagSet("teacher-bridge", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	mode := fs.String("mode", "", "scoring mode: http-rerank")
+	endpoint := fs.String("endpoint", "", "HTTP reranker scoring endpoint")
+	model := fs.String("model", "", "teacher model identifier to pass to the scorer")
+	batchSize := fs.Int("batch-size", 16, "HTTP pair batch size")
+	scoreScale := fs.String("score-scale", "logit", "score scale provenance, such as logit, probability, or raw")
+	manifestPath := fs.String("manifest", "", "bridge provenance manifest path; default is <output>.teacher-bridge.manifest.json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *mode == "" {
+		return fmt.Errorf("usage: teacher-bridge <model> <requests.jsonl> <scored.jsonl>\n   or: teacher-bridge --mode http-rerank --endpoint <url> --model <model> [flags] <requests.jsonl> <scored.jsonl>")
+	}
+	if *mode != "http-rerank" {
+		return fmt.Errorf("unsupported mode %q", *mode)
+	}
+	if fs.NArg() != 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
+		return fmt.Errorf("usage: teacher-bridge --mode http-rerank --endpoint <url> --model <model> [flags] <requests.jsonl> <scored.jsonl>")
+	}
+	if strings.TrimSpace(*endpoint) == "" {
+		return fmt.Errorf("--endpoint is required for http-rerank mode")
+	}
+	if strings.TrimSpace(*model) == "" {
+		return fmt.Errorf("--model is required for http-rerank mode")
+	}
+	if *batchSize <= 0 {
+		return fmt.Errorf("--batch-size must be positive")
+	}
+	inPath, outPath := fs.Arg(0), fs.Arg(1)
+	if *manifestPath == "" {
+		*manifestPath = outPath + ".teacher-bridge.manifest.json"
+	}
+	return runHTTPRerank(httpRerankConfig{
+		Endpoint:     *endpoint,
+		Model:        *model,
+		BatchSize:    *batchSize,
+		ScoreScale:   *scoreScale,
+		InputPath:    inPath,
+		OutputPath:   outPath,
+		ManifestPath: *manifestPath,
+	})
+}
+
+func runLegacyEmbedding(model, inPath, outPath string) error {
 	rows, err := readRows(inPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "read: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("read: %w", err)
 	}
 
 	uniq := map[string]struct{}{}
@@ -71,8 +127,7 @@ func main() {
 		}
 		embs, err := embed(model, texts[i:end])
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "embed batch %d: %v\n", i, err)
-			os.Exit(1)
+			return fmt.Errorf("embed batch %d: %w", i, err)
 		}
 		for j, e := range embs {
 			cache[texts[i+j]] = e
@@ -84,8 +139,7 @@ func main() {
 
 	out, err := os.Create(outPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "create: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("create: %w", err)
 	}
 	defer out.Close()
 	w := bufio.NewWriter(out)
@@ -112,6 +166,7 @@ func main() {
 		written++
 	}
 	fmt.Fprintf(os.Stderr, "wrote %d deduped scored rows to %s\n", written, outPath)
+	return nil
 }
 
 type row struct{ m map[string]any }
@@ -144,6 +199,255 @@ func readRows(path string) ([]row, error) {
 		rows = append(rows, row{m: m})
 	}
 	return rows, sc.Err()
+}
+
+type httpRerankConfig struct {
+	Endpoint     string
+	Model        string
+	BatchSize    int
+	ScoreScale   string
+	InputPath    string
+	OutputPath   string
+	ManifestPath string
+}
+
+type httpPair struct {
+	ID             string `json:"id"`
+	Source         string `json:"source,omitempty"`
+	Query          string `json:"query"`
+	Candidate      string `json:"candidate"`
+	Role           string `json:"role,omitempty"`
+	ExampleIndex   int    `json:"example_index,omitempty"`
+	CandidateIndex int    `json:"candidate_index,omitempty"`
+}
+
+type httpScoreRequest struct {
+	Model string     `json:"model"`
+	Pairs []httpPair `json:"pairs"`
+}
+
+type httpScoreResponse struct {
+	Scores []httpScore `json:"scores"`
+}
+
+type httpScore struct {
+	ID    string          `json:"id"`
+	Score json.RawMessage `json:"score"`
+}
+
+type bridgeManifest struct {
+	Schema            string `json:"schema"`
+	CreatedUTC        string `json:"created_utc"`
+	Mode              string `json:"mode"`
+	Endpoint          string `json:"endpoint"`
+	Model             string `json:"model"`
+	ScoreScale        string `json:"score_scale,omitempty"`
+	InputJSONL        string `json:"input_jsonl"`
+	OutputJSONL       string `json:"output_jsonl"`
+	RowsRead          int    `json:"rows_read"`
+	RowsWritten       int    `json:"rows_written"`
+	DuplicatesSkipped int    `json:"duplicates_skipped"`
+}
+
+func runHTTPRerank(cfg httpRerankConfig) error {
+	rows, err := readRows(cfg.InputPath)
+	if err != nil {
+		return fmt.Errorf("read: %w", err)
+	}
+	pairs, scoreRows, skipped := uniqueHTTPPairs(rows)
+	if len(pairs) == 0 {
+		return fmt.Errorf("no scoreable rows in %s", cfg.InputPath)
+	}
+
+	out, err := os.Create(cfg.OutputPath)
+	if err != nil {
+		return fmt.Errorf("create output: %w", err)
+	}
+	w := bufio.NewWriter(out)
+	written := 0
+	closeOutput := func() error {
+		if err := w.Flush(); err != nil {
+			_ = out.Close()
+			return err
+		}
+		return out.Close()
+	}
+
+	for start := 0; start < len(pairs); start += cfg.BatchSize {
+		end := start + cfg.BatchSize
+		if end > len(pairs) {
+			end = len(pairs)
+		}
+		scores, err := scoreHTTPBatch(cfg.Endpoint, cfg.Model, pairs[start:end])
+		if err != nil {
+			_ = out.Close()
+			return fmt.Errorf("score batch %d: %w", start, err)
+		}
+		for _, pair := range pairs[start:end] {
+			score, ok := scores[pair.ID]
+			if !ok {
+				_ = out.Close()
+				return fmt.Errorf("score batch %d: missing score for id %q", start, pair.ID)
+			}
+			record := scoreRows[pair.ID]
+			record.m["score"] = score
+			b, err := json.Marshal(record.m)
+			if err != nil {
+				_ = out.Close()
+				return fmt.Errorf("encode score row: %w", err)
+			}
+			if _, err := w.Write(b); err != nil {
+				_ = out.Close()
+				return err
+			}
+			if err := w.WriteByte('\n'); err != nil {
+				_ = out.Close()
+				return err
+			}
+			written++
+		}
+		fmt.Fprintf(os.Stderr, "scored %d/%d\n", end, len(pairs))
+	}
+	if err := closeOutput(); err != nil {
+		return fmt.Errorf("close output: %w", err)
+	}
+
+	manifest := bridgeManifest{
+		Schema:            "manta.teacher_bridge_http_rerank.v1",
+		CreatedUTC:        time.Now().UTC().Format(time.RFC3339),
+		Mode:              "http-rerank",
+		Endpoint:          cfg.Endpoint,
+		Model:             cfg.Model,
+		ScoreScale:        cfg.ScoreScale,
+		InputJSONL:        cfg.InputPath,
+		OutputJSONL:       cfg.OutputPath,
+		RowsRead:          len(rows),
+		RowsWritten:       written,
+		DuplicatesSkipped: skipped,
+	}
+	if err := writeBridgeManifest(cfg.ManifestPath, manifest); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "wrote %d scored rows to %s (duplicates_skipped=%d)\n", written, cfg.OutputPath, skipped)
+	fmt.Fprintf(os.Stderr, "manifest: %s\n", cfg.ManifestPath)
+	return nil
+}
+
+func uniqueHTTPPairs(rows []row) ([]httpPair, map[string]row, int) {
+	seen := map[string]string{}
+	scoreRows := map[string]row{}
+	pairs := make([]httpPair, 0, len(rows))
+	skipped := 0
+	for _, r := range rows {
+		source, query, candidate := r.text("source"), r.text("query"), r.text("candidate")
+		key := source + "\x00" + query + "\x00" + candidate
+		if _, ok := seen[key]; ok {
+			skipped++
+			continue
+		}
+		id := strconv.Itoa(len(pairs))
+		seen[key] = id
+		pair := httpPair{
+			ID:             id,
+			Source:         source,
+			Query:          query,
+			Candidate:      candidate,
+			Role:           r.text("role"),
+			ExampleIndex:   intFromRow(r, "example_index"),
+			CandidateIndex: intFromRow(r, "candidate_index"),
+		}
+		pairs = append(pairs, pair)
+		scoreRows[id] = r
+	}
+	return pairs, scoreRows, skipped
+}
+
+func intFromRow(r row, key string) int {
+	switch v := r.m[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case json.Number:
+		i, _ := v.Int64()
+		return int(i)
+	default:
+		return 0
+	}
+}
+
+func scoreHTTPBatch(endpoint, model string, pairs []httpPair) (map[string]float64, error) {
+	body, err := json.Marshal(httpScoreRequest{Model: model, Pairs: pairs})
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Post(endpoint, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("http status %s", resp.Status)
+	}
+	var sr httpScoreResponse
+	if err := json.NewDecoder(resp.Body).Decode(&sr); err != nil {
+		return nil, err
+	}
+	out := make(map[string]float64, len(sr.Scores))
+	for _, score := range sr.Scores {
+		if score.ID == "" {
+			return nil, fmt.Errorf("score response contains empty id")
+		}
+		if _, exists := out[score.ID]; exists {
+			return nil, fmt.Errorf("duplicate score response for id %q", score.ID)
+		}
+		value, err := parseFiniteScore(score.Score)
+		if err != nil {
+			return nil, fmt.Errorf("id %q: %w", score.ID, err)
+		}
+		out[score.ID] = value
+	}
+	return out, nil
+}
+
+func parseFiniteScore(raw json.RawMessage) (float64, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, fmt.Errorf("missing score")
+	}
+	var number json.Number
+	if err := json.Unmarshal(raw, &number); err != nil {
+		return 0, fmt.Errorf("score must be numeric: %w", err)
+	}
+	score, err := strconv.ParseFloat(number.String(), 64)
+	if err != nil {
+		return 0, fmt.Errorf("score must be finite: %w", err)
+	}
+	if math.IsNaN(score) || math.IsInf(score, 0) {
+		return 0, fmt.Errorf("score must be finite")
+	}
+	return score, nil
+}
+
+func writeBridgeManifest(path string, manifest bridgeManifest) error {
+	if path == "" {
+		return nil
+	}
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(manifest); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 type embedReq struct {

@@ -340,6 +340,30 @@ Use `eos export-teacher-score-requests <hard-negatives.jsonl> <requests.jsonl>` 
 
 An external scorer can add a `score` field to those rows and feed them directly into `eos import-teacher-scores`. The export command writes a `manta.teacher_score_requests.v1` manifest and supports `--missing-only` for partially scored files.
 
+For true query-document joint scorers, `cmd/teacher-bridge` now has an HTTP reranker mode that preserves the request row text and sends batched pairs to a local scoring service:
+
+```bash
+go run ./cmd/teacher-bridge \
+  --mode http-rerank \
+  --endpoint http://127.0.0.1:8080/score \
+  --model <reranker-model-id> \
+  --batch-size 16 \
+  --score-scale logit \
+  --manifest <scored.manifest.json> \
+  <requests.jsonl> \
+  <scored.jsonl>
+```
+
+The HTTP request body is `{ "model": "...", "pairs": [{"id":"0","source":"...","query":"...","candidate":"...","role":"negative","example_index":0,"candidate_index":1}] }`; the scorer response is `{ "scores": [{"id":"0","score":12.34}] }`. The bridge emits one import-compatible scored JSONL row per unique `source + query + candidate`, collapses exact duplicates, keeps duplicate query/candidate text under different sources separate, rejects missing or non-finite scores, and writes a `manta.teacher_bridge_http_rerank.v1` provenance manifest. The legacy `teacher-bridge <model> <requests.jsonl> <scored.jsonl>` path remains the old Ollama embedding/cosine bridge and is not a substitute for this reranker lane.
+
+For the current NFCorpus reranker-teacher frontier, the ready request file is:
+
+```text
+runs/eos-narrow-default-reranker-teacher-frontier-audit-v1-20260623T065159Z/data/nfcorpus-train-dev-novel-frontier.teacher-score-requests.jsonl
+```
+
+After scoring it with a real reranker service, import the scored rows with `eos import-teacher-scores`, then run `audit-teacher-scores` and `filter-teacher-scores`. Training remains blocked until real scorer output passes positive-top1, margin, novelty, and leakage gates; fake scorer or embedding-cosine bridge output is only plumbing evidence.
+
 Local Eos teachers can bypass the sidecar step with `eos score-teacher-hard-negatives <teacher.mll> <hard-negatives.jsonl> <output.jsonl>`. That command embeds each query and its `positive + negatives`, writes cosine-style `teacher_scores`, and emits a `manta.teacher_hard_negative_score.v1` manifest with artifact, backend, batch size, and teacher provenance.
 
 Before spending a training run on a new teacher, run `eos audit-teacher-scores <hard-negatives.jsonl> <summary.json>`. It reports score coverage, positive top-1 rate, mean positive rank, positive-vs-best-negative margin, and teacher-distribution entropy overall and by source, giving a cheap reject path for teachers that misorder positives or produce unusably flat/sharp targets.
