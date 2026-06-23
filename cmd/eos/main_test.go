@@ -3132,9 +3132,137 @@ func TestRunAuditTeacherScoresWritesSummary(t *testing.T) {
 	if summary.MeanNormalizedEntropy <= 0 || summary.MeanNormalizedEntropy > 1 {
 		t.Fatalf("summary normalized entropy = %f", summary.MeanNormalizedEntropy)
 	}
+	var rawSummary map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawSummary); err != nil {
+		t.Fatalf("decode raw summary: %v", err)
+	}
+	for _, key := range []string{"label_policy", "any_positive_top1", "duplicate_positive_negative_candidates"} {
+		if _, ok := rawSummary[key]; ok {
+			t.Fatalf("default audit summary unexpectedly included %q: %s", key, data)
+		}
+	}
 	fiqa := summary.Sources["fiqa"]
 	if fiqa.Examples != 2 || fiqa.ScoredExamples != 1 || fiqa.MissingExamples != 1 || fiqa.PositiveTop1 != 0 {
 		t.Fatalf("fiqa source summary = %+v", fiqa)
+	}
+}
+
+func TestRunAuditTeacherScoresQrelsCorpusCountsDuplicatePositiveTop1(t *testing.T) {
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "hard-negatives.jsonl")
+	inputRows := strings.Join([]string{
+		`{"source":"nfcorpus","query":"query one","positive":"selected positive text","negatives":["duplicate relevant text","ordinary negative"],"teacher_scores":[0.2,0.9,0.1],"query_id":"q1","positive_doc_id":"d1","negative_doc_ids":["d2","d4"]}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(inputPath, []byte(inputRows), 0o644); err != nil {
+		t.Fatalf("write hard negatives: %v", err)
+	}
+	qrelsPath := filepath.Join(dir, "qrels.tsv")
+	if err := os.WriteFile(qrelsPath, []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\nq1\td3\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	corpusPath := filepath.Join(dir, "corpus.jsonl")
+	corpusRows := strings.Join([]string{
+		`{"_id":"d1","title":"","text":"selected positive text"}`,
+		`{"_id":"d2","title":"","text":"duplicate relevant text"}`,
+		`{"_id":"d3","title":"","text":"duplicate relevant text"}`,
+		`{"_id":"d4","title":"","text":"ordinary negative"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(corpusPath, []byte(corpusRows), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	summaryPath := filepath.Join(dir, "teacher-audit.json")
+
+	captureRunOutput(t, []string{
+		"audit-teacher-scores",
+		"--qrels", qrelsPath,
+		"--corpus", corpusPath,
+		inputPath,
+		summaryPath,
+	})
+
+	var summary teacherScoreAuditSummary
+	data, err := os.ReadFile(summaryPath)
+	if err != nil {
+		t.Fatalf("read summary: %v", err)
+	}
+	if err := json.Unmarshal(data, &summary); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	if summary.LabelPolicy != "selected_positive_and_any_qrels_positive" {
+		t.Fatalf("label policy = %q", summary.LabelPolicy)
+	}
+	if summary.PositiveTop1 != 0 || summary.AnyPositiveTop1 == nil || *summary.AnyPositiveTop1 != 1 {
+		t.Fatalf("top1 counts selected=%d any=%v summary=%+v", summary.PositiveTop1, summary.AnyPositiveTop1, summary)
+	}
+	if summary.AnyPositiveTop1Rate == nil || math.Abs(*summary.AnyPositiveTop1Rate-1) > 0.000001 {
+		t.Fatalf("any positive rate = %v", summary.AnyPositiveTop1Rate)
+	}
+	if summary.DuplicatePositiveNegativeCandidates == nil || *summary.DuplicatePositiveNegativeCandidates != 1 {
+		t.Fatalf("duplicate positive negatives = %v", summary.DuplicatePositiveNegativeCandidates)
+	}
+	if summary.ExamplesWithDuplicatePositiveNegatives == nil || *summary.ExamplesWithDuplicatePositiveNegatives != 1 {
+		t.Fatalf("examples with duplicate positive negatives = %v", summary.ExamplesWithDuplicatePositiveNegatives)
+	}
+	source := summary.Sources["nfcorpus"]
+	if source.AnyPositiveTop1 == nil || *source.AnyPositiveTop1 != 1 || source.DuplicatePositiveNegativeCandidates == nil || *source.DuplicatePositiveNegativeCandidates != 1 {
+		t.Fatalf("source summary = %+v", source)
+	}
+}
+
+func TestRunAuditTeacherScoresQrelsCorpusCleanCaseMatchesSelectedPositive(t *testing.T) {
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "hard-negatives.jsonl")
+	inputRows := strings.Join([]string{
+		`{"source":"nfcorpus","query":"query one","positive":"selected positive text","negatives":["ordinary negative","other negative"],"teacher_scores":[0.9,0.2,0.1],"query_id":"q1","positive_doc_id":"d1","negative_doc_ids":["d2","d4"]}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(inputPath, []byte(inputRows), 0o644); err != nil {
+		t.Fatalf("write hard negatives: %v", err)
+	}
+	qrelsPath := filepath.Join(dir, "qrels.tsv")
+	if err := os.WriteFile(qrelsPath, []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	corpusPath := filepath.Join(dir, "corpus.jsonl")
+	corpusRows := strings.Join([]string{
+		`{"_id":"d1","title":"","text":"selected positive text"}`,
+		`{"_id":"d2","title":"","text":"ordinary negative"}`,
+		`{"_id":"d4","title":"","text":"other negative"}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(corpusPath, []byte(corpusRows), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	summaryPath := filepath.Join(dir, "teacher-audit.json")
+
+	captureRunOutput(t, []string{
+		"audit-teacher-scores",
+		"--qrels", qrelsPath,
+		"--corpus", corpusPath,
+		inputPath,
+		summaryPath,
+	})
+
+	var summary teacherScoreAuditSummary
+	data, err := os.ReadFile(summaryPath)
+	if err != nil {
+		t.Fatalf("read summary: %v", err)
+	}
+	if err := json.Unmarshal(data, &summary); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	if summary.PositiveTop1 != 1 || summary.AnyPositiveTop1 == nil || *summary.AnyPositiveTop1 != summary.PositiveTop1 {
+		t.Fatalf("top1 counts selected=%d any=%v summary=%+v", summary.PositiveTop1, summary.AnyPositiveTop1, summary)
+	}
+	if summary.DuplicatePositiveNegativeCandidates == nil || *summary.DuplicatePositiveNegativeCandidates != 0 {
+		t.Fatalf("duplicate positive negatives = %v", summary.DuplicatePositiveNegativeCandidates)
+	}
+	if summary.ExamplesWithDuplicatePositiveNegatives == nil || *summary.ExamplesWithDuplicatePositiveNegatives != 0 {
+		t.Fatalf("examples with duplicate positive negatives = %v", summary.ExamplesWithDuplicatePositiveNegatives)
+	}
+	if summary.AnyPositiveMeanRank == nil || math.Abs(*summary.AnyPositiveMeanRank-summary.PositiveMeanRank) > 0.000001 {
+		t.Fatalf("mean ranks selected=%f any=%v", summary.PositiveMeanRank, summary.AnyPositiveMeanRank)
+	}
+	if summary.AnyPositiveMeanMargin == nil || math.Abs(*summary.AnyPositiveMeanMargin-summary.PositiveMeanMargin) > 0.000001 {
+		t.Fatalf("mean margins selected=%f any=%v", summary.PositiveMeanMargin, summary.AnyPositiveMeanMargin)
 	}
 }
 

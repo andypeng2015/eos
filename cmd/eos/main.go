@@ -2857,6 +2857,7 @@ type teacherScoreAuditSummary struct {
 	InputJSONL  string  `json:"input_jsonl"`
 	Mode        string  `json:"mode"`
 	Temperature float64 `json:"temperature"`
+	LabelPolicy string  `json:"label_policy,omitempty"`
 	teacherScoreAuditStats
 	Sources map[string]teacherScoreAuditStats `json:"sources,omitempty"`
 }
@@ -2921,34 +2922,47 @@ type teacherScoreFilterCounters struct {
 }
 
 type teacherScoreAuditStats struct {
-	Examples              int     `json:"examples"`
-	ScoredExamples        int     `json:"scored_examples"`
-	MissingExamples       int     `json:"missing_examples"`
-	Candidates            int     `json:"candidates"`
-	ScoredCandidates      int     `json:"scored_candidates"`
-	PositiveTop1          int     `json:"positive_top1"`
-	PositiveTop1Rate      float64 `json:"positive_top1_rate"`
-	PositiveMeanRank      float64 `json:"positive_mean_rank"`
-	PositiveMeanMargin    float64 `json:"positive_mean_margin"`
-	MeanScore             float64 `json:"mean_score"`
-	MeanScoreRange        float64 `json:"mean_score_range"`
-	MeanEntropy           float64 `json:"mean_entropy"`
-	MeanNormalizedEntropy float64 `json:"mean_normalized_entropy"`
+	Examples                               int      `json:"examples"`
+	ScoredExamples                         int      `json:"scored_examples"`
+	MissingExamples                        int      `json:"missing_examples"`
+	Candidates                             int      `json:"candidates"`
+	ScoredCandidates                       int      `json:"scored_candidates"`
+	PositiveTop1                           int      `json:"positive_top1"`
+	PositiveTop1Rate                       float64  `json:"positive_top1_rate"`
+	PositiveMeanRank                       float64  `json:"positive_mean_rank"`
+	PositiveMeanMargin                     float64  `json:"positive_mean_margin"`
+	AnyPositiveExamples                    *int     `json:"any_positive_examples,omitempty"`
+	AnyPositiveTop1                        *int     `json:"any_positive_top1,omitempty"`
+	AnyPositiveTop1Rate                    *float64 `json:"any_positive_top1_rate,omitempty"`
+	AnyPositiveMeanRank                    *float64 `json:"any_positive_mean_rank,omitempty"`
+	AnyPositiveMeanMargin                  *float64 `json:"any_positive_mean_margin,omitempty"`
+	DuplicatePositiveNegativeCandidates    *int     `json:"duplicate_positive_negative_candidates,omitempty"`
+	ExamplesWithDuplicatePositiveNegatives *int     `json:"examples_with_duplicate_positive_negatives,omitempty"`
+	MeanScore                              float64  `json:"mean_score"`
+	MeanScoreRange                         float64  `json:"mean_score_range"`
+	MeanEntropy                            float64  `json:"mean_entropy"`
+	MeanNormalizedEntropy                  float64  `json:"mean_normalized_entropy"`
 }
 
 type teacherScoreAuditCounters struct {
-	Examples             int
-	ScoredExamples       int
-	MissingExamples      int
-	Candidates           int
-	ScoredCandidates     int
-	PositiveTop1         int
-	PositiveRankSum      float64
-	PositiveMarginSum    float64
-	ScoreSum             float64
-	ScoreRangeSum        float64
-	EntropySum           float64
-	NormalizedEntropySum float64
+	Examples                               int
+	ScoredExamples                         int
+	MissingExamples                        int
+	Candidates                             int
+	ScoredCandidates                       int
+	PositiveTop1                           int
+	PositiveRankSum                        float64
+	PositiveMarginSum                      float64
+	AnyPositiveExamples                    int
+	AnyPositiveTop1                        int
+	AnyPositiveRankSum                     float64
+	AnyPositiveMarginSum                   float64
+	DuplicatePositiveNegativeCandidates    int
+	ExamplesWithDuplicatePositiveNegatives int
+	ScoreSum                               float64
+	ScoreRangeSum                          float64
+	EntropySum                             float64
+	NormalizedEntropySum                   float64
 }
 
 type sparseAttentionPlanReport struct {
@@ -3251,11 +3265,19 @@ func runScoreTeacherHardNegatives(args []string) error {
 	return nil
 }
 
+type teacherScoreAnyPositivePolicy struct {
+	qrels        map[string]map[string]bool
+	qrelsTextSet map[string]map[string]bool
+	docText      map[string]string
+}
+
 func runAuditTeacherScores(args []string) error {
 	fs := flag.NewFlagSet("audit-teacher-scores", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	mode := fs.String("mode", "text", "input mode: text or tokenized")
 	temperature := fs.Float64("temperature", 1, "softmax temperature used for entropy diagnostics")
+	qrelsPath := fs.String("qrels", "", "BEIR qrels TSV path for optional any-qrels-positive diagnostics")
+	corpusPath := fs.String("corpus", "", "BEIR corpus JSONL path for optional exact-text qrels-positive diagnostics")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -3265,6 +3287,9 @@ func runAuditTeacherScores(args []string) error {
 	if *temperature <= 0 {
 		return fmt.Errorf("temperature must be positive")
 	}
+	if (*qrelsPath == "") != (*corpusPath == "") {
+		return fmt.Errorf("--qrels and --corpus must be supplied together")
+	}
 	inputPath := fs.Arg(0)
 	summaryPath := inputPath + ".teacher-score-audit.json"
 	if fs.NArg() > 1 && fs.Arg(1) != "" {
@@ -3273,8 +3298,8 @@ func runAuditTeacherScores(args []string) error {
 	normalizedMode := strings.ToLower(strings.TrimSpace(*mode))
 	total := teacherScoreAuditCounters{}
 	sourceTotals := map[string]*teacherScoreAuditCounters{}
-	add := func(source string, candidateCount int, scores []float32) {
-		total.add(candidateCount, scores, *temperature)
+	add := func(source string, candidateCount int, scores []float32, anyPositiveLabels []bool) {
+		total.addWithLabels(candidateCount, scores, anyPositiveLabels, *temperature)
 		key := strings.TrimSpace(source)
 		if key == "" {
 			key = "unknown"
@@ -3284,7 +3309,18 @@ func runAuditTeacherScores(args []string) error {
 			sourceTotal = &teacherScoreAuditCounters{}
 			sourceTotals[key] = sourceTotal
 		}
-		sourceTotal.add(candidateCount, scores, *temperature)
+		sourceTotal.addWithLabels(candidateCount, scores, anyPositiveLabels, *temperature)
+	}
+	var anyPositivePolicy *teacherScoreAnyPositivePolicy
+	if *qrelsPath != "" {
+		if normalizedMode == "tokenized" || normalizedMode == "tokens" {
+			return fmt.Errorf("--qrels/--corpus diagnostics are unsupported in tokenized mode")
+		}
+		policy, err := loadTeacherScoreAnyPositivePolicy(*qrelsPath, *corpusPath)
+		if err != nil {
+			return err
+		}
+		anyPositivePolicy = policy
 	}
 	switch normalizedMode {
 	case "text":
@@ -3293,7 +3329,11 @@ func runAuditTeacherScores(args []string) error {
 			return err
 		}
 		for _, example := range examples {
-			add(example.Source, 1+len(example.Negatives), example.TeacherScores)
+			var labels []bool
+			if anyPositivePolicy != nil {
+				labels = anyPositivePolicy.labelsForExample(example)
+			}
+			add(example.Source, 1+len(example.Negatives), example.TeacherScores, labels)
 		}
 	case "tokenized", "tokens":
 		normalizedMode = "tokenized"
@@ -3302,7 +3342,7 @@ func runAuditTeacherScores(args []string) error {
 			return err
 		}
 		for _, example := range examples {
-			add(example.Source, 1+len(example.NegativeTokens), example.TeacherScores)
+			add(example.Source, 1+len(example.NegativeTokens), example.TeacherScores, nil)
 		}
 	default:
 		return fmt.Errorf("unsupported mode %q: want text or tokenized", *mode)
@@ -3314,6 +3354,9 @@ func runAuditTeacherScores(args []string) error {
 		Mode:                   normalizedMode,
 		Temperature:            *temperature,
 		teacherScoreAuditStats: total.summary(),
+	}
+	if anyPositivePolicy != nil {
+		summary.LabelPolicy = "selected_positive_and_any_qrels_positive"
 	}
 	if len(sourceTotals) > 0 {
 		summary.Sources = make(map[string]teacherScoreAuditStats, len(sourceTotals))
@@ -3328,6 +3371,200 @@ func runAuditTeacherScores(args []string) error {
 		summary.Examples, summary.ScoredExamples, summary.MissingExamples, summary.PositiveTop1Rate, summary.PositiveMeanMargin, summary.MeanNormalizedEntropy)
 	fmt.Printf("summary: %s\n", summaryPath)
 	return nil
+}
+
+func loadTeacherScoreAnyPositivePolicy(qrelsPath, corpusPath string) (*teacherScoreAnyPositivePolicy, error) {
+	qrels, err := readTeacherScoreAuditQrels(qrelsPath)
+	if err != nil {
+		return nil, fmt.Errorf("read qrels: %w", err)
+	}
+	docText, err := readTeacherScoreAuditCorpusText(corpusPath)
+	if err != nil {
+		return nil, fmt.Errorf("read corpus: %w", err)
+	}
+	qrelsTextSet := make(map[string]map[string]bool, len(qrels))
+	for queryID, docIDs := range qrels {
+		for docID := range docIDs {
+			text := docText[docID]
+			if text == "" {
+				continue
+			}
+			if qrelsTextSet[queryID] == nil {
+				qrelsTextSet[queryID] = map[string]bool{}
+			}
+			qrelsTextSet[queryID][text] = true
+		}
+	}
+	return &teacherScoreAnyPositivePolicy{qrels: qrels, qrelsTextSet: qrelsTextSet, docText: docText}, nil
+}
+
+func (p *teacherScoreAnyPositivePolicy) labelsForExample(example eosruntime.EmbeddingTextHardNegativeExample) []bool {
+	if p == nil || len(example.TeacherScores) == 0 {
+		return nil
+	}
+	queryID, ok := teacherScoreAuditExtraString(example.ExtraFields, "query_id")
+	if !ok {
+		return nil
+	}
+	positiveDocID, ok := teacherScoreAuditExtraString(example.ExtraFields, "positive_doc_id")
+	if !ok {
+		return nil
+	}
+	negativeDocIDs, ok := teacherScoreAuditExtraStringSlice(example.ExtraFields, "negative_doc_ids")
+	if !ok || len(negativeDocIDs) != len(example.Negatives) {
+		return nil
+	}
+	candidateCount := 1 + len(example.Negatives)
+	if len(example.TeacherScores) != candidateCount {
+		return nil
+	}
+	labels := make([]bool, candidateCount)
+	candidates := make([]string, 0, candidateCount)
+	candidates = append(candidates, example.Positive)
+	candidates = append(candidates, example.Negatives...)
+	docIDs := make([]string, 0, candidateCount)
+	docIDs = append(docIDs, positiveDocID)
+	docIDs = append(docIDs, negativeDocIDs...)
+	for i := range labels {
+		labels[i] = p.isQrelsPositiveCandidate(queryID, docIDs[i], candidates[i])
+	}
+	return labels
+}
+
+func (p *teacherScoreAnyPositivePolicy) isQrelsPositiveCandidate(queryID, docID, text string) bool {
+	if p.qrels[queryID][docID] {
+		return true
+	}
+	normalizedText := teacherScoreAuditNormalizeText(text)
+	if normalizedText == "" {
+		normalizedText = p.docText[docID]
+	}
+	return normalizedText != "" && p.qrelsTextSet[queryID][normalizedText]
+}
+
+func teacherScoreAuditExtraString(fields map[string]json.RawMessage, key string) (string, bool) {
+	raw := fields[key]
+	if len(raw) == 0 {
+		return "", false
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", false
+	}
+	value = strings.TrimSpace(value)
+	return value, value != ""
+}
+
+func teacherScoreAuditExtraStringSlice(fields map[string]json.RawMessage, key string) ([]string, bool) {
+	raw := fields[key]
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var values []string
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return nil, false
+	}
+	out := make([]string, len(values))
+	for i, value := range values {
+		out[i] = strings.TrimSpace(value)
+	}
+	return out, true
+}
+
+func readTeacherScoreAuditQrels(path string) (map[string]map[string]bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	qrels := map[string]map[string]bool{}
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if lineNo == 1 && len(parts) >= 2 && strings.Contains(strings.ToLower(parts[0]), "query") {
+			continue
+		}
+		if len(parts) < 3 {
+			return nil, fmt.Errorf("%s:%d: expected query-id, corpus-id, score", path, lineNo)
+		}
+		docField, scoreField := 1, 2
+		if len(parts) >= 4 {
+			docField, scoreField = 2, 3
+		}
+		score, err := strconv.ParseFloat(parts[scoreField], 64)
+		if err != nil {
+			return nil, fmt.Errorf("%s:%d: score: %w", path, lineNo, err)
+		}
+		if score <= 0 {
+			continue
+		}
+		queryID := strings.TrimSpace(parts[0])
+		docID := strings.TrimSpace(parts[docField])
+		if queryID == "" || docID == "" {
+			continue
+		}
+		if qrels[queryID] == nil {
+			qrels[queryID] = map[string]bool{}
+		}
+		qrels[queryID][docID] = true
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if len(qrels) == 0 {
+		return nil, fmt.Errorf("qrels file has no positive relevance rows: %s", path)
+	}
+	return qrels, nil
+}
+
+func readTeacherScoreAuditCorpusText(path string) (map[string]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	docText := map[string]string{}
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var record struct {
+			ID    string `json:"_id"`
+			Title string `json:"title,omitempty"`
+			Text  string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			return nil, fmt.Errorf("%s:%d: %w", path, lineNo, err)
+		}
+		id := strings.TrimSpace(record.ID)
+		if id == "" {
+			continue
+		}
+		docText[id] = teacherScoreAuditNormalizeText(strings.Join([]string{record.Title, record.Text}, "\n"))
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if len(docText) == 0 {
+		return nil, fmt.Errorf("corpus file has no documents: %s", path)
+	}
+	return docText, nil
+}
+
+func teacherScoreAuditNormalizeText(text string) string {
+	return strings.Join(strings.Fields(text), " ")
 }
 
 func runFilterTeacherScores(args []string) error {
@@ -3948,6 +4185,10 @@ func dotTeacherVectors(a, b []float32) float32 {
 }
 
 func (c *teacherScoreAuditCounters) add(candidateCount int, scores []float32, temperature float64) {
+	c.addWithLabels(candidateCount, scores, nil, temperature)
+}
+
+func (c *teacherScoreAuditCounters) addWithLabels(candidateCount int, scores []float32, anyPositiveLabels []bool, temperature float64) {
 	c.Examples++
 	if candidateCount < 0 {
 		candidateCount = 0
@@ -3994,6 +4235,57 @@ func (c *teacherScoreAuditCounters) add(candidateCount int, scores []float32, te
 	c.ScoreRangeSum += maxScore - minScore
 	c.EntropySum += entropy
 	c.NormalizedEntropySum += normalizedEntropy
+	if len(anyPositiveLabels) == len(scores) {
+		c.addAnyPositiveScores(scores, anyPositiveLabels)
+	}
+}
+
+func (c *teacherScoreAuditCounters) addAnyPositiveScores(scores []float32, labels []bool) {
+	bestPositive := math.Inf(-1)
+	bestNonPositive := math.Inf(-1)
+	hasPositive := false
+	duplicatePositiveNegatives := 0
+	for i, raw := range scores {
+		score := float64(raw)
+		if labels[i] {
+			hasPositive = true
+			if i > 0 {
+				duplicatePositiveNegatives++
+			}
+			if score > bestPositive {
+				bestPositive = score
+			}
+			continue
+		}
+		if score > bestNonPositive {
+			bestNonPositive = score
+		}
+	}
+	if !hasPositive {
+		return
+	}
+	rank := 1
+	for i, raw := range scores {
+		if labels[i] {
+			continue
+		}
+		if float64(raw) > bestPositive {
+			rank++
+		}
+	}
+	if math.IsInf(bestNonPositive, -1) {
+		bestNonPositive = bestPositive
+	}
+	c.AnyPositiveExamples++
+	if rank == 1 {
+		c.AnyPositiveTop1++
+	}
+	c.AnyPositiveRankSum += float64(rank)
+	c.AnyPositiveMarginSum += bestPositive - bestNonPositive
+	c.DuplicatePositiveNegativeCandidates += duplicatePositiveNegatives
+	if duplicatePositiveNegatives > 0 {
+		c.ExamplesWithDuplicatePositiveNegatives++
+	}
 }
 
 func (c teacherScoreAuditCounters) summary() teacherScoreAuditStats {
@@ -4016,6 +4308,23 @@ func (c teacherScoreAuditCounters) summary() teacherScoreAuditStats {
 	}
 	if c.ScoredCandidates > 0 {
 		summary.MeanScore = c.ScoreSum / float64(c.ScoredCandidates)
+	}
+	if c.AnyPositiveExamples > 0 {
+		anyExamples := c.AnyPositiveExamples
+		anyTop1 := c.AnyPositiveTop1
+		duplicateCandidates := c.DuplicatePositiveNegativeCandidates
+		examplesWithDuplicates := c.ExamplesWithDuplicatePositiveNegatives
+		anyInv := 1 / float64(c.AnyPositiveExamples)
+		anyRate := float64(c.AnyPositiveTop1) * anyInv
+		anyRank := c.AnyPositiveRankSum * anyInv
+		anyMargin := c.AnyPositiveMarginSum * anyInv
+		summary.AnyPositiveExamples = &anyExamples
+		summary.AnyPositiveTop1 = &anyTop1
+		summary.AnyPositiveTop1Rate = &anyRate
+		summary.AnyPositiveMeanRank = &anyRank
+		summary.AnyPositiveMeanMargin = &anyMargin
+		summary.DuplicatePositiveNegativeCandidates = &duplicateCandidates
+		summary.ExamplesWithDuplicatePositiveNegatives = &examplesWithDuplicates
 	}
 	return summary
 }
