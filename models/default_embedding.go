@@ -33,6 +33,7 @@ type DefaultEmbeddingPackageConfig struct {
 	GroupedLossWeight  float32
 	TeacherLossWeight  float32
 	TeacherTemperature float32
+	BootstrapFrom      string
 }
 
 // InitDefaultEmbeddingPackage compiles Eos's default trainable embedding
@@ -66,7 +67,8 @@ func InitDefaultEmbeddingPackage(path string, cfg DefaultEmbeddingPackageConfig)
 		return eosruntime.EmbeddingTrainPackagePaths{}, err
 	}
 	return eosruntime.InitializeEmbeddingTrainerPackageWithManifest(path, manifest, cfg.trainConfig(), eosruntime.EmbeddingTrainInitOptions{
-		Seed: cfg.Seed,
+		Seed:                  cfg.Seed,
+		BootstrapArtifactPath: cfg.BootstrapFrom,
 		ShapeSizes: map[string]int{
 			"D": cfg.EmbeddingDim,
 			"H": cfg.HiddenDim,

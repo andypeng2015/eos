@@ -4817,6 +4817,7 @@ func runInitModel(args []string) error {
 	var groupedLossWeight float64
 	var teacherLossWeight float64
 	var teacherTemperature float64
+	var bootstrapFrom string
 	fs.StringVar(&name, "name", "", "model name")
 	fs.IntVar(&vocabSize, "vocab-size", 0, "tokenizer vocab size")
 	fs.IntVar(&maxSequence, "max-seq", 0, "maximum token sequence length")
@@ -4834,6 +4835,7 @@ func runInitModel(args []string) error {
 	fs.Float64Var(&groupedLossWeight, "grouped-loss-weight", 0, "grouped hard-negative loss weight for hybrid_infonce")
 	fs.Float64Var(&teacherLossWeight, "teacher-loss-weight", 0, "teacher score distillation weight for hard-negative training")
 	fs.Float64Var(&teacherTemperature, "teacher-temperature", 0, "teacher score softmax temperature for hard-negative distillation")
+	fs.StringVar(&bootstrapFrom, "bootstrap-from", "", "initialize overlapping model weights from an existing embedding artifact/package; uses its sibling .embed-train.mll checkpoint")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -4877,6 +4879,7 @@ func runInitModel(args []string) error {
 		GroupedLossWeight:  float32(groupedLossWeight),
 		TeacherLossWeight:  float32(teacherLossWeight),
 		TeacherTemperature: float32(teacherTemperature),
+		BootstrapFrom:      bootstrapFrom,
 	})
 	if err != nil {
 		return err
@@ -4903,6 +4906,9 @@ func runInitModel(args []string) error {
 	)
 	fmt.Printf("weights: %s\n", paths.WeightFilePath)
 	fmt.Printf("checkpoint: %s\n", paths.CheckpointPath)
+	if bootstrapFrom != "" {
+		fmt.Printf("bootstrap: %s\n", bootstrapFrom)
+	}
 	fmt.Printf("profile: %s\n", paths.TrainProfilePath)
 	return nil
 }

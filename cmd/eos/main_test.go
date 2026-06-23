@@ -14,6 +14,7 @@ import (
 	"m31labs.dev/eos/compiler"
 	"m31labs.dev/eos/models"
 	eosruntime "m31labs.dev/eos/runtime"
+	"m31labs.dev/eos/runtime/backend"
 	mll "m31labs.dev/mll"
 )
 
@@ -1019,6 +1020,73 @@ func TestRunInitModelHonorsEncoderRepeats(t *testing.T) {
 	}
 	if manifest.EncoderRepeats != 3 {
 		t.Fatalf("encoder repeats = %d, want 3", manifest.EncoderRepeats)
+	}
+}
+
+func TestRunInitModelBootstrapFromCopiesOverlap(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "source.mll")
+	if err := run([]string{
+		"init-model",
+		"--vocab-size", "8",
+		"--max-seq", "8",
+		"--embedding-dim", "2",
+		"--hidden-dim", "4",
+		"--seed", "7",
+		sourcePath,
+	}); err != nil {
+		t.Fatalf("run source init-model: %v", err)
+	}
+	sourceCheckpointPath := eosruntime.DefaultEmbeddingCheckpointPath(sourcePath)
+	sourceCheckpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(sourceCheckpointPath)
+	if err != nil {
+		t.Fatalf("read source checkpoint: %v", err)
+	}
+	sourceCheckpoint.TokenEmbedding = backend.NewTensorF32([]int{8, 2}, []float32{
+		31, 32,
+		33, 34,
+		35, 36,
+		37, 38,
+		39, 40,
+		41, 42,
+		43, 44,
+		45, 46,
+	})
+	if err := sourceCheckpoint.WriteFile(sourceCheckpointPath); err != nil {
+		t.Fatalf("rewrite source checkpoint: %v", err)
+	}
+
+	targetPath := filepath.Join(dir, "target.mll")
+	if err := run([]string{
+		"init-model",
+		"--vocab-size", "8",
+		"--max-seq", "8",
+		"--embedding-dim", "3",
+		"--hidden-dim", "5",
+		"--seed", "11",
+		"--bootstrap-from", sourcePath,
+		targetPath,
+	}); err != nil {
+		t.Fatalf("run target init-model: %v", err)
+	}
+	targetCheckpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(eosruntime.DefaultEmbeddingCheckpointPath(targetPath))
+	if err != nil {
+		t.Fatalf("read target checkpoint: %v", err)
+	}
+	if got := targetCheckpoint.TokenEmbedding.Shape; len(got) != 2 || got[0] != 8 || got[1] != 3 {
+		t.Fatalf("target token shape = %v, want [8 3]", got)
+	}
+	for row := 0; row < 8; row++ {
+		for col := 0; col < 2; col++ {
+			got := targetCheckpoint.TokenEmbedding.F32[row*3+col]
+			want := sourceCheckpoint.TokenEmbedding.F32[row*2+col]
+			if got != want {
+				t.Fatalf("token overlap[%d,%d] = %f, want %f", row, col, got, want)
+			}
+		}
+	}
+	if _, err := eosruntime.LoadEmbeddingTrainerPackage(targetPath); err != nil {
+		t.Fatalf("reload bootstrapped package: %v", err)
 	}
 }
 

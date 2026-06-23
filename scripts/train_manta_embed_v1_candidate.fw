@@ -45,6 +45,7 @@ type candidateConfig struct {
 	HiddenDim           string
 	EncoderRepeats      string
 	InitSeed            string
+	BootstrapArtifact   string
 	WeightBits          string
 	Epochs              string
 	BatchSize           string
@@ -115,6 +116,7 @@ Common knobs:
   EOS_RUN_ID=eos-embed-v1-20260412
   EOS_ENCODER_REPEATS=2
   EOS_INITIAL_ARTIFACT=/path/to/previous-stage/eos-embed-v1.mll
+  EOS_BOOTSTRAP_ARTIFACT=/path/to/same-family/eos-embed-v1.mll
   EOS_EPOCHS=3
   EOS_BATCH_SIZE=1024
   EOS_LR=0.005
@@ -544,6 +546,7 @@ func writeManifest(cfg candidateConfig, status string) error {
     "tokenizer": %s,
     "package_tokenizer": %s,
     "tokenizer_corpus": %s,
+    "bootstrap_artifact": %s,
     "thresholds_env": %s
   },
   "outputs": {
@@ -614,6 +617,7 @@ func writeManifest(cfg candidateConfig, status string) error {
 		jsonString(cfg.TokenizerPath),
 		jsonString(cfg.PackageTokenizerPath),
 		jsonString(cfg.TokenizerCorpus),
+		jsonString(cfg.BootstrapArtifact),
 		jsonString(cfg.ThresholdsEnv),
 		jsonString(cfg.Artifact),
 		jsonString(cfg.SealedArtifact),
@@ -714,6 +718,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		HiddenDim:           getenv("EOS_HIDDEN_DIM", "256"),
 		EncoderRepeats:      getenv("EOS_ENCODER_REPEATS", "2"),
 		InitSeed:            getenv("EOS_INIT_SEED", "1"),
+		BootstrapArtifact:   getenv("EOS_BOOTSTRAP_ARTIFACT", ""),
 		WeightBits:          getenv("EOS_WEIGHT_BITS", "8"),
 		Epochs:              getenv("EOS_EPOCHS", "3"),
 		BatchSize:           getenv("EOS_BATCH_SIZE", "1024"),
@@ -990,7 +995,7 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 		err = copyPretrainedArtifact(initialArtifact, cfg.Artifact, cfg.ModelName)
 		guard err == nil else return cfg, err
 	} else {
-		err = runCmd(cfg, "Initialize "+cfg.ModelName, "init-model.log", cfg.MantaBin, []string{
+		initArgs := []string{
 			"init-model",
 			"--name", cfg.ModelName,
 			"--vocab-size", cfg.VocabSize,
@@ -1003,8 +1008,12 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 			"--lr", cfg.LR,
 			"--contrastive-loss", cfg.ContrastiveLoss,
 			"--temperature", cfg.Temperature,
-			cfg.Artifact,
-		})
+		}
+		if cfg.BootstrapArtifact != "" {
+			initArgs = append(initArgs, "--bootstrap-from", cfg.BootstrapArtifact)
+		}
+		initArgs = append(initArgs, cfg.Artifact)
+		err = runCmd(cfg, "Initialize "+cfg.ModelName, "init-model.log", cfg.MantaBin, initArgs)
 		guard err == nil else return cfg, err
 	}
 
