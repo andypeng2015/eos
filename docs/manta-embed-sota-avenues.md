@@ -356,6 +356,22 @@ go run ./cmd/teacher-bridge \
 
 The HTTP request body is `{ "model": "...", "pairs": [{"id":"0","source":"...","query":"...","candidate":"...","role":"negative","example_index":0,"candidate_index":1}] }`; the scorer response is `{ "scores": [{"id":"0","score":12.34}] }`. The bridge emits one import-compatible scored JSONL row per unique `source + query + candidate`, collapses exact duplicates, keeps duplicate query/candidate text under different sources separate, rejects missing or non-finite scores, and writes a `manta.teacher_bridge_http_rerank.v1` provenance manifest. The legacy `teacher-bridge <model> <requests.jsonl> <scored.jsonl>` path remains the old Ollama embedding/cosine bridge and is not a substitute for this reranker lane.
 
+For Hugging Face Text Embeddings Inference reranker services, no custom proxy is required. Launch TEI separately with a sequence-classification reranker model, for example a BGE reranker such as `BAAI/bge-reranker-large` or `BAAI/bge-reranker-v2-m3`, then point `teacher-bridge` at TEI's native `/rerank` endpoint:
+
+```bash
+go run ./cmd/teacher-bridge \
+  --mode tei-rerank \
+  --endpoint http://127.0.0.1:8080/rerank \
+  --model BAAI/bge-reranker-v2-m3 \
+  --batch-size 16 \
+  --score-scale logit \
+  --manifest <scored.manifest.json> \
+  <requests.jsonl> \
+  <scored.jsonl>
+```
+
+The TEI request body is `{ "query": "...", "texts": ["candidate text", "..."] }`. The bridge groups the exported request rows by query, chunks candidates by `--batch-size`, accepts TEI-style top-level arrays of `{index, score}` or `{ "results": [{index, score}] }`, and writes the same import-compatible `source`, `query`, `candidate`, `score` JSONL rows as the proxy mode. The `--model` value is provenance-only in this mode because model selection belongs to the running TEI service. Missing, duplicate, or out-of-range response indexes and missing or non-finite scores are rejected. The manifest schema is `manta.teacher_bridge_tei_rerank.v1`.
+
 For the current NFCorpus reranker-teacher frontier, the ready request file is:
 
 ```text

@@ -109,6 +109,135 @@ func TestHTTPRerankFailsOnNonFiniteScore(t *testing.T) {
 	}
 }
 
+func TestTEIRerankSendsNativeGroupedRequestsAndWritesImportRows(t *testing.T) {
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "requests.jsonl")
+	outputPath := filepath.Join(dir, "scores.jsonl")
+	manifestPath := filepath.Join(dir, "scores.manifest.json")
+	writeFile(t, inputPath, strings.Join([]string{
+		`{"source":"s1","query":"q1","candidate":"doc-a","role":"positive","example_index":0,"candidate_index":0}`,
+		`{"source":"s1","query":"q2","candidate":"doc-b","role":"negative","example_index":1,"candidate_index":1}`,
+		`{"source":"s1","query":"q1","candidate":"doc-c","role":"negative","example_index":0,"candidate_index":2}`,
+		`{"source":"s1","query":"q1","candidate":"doc-a","role":"positive","example_index":0,"candidate_index":0}`,
+	}, "\n")+"\n")
+
+	var requests []teiRerankRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req teiRerankRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		requests = append(requests, req)
+		switch req.Query {
+		case "q1":
+			if fmt.Sprint(req.Texts) != "[doc-a doc-c]" {
+				t.Fatalf("q1 texts = %+v", req.Texts)
+			}
+			_, _ = w.Write([]byte(`[{"index":0,"score":2.5},{"index":1,"score":1.5}]`))
+		case "q2":
+			if fmt.Sprint(req.Texts) != "[doc-b]" {
+				t.Fatalf("q2 texts = %+v", req.Texts)
+			}
+			_, _ = w.Write([]byte(`{"results":[{"index":0,"score":0.5}]}`))
+		default:
+			t.Fatalf("unexpected query %q", req.Query)
+		}
+	}))
+	defer server.Close()
+
+	if err := run([]string{
+		"--mode", "tei-rerank",
+		"--endpoint", server.URL,
+		"--model", "BAAI/bge-reranker-v2-m3",
+		"--batch-size", "16",
+		"--score-scale", "logit",
+		"--manifest", manifestPath,
+		inputPath,
+		outputPath,
+	}); err != nil {
+		t.Fatalf("run tei rerank: %v", err)
+	}
+
+	if len(requests) != 2 || requests[0].Query != "q1" || requests[1].Query != "q2" {
+		t.Fatalf("requests = %+v", requests)
+	}
+	rows := readJSONLines(t, outputPath)
+	if len(rows) != 3 {
+		t.Fatalf("output rows = %d, want 3", len(rows))
+	}
+	for _, row := range rows {
+		if row["source"] == "" || row["query"] == "" || row["candidate"] == "" {
+			t.Fatalf("output row is not import-compatible: %+v", row)
+		}
+		if _, ok := row["score"].(float64); !ok {
+			t.Fatalf("output row missing numeric score: %+v", row)
+		}
+	}
+	var manifest bridgeManifest
+	decodeFile(t, manifestPath, &manifest)
+	if manifest.Schema != "manta.teacher_bridge_tei_rerank.v1" || manifest.Mode != "tei-rerank" || manifest.Model != "BAAI/bge-reranker-v2-m3" || manifest.RowsRead != 4 || manifest.RowsWritten != 3 || manifest.DuplicatesSkipped != 1 {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+}
+
+func TestParseTEIRerankResultsAcceptsArrayAndWrapper(t *testing.T) {
+	got, err := parseTEIRerankResults(strings.NewReader(`[{"index":1,"score":0.25},{"index":0,"score":0.75}]`), 2)
+	if err != nil {
+		t.Fatalf("parse array: %v", err)
+	}
+	if got[0] != 0.75 || got[1] != 0.25 {
+		t.Fatalf("array scores = %+v", got)
+	}
+	got, err = parseTEIRerankResults(strings.NewReader(`{"results":[{"index":0,"score":3.5}]}`), 1)
+	if err != nil {
+		t.Fatalf("parse wrapper: %v", err)
+	}
+	if got[0] != 3.5 {
+		t.Fatalf("wrapper scores = %+v", got)
+	}
+}
+
+func TestTEIRerankRejectsBadResponses(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "missing score", body: `[{"index":0}]`, want: "missing score"},
+		{name: "non finite score", body: `[{"index":0,"score":1e999}]`, want: "finite"},
+		{name: "invalid index", body: `[{"index":2,"score":1}]`, want: "invalid TEI result index"},
+		{name: "duplicate index", body: `[{"index":0,"score":1},{"index":0,"score":2}]`, want: "duplicate TEI result index"},
+		{name: "missing index", body: `[{"score":1}]`, want: "missing TEI result index"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseTEIRerankResults(strings.NewReader(tc.body), 1)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestTEIRerankFailsOnMissingIndexResponse(t *testing.T) {
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "requests.jsonl")
+	outputPath := filepath.Join(dir, "scores.jsonl")
+	writeFile(t, inputPath, strings.Join([]string{
+		`{"source":"s","query":"q","candidate":"doc-a"}`,
+		`{"source":"s","query":"q","candidate":"doc-b"}`,
+	}, "\n")+"\n")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"index":0,"score":1}]`))
+	}))
+	defer server.Close()
+
+	err := run([]string{"--mode", "tei-rerank", "--endpoint", server.URL, "--model", "fake", inputPath, outputPath})
+	if err == nil || !strings.Contains(err.Error(), "missing score") {
+		t.Fatalf("err = %v, want missing score failure", err)
+	}
+}
+
 func TestHTTPRerankOutputImportsIntoEOS(t *testing.T) {
 	dir := t.TempDir()
 	hardNegativesPath := filepath.Join(dir, "hard-negatives.jsonl")

@@ -8,6 +8,7 @@
 //	eos export-teacher-score-requests <hard-negatives.jsonl> <requests.jsonl>
 //	teacher-bridge <model> <requests.jsonl> <scored.jsonl>      # legacy embedding mode
 //	teacher-bridge --mode http-rerank --endpoint http://127.0.0.1:8080/score --model <model> <requests.jsonl> <scored.jsonl>
+//	teacher-bridge --mode tei-rerank --endpoint http://127.0.0.1:8080/rerank --model <model> <requests.jsonl> <scored.jsonl>
 //	eos import-teacher-scores <hard-negatives.jsonl> <scored.jsonl> <out.jsonl>
 //	eos audit-teacher-scores <out.jsonl>
 //
@@ -22,6 +23,7 @@
 //
 //	teacher-bridge <model> <requests.jsonl> <scored.jsonl>
 //	teacher-bridge --mode http-rerank --endpoint <url> --model <model> [flags] <requests.jsonl> <scored.jsonl>
+//	teacher-bridge --mode tei-rerank --endpoint <url> --model <model> [flags] <requests.jsonl> <scored.jsonl>
 package main
 
 import (
@@ -30,6 +32,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -59,7 +62,7 @@ func run(args []string) error {
 	}
 	fs := flag.NewFlagSet("teacher-bridge", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	mode := fs.String("mode", "", "scoring mode: http-rerank")
+	mode := fs.String("mode", "", "scoring mode: http-rerank or tei-rerank")
 	endpoint := fs.String("endpoint", "", "HTTP reranker scoring endpoint")
 	model := fs.String("model", "", "teacher model identifier to pass to the scorer")
 	batchSize := fs.Int("batch-size", 16, "HTTP pair batch size")
@@ -69,19 +72,19 @@ func run(args []string) error {
 		return err
 	}
 	if *mode == "" {
-		return fmt.Errorf("usage: teacher-bridge <model> <requests.jsonl> <scored.jsonl>\n   or: teacher-bridge --mode http-rerank --endpoint <url> --model <model> [flags] <requests.jsonl> <scored.jsonl>")
+		return fmt.Errorf("usage: teacher-bridge <model> <requests.jsonl> <scored.jsonl>\n   or: teacher-bridge --mode http-rerank --endpoint <url> --model <model> [flags] <requests.jsonl> <scored.jsonl>\n   or: teacher-bridge --mode tei-rerank --endpoint <url> --model <model> [flags] <requests.jsonl> <scored.jsonl>")
 	}
-	if *mode != "http-rerank" {
+	if *mode != "http-rerank" && *mode != "tei-rerank" {
 		return fmt.Errorf("unsupported mode %q", *mode)
 	}
 	if fs.NArg() != 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: teacher-bridge --mode http-rerank --endpoint <url> --model <model> [flags] <requests.jsonl> <scored.jsonl>")
+		return fmt.Errorf("usage: teacher-bridge --mode http-rerank|tei-rerank --endpoint <url> --model <model> [flags] <requests.jsonl> <scored.jsonl>")
 	}
 	if strings.TrimSpace(*endpoint) == "" {
-		return fmt.Errorf("--endpoint is required for http-rerank mode")
+		return fmt.Errorf("--endpoint is required for %s mode", *mode)
 	}
 	if strings.TrimSpace(*model) == "" {
-		return fmt.Errorf("--model is required for http-rerank mode")
+		return fmt.Errorf("--model is required for %s mode", *mode)
 	}
 	if *batchSize <= 0 {
 		return fmt.Errorf("--batch-size must be positive")
@@ -90,7 +93,7 @@ func run(args []string) error {
 	if *manifestPath == "" {
 		*manifestPath = outPath + ".teacher-bridge.manifest.json"
 	}
-	return runHTTPRerank(httpRerankConfig{
+	cfg := httpRerankConfig{
 		Endpoint:     *endpoint,
 		Model:        *model,
 		BatchSize:    *batchSize,
@@ -98,7 +101,11 @@ func run(args []string) error {
 		InputPath:    inPath,
 		OutputPath:   outPath,
 		ManifestPath: *manifestPath,
-	})
+	}
+	if *mode == "tei-rerank" {
+		return runTEIRerank(cfg)
+	}
+	return runHTTPRerank(cfg)
 }
 
 func runLegacyEmbedding(model, inPath, outPath string) error {
@@ -235,6 +242,16 @@ type httpScore struct {
 	Score json.RawMessage `json:"score"`
 }
 
+type teiRerankRequest struct {
+	Query string   `json:"query"`
+	Texts []string `json:"texts"`
+}
+
+type teiRerankResult struct {
+	Index json.RawMessage `json:"index"`
+	Score json.RawMessage `json:"score"`
+}
+
 type bridgeManifest struct {
 	Schema            string `json:"schema"`
 	CreatedUTC        string `json:"created_utc"`
@@ -333,6 +350,105 @@ func runHTTPRerank(cfg httpRerankConfig) error {
 	return nil
 }
 
+func runTEIRerank(cfg httpRerankConfig) error {
+	rows, err := readRows(cfg.InputPath)
+	if err != nil {
+		return fmt.Errorf("read: %w", err)
+	}
+	pairs, scoreRows, skipped := uniqueHTTPPairs(rows)
+	if len(pairs) == 0 {
+		return fmt.Errorf("no scoreable rows in %s", cfg.InputPath)
+	}
+
+	out, err := os.Create(cfg.OutputPath)
+	if err != nil {
+		return fmt.Errorf("create output: %w", err)
+	}
+	w := bufio.NewWriter(out)
+	closeOutput := func() error {
+		if err := w.Flush(); err != nil {
+			_ = out.Close()
+			return err
+		}
+		return out.Close()
+	}
+
+	queryOrder := make([]string, 0)
+	groups := map[string][]httpPair{}
+	for _, pair := range pairs {
+		if _, ok := groups[pair.Query]; !ok {
+			queryOrder = append(queryOrder, pair.Query)
+		}
+		groups[pair.Query] = append(groups[pair.Query], pair)
+	}
+
+	written := 0
+	scored := 0
+	for _, query := range queryOrder {
+		group := groups[query]
+		for chunkStart := 0; chunkStart < len(group); chunkStart += cfg.BatchSize {
+			chunkEnd := chunkStart + cfg.BatchSize
+			if chunkEnd > len(group) {
+				chunkEnd = len(group)
+			}
+			chunk := group[chunkStart:chunkEnd]
+			scores, err := scoreTEIBatch(cfg.Endpoint, query, chunk)
+			if err != nil {
+				_ = out.Close()
+				return fmt.Errorf("score query %q batch %d: %w", query, scored, err)
+			}
+			for _, pair := range chunk {
+				score, ok := scores[pair.ID]
+				if !ok {
+					_ = out.Close()
+					return fmt.Errorf("score query %q batch %d: missing score for id %q", query, scored, pair.ID)
+				}
+				record := scoreRows[pair.ID]
+				record.m["score"] = score
+				b, err := json.Marshal(record.m)
+				if err != nil {
+					_ = out.Close()
+					return fmt.Errorf("encode score row: %w", err)
+				}
+				if _, err := w.Write(b); err != nil {
+					_ = out.Close()
+					return err
+				}
+				if err := w.WriteByte('\n'); err != nil {
+					_ = out.Close()
+					return err
+				}
+				written++
+			}
+			scored += len(chunk)
+			fmt.Fprintf(os.Stderr, "scored %d/%d\n", scored, len(pairs))
+		}
+	}
+	if err := closeOutput(); err != nil {
+		return fmt.Errorf("close output: %w", err)
+	}
+
+	manifest := bridgeManifest{
+		Schema:            "manta.teacher_bridge_tei_rerank.v1",
+		CreatedUTC:        time.Now().UTC().Format(time.RFC3339),
+		Mode:              "tei-rerank",
+		Endpoint:          cfg.Endpoint,
+		Model:             cfg.Model,
+		ScoreScale:        cfg.ScoreScale,
+		InputJSONL:        cfg.InputPath,
+		OutputJSONL:       cfg.OutputPath,
+		RowsRead:          len(rows),
+		RowsWritten:       written,
+		DuplicatesSkipped: skipped,
+	}
+	if err := writeBridgeManifest(cfg.ManifestPath, manifest); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "wrote %d scored rows to %s (duplicates_skipped=%d)\n", written, cfg.OutputPath, skipped)
+	fmt.Fprintf(os.Stderr, "manifest: %s\n", cfg.ManifestPath)
+	return nil
+}
+
 func uniqueHTTPPairs(rows []row) ([]httpPair, map[string]row, int) {
 	seen := map[string]string{}
 	scoreRows := map[string]row{}
@@ -408,6 +524,85 @@ func scoreHTTPBatch(endpoint, model string, pairs []httpPair) (map[string]float6
 		out[score.ID] = value
 	}
 	return out, nil
+}
+
+func scoreTEIBatch(endpoint, query string, pairs []httpPair) (map[string]float64, error) {
+	texts := make([]string, 0, len(pairs))
+	for _, pair := range pairs {
+		texts = append(texts, pair.Candidate)
+	}
+	body, err := json.Marshal(teiRerankRequest{Query: query, Texts: texts})
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Post(endpoint, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("http status %s", resp.Status)
+	}
+	results, err := parseTEIRerankResults(resp.Body, len(pairs))
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]float64, len(results))
+	for idx, score := range results {
+		out[pairs[idx].ID] = score
+	}
+	return out, nil
+}
+
+func parseTEIRerankResults(r io.Reader, candidateCount int) (map[int]float64, error) {
+	var raw json.RawMessage
+	if err := json.NewDecoder(r).Decode(&raw); err != nil {
+		return nil, err
+	}
+	var results []teiRerankResult
+	if err := json.Unmarshal(raw, &results); err != nil {
+		var wrapper struct {
+			Results []teiRerankResult `json:"results"`
+		}
+		if err := json.Unmarshal(raw, &wrapper); err != nil {
+			return nil, fmt.Errorf("TEI response must be an array or results wrapper: %w", err)
+		}
+		results = wrapper.Results
+	}
+	out := make(map[int]float64, len(results))
+	for _, result := range results {
+		idx, err := parseTEIIndex(result.Index)
+		if err != nil {
+			return nil, err
+		}
+		if idx < 0 || idx >= candidateCount {
+			return nil, fmt.Errorf("invalid TEI result index %d for %d candidates", idx, candidateCount)
+		}
+		if _, exists := out[idx]; exists {
+			return nil, fmt.Errorf("duplicate TEI result index %d", idx)
+		}
+		score, err := parseFiniteScore(result.Score)
+		if err != nil {
+			return nil, fmt.Errorf("index %d: %w", idx, err)
+		}
+		out[idx] = score
+	}
+	return out, nil
+}
+
+func parseTEIIndex(raw json.RawMessage) (int, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, fmt.Errorf("missing TEI result index")
+	}
+	var number json.Number
+	if err := json.Unmarshal(raw, &number); err != nil {
+		return 0, fmt.Errorf("TEI result index must be numeric: %w", err)
+	}
+	i, err := strconv.ParseInt(number.String(), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("TEI result index must be an integer: %w", err)
+	}
+	return int(i), nil
 }
 
 func parseFiniteScore(raw json.RawMessage) (float64, error) {
