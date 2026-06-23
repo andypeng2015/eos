@@ -65,6 +65,7 @@ type candidateConfig struct {
 	TurboQuantPrefixWeight string
 	TurboQuantPrefixSeed string
 	TurboQuantPrefixScoreMode string
+	TurboQuantCompactObjectives string
 	ClearTurboQuantRankMargin string
 	TurboQuantRankMarginObjectives string
 	TurboQuantRankMargin string
@@ -525,6 +526,7 @@ func writeManifest(cfg candidateConfig, status string) error {
     "turboquant_prefix_weight": %s,
     "turboquant_prefix_seed": %s,
     "turboquant_prefix_score_mode": %s,
+    "turboquant_compact_objectives": %s,
     "clear_turboquant_rank_margin": %s,
     "turboquant_rank_margin_objectives": %s,
     "turboquant_rank_margin": %s,
@@ -596,6 +598,7 @@ func writeManifest(cfg candidateConfig, status string) error {
 		jsonString(cfg.TurboQuantPrefixWeight),
 		jsonString(cfg.TurboQuantPrefixSeed),
 		jsonString(cfg.TurboQuantPrefixScoreMode),
+		jsonString(cfg.TurboQuantCompactObjectives),
 		jsonBool(configBool(cfg.ClearTurboQuantRankMargin)),
 		jsonString(cfg.TurboQuantRankMarginObjectives),
 		jsonString(cfg.TurboQuantRankMargin),
@@ -731,6 +734,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		TurboQuantPrefixWeight: getenv("EOS_TURBOQUANT_PREFIX_WEIGHT", ""),
 		TurboQuantPrefixSeed: getenv("EOS_TURBOQUANT_PREFIX_SEED", ""),
 		TurboQuantPrefixScoreMode: getenv("EOS_TURBOQUANT_PREFIX_SCORE_MODE", ""),
+		TurboQuantCompactObjectives: getenv("EOS_TURBOQUANT_COMPACT_OBJECTIVES", ""),
 		ClearTurboQuantRankMargin: getenv("EOS_CLEAR_TURBOQUANT_RANK_MARGIN", ""),
 		TurboQuantRankMarginObjectives: getenv("EOS_TURBOQUANT_RANK_MARGIN_OBJECTIVES", ""),
 		TurboQuantRankMargin: getenv("EOS_TURBOQUANT_RANK_MARGIN", ""),
@@ -912,6 +916,9 @@ func trainCommonArgs(cfg candidateConfig) []string {
 	}
 	if cfg.TurboQuantPrefixScoreMode != "" {
 		args = append(args, "--turboquant-prefix-score-mode", cfg.TurboQuantPrefixScoreMode)
+	}
+	if cfg.TurboQuantCompactObjectives != "" {
+		args = append(args, "--turboquant-compact-objectives", cfg.TurboQuantCompactObjectives)
 	}
 	if configBool(cfg.ClearTurboQuantRankMargin) {
 		args = append(args, "--clear-turboquant-rank-margin")

@@ -4086,6 +4086,47 @@ func TestRunTrainEmbedAcceptsTurboQuantRankMarginObjectives(t *testing.T) {
 	}
 }
 
+func TestRunTrainEmbedAcceptsTurboQuantCompactObjectives(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	dir := t.TempDir()
+	trainPath := filepath.Join(dir, "hard-train.jsonl")
+	metricsPath := filepath.Join(dir, "train.metrics.json")
+	examples := []eosruntime.EmbeddingHardNegativeExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}, NegativeTokens: [][]int32{{2, 3}}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}, NegativeMasks: [][]int32{{1, 1}}, TeacherScores: []float32{1, 0}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}, NegativeTokens: [][]int32{{1, 2}}, QueryMask: []int32{1, 1}, PositiveMask: []int32{1, 1}, NegativeMasks: [][]int32{{1, 1}}, TeacherScores: []float32{1, 0}},
+	}
+	if err := eosruntime.WriteEmbeddingHardNegativeExamplesFile(trainPath, examples); err != nil {
+		t.Fatalf("write train dataset: %v", err)
+	}
+	if err := run([]string{"train-embed", "--hard-negative-train", "--epochs", "1", "--batch-size", "2", "--contrastive-loss", "grouped_infonce", "--matryoshka-dims", "2", "--turboquant-compact-objectives", "2:2=0.25", "--metrics-json", metricsPath, path, trainPath}); err != nil {
+		t.Fatalf("run train-embed turboquant compact objectives: %v", err)
+	}
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(eosruntime.DefaultEmbeddingCheckpointPath(path))
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if got := checkpoint.Config.TurboQuantCompactObjectives; len(got) != 1 || got[0].Dim != 2 || got[0].BitWidth != 2 || got[0].Weight != 0.25 {
+		t.Fatalf("turboquant compact objectives = %+v", got)
+	}
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	var metrics trainMetricsJSON
+	if err := json.Unmarshal(data, &metrics); err != nil {
+		t.Fatalf("unmarshal metrics: %v", err)
+	}
+	if got := metrics.Config.TurboQuantCompactObjectives; len(got) != 1 || got[0].Dim != 2 || got[0].BitWidth != 2 || got[0].Weight != 0.25 {
+		t.Fatalf("metrics turboquant compact objectives = %+v", got)
+	}
+	if metrics.Workload.TrainPairsPerEpoch != 12 {
+		t.Fatalf("metrics train pairs/epoch = %d, want base grouped+matryoshka+compact pairs", metrics.Workload.TrainPairsPerEpoch)
+	}
+}
+
 func TestRunTrainEmbedEvalOnlyAllowsInheritedTurboQuantRankMarginCheckpoint(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
@@ -4410,6 +4451,16 @@ func TestRunTrainCorpusRejectsInvalidTurboQuantPrefixObjectives(t *testing.T) {
 		t.Fatal("expected invalid turboquant prefix objectives error")
 	}
 	if !strings.Contains(err.Error(), "turboquant-prefix-objectives") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunTrainCorpusRejectsTurboQuantCompactObjectives(t *testing.T) {
+	err := run([]string{"train-corpus", "--matryoshka-dims", "2", "--turboquant-compact-objectives", "2:2=0.25", filepath.Join(t.TempDir(), "artifact.mll"), filepath.Join(t.TempDir(), "corpus.txt")})
+	if err == nil {
+		t.Fatal("expected compact objectives hard-negative requirement")
+	}
+	if !strings.Contains(err.Error(), "hard-negative-train") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

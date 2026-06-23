@@ -173,6 +173,30 @@ func TestEstimateHardNegativeTrainWorkloadWithTurboQuantRankMarginObjectives(t *
 	}
 }
 
+func TestEstimateHardNegativeTrainWorkloadWithTurboQuantCompactObjectives(t *testing.T) {
+	workload := EstimateHardNegativeTrainWorkload(128, 1, 0, EmbeddingTrainRunConfig{
+		Epochs:          1,
+		BatchSize:       64,
+		ContrastiveLoss: "grouped_infonce",
+		MatryoshkaDims:  []int{64, 128},
+		TurboQuantCompactObjectives: []TurboQuantPrefixObjective{
+			{Dim: 64, BitWidth: 2, Weight: 0},
+			{Dim: 128, BitWidth: 4, Weight: 0.25},
+		},
+	})
+	if workload.TrainPairsPerEpoch != 1024 {
+		t.Fatalf("train pairs/epoch = %d, want grouped base+matryoshka+compact pairs", workload.TrainPairsPerEpoch)
+	}
+	noop := EstimateHardNegativeTrainWorkload(128, 1, 0, EmbeddingTrainRunConfig{
+		Epochs:          1,
+		BatchSize:       64,
+		ContrastiveLoss: "grouped_infonce",
+	})
+	if noop.TrainPairsPerEpoch != 256 {
+		t.Fatalf("default train pairs/epoch = %d, want unchanged 256", noop.TrainPairsPerEpoch)
+	}
+}
+
 func TestTurboQuantRankMarginHardNegativeCountsEligibleRows(t *testing.T) {
 	queries := []*embeddingEncodedSequence{
 		{pooled: []float32{1, 0}},
@@ -206,6 +230,48 @@ func TestTurboQuantRankMarginHardNegativeCountsEligibleRows(t *testing.T) {
 	}
 	if loss <= 0 {
 		t.Fatalf("rank-margin loss = %f, want positive hinge loss", loss)
+	}
+}
+
+func TestTurboQuantCompactHardNegativeUsesPreparedIPAndTeacherTargets(t *testing.T) {
+	queries := []*embeddingEncodedSequence{
+		{pooled: []float32{1, 0}},
+		{pooled: []float32{0, 1}},
+	}
+	candidates := []*embeddingEncodedSequence{
+		{pooled: []float32{1, 0}},
+		{pooled: []float32{0, 1}},
+		{pooled: []float32{0, 1}},
+		{pooled: []float32{1, 0}},
+	}
+	spans := []embeddingCandidateSpan{{Start: 0, End: 2}, {Start: 2, End: 4}}
+	teacherScores := [][]float32{{1, 0}, {1, 0}}
+	queryGrads := newEmbeddingPooledGradBuffers(queries)
+	candidateGrads := newEmbeddingPooledGradBuffers(candidates)
+	loss, score, pairs := accumulateTurboQuantCompactHardNegativeGrads(queries, candidates, spans, teacherScores, EmbeddingTrainConfig{
+		MatryoshkaDims: []int{2},
+		TurboQuantCompactObjectives: []TurboQuantPrefixObjective{
+			{Dim: 2, BitWidth: 2, Weight: 0.5},
+		},
+		TurboQuantPrefixSeed: DefaultTurboQuantMultiVectorQuantizerSeed,
+		Temperature:          0.05,
+		TeacherTemperature:   1,
+	}, queryGrads, candidateGrads)
+	if pairs != 4 {
+		t.Fatalf("compact pairs = %d, want candidate count across active rows", pairs)
+	}
+	if !finite32(loss) || loss <= 0 {
+		t.Fatalf("compact loss = %f, want finite positive", loss)
+	}
+	if !finite32(score) {
+		t.Fatalf("compact score = %f, want finite", score)
+	}
+	for i, grad := range append(queryGrads, candidateGrads...) {
+		for j, value := range grad {
+			if !finite32(value) {
+				t.Fatalf("grad[%d][%d] = %f, want finite", i, j, value)
+			}
+		}
 	}
 }
 
@@ -484,6 +550,66 @@ func TestEmbeddingTrainerFitContrastiveRejectsInvalidTurboQuantPrefixConfig(t *t
 		if _, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitContrastive(trainSet, nil, tt.cfg); err == nil {
 			t.Fatalf("%s: expected invalid turboquant prefix objectives error", tt.name)
 		}
+	}
+	for _, tt := range []struct {
+		name string
+		cfg  EmbeddingTrainRunConfig
+	}{
+		{
+			name: "missing dim",
+			cfg: EmbeddingTrainRunConfig{
+				MatryoshkaDims: []int{2},
+				TurboQuantCompactObjectives: []TurboQuantPrefixObjective{
+					{Dim: 4, BitWidth: 2, Weight: 0.5},
+				},
+			},
+		},
+		{
+			name: "duplicate",
+			cfg: EmbeddingTrainRunConfig{
+				MatryoshkaDims: []int{2},
+				TurboQuantCompactObjectives: []TurboQuantPrefixObjective{
+					{Dim: 2, BitWidth: 2, Weight: 0.5},
+					{Dim: 2, BitWidth: 2, Weight: 0.25},
+				},
+			},
+		},
+		{
+			name: "invalid bit",
+			cfg: EmbeddingTrainRunConfig{
+				MatryoshkaDims: []int{2},
+				TurboQuantCompactObjectives: []TurboQuantPrefixObjective{
+					{Dim: 2, BitWidth: 9, Weight: 0.5},
+				},
+			},
+		},
+		{
+			name: "negative weight",
+			cfg: EmbeddingTrainRunConfig{
+				MatryoshkaDims: []int{2},
+				TurboQuantCompactObjectives: []TurboQuantPrefixObjective{
+					{Dim: 2, BitWidth: 2, Weight: -0.5},
+				},
+			},
+		},
+	} {
+		tt.cfg.Epochs = 1
+		tt.cfg.BatchSize = 2
+		tt.cfg.HardNegativeTrain = true
+		tt.cfg.HardNegativesPerQuery = 1
+		if _, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitHardNegatives(tinyEmbeddingHardNegativeDataset(), nil, tt.cfg); err == nil {
+			t.Fatalf("%s: expected invalid turboquant compact objectives error", tt.name)
+		}
+	}
+	if _, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitContrastive(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:         1,
+		BatchSize:      2,
+		MatryoshkaDims: []int{2},
+		TurboQuantCompactObjectives: []TurboQuantPrefixObjective{
+			{Dim: 2, BitWidth: 2, Weight: 0.5},
+		},
+	}); err == nil || !strings.Contains(err.Error(), "hard-negative training") {
+		t.Fatalf("compact objective without hard-negative training error = %v, want hard-negative requirement", err)
 	}
 	for _, tt := range []struct {
 		in   string
@@ -870,6 +996,121 @@ func TestEmbeddingTrainerFitHardNegativesClearTurboQuantPrefixAllowsRankMarginOn
 	}
 	if got := trainer.config.TurboQuantRankMarginObjectives; len(got) != 1 || got[0].Dim != 2 || got[0].BitWidth != 2 || got[0].Weight != 0.25 {
 		t.Fatalf("trainer rank-margin objectives = %+v, want 2:2=0.25", got)
+	}
+}
+
+func TestEmbeddingTrainerFitHardNegativesClearTurboQuantPrefixPreservesCompactSeed(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.005)
+	trainer.config.MatryoshkaDims = []int{2}
+	trainer.config.MatryoshkaWeights = []float32{1}
+	trainer.config.TurboQuantPrefixObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 4, Weight: 0.5}}
+	trainer.config.TurboQuantPrefixSeed = 123
+	trainer.config.TurboQuantPrefixScoreMode = TurboQuantPrefixScoreModePreparedIP
+
+	summary, err := trainer.FitHardNegatives(tinyEmbeddingHardNegativeDataset(), nil, EmbeddingTrainRunConfig{
+		Epochs:                    1,
+		BatchSize:                 2,
+		Shuffle:                   false,
+		ClearTurboQuantPrefix:     true,
+		HardNegativeTrain:         true,
+		HardNegativesPerQuery:     1,
+		TurboQuantPrefixSeed:      777,
+		TurboQuantPrefixScoreMode: TurboQuantPrefixScoreModePreparedIP,
+		TurboQuantCompactObjectives: []TurboQuantPrefixObjective{
+			{Dim: 2, BitWidth: 2, Weight: 0.25},
+		},
+	})
+	if err != nil {
+		t.Fatalf("fit hard negatives with clear prefix and compact objectives: %v", err)
+	}
+	if len(summary.Config.TurboQuantPrefixBits) != 0 || len(summary.Config.TurboQuantPrefixObjectives) != 0 {
+		t.Fatalf("summary prefix config = bits:%v objectives:%+v, want cleared", summary.Config.TurboQuantPrefixBits, summary.Config.TurboQuantPrefixObjectives)
+	}
+	if got := summary.Config.TurboQuantCompactObjectives; len(got) != 1 || got[0].Dim != 2 || got[0].BitWidth != 2 || got[0].Weight != 0.25 {
+		t.Fatalf("summary compact objectives = %+v, want 2:2=0.25", got)
+	}
+	if summary.Config.TurboQuantPrefixSeed != 777 || trainer.config.TurboQuantPrefixSeed != 777 {
+		t.Fatalf("compact seed summary/trainer = %d/%d, want 777/777", summary.Config.TurboQuantPrefixSeed, trainer.config.TurboQuantPrefixSeed)
+	}
+	if summary.Config.TurboQuantPrefixScoreMode != "" || trainer.config.TurboQuantPrefixScoreMode != "" {
+		t.Fatalf("compact-only score mode summary/trainer = %q/%q, want empty", summary.Config.TurboQuantPrefixScoreMode, trainer.config.TurboQuantPrefixScoreMode)
+	}
+}
+
+func TestEmbeddingTrainerFitHardNegativesClearTurboQuantRankMarginPreservesCompactSeed(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.005)
+	trainer.config.MatryoshkaDims = []int{2}
+	trainer.config.MatryoshkaWeights = []float32{1}
+	trainer.config.TurboQuantRankMarginObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 2, Weight: 0.25}}
+	trainer.config.TurboQuantRankMargin = 0.02
+	trainer.config.TurboQuantPrefixSeed = 123
+	trainer.config.TurboQuantPrefixScoreMode = TurboQuantPrefixScoreModePreparedIP
+
+	summary, err := trainer.FitHardNegatives(tinyEmbeddingHardNegativeDataset(), nil, EmbeddingTrainRunConfig{
+		Epochs:                    1,
+		BatchSize:                 2,
+		Shuffle:                   false,
+		ClearTurboQuantRankMargin: true,
+		HardNegativeTrain:         true,
+		HardNegativesPerQuery:     1,
+		TurboQuantPrefixSeed:      888,
+		TurboQuantPrefixScoreMode: TurboQuantPrefixScoreModePreparedIP,
+		TurboQuantCompactObjectives: []TurboQuantPrefixObjective{
+			{Dim: 2, BitWidth: 2, Weight: 0.25},
+		},
+	})
+	if err != nil {
+		t.Fatalf("fit hard negatives with clear rank-margin and compact objectives: %v", err)
+	}
+	if len(summary.Config.TurboQuantRankMarginObjectives) != 0 || trainer.config.TurboQuantRankMargin != 0 {
+		t.Fatalf("rank-margin summary/trainer = %+v/%f, want cleared", summary.Config.TurboQuantRankMarginObjectives, trainer.config.TurboQuantRankMargin)
+	}
+	if got := summary.Config.TurboQuantCompactObjectives; len(got) != 1 || got[0].Dim != 2 || got[0].BitWidth != 2 || got[0].Weight != 0.25 {
+		t.Fatalf("summary compact objectives = %+v, want 2:2=0.25", got)
+	}
+	if summary.Config.TurboQuantPrefixSeed != 888 || trainer.config.TurboQuantPrefixSeed != 888 {
+		t.Fatalf("compact seed summary/trainer = %d/%d, want 888/888", summary.Config.TurboQuantPrefixSeed, trainer.config.TurboQuantPrefixSeed)
+	}
+	if summary.Config.TurboQuantPrefixScoreMode != "" || trainer.config.TurboQuantPrefixScoreMode != "" {
+		t.Fatalf("compact-only score mode summary/trainer = %q/%q, want empty", summary.Config.TurboQuantPrefixScoreMode, trainer.config.TurboQuantPrefixScoreMode)
+	}
+}
+
+func TestEmbeddingTrainerFitHardNegativesTurboQuantCompactRunsAndTracksWork(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.005)
+	trainSet := tinyEmbeddingHardNegativeDataset()
+	summary, err := trainer.FitHardNegatives(trainSet, nil, EmbeddingTrainRunConfig{
+		Epochs:                1,
+		BatchSize:             2,
+		Shuffle:               false,
+		HardNegativeTrain:     true,
+		HardNegativesPerQuery: 1,
+		ContrastiveLoss:       "grouped_infonce",
+		MatryoshkaDims:        []int{2},
+		TurboQuantCompactObjectives: []TurboQuantPrefixObjective{
+			{Dim: 2, BitWidth: 2, Weight: 0.25},
+		},
+	})
+	if err != nil {
+		t.Fatalf("fit hard negatives with compact objective: %v", err)
+	}
+	if got := summary.Config.TurboQuantCompactObjectives; len(got) != 1 || got[0].Dim != 2 || got[0].BitWidth != 2 || got[0].Weight != 0.25 {
+		t.Fatalf("summary compact objectives = %+v, want 2:2=0.25", got)
+	}
+	if summary.Config.TurboQuantPrefixSeed != DefaultTurboQuantMultiVectorQuantizerSeed {
+		t.Fatalf("summary prefix seed = %d, want default %d", summary.Config.TurboQuantPrefixSeed, DefaultTurboQuantMultiVectorQuantizerSeed)
+	}
+	if summary.Config.TurboQuantPrefixScoreMode != "" {
+		t.Fatalf("summary prefix score mode = %q, want empty for compact-only prepared-IP objective", summary.Config.TurboQuantPrefixScoreMode)
+	}
+	if summary.FinalTrain.BatchSize != 8 {
+		t.Fatalf("final train batch size = %d, want base+compact pair count", summary.FinalTrain.BatchSize)
+	}
+	if summary.Workload.PlannedTrainPairs != 8 || summary.Workload.ActualTrainPairs != 8 {
+		t.Fatalf("train pairs planned/actual = %d/%d, want 8/8", summary.Workload.PlannedTrainPairs, summary.Workload.ActualTrainPairs)
+	}
+	if summary.FinalTrain.Loss < 0 || !finite32(summary.FinalTrain.Loss) {
+		t.Fatalf("final train loss = %f, want finite non-negative", summary.FinalTrain.Loss)
 	}
 }
 

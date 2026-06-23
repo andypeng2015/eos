@@ -131,6 +131,37 @@ func TestEmbeddingTrainManifestRoundTripTurboQuantRankMarginObjectives(t *testin
 	}
 }
 
+func TestEmbeddingTrainManifestRoundTripTurboQuantCompactObjectives(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tiny_train_embed_q8.train.mll")
+	want := EmbeddingTrainManifest{
+		Name:      "tiny_train_embed_q8",
+		Embedding: tinyMaskedEmbeddingManifest(),
+		Config: EmbeddingTrainConfig{
+			LearningRate:    0.05,
+			WeightBits:      8,
+			Optimizer:       "adamw",
+			ContrastiveLoss: "infonce",
+			Temperature:     0.05,
+			MatryoshkaDims:  []int{64, 128},
+			TurboQuantCompactObjectives: []TurboQuantPrefixObjective{
+				{Dim: 128, BitWidth: 4, Weight: 0.05},
+				{Dim: 64, BitWidth: 2, Weight: 0},
+			},
+			TurboQuantPrefixSeed: DefaultTurboQuantMultiVectorQuantizerSeed,
+		},
+	}
+	if err := want.WriteFile(path); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	got, err := ReadEmbeddingTrainManifestFile(path)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if formatted := FormatTurboQuantPrefixObjectives(got.Config.TurboQuantCompactObjectives); formatted != "64:2=0,128:4=0.05" {
+		t.Fatalf("turboquant compact objectives = %q", formatted)
+	}
+}
+
 func TestEmbeddingTrainManifestValidateModule(t *testing.T) {
 	src := []byte(`
 param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable

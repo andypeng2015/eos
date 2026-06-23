@@ -4847,6 +4847,7 @@ func runTrainEmbed(args []string) error {
 	var turboQuantPrefixWeight float64
 	var turboQuantPrefixSeed int64
 	var turboQuantPrefixScoreMode string
+	var turboQuantCompactObjectives string
 	var clearTurboQuantRankMargin bool
 	var turboQuantRankMarginObjectives string
 	var turboQuantRankMargin float64
@@ -4894,6 +4895,7 @@ func runTrainEmbed(args []string) error {
 	fs.Float64Var(&turboQuantPrefixWeight, "turboquant-prefix-weight", 0, "optional weight for each TurboQuant compact-prefix objective (default 1 when bits are set)")
 	fs.Int64Var(&turboQuantPrefixSeed, "turboquant-prefix-seed", 0, "TurboQuant compact-prefix quantizer seed (default matches multivector retrieval)")
 	fs.StringVar(&turboQuantPrefixScoreMode, "turboquant-prefix-score-mode", "", "TurboQuant compact-prefix score mode: reconstruct_cosine (default) or prepared_ip")
+	fs.StringVar(&turboQuantCompactObjectives, "turboquant-compact-objectives", "", "comma-separated hard-negative prepared-IP TurboQuant compact objectives as dim:bit=weight, for example 256:4=0.05")
 	fs.BoolVar(&clearTurboQuantRankMargin, "clear-turboquant-rank-margin", false, "clear inherited TurboQuant rank-margin objectives for continuation hard-negative training")
 	fs.StringVar(&turboQuantRankMarginObjectives, "turboquant-rank-margin-objectives", "", "comma-separated TurboQuant hard-negative rank-margin objectives as dim:bit=weight, for example 128:4=0.1")
 	fs.Float64Var(&turboQuantRankMargin, "turboquant-rank-margin", 0, "TurboQuant hard-negative rank-margin target (default 0.02 when objectives are enabled)")
@@ -4995,6 +4997,10 @@ func runTrainEmbed(args []string) error {
 	if len(parsedTurboQuantPrefixObjectives) > 0 && turboQuantPrefixWeight != 0 {
 		return fmt.Errorf("--turboquant-prefix-weight must not be set with --turboquant-prefix-objectives")
 	}
+	parsedTurboQuantCompactObjectives, parseErr := eosruntime.ParseTurboQuantPrefixObjectives(turboQuantCompactObjectives)
+	if parseErr != nil {
+		return fmt.Errorf("turboquant-compact-objectives: %w", parseErr)
+	}
 	parsedTurboQuantRankMarginObjectives, parseErr := eosruntime.ParseTurboQuantPrefixObjectives(turboQuantRankMarginObjectives)
 	if parseErr != nil {
 		return fmt.Errorf("turboquant-rank-margin-objectives: %w", parseErr)
@@ -5027,6 +5033,9 @@ func runTrainEmbed(args []string) error {
 	}
 	if len(parsedTurboQuantRankMarginObjectives) > 0 && !hardNegativeTrain {
 		return fmt.Errorf("--turboquant-rank-margin-objectives requires --hard-negative-train")
+	}
+	if len(parsedTurboQuantCompactObjectives) > 0 && !hardNegativeTrain {
+		return fmt.Errorf("--turboquant-compact-objectives requires --hard-negative-train")
 	}
 	path := fs.Arg(0)
 	trainPath := fs.Arg(1)
@@ -5077,6 +5086,7 @@ func runTrainEmbed(args []string) error {
 		TurboQuantPrefixWeight:         float32(turboQuantPrefixWeight),
 		TurboQuantPrefixSeed:           turboQuantPrefixSeed,
 		TurboQuantPrefixScoreMode:      parsedTurboQuantPrefixScoreMode,
+		TurboQuantCompactObjectives:    parsedTurboQuantCompactObjectives,
 		ClearTurboQuantRankMargin:      clearTurboQuantRankMargin,
 		TurboQuantRankMarginObjectives: parsedTurboQuantRankMarginObjectives,
 		TurboQuantRankMargin:           float32(turboQuantRankMargin),
@@ -5625,6 +5635,7 @@ func runTrainCorpus(args []string) error {
 	var turboQuantPrefixWeight float64
 	var turboQuantPrefixSeed int64
 	var turboQuantPrefixScoreMode string
+	var turboQuantCompactObjectives string
 	fs.IntVar(&epochs, "epochs", 10, "number of epochs")
 	fs.IntVar(&batchSize, "batch-size", 8, "batch size")
 	fs.BoolVar(&shuffle, "shuffle", true, "shuffle training set each epoch")
@@ -5660,6 +5671,7 @@ func runTrainCorpus(args []string) error {
 	fs.Float64Var(&turboQuantPrefixWeight, "turboquant-prefix-weight", 0, "optional weight for each TurboQuant compact-prefix objective (default 1 when bits are set)")
 	fs.Int64Var(&turboQuantPrefixSeed, "turboquant-prefix-seed", 0, "TurboQuant compact-prefix quantizer seed (default matches multivector retrieval)")
 	fs.StringVar(&turboQuantPrefixScoreMode, "turboquant-prefix-score-mode", "", "TurboQuant compact-prefix score mode: reconstruct_cosine (default) or prepared_ip")
+	fs.StringVar(&turboQuantCompactObjectives, "turboquant-compact-objectives", "", "comma-separated hard-negative prepared-IP TurboQuant compact objectives as dim:bit=weight, for example 256:4=0.05")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -5730,6 +5742,13 @@ func runTrainCorpus(args []string) error {
 	}
 	if len(parsedTurboQuantPrefixObjectives) > 0 && turboQuantPrefixWeight != 0 {
 		return fmt.Errorf("--turboquant-prefix-weight must not be set with --turboquant-prefix-objectives")
+	}
+	parsedTurboQuantCompactObjectives, parseErr := eosruntime.ParseTurboQuantPrefixObjectives(turboQuantCompactObjectives)
+	if parseErr != nil {
+		return fmt.Errorf("turboquant-compact-objectives: %w", parseErr)
+	}
+	if len(parsedTurboQuantCompactObjectives) > 0 {
+		return fmt.Errorf("--turboquant-compact-objectives requires --hard-negative-train")
 	}
 	parsedTurboQuantPrefixScoreMode := ""
 	if strings.TrimSpace(turboQuantPrefixScoreMode) != "" {
@@ -5894,6 +5913,7 @@ type trainRunConfigJSON struct {
 	TurboQuantPrefixWeight         float32                                `json:"turboquant_prefix_weight,omitempty"`
 	TurboQuantPrefixSeed           int64                                  `json:"turboquant_prefix_seed,omitempty"`
 	TurboQuantPrefixScoreMode      string                                 `json:"turboquant_prefix_score_mode,omitempty"`
+	TurboQuantCompactObjectives    []eosruntime.TurboQuantPrefixObjective `json:"turboquant_compact_objectives,omitempty"`
 	ClearTurboQuantRankMargin      bool                                   `json:"clear_turboquant_rank_margin,omitempty"`
 	TurboQuantRankMarginObjectives []eosruntime.TurboQuantPrefixObjective `json:"turboquant_rank_margin_objectives,omitempty"`
 	TurboQuantRankMargin           float32                                `json:"turboquant_rank_margin,omitempty"`
@@ -6072,6 +6092,7 @@ func trainRunConfigPayload(cfg eosruntime.EmbeddingTrainRunConfig) trainRunConfi
 		TurboQuantPrefixWeight:         cfg.TurboQuantPrefixWeight,
 		TurboQuantPrefixSeed:           cfg.TurboQuantPrefixSeed,
 		TurboQuantPrefixScoreMode:      cfg.TurboQuantPrefixScoreMode,
+		TurboQuantCompactObjectives:    cfg.TurboQuantCompactObjectives,
 		ClearTurboQuantRankMargin:      cfg.ClearTurboQuantRankMargin,
 		TurboQuantRankMarginObjectives: cfg.TurboQuantRankMarginObjectives,
 		TurboQuantRankMargin:           cfg.TurboQuantRankMargin,

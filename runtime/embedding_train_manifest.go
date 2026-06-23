@@ -130,6 +130,7 @@ func (m EmbeddingTrainManifest) mllValues() map[string]authoredManifestValue {
 		"config.turboquant_prefix_weight":          authoredFloat(float64(m.Config.TurboQuantPrefixWeight)),
 		"config.turboquant_prefix_seed":            authoredInt(m.Config.TurboQuantPrefixSeed),
 		"config.turboquant_prefix_score_mode":      authoredString(m.Config.TurboQuantPrefixScoreMode),
+		"config.turboquant_compact_objectives":     authoredString(FormatTurboQuantPrefixObjectives(m.Config.TurboQuantCompactObjectives)),
 		"config.turboquant_rank_margin_objectives": authoredString(FormatTurboQuantPrefixObjectives(m.Config.TurboQuantRankMarginObjectives)),
 		"config.turboquant_rank_margin":            authoredFloat(float64(m.Config.TurboQuantRankMargin)),
 	}
@@ -265,6 +266,15 @@ func embeddingTrainManifestFromDoc(doc authoredManifestDoc) (EmbeddingTrainManif
 			return EmbeddingTrainManifest{}, err
 		}
 		manifest.Config.TurboQuantPrefixScoreMode = mode
+	}
+	if value, ok, err := doc.string("config.turboquant_compact_objectives"); err != nil {
+		return EmbeddingTrainManifest{}, err
+	} else if ok {
+		objectives, err := ParseTurboQuantPrefixObjectives(value)
+		if err != nil {
+			return EmbeddingTrainManifest{}, err
+		}
+		manifest.Config.TurboQuantCompactObjectives = objectives
 	}
 	if value, ok, err := doc.string("config.turboquant_rank_margin_objectives"); err != nil {
 		return EmbeddingTrainManifest{}, err

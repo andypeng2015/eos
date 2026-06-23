@@ -47,6 +47,7 @@ type EmbeddingTrainConfig struct {
 	TurboQuantPrefixWeight         float32
 	TurboQuantPrefixSeed           int64
 	TurboQuantPrefixScoreMode      string
+	TurboQuantCompactObjectives    []TurboQuantPrefixObjective
 	TurboQuantRankMarginObjectives []TurboQuantPrefixObjective
 	TurboQuantRankMargin           float32
 }
@@ -1388,15 +1389,16 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 	pairCount := hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, t.config.ContrastiveLoss) + teacherPairCount
 	prefixLoss, prefixScore, prefixPairs := accumulateMatryoshkaHardNegativeGrads(queries, candidates, targetIndexes, candidateSpans, t.config, queryGrads, candidateGrads)
 	turboPrefixLoss, turboPrefixScore, turboPrefixPairs := accumulateTurboQuantPrefixHardNegativeGrads(queries, candidates, targetIndexes, candidateSpans, t.config, queryGrads, candidateGrads)
+	compactLoss, compactScore, compactPairs := accumulateTurboQuantCompactHardNegativeGrads(queries, candidates, candidateSpans, teacherScores, t.config, queryGrads, candidateGrads)
 	rankLoss, rankScore, rankPairs := accumulateTurboQuantRankMarginHardNegativeGrads(queries, candidates, candidateSpans, teacherScores, t.config, queryGrads, candidateGrads)
-	if prefixPairs+turboPrefixPairs+rankPairs > 0 {
-		weightSum := matryoshkaWeightSum(t.config.MatryoshkaWeights) + turboQuantPrefixWeightSum(t.config) + turboQuantRankMarginWeightSum(t.config)
+	if prefixPairs+turboPrefixPairs+compactPairs+rankPairs > 0 {
+		weightSum := matryoshkaWeightSum(t.config.MatryoshkaWeights) + turboQuantPrefixWeightSum(t.config) + turboQuantCompactWeightSum(t.config) + turboQuantRankMarginWeightSum(t.config)
 		objectiveScale := float32(1) / (1 + weightSum)
 		scaleEmbeddingGradBuffers(queryGrads, objectiveScale)
 		scaleEmbeddingGradBuffers(candidateGrads, objectiveScale)
-		totalLoss = totalLoss*objectiveScale + (prefixLoss+turboPrefixLoss+rankLoss)*objectiveScale
-		totalScore += prefixScore + turboPrefixScore + rankScore
-		pairCount += prefixPairs + turboPrefixPairs + rankPairs
+		totalLoss = totalLoss*objectiveScale + (prefixLoss+turboPrefixLoss+compactLoss+rankLoss)*objectiveScale
+		totalScore += prefixScore + turboPrefixScore + compactScore + rankScore
+		pairCount += prefixPairs + turboPrefixPairs + compactPairs + rankPairs
 	}
 	if !t.tryBackpropContrastiveBatch(
 		queries,
@@ -3877,6 +3879,106 @@ func accumulateTurboQuantRankMarginHardNegativeGrads(queries, candidates []*embe
 	return totalLoss, totalScore, pairCount
 }
 
+func accumulateTurboQuantCompactHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, teacherScores [][]float32, cfg EmbeddingTrainConfig, queryGrads, candidateGrads [][]float32) (float32, float32, int) {
+	objectives := turboQuantCompactObjectivesForConfig(cfg)
+	if len(objectives) == 0 {
+		return 0, 0, 0
+	}
+	seed := effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	pairCount := 0
+	for _, objective := range objectives {
+		if objective.Weight <= 0 {
+			continue
+		}
+		dimQueryGrads := newEmbeddingPooledGradBuffers(queries)
+		dimCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
+		loss, score, pairs := accumulateTurboQuantPreparedIPCompactHardNegativeGrads(queries, candidates, candidateSpans, teacherScores, objective.Dim, objective.BitWidth, seed, cfg.Temperature, cfg.TeacherTemperature, dimQueryGrads, dimCandidateGrads)
+		addScaledEmbeddingGradBuffers(queryGrads, dimQueryGrads, objective.Weight)
+		addScaledEmbeddingGradBuffers(candidateGrads, dimCandidateGrads, objective.Weight)
+		totalLoss += loss * objective.Weight
+		totalScore += score
+		pairCount += pairs
+	}
+	return totalLoss, totalScore, pairCount
+}
+
+func accumulateTurboQuantPreparedIPCompactHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, teacherScores [][]float32, dim, bitWidth int, seed int64, modelTemperature, teacherTemperature float32, queryGrads, candidateGrads [][]float32) (float32, float32, int) {
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	pairCount := 0
+	if dim <= 0 {
+		return 0, 0, 0
+	}
+	if modelTemperature <= 0 {
+		modelTemperature = 0.05
+	}
+	if teacherTemperature <= 0 {
+		teacherTemperature = 1
+	}
+	queryMatrix := newTurboQuantPreparedPrefixMatrix(queries, dim, bitWidth, seed, true)
+	candidateMatrix := newTurboQuantPreparedPrefixMatrix(candidates, dim, bitWidth, seed, false)
+	if queryMatrix.width == 0 || candidateMatrix.width != queryMatrix.width {
+		return 0, 0, 0
+	}
+	maxCandidates := 0
+	for i := range queries {
+		span := groupedCandidateSpan(candidateSpans, i, len(candidates))
+		if n := span.End - span.Start; n > maxCandidates {
+			maxCandidates = n
+		}
+	}
+	if maxCandidates < 2 {
+		return 0, 0, 0
+	}
+	q := turboquant.NewIPWithSeed(dim, bitWidth, seed)
+	modelScores := make([]float32, maxCandidates)
+	modelProbs := make([]float32, maxCandidates)
+	teacherProbs := make([]float32, maxCandidates)
+	for i := range queries {
+		span := groupedCandidateSpan(candidateSpans, i, len(candidates))
+		count := span.End - span.Start
+		if count < 2 {
+			continue
+		}
+		scores := modelScores[:count]
+		for j := span.Start; j < span.End; j++ {
+			local := j - span.Start
+			score := q.InnerProductPrepared(candidateMatrix.quantized[j], queryMatrix.prepared[i])
+			scores[local] = score
+			totalScore += score
+		}
+		model := modelProbs[:count]
+		softmaxScoresInto(scores, modelTemperature, model)
+		target := teacherProbs[:count]
+		useTeacher := i < len(teacherScores) && len(teacherScores[i]) == count
+		if useTeacher {
+			softmaxScoresInto(teacherScores[i], teacherTemperature, target)
+		}
+		queryRaw := queryMatrix.rawRow(i)
+		queryNormalized := queryMatrix.normalizedRow(i)
+		for local, prob := range model {
+			targetProb := float32(0)
+			if useTeacher {
+				targetProb = target[local]
+			} else if local == 0 {
+				targetProb = 1
+			}
+			if prob < 1e-12 {
+				prob = 1e-12
+			}
+			totalLoss -= targetProb * float32(math.Log(float64(prob)))
+			j := span.Start + local
+			scale := (model[local] - targetProb) / modelTemperature
+			accumulateNormalizedPrefixSTEGrad(queryRaw, queryNormalized, queryMatrix.rawNorms[i], candidateMatrix.dequantizedRow(j), scale, queryGrads[i])
+			accumulateNormalizedPrefixSTEGrad(candidateMatrix.rawRow(j), candidateMatrix.normalizedRow(j), candidateMatrix.rawNorms[j], queryNormalized, scale, candidateGrads[j])
+		}
+		pairCount += count
+	}
+	return totalLoss, totalScore, pairCount
+}
+
 func accumulateTurboQuantRankMarginReconstructCosineHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, teacherScores [][]float32, dim, bitWidth int, seed int64, margin float32, queryGrads, candidateGrads [][]float32) (float32, float32, int) {
 	totalLoss := float32(0)
 	totalScore := float32(0)
@@ -4985,16 +5087,21 @@ func normalizedTrainConfig(cfg EmbeddingTrainConfig, params ...eosartifact.Param
 	if objectives, err := normalizeTurboQuantPrefixObjectives(cfg.TurboQuantRankMarginObjectives, cfg.MatryoshkaDims, 0); err == nil {
 		cfg.TurboQuantRankMarginObjectives = objectives
 	}
+	if objectives, err := normalizeTurboQuantPrefixObjectives(cfg.TurboQuantCompactObjectives, cfg.MatryoshkaDims, 0); err == nil {
+		cfg.TurboQuantCompactObjectives = objectives
+	}
 	if len(cfg.TurboQuantRankMarginObjectives) > 0 && cfg.TurboQuantRankMargin == 0 {
 		cfg.TurboQuantRankMargin = effectiveTurboQuantRankMargin(cfg.TurboQuantRankMargin)
 	}
-	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 || len(cfg.TurboQuantRankMarginObjectives) > 0 {
+	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 || len(cfg.TurboQuantCompactObjectives) > 0 || len(cfg.TurboQuantRankMarginObjectives) > 0 {
 		if cfg.TurboQuantPrefixWeight == 0 {
 			if len(cfg.TurboQuantPrefixBits) > 0 {
 				cfg.TurboQuantPrefixWeight = 1
 			}
 		}
 		cfg.TurboQuantPrefixSeed = effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
+	}
+	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 || len(cfg.TurboQuantRankMarginObjectives) > 0 {
 		if mode, err := normalizeTurboQuantPrefixScoreMode(cfg.TurboQuantPrefixScoreMode); err == nil {
 			cfg.TurboQuantPrefixScoreMode = mode
 		}
@@ -5024,6 +5131,11 @@ func normalizeMatryoshkaTrainConfig(cfg EmbeddingTrainConfig, embeddingDim int) 
 		return cfg, err
 	}
 	cfg.TurboQuantRankMarginObjectives = rankObjectives
+	compactObjectives, err := normalizeTurboQuantPrefixObjectives(cfg.TurboQuantCompactObjectives, cfg.MatryoshkaDims, embeddingDim)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.TurboQuantCompactObjectives = compactObjectives
 	if len(cfg.TurboQuantPrefixBits) > 0 && len(cfg.TurboQuantPrefixObjectives) > 0 {
 		return cfg, fmt.Errorf("turboquant_prefix_objectives is mutually exclusive with turboquant_prefix_bits")
 	}
@@ -5033,13 +5145,15 @@ func normalizeMatryoshkaTrainConfig(cfg EmbeddingTrainConfig, embeddingDim int) 
 	if len(cfg.TurboQuantRankMarginObjectives) > 0 && cfg.TurboQuantRankMargin == 0 {
 		cfg.TurboQuantRankMargin = effectiveTurboQuantRankMargin(cfg.TurboQuantRankMargin)
 	}
-	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 || len(cfg.TurboQuantRankMarginObjectives) > 0 {
+	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 || len(cfg.TurboQuantCompactObjectives) > 0 || len(cfg.TurboQuantRankMarginObjectives) > 0 {
 		if cfg.TurboQuantPrefixWeight == 0 {
 			if len(cfg.TurboQuantPrefixBits) > 0 {
 				cfg.TurboQuantPrefixWeight = 1
 			}
 		}
 		cfg.TurboQuantPrefixSeed = effectiveTurboQuantPrefixSeed(cfg.TurboQuantPrefixSeed)
+	}
+	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 || len(cfg.TurboQuantRankMarginObjectives) > 0 {
 		mode, err := normalizeTurboQuantPrefixScoreMode(cfg.TurboQuantPrefixScoreMode)
 		if err != nil {
 			return cfg, err
@@ -5311,6 +5425,13 @@ func turboQuantRankMarginObjectivesForConfig(cfg EmbeddingTrainConfig) []TurboQu
 	return append([]TurboQuantPrefixObjective(nil), cfg.TurboQuantRankMarginObjectives...)
 }
 
+func turboQuantCompactObjectivesForConfig(cfg EmbeddingTrainConfig) []TurboQuantPrefixObjective {
+	if len(cfg.TurboQuantCompactObjectives) == 0 {
+		return nil
+	}
+	return append([]TurboQuantPrefixObjective(nil), cfg.TurboQuantCompactObjectives...)
+}
+
 func effectiveTurboQuantRankMargin(margin float32) float32 {
 	if margin == 0 {
 		return 0.02
@@ -5372,6 +5493,16 @@ func turboQuantPrefixWeightSum(cfg EmbeddingTrainConfig) float32 {
 func turboQuantRankMarginWeightSum(cfg EmbeddingTrainConfig) float32 {
 	sum := float32(0)
 	for _, objective := range turboQuantRankMarginObjectivesForConfig(cfg) {
+		if objective.Weight > 0 {
+			sum += objective.Weight
+		}
+	}
+	return sum
+}
+
+func turboQuantCompactWeightSum(cfg EmbeddingTrainConfig) float32 {
+	sum := float32(0)
+	for _, objective := range turboQuantCompactObjectivesForConfig(cfg) {
 		if objective.Weight > 0 {
 			sum += objective.Weight
 		}
@@ -5474,6 +5605,14 @@ func validateTrainConfig(cfg EmbeddingTrainConfig) error {
 			return fmt.Errorf("turboquant_rank_margin must be finite and non-negative")
 		}
 		if _, err := normalizeTurboQuantPrefixScoreMode(cfg.TurboQuantPrefixScoreMode); err != nil {
+			return err
+		}
+	}
+	if len(cfg.TurboQuantCompactObjectives) > 0 {
+		if _, err := normalizeTurboQuantPrefixObjectives(cfg.TurboQuantCompactObjectives, cfg.MatryoshkaDims, 0); err != nil {
+			return err
+		}
+		if _, err := normalizeTurboQuantPrefixScoreMode(TurboQuantPrefixScoreModePreparedIP); err != nil {
 			return err
 		}
 	}
