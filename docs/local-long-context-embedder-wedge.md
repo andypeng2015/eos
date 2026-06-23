@@ -65,6 +65,8 @@ Long-context baselines:
 
 Every baseline run must record model id, revision/version, dimensions, max tokens, precision, chunking policy, pooling policy, and index settings.
 
+Current promoted-package retarget evidence is still diagnostic, but the package-sidecar path now works on an official LongEmbed-derived task. Run `runs/eos-current-default-retarget-official-longembed-v1-qmsum-20260623T063632Z/` rewrote the promoted narrow package sidecars into a QMSum doc20/query20 capped run, exported token-span vectors, and consumed max observed document tokens `4096` with mean observed document tokens `4057.25`. All rows are `quality_claim=false`, recall@100 saturated at `1.0`, and 2WikiMultihopQA was not rerun in this slice. QMSum nDCG@10 rows: Eos direct `0.517955842`, Eos token-span dense `0.547133297`, Eos token-span q4 `0.567516406`, best Eos fusion `0.540547745`, Qwen3 q4 `0.848162307`, and mxbai q4 `0.828480363`. This proves retargeted promoted-package sidecars and capped long-token consumption, not product-quality LongEmbed performance; Qwen3 and mxbai q4 remain far ahead.
+
 ## Model Path
 
 ### Stage A: Eos Embed V1 Reliable Baseline
