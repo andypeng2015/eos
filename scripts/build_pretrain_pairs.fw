@@ -19,6 +19,7 @@ package main
 // Process-doc lane:
 //   EOS_PRETRAIN_BEIR=0 \
 //   EOS_PROCESS_PRETRAIN=1 \
+//   EOS_PROCESS_PRETRAIN_SYNTHETIC_QUERIES=1 \
 //   EOS_PROCESS_PRETRAIN_MAX_DOCS=16 \
 //   EOS_PRETRAIN_OUT=$PWD/datasets/eos-embed-v1/processed/process-pretrain-smoke.jsonl \
 //     ferrous-wheel run scripts/build_pretrain_pairs.fw
@@ -282,6 +283,139 @@ func processQuery(chunk processChunk) string {
 	return fmt.Sprintf("process guidance in %s part %d", chunk.RelPath, chunk.Index+1)
 }
 
+func trimWords(text string, maxWords int) string {
+	words := strings.Fields(strings.TrimSpace(text))
+	if len(words) <= maxWords {
+		return strings.Join(words, " ")
+	}
+	return strings.Join(words[:maxWords], " ")
+}
+
+func processPathTopic(relPath string) string {
+	base := strings.TrimSuffix(filepath.Base(relPath), filepath.Ext(relPath))
+	if strings.EqualFold(base, "SKILL") {
+		parent := filepath.Base(filepath.Dir(relPath))
+		if parent != "." && parent != "/" {
+			base = parent
+		}
+	}
+	base = strings.ReplaceAll(base, "_", " ")
+	base = strings.ReplaceAll(base, "-", " ")
+	base = strings.ReplaceAll(base, ".", " ")
+	base = strings.TrimSpace(strings.Join(strings.Fields(base), " "))
+	if base == "" {
+		return relPath
+	}
+	return base
+}
+
+func cleanTopicToken(token string) string {
+	token = strings.Trim(token, "`*_#[](){}<>:;,.!?\"'")
+	token = strings.ReplaceAll(token, "/", " ")
+	token = strings.ReplaceAll(token, "_", " ")
+	token = strings.ReplaceAll(token, "-", " ")
+	return strings.TrimSpace(token)
+}
+
+func isProcessStopword(token string) bool {
+	switch token {
+	case "about", "action", "actions", "after", "again", "agent", "agents", "also", "ambient", "and", "any", "arbiter", "are", "because", "been", "before", "being", "blocker", "blockers", "budget", "build", "candidate", "candidates", "can", "caveat", "caveats", "checkpoint", "checkpoints", "codex", "code", "command", "commands", "compact", "contract", "data", "descriptor", "distillation", "docs", "does", "dont", "each", "eos", "exact", "file", "files", "final", "for", "from", "has", "have", "how", "include", "inspected", "into", "its", "keep", "late", "ledger", "local", "logs", "make", "may", "must", "needed", "next", "not", "only", "outcome", "output", "parent", "path", "paths", "process", "recommended", "report", "reports", "results", "risk", "root", "run", "runs", "script", "set", "should", "snapshot", "stale", "state", "status", "summarize", "summary", "than", "that", "the", "their", "then", "there", "these", "this", "tiller", "token", "tokens", "unless", "update", "usage", "use", "used", "useful", "uses", "using", "verification", "when", "where", "which", "with", "work", "would", "write", "you", "your":
+		return true
+	}
+	return false
+}
+
+func extractHeadingTopic(text string) string {
+	parts := strings.Split(text, "#")
+	for _, part := range parts[1:] {
+		candidateWords := []string{}
+		for _, raw := range strings.Fields(part) {
+			word := strings.Trim(raw, "`*_[](){}<>:;,.!?\"'")
+			if word == "" {
+				continue
+			}
+			candidateWords = append(candidateWords, word)
+			if len(candidateWords) >= 8 {
+				break
+			}
+		}
+		candidate := strings.TrimSpace(strings.Join(candidateWords, " "))
+		if candidate != "" && len(candidate) <= 96 {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func extractTermTopic(text string) string {
+	counts := map[string]int{}
+	order := []string{}
+	for _, raw := range strings.Fields(text) {
+		cleaned := strings.ToLower(cleanTopicToken(raw))
+		for _, token := range strings.Fields(cleaned) {
+			if len(token) < 4 || isProcessStopword(token) {
+				continue
+			}
+			if _, ok := counts[token]; !ok {
+				order = append(order, token)
+			}
+			counts[token]++
+		}
+	}
+	best := ""
+	bestCount := 0
+	for _, token := range order {
+		count := counts[token]
+		if count < 2 || len(token) < 8 {
+			continue
+		}
+		if count > bestCount {
+			best = token
+			bestCount = count
+		}
+	}
+	return best
+}
+
+func syntheticProcessQuery(chunk processChunk) (string, string) {
+	pathTopic := processPathTopic(chunk.RelPath)
+	heading := extractHeadingTopic(chunk.Text)
+	termTopic := extractTermTopic(chunk.Text)
+	switch chunk.Index % 3 {
+	case 0:
+		topic := pathTopic
+		if heading != "" {
+			topic = heading
+		}
+		return fmt.Sprintf("Where is %s described in the Eos process?", trimWords(topic, 10)), "heading"
+	case 1:
+		topic := pathTopic
+		if termTopic != "" {
+			topic = termTopic
+		} else if heading != "" {
+			topic = heading
+		}
+		return fmt.Sprintf("Which process document explains %s?", trimWords(topic, 10)), "topic"
+	default:
+		return fmt.Sprintf("How do I follow the %s process guidance?", trimWords(pathTopic, 10)), "path"
+	}
+}
+
+func validProcessRow(row pretrainRow) bool {
+	if strings.TrimSpace(row.Query) == "" || strings.TrimSpace(row.Positive) == "" {
+		return false
+	}
+	if strings.TrimSpace(row.Query) == strings.TrimSpace(row.Positive) {
+		return false
+	}
+	for _, neg := range row.Negatives {
+		if strings.TrimSpace(neg) == "" || strings.TrimSpace(neg) == strings.TrimSpace(row.Positive) {
+			return false
+		}
+	}
+	return len(row.Negatives) > 0
+}
+
 func sanitizeID(value string) string {
 	value = strings.ToLower(value)
 	var b strings.Builder
@@ -319,6 +453,26 @@ func pickRandomOtherProcessChunk(chunks []processChunk, excludeIdx int, rng *ran
 	return chunks[j].Text
 }
 
+func pickDistinctProcessChunk(chunks []processChunk, excludeIdx int, rng *rand.Rand) string {
+	if len(chunks) <= 1 {
+		return ""
+	}
+	excludedText := strings.TrimSpace(chunks[excludeIdx].Text)
+	for attempts := 0; attempts < 8; attempts++ {
+		j := rng.Intn(len(chunks))
+		if j != excludeIdx && strings.TrimSpace(chunks[j].Text) != excludedText {
+			return chunks[j].Text
+		}
+	}
+	for offset := 1; offset < len(chunks); offset++ {
+		j := (excludeIdx + offset) % len(chunks)
+		if strings.TrimSpace(chunks[j].Text) != excludedText {
+			return chunks[j].Text
+		}
+	}
+	return ""
+}
+
 func emitProcessRows(root string, enc *json.Encoder, rng *rand.Rand) (int, int, error) {
 	docs := collectProcessDocs(root)
 	fmt.Println(f"[process] {len(docs)} docs")
@@ -341,22 +495,40 @@ func emitProcessRows(root string, enc *json.Encoder, rng *rand.Rand) (int, int, 
 	if len(chunks) < 2 {
 		return len(docs), 0, nil
 	}
+	syntheticQueries := envEnabled("EOS_PROCESS_PRETRAIN_SYNTHETIC_QUERIES")
+	rows := 0
 	for i, chunk := range chunks {
 		neg := pickRandomOtherProcessChunk(chunks, i, rng)
+		if syntheticQueries {
+			neg = pickDistinctProcessChunk(chunks, i, rng)
+		}
 		if neg == "" {
 			continue
 		}
+		query := processQuery(chunk)
+		source := "process:" + chunk.Category
+		groupID := fmt.Sprintf("process-%s-%d", sanitizeID(chunk.RelPath), chunk.Index)
+		if syntheticQueries {
+			kindQuery, kind := syntheticProcessQuery(chunk)
+			query = kindQuery
+			source = "process-query:" + kind
+			groupID = fmt.Sprintf("process-query-%s-%s-%d", kind, sanitizeID(chunk.RelPath), chunk.Index)
+		}
 		row := pretrainRow{
-			Query:     processQuery(chunk),
+			Query:     query,
 			Positive:  chunk.Text,
 			Negatives: []string{neg},
-			Source:    "process:" + chunk.Category,
-			GroupID:   fmt.Sprintf("process-%s-%d", sanitizeID(chunk.RelPath), chunk.Index),
+			Source:    source,
+			GroupID:   groupID,
+		}
+		if syntheticQueries && !validProcessRow(row) {
+			continue
 		}
 		err := enc.Encode(row)
-		guard err == nil else return len(docs), i, err
+		guard err == nil else return len(docs), rows, err
+		rows++
 	}
-	return len(docs), len(chunks), nil
+	return len(docs), rows, nil
 }
 
 // splitBody returns (firstHalf, secondHalf) of a body string, split at a

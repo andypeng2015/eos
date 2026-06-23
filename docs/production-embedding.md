@@ -77,6 +77,8 @@ ferrous-wheel run scripts/build_pretrain_pairs.fw
 
 `EOS_PROCESS_PRETRAIN_INCLUDE_DOCS=1` adds `docs/**/*.md`. Use `EOS_PROCESS_PRETRAIN_PATHS=path1,path2` for extra files or directories, `EOS_PROCESS_PRETRAIN_MAX_DOCS` and `EOS_PROCESS_PRETRAIN_MAX_ROWS` for bounded probes, and `EOS_PROCESS_PRETRAIN_CHUNK_WORDS` when the default `220`-word chunks are too large or small.
 
+Set `EOS_PROCESS_PRETRAIN_SYNTHETIC_QUERIES=1` with `EOS_PROCESS_PRETRAIN=1` to replace the generic `process guidance in <path>` queries with deterministic path-, heading-, and term-derived query-style rows such as `Where is <topic> described in the Eos process?`. These rows keep the same hard-negative JSONL shape and use `process-query:*` sources. Treat this as generated-data plumbing/proof until a downstream retrieval or training gate shows model-quality movement.
+
 A bounded end-to-end process-corpus smoke generated `12` process rows, trained through the hard-negative path with `optimizer_updates=42`, and completed a separate eval-only pass with `optimizer_updates=0`. Treat this as plumbing proof only, not a quality result.
 
 The shipping pipeline reads `/data/manta/datasets/eos-embed-v1/processed/pretrain-pairs.jsonl` when it builds `shipping-mixed-pretrain-plus-beir.jsonl`. If that file already exists, rebuild it with the command above before running:
