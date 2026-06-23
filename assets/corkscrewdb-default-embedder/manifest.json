@@ -248,15 +248,51 @@
     }
   },
   "dense_quality_next_lane_blocker": {
-    "status": "no_train_scorer_blocked",
+    "status": "no_train_teacher_quality_blocked",
     "run_dir": "runs/eos-narrow-default-reranker-teacher-frontier-audit-v1-20260623T065159Z",
     "report": ".tiller/scratch/codex/eos-narrow-default-reranker-teacher-frontier-audit-v1-report.md",
     "request_only": true,
     "train_allowed": false,
     "hard_negative_examples": 1188,
     "teacher_score_request_rows": 7066,
-    "reason": "Generated request-only NFCorpus train/dev frontier rows, but no local stronger cross-encoder or reranker query-document scorer was found; embedding/cosine and vector-cache teachers are not a substitute for this lane.",
-    "next_action": "Wire or acquire a true cross-encoder/reranker scorer, score the request manifest, import scores, and rerun positive-top1, margin, novelty, and leakage audits before any dense training."
+    "true_reranker_bridge": {
+      "status": "working",
+      "http_bridge": "cmd/teacher-bridge --mode tei-rerank",
+      "tei_image": "ghcr.io/huggingface/text-embeddings-inference:120-1.9",
+      "blackwell_rtx50_viable": true,
+      "endpoint": "TEI native /rerank",
+      "report": ".tiller/scratch/codex/eos-blackwell120-tei-reranker-probe-v1-report.md"
+    },
+    "subset64_true_reranker_audits": [
+      {
+        "model": "BAAI/bge-reranker-base",
+        "runtime": "ghcr.io/huggingface/text-embeddings-inference:cpu-1.9",
+        "positive_top1": 0.421875,
+        "kept_teacher_scores": "27/64",
+        "report": ".tiller/scratch/codex/eos-real-tei-reranker-score-audit-v1-report.md"
+      },
+      {
+        "model": "BAAI/bge-reranker-v2-m3",
+        "runtime": "ghcr.io/huggingface/text-embeddings-inference:120-1.9",
+        "positive_top1": 0.140625,
+        "kept_teacher_scores": "9/64",
+        "report": ".tiller/scratch/codex/eos-blackwell120-tei-reranker-probe-v1-report.md"
+      },
+      {
+        "model": "BAAI/bge-reranker-large",
+        "runtime": "ghcr.io/huggingface/text-embeddings-inference:120-1.9",
+        "positive_top1": 0.234375,
+        "kept_teacher_scores": "15/64",
+        "report": ".tiller/scratch/codex/eos-blackwell120-bge-large-subset-v1-report.md"
+      }
+    ],
+    "metadata_preservation": {
+      "status": "verified_subset64_after_a7482cc",
+      "report": ".tiller/scratch/codex/eos-tei-subset64-metadata-resmoke-v1-report.md"
+    },
+    "decision": "no_train",
+    "reason": "The local true-reranker scorer path is now unblocked, but tested BGE subset teachers are quality-negative or still request-only/no-train; embedding/cosine and vector-cache teachers remain non-substitutes for this reranker lane.",
+    "next_action": "Investigate label/teacher disagreement or test a different query-document teacher before full scoring or any dense training; require positive-top1, margin, novelty, and leakage gates to pass first."
   },
   "corkscrewdb_api_evidence": {
     "status": "narrow_default_main_local_flat_smoke",
@@ -420,7 +456,7 @@
     "Serving evidence is capped SciFact TurboQuant proxy evidence, not hosted parity or a full retrieval benchmark.",
     "Current CorkScrewDB API evidence in this manifest covers local-flat packed-parent, local HNSW/raw, and local SearchMulti BM25-dot hybrid smokes for the promoted narrow default only.",
     "Long-context rows are local harness/cache evidence with quality_claim=false; synthetic smoke is not product proof, capped repo-docs rows are not LongEmbed proof, and QMSum retarget rows are capped doc20/query20 sidecar-retarget evidence only.",
-    "Dense-quality reranker-teacher frontier is request-only and scorer-blocked; no model promotion or additional dense training is recommended until a true cross-encoder/reranker scorer is wired.",
+    "Dense-quality reranker-teacher frontier remains request-only/no-train: the Blackwell TEI true-reranker scorer path works with image 120-1.9, but tested BGE subset teachers failed quality gates.",
     "No CorkScrewDB remote mode, federation, native Matryoshka, hosted-model parity, or service SLO claim is implied."
   ]
 }
