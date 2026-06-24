@@ -954,8 +954,16 @@ func buildMaskedTokenInputs(batches [][]int32, padID int32, batched bool) (*back
 	maskData := make([]int32, 0, len(batches)*maxLen)
 	for _, batch := range batches {
 		tokenData = append(tokenData, batch...)
-		for range batch {
-			maskData = append(maskData, 1)
+		activeLen := len(batch)
+		for activeLen > 0 && batch[activeLen-1] == padID {
+			activeLen--
+		}
+		for i := range batch {
+			if i < activeLen {
+				maskData = append(maskData, 1)
+			} else {
+				maskData = append(maskData, 0)
+			}
 		}
 		for i := len(batch); i < maxLen; i++ {
 			tokenData = append(tokenData, padID)

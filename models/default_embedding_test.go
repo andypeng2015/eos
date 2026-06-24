@@ -1,12 +1,15 @@
 package models
 
 import (
+	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
 
 	eosartifact "m31labs.dev/eos/artifact/eos"
 	eosruntime "m31labs.dev/eos/runtime"
+	"m31labs.dev/eos/runtime/backends/vulkan"
 	mll "m31labs.dev/mll"
 )
 
@@ -113,6 +116,99 @@ func TestInitDefaultEmbeddingPackageQ4DeclaresQ4Params(t *testing.T) {
 	}
 }
 
+func TestDefaultEmbeddingPackageV2PackagedInferenceParity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "eos-embed-v2-generated.mll")
+	paths, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
+		Name:         "eos-embed-v2-generated",
+		VocabSize:    16,
+		MaxSequence:  8,
+		EmbeddingDim: 4,
+		HiddenDim:    8,
+		Seed:         7,
+	})
+	if err != nil {
+		t.Fatalf("init default embedding package: %v", err)
+	}
+
+	manifest, err := eosruntime.ReadEmbeddingManifestFile(paths.EmbeddingManifestPath)
+	if err != nil {
+		t.Fatalf("read embedding manifest: %v", err)
+	}
+	if manifest.AttentionMaskMode != eosruntime.EmbeddingAttentionMaskModeKey {
+		t.Fatalf("attention mask mode = %q, want %q", manifest.AttentionMaskMode, eosruntime.EmbeddingAttentionMaskModeKey)
+	}
+	if manifest.PositionEncoding != eosruntime.EmbeddingPositionEncodingRoPE {
+		t.Fatalf("position encoding = %q, want %q", manifest.PositionEncoding, eosruntime.EmbeddingPositionEncodingRoPE)
+	}
+
+	mod, err := eosartifact.ReadFile(paths.ArtifactPath)
+	if err != nil {
+		t.Fatalf("read artifact: %v", err)
+	}
+	if !moduleHasKernelOpForTest(mod, "masked_softmax") {
+		t.Fatal("generated v2 artifact is missing masked_softmax")
+	}
+	if !moduleHasKernelOpForTest(mod, "rope") {
+		t.Fatal("generated v2 artifact is missing rope")
+	}
+	if moduleRequiresCapabilityForTest(mod, eosartifact.CapabilityDeviceExecution) {
+		t.Fatalf("generated v2 artifact unexpectedly declares device-native serving capability: %v", mod.Requirements.Capabilities)
+	}
+
+	rt := eosruntime.New(vulkan.New())
+	model, err := rt.LoadEmbeddingPackage(context.Background(), path)
+	if err != nil {
+		t.Fatalf("load generated v2 embedding package: %v", err)
+	}
+	if got := model.Backend(); got == "" {
+		t.Fatal("expected selected backend")
+	}
+
+	base, err := model.Embed(context.Background(), []int32{4, 5})
+	if err != nil {
+		t.Fatalf("embed base: %v", err)
+	}
+	padded, err := model.Embed(context.Background(), []int32{4, 5, 0, 0})
+	if err != nil {
+		t.Fatalf("embed padded: %v", err)
+	}
+	assertEmbeddingCloseForTest(t, "right-padding", padded.Embeddings.F32, base.Embeddings.F32, 1e-5)
+
+	ordered, err := model.Embed(context.Background(), []int32{4, 5, 6})
+	if err != nil {
+		t.Fatalf("embed ordered: %v", err)
+	}
+	reordered, err := model.Embed(context.Background(), []int32{6, 5, 4})
+	if err != nil {
+		t.Fatalf("embed reordered: %v", err)
+	}
+	if maxAbs, l2 := embeddingDiffStatsForTest(ordered.Embeddings.F32, reordered.Embeddings.F32); maxAbs <= 1e-6 && l2 <= 1e-6 {
+		t.Fatalf("v2 packaged embed is not order-sensitive: max_abs=%.9g l2=%.9g ordered=%v reordered=%v", maxAbs, l2, ordered.Embeddings.F32, reordered.Embeddings.F32)
+	}
+
+	batches := [][]int32{
+		{4, 5, 0, 0},
+		{6, 7, 8, 0},
+		{9, 10, 11, 12},
+	}
+	batchResult, err := model.EmbedBatch(context.Background(), batches)
+	if err != nil {
+		t.Fatalf("embed batch: %v", err)
+	}
+	if got, want := batchResult.Embeddings.Shape, []int{len(batches), len(base.Embeddings.F32)}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("batch embedding shape = %v, want %v", got, want)
+	}
+	rowWidth := batchResult.Embeddings.Shape[1]
+	for i, tokens := range batches {
+		perExample, err := model.Embed(context.Background(), tokens)
+		if err != nil {
+			t.Fatalf("embed batch item %d: %v", i, err)
+		}
+		row := batchResult.Embeddings.F32[i*rowWidth : (i+1)*rowWidth]
+		assertEmbeddingCloseForTest(t, "batch row", row, perExample.Embeddings.F32, 1e-5)
+	}
+}
+
 func TestInitDefaultEmbeddingPackageRejectsUnknownWeightDType(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "eos-embed-v1.mll")
 	if _, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
@@ -124,6 +220,55 @@ func TestInitDefaultEmbeddingPackageRejectsUnknownWeightDType(t *testing.T) {
 	}); err == nil {
 		t.Fatal("expected weight dtype error")
 	}
+}
+
+func moduleHasKernelOpForTest(mod *eosartifact.Module, op string) bool {
+	if mod == nil {
+		return false
+	}
+	for _, kernel := range mod.Kernels {
+		for _, bodyOp := range kernel.Body {
+			if bodyOp.Op == op {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func moduleRequiresCapabilityForTest(mod *eosartifact.Module, capability string) bool {
+	if mod == nil {
+		return false
+	}
+	for _, got := range mod.Requirements.Capabilities {
+		if got == capability {
+			return true
+		}
+	}
+	return false
+}
+
+func assertEmbeddingCloseForTest(t *testing.T, label string, got, want []float32, tolerance float32) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s len = %d, want %d", label, len(got), len(want))
+	}
+	if maxAbs, l2 := embeddingDiffStatsForTest(got, want); maxAbs > tolerance || l2 > tolerance {
+		t.Fatalf("%s mismatch: max_abs=%.9g l2=%.9g got=%v want=%v", label, maxAbs, l2, got, want)
+	}
+}
+
+func embeddingDiffStatsForTest(a, b []float32) (float32, float32) {
+	maxAbs := float32(0)
+	sumSquares := float64(0)
+	for i := range a {
+		diff := float32(math.Abs(float64(a[i] - b[i])))
+		if diff > maxAbs {
+			maxAbs = diff
+		}
+		sumSquares += float64(diff * diff)
+	}
+	return maxAbs, float32(math.Sqrt(sumSquares))
 }
 
 func TestDefaultEmbeddingPackageQ4TrainsContrastive(t *testing.T) {
