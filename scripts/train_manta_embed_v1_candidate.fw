@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -284,9 +285,207 @@ func runCmd(cfg candidateConfig, label string, logName string, name string, args
 	cmd.Dir = cfg.Root
 	cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
 	cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
-	err = cmd.Run()
+	started := time.Now().UTC()
+	err = writeRunStatus(cfg, runStatus{
+		Label:          label,
+		LogPath:        logPath,
+		CmdPath:        cmdPath,
+		Command:        rendered,
+		State:          "starting",
+		StartedUTC:     started,
+		UpdatedUTC:     started,
+		HeartbeatCount: 0,
+	})
+	guard err == nil else return err
+	err = cmd.Start()
+	if err != nil {
+		updated := time.Now().UTC()
+		status := runStatus{
+			Label:          label,
+			LogPath:        logPath,
+			CmdPath:        cmdPath,
+			Command:        rendered,
+			State:          "failed",
+			StartedUTC:     started,
+			UpdatedUTC:     updated,
+			HeartbeatCount: 0,
+			ExitError:      err.Error(),
+			ExitCode:       -1,
+		}
+		status.captureLog(logPath)
+		status.ElapsedSeconds = int(updated.Sub(started).Seconds())
+		writeErr := writeRunStatus(cfg, status)
+		guard writeErr == nil else return writeErr
+		return fmt.Errorf("%s failed to start; see %s: %w", label, logPath, err)
+	}
+	pid := cmd.Process.Pid
+	err = writeRunStatus(cfg, runStatus{
+		Label:          label,
+		LogPath:        logPath,
+		CmdPath:        cmdPath,
+		Command:        rendered,
+		PID:            pid,
+		State:          "running",
+		StartedUTC:     started,
+		UpdatedUTC:     time.Now().UTC(),
+		HeartbeatCount: 0,
+	})
+	guard err == nil else return err
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+	heartbeatEvery := statusHeartbeatInterval()
+	heartbeatCount := 0
+	if heartbeatEvery > 0 {
+		for {
+			select {
+			case waitErr := <-done:
+				err = waitErr
+				goto finished
+			case <-time.After(heartbeatEvery):
+				heartbeatCount++
+				updated := time.Now().UTC()
+				status := runStatus{
+					Label:          label,
+					LogPath:        logPath,
+					CmdPath:        cmdPath,
+					Command:        rendered,
+					PID:            pid,
+					State:          "running",
+					StartedUTC:     started,
+					UpdatedUTC:     updated,
+					ElapsedSeconds: int(updated.Sub(started).Seconds()),
+					HeartbeatCount: heartbeatCount,
+				}
+				status.captureLog(logPath)
+				_ = writeRunStatus(cfg, status)
+			}
+		}
+	} else {
+		err = <-done
+	}
+finished:
+	updated := time.Now().UTC()
+	state := "completed"
+	exitError := ""
+	exitCode := 0
+	if err != nil {
+		state = "failed"
+		exitError = err.Error()
+		exitCode = commandExitCode(err)
+	}
+	status := runStatus{
+		Label:          label,
+		LogPath:        logPath,
+		CmdPath:        cmdPath,
+		Command:        rendered,
+		PID:            pid,
+		State:          state,
+		StartedUTC:     started,
+		UpdatedUTC:     updated,
+		ElapsedSeconds: int(updated.Sub(started).Seconds()),
+		HeartbeatCount: heartbeatCount,
+		ExitError:      exitError,
+		ExitCode:       exitCode,
+	}
+	status.captureLog(logPath)
+	writeErr := writeRunStatus(cfg, status)
+	guard writeErr == nil else return writeErr
 	guard err == nil else return fmt.Errorf("%s failed; see %s: %w", label, logPath, err)
 	return nil
+}
+
+type runStatus struct {
+	Label          string
+	LogPath        string
+	CmdPath        string
+	Command        string
+	PID            int
+	State          string
+	StartedUTC     time.Time
+	UpdatedUTC     time.Time
+	ElapsedSeconds int
+	HeartbeatCount int
+	LogSizeBytes   int64
+	LogModifiedUTC string
+	ExitError      string
+	ExitCode       int
+}
+
+func statusHeartbeatInterval() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("EOS_STATUS_EVERY_SECONDS"))
+	if raw == "" {
+		return 30 * time.Second
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds < 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func commandExitCode(err error) int {
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return exitErr.ExitCode()
+	}
+	return -1
+}
+
+func (status *runStatus) captureLog(logPath string) {
+	info, err := os.Stat(logPath)
+	if err != nil {
+		return
+	}
+	status.LogSizeBytes = info.Size()
+	status.LogModifiedUTC = info.ModTime().UTC().Format(time.RFC3339)
+}
+
+func writeRunStatus(cfg candidateConfig, status runStatus) error {
+	body := renderRunStatus(cfg, status)
+	err := os.WriteFile(filepath.Join(cfg.RunDir, "status.json"), []byte(body), 0o644)
+	guard err == nil else return err
+	f, err := os.OpenFile(filepath.Join(cfg.RunDir, "status.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	guard err == nil else return err
+	defer f.Close()
+	_, err = f.WriteString(body + "\n")
+	return err
+}
+
+func renderRunStatus(cfg candidateConfig, status runStatus) string {
+	started := status.StartedUTC.Format(time.RFC3339)
+	updated := status.UpdatedUTC.Format(time.RFC3339)
+	logModified := "null"
+	if status.LogModifiedUTC != "" {
+		logModified = jsonString(status.LogModifiedUTC)
+	}
+	exitError := "null"
+	if status.ExitError != "" {
+		exitError = jsonString(status.ExitError)
+	}
+	exitCode := "null"
+	if status.State == "completed" || status.State == "failed" {
+		exitCode = strconv.Itoa(status.ExitCode)
+	}
+	return fmt.Sprintf(`{"schema":"manta.embedding_candidate.run_status.v1","run_id":%s,"run_dir":%s,"phase":%s,"label":%s,"log_path":%s,"cmd_path":%s,"command":%s,"pid":%d,"state":%s,"started_utc":%s,"updated_utc":%s,"elapsed_seconds":%d,"heartbeat_count":%d,"log_size_bytes":%d,"log_modified_utc":%s,"exit_error":%s,"exit_code":%s}`,
+		jsonString(cfg.RunID),
+		jsonString(cfg.RunDir),
+		jsonString(status.Label),
+		jsonString(status.Label),
+		jsonString(status.LogPath),
+		jsonString(status.CmdPath),
+		jsonString(status.Command),
+		status.PID,
+		jsonString(status.State),
+		jsonString(started),
+		jsonString(updated),
+		status.ElapsedSeconds,
+		status.HeartbeatCount,
+		status.LogSizeBytes,
+		logModified,
+		exitError,
+		exitCode,
+	)
 }
 
 func hasAnyEnv(names []string) bool {
