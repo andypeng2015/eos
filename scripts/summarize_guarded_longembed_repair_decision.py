@@ -171,10 +171,12 @@ def compact_requirement_summary(plan: dict[str, Any]) -> dict[str, Any]:
 
 
 def decide(dense: dict[str, Any], compact: dict[str, Any]) -> str:
-    if not dense.get("provided") or not compact.get("provided"):
+    if not dense.get("provided"):
         return "pending"
     if not dense.get("accepted"):
         return "no_promote_dense_gate_failed"
+    if not compact.get("provided"):
+        return "pending"
     if not compact.get("accepted"):
         return "no_promote_compact_gate_failed"
     return "short_dense_and_compact_passed_needs_long_context_review"

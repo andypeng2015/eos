@@ -150,6 +150,23 @@ class SummarizeGuardedLongEmbedRepairDecisionTest(unittest.TestCase):
         self.assertFalse(summary["evidence_complete"])
         self.assertFalse(summary["compact_manifest"]["provided"])
 
+    def test_dense_rejected_without_compact_manifest_blocks_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary = summarizer.summarize_decision(
+                plan_json=write_json(root / "plan.json", plan()),
+                dense_manifest=write_json(
+                    root / "dense.manifest.json",
+                    manifest(gate_status="rejected", gate_exit_code=1, suffix="dense"),
+                ),
+                compact_manifest=None,
+            )
+
+        self.assertEqual(summary["decision"], "no_promote_dense_gate_failed")
+        self.assertFalse(summary["evidence_complete"])
+        self.assertFalse(summary["dense_manifest"]["accepted"])
+        self.assertFalse(summary["compact_manifest"]["provided"])
+
     def test_plan_quality_claim_true_or_wrong_schema_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
