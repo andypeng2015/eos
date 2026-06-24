@@ -1392,6 +1392,38 @@ func TestEmbeddingTrainerFitContrastiveReportsProgress(t *testing.T) {
 	}
 }
 
+func TestEmbeddingTrainerFitContrastiveReportsEvalProgress(t *testing.T) {
+	trainer := newTinyTrainableEmbeddingTrainer(t, 0.05)
+	evalSet := tinyEmbeddingContrastiveDataset()
+	var reports []EmbeddingTrainProgress
+
+	summary, err := trainer.FitContrastive(nil, evalSet, EmbeddingTrainRunConfig{
+		EvalOnly:           true,
+		ProgressEverySteps: 1,
+		Progress: func(progress EmbeddingTrainProgress) {
+			reports = append(reports, progress)
+		},
+	})
+	if err != nil {
+		t.Fatalf("fit contrastive eval-only: %v", err)
+	}
+	if len(reports) != 2 {
+		t.Fatalf("progress reports = %d, want 2", len(reports))
+	}
+	if reports[0].Phase != "eval_start" || reports[1].Phase != "eval_done" {
+		t.Fatalf("progress phases = %q, %q; want eval_start, eval_done", reports[0].Phase, reports[1].Phase)
+	}
+	if reports[1].EvalPass != summary.Workload.ActualEvalPasses {
+		t.Fatalf("eval pass = %d, want %d", reports[1].EvalPass, summary.Workload.ActualEvalPasses)
+	}
+	if reports[1].EvalExamples != summary.Workload.ActualEvalExamples || reports[1].EvalPairs != summary.Workload.ActualEvalPairs {
+		t.Fatalf("eval examples/pairs = %d/%d, want %d/%d", reports[1].EvalExamples, reports[1].EvalPairs, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs)
+	}
+	if reports[1].Elapsed <= 0 {
+		t.Fatalf("eval progress elapsed = %s, want > 0", reports[1].Elapsed)
+	}
+}
+
 func TestEmbeddingTrainerFitContrastiveEvalOnlyDoesNotTrain(t *testing.T) {
 	trainer := newTinyTrainableEmbeddingTrainer(t, 0.05)
 	evalSet := tinyEmbeddingContrastiveDataset()

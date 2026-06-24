@@ -5451,6 +5451,13 @@ func runTrainEmbed(args []string) error {
 		}
 		return nil
 	}
+	if progressEvery > 0 {
+		mode := "train"
+		if evalOnly {
+			mode = "eval"
+		}
+		fmt.Printf("progress: phase=fit_start mode=%s artifact=%q train=%q eval=%q tokenizer=%q progress_every=%d\n", mode, path, trainPath, evalPath, tokenizerPath, progressEvery)
+	}
 	var (
 		summary eosruntime.EmbeddingTrainRunSummary
 		paths   eosruntime.EmbeddingTrainPackagePaths
@@ -5878,12 +5885,30 @@ func formatTrainThroughput(summary eosruntime.EmbeddingTrainRunSummary) string {
 }
 
 func printTrainProgress(progress eosruntime.EmbeddingTrainProgress) {
+	phase := progress.Phase
+	if phase == "" {
+		phase = "train"
+	}
+	if phase == "eval_start" || phase == "eval_done" {
+		fmt.Printf(
+			"progress: phase=%s epoch=%d step=%d eval_pass=%d eval_examples=%d eval_pairs=%d elapsed=%s\n",
+			phase,
+			progress.Epoch,
+			progress.Step,
+			progress.EvalPass,
+			progress.EvalExamples,
+			progress.EvalPairs,
+			progress.Elapsed.Round(time.Millisecond),
+		)
+		return
+	}
 	epochPairs := fmt.Sprintf("%d", progress.EpochTrainPairs)
 	if progress.PlannedEpochPairs > 0 {
 		epochPairs = fmt.Sprintf("%d/%d", progress.EpochTrainPairs, progress.PlannedEpochPairs)
 	}
 	fmt.Printf(
-		"progress: epoch=%d batch=%d/%d step=%d loss=%.6f avg_score=%.6f batch_examples=%d batch_pairs=%d epoch_examples=%d epoch_pairs=%s elapsed=%s\n",
+		"progress: phase=%s epoch=%d batch=%d/%d step=%d loss=%.6f avg_score=%.6f batch_examples=%d batch_pairs=%d epoch_examples=%d epoch_pairs=%s elapsed=%s\n",
+		phase,
 		progress.Epoch,
 		progress.Batch,
 		progress.Batches,

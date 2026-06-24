@@ -74,15 +74,19 @@ type EmbeddingTrainProgressFunc func(EmbeddingTrainProgress)
 
 // EmbeddingTrainProgress reports one completed optimizer step.
 type EmbeddingTrainProgress struct {
+	Phase              string
 	Epoch              int
 	Batch              int
 	Batches            int
 	Step               int
+	EvalPass           int
 	BatchExamples      int
 	BatchPairs         int64
 	EpochTrainExamples int64
 	EpochTrainPairs    int64
 	PlannedEpochPairs  int64
+	EvalExamples       int64
+	EvalPairs          int64
 	Loss               float32
 	AverageScore       float32
 	Elapsed            time.Duration
@@ -215,6 +219,7 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 	}
 	if cfg.EvalOnly {
 		evalStart := time.Now()
+		maybeReportEvalProgress(cfg, "eval_start", 0, t.step, 1, int64(len(evalSet)), int64(len(evalSet)), runStart)
 		finalEval, err := t.EvaluatePairs(evalSet)
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("eval: %w", err)
@@ -228,6 +233,7 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 		summary.Workload.ActualEvalPasses = 1
 		summary.Workload.ActualEvalPairs = int64(len(evalSet))
 		summary.Workload.ActualEvalExamples = int64(len(evalSet))
+		maybeReportEvalProgress(cfg, "eval_done", 0, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
 		summary.EndProfile = t.TrainProfile()
 		summary.DeltaProfile = diffTrainProfile(summary.StartProfile, summary.EndProfile)
 		summary.Workload.ActualTotalPairs = summary.Workload.ActualEvalPairs
@@ -274,6 +280,8 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 
 		if len(evalSet) > 0 && epoch%cfg.EvalEveryEpoch == 0 {
 			evalStart := time.Now()
+			evalPass := summary.Workload.ActualEvalPasses + 1
+			maybeReportEvalProgress(cfg, "eval_start", epoch, t.step, evalPass, int64(len(evalSet)), int64(len(evalSet)), runStart)
 			evalMetrics, err := t.EvaluatePairs(evalSet)
 			if err != nil {
 				return EmbeddingTrainRunSummary{}, fmt.Errorf("epoch %d eval: %w", epoch, err)
@@ -284,6 +292,7 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 			summary.Workload.ActualEvalExamples += int64(len(evalSet))
 			record.Eval = cloneEvalMetrics(evalMetrics)
 			summary.LastEval = cloneEvalMetrics(evalMetrics)
+			maybeReportEvalProgress(cfg, "eval_done", epoch, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
 			if !haveBest || betterEvalMetrics(evalMetrics, *summary.BestEval, cfg.SelectMetric, cfg.MinDelta) {
 				bestCheckpoint, err = t.Checkpoint()
 				if err != nil {
@@ -323,6 +332,8 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 	}
 	if len(evalSet) > 0 {
 		evalStart := time.Now()
+		evalPass := summary.Workload.ActualEvalPasses + 1
+		maybeReportEvalProgress(cfg, "eval_start", summary.EpochsCompleted, t.step, evalPass, int64(len(evalSet)), int64(len(evalSet)), runStart)
 		finalEval, err := t.EvaluatePairs(evalSet)
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("final eval: %w", err)
@@ -332,6 +343,7 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 		summary.Workload.ActualEvalPairs += int64(len(evalSet))
 		summary.Workload.ActualEvalExamples += int64(len(evalSet))
 		summary.FinalEval = cloneEvalMetrics(finalEval)
+		maybeReportEvalProgress(cfg, "eval_done", summary.EpochsCompleted, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
 		if summary.BestEval == nil {
 			summary.BestEval = cloneEvalMetrics(finalEval)
 			if summary.BestEpoch == 0 {
@@ -428,6 +440,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 	}
 	if cfg.EvalOnly {
 		evalStart := time.Now()
+		maybeReportEvalProgress(cfg, "eval_start", 0, t.step, 1, int64(len(evalSet)), int64(len(evalSet)*len(evalSet)), runStart)
 		finalEval, err := t.EvaluateContrastive(evalSet)
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("eval: %w", err)
@@ -441,6 +454,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		summary.Workload.ActualEvalPasses = 1
 		summary.Workload.ActualEvalPairs = int64(len(evalSet) * len(evalSet))
 		summary.Workload.ActualEvalExamples = int64(len(evalSet))
+		maybeReportEvalProgress(cfg, "eval_done", 0, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
 		summary.EndProfile = t.TrainProfile()
 		summary.DeltaProfile = diffTrainProfile(summary.StartProfile, summary.EndProfile)
 		summary.Workload.ActualTotalPairs = summary.Workload.ActualEvalPairs
@@ -480,6 +494,8 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 	hasEval := len(evalSet) > 0 || len(cfg.EvalPairs) > 0
 	recordEval := func(epoch int) (*EmbeddingEvalMetrics, bool, error) {
 		evalStart := time.Now()
+		evalPass := summary.Workload.ActualEvalPasses + 1
+		maybeReportEvalProgress(cfg, "eval_start", epoch, t.step, evalPass, evalExamplesPerPass(), evalPairsPerPass(), runStart)
 		evalMetrics, err := runEval()
 		if err != nil {
 			return nil, false, err
@@ -489,6 +505,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		summary.Workload.ActualEvalPairs += evalPairsPerPass()
 		summary.Workload.ActualEvalExamples += evalExamplesPerPass()
 		summary.LastEval = cloneEvalMetrics(evalMetrics)
+		maybeReportEvalProgress(cfg, "eval_done", epoch, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
 		improved := false
 		if !haveBest || betterEvalMetrics(evalMetrics, *summary.BestEval, cfg.SelectMetric, cfg.MinDelta) {
 			bestCheckpoint, err = t.Checkpoint()
@@ -584,6 +601,8 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 	}
 	if hasEval {
 		evalStart := time.Now()
+		evalPass := summary.Workload.ActualEvalPasses + 1
+		maybeReportEvalProgress(cfg, "eval_start", summary.EpochsCompleted, t.step, evalPass, evalExamplesPerPass(), evalPairsPerPass(), runStart)
 		finalEval, err := runEval()
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("final eval: %w", err)
@@ -593,6 +612,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		summary.Workload.ActualEvalPairs += evalPairsPerPass()
 		summary.Workload.ActualEvalExamples += evalExamplesPerPass()
 		summary.FinalEval = cloneEvalMetrics(finalEval)
+		maybeReportEvalProgress(cfg, "eval_done", summary.EpochsCompleted, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
 		if summary.BestEval == nil {
 			summary.BestEval = cloneEvalMetrics(finalEval)
 			if summary.BestEpoch == 0 {
@@ -683,6 +703,7 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 	}
 	if cfg.EvalOnly {
 		evalStart := time.Now()
+		maybeReportEvalProgress(cfg, "eval_start", 0, t.step, 1, int64(len(evalSet)), int64(len(evalSet)), runStart)
 		finalEval, err := t.EvaluatePairs(evalSet)
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("eval: %w", err)
@@ -696,6 +717,7 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 		summary.Workload.ActualEvalPasses = 1
 		summary.Workload.ActualEvalPairs = int64(len(evalSet))
 		summary.Workload.ActualEvalExamples = int64(len(evalSet))
+		maybeReportEvalProgress(cfg, "eval_done", 0, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
 		summary.EndProfile = t.TrainProfile()
 		summary.DeltaProfile = diffTrainProfile(summary.StartProfile, summary.EndProfile)
 		summary.Workload.ActualTotalPairs = summary.Workload.ActualEvalPairs
@@ -716,6 +738,8 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 	)
 	recordEval := func(epoch int) (*EmbeddingEvalMetrics, bool, error) {
 		evalStart := time.Now()
+		evalPass := summary.Workload.ActualEvalPasses + 1
+		maybeReportEvalProgress(cfg, "eval_start", epoch, t.step, evalPass, int64(len(evalSet)), int64(len(evalSet)), runStart)
 		evalMetrics, err := t.EvaluatePairs(evalSet)
 		if err != nil {
 			return nil, false, err
@@ -725,6 +749,7 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 		summary.Workload.ActualEvalPairs += int64(len(evalSet))
 		summary.Workload.ActualEvalExamples += int64(len(evalSet))
 		summary.LastEval = cloneEvalMetrics(evalMetrics)
+		maybeReportEvalProgress(cfg, "eval_done", epoch, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
 		improved := false
 		if !haveBest || betterEvalMetrics(evalMetrics, *summary.BestEval, cfg.SelectMetric, cfg.MinDelta) {
 			bestCheckpoint, err = t.Checkpoint()
@@ -820,6 +845,8 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 	}
 	if len(evalSet) > 0 {
 		evalStart := time.Now()
+		evalPass := summary.Workload.ActualEvalPasses + 1
+		maybeReportEvalProgress(cfg, "eval_start", summary.EpochsCompleted, t.step, evalPass, int64(len(evalSet)), int64(len(evalSet)), runStart)
 		finalEval, err := t.EvaluatePairs(evalSet)
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("final eval: %w", err)
@@ -829,6 +856,7 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 		summary.Workload.ActualEvalPairs += int64(len(evalSet))
 		summary.Workload.ActualEvalExamples += int64(len(evalSet))
 		summary.FinalEval = cloneEvalMetrics(finalEval)
+		maybeReportEvalProgress(cfg, "eval_done", summary.EpochsCompleted, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
 		if summary.BestEval == nil {
 			summary.BestEval = cloneEvalMetrics(finalEval)
 			if summary.BestEpoch == 0 {
@@ -1559,6 +1587,7 @@ func (t *EmbeddingTrainer) runEpoch(trainSet []EmbeddingPairExample, order []int
 		totalExamples += metrics.BatchSize
 		batchIndex++
 		maybeReportTrainProgress(cfg, EmbeddingTrainProgress{
+			Phase:              "train",
 			Epoch:              epoch,
 			Batch:              batchIndex,
 			Batches:            totalBatches,
@@ -1625,6 +1654,7 @@ func (t *EmbeddingTrainer) runContrastiveEpoch(trainSet []EmbeddingContrastiveEx
 			debug.FreeOSMemory()
 		}
 		progress := EmbeddingTrainProgress{
+			Phase:              "train",
 			Epoch:              epoch,
 			Batch:              batchIndex,
 			Batches:            totalBatches,
@@ -1712,6 +1742,7 @@ func (t *EmbeddingTrainer) runHardNegativeEpoch(trainSet []EmbeddingHardNegative
 			debug.FreeOSMemory()
 		}
 		progress := EmbeddingTrainProgress{
+			Phase:              "train",
 			Epoch:              epoch,
 			Batch:              batchIndex,
 			Batches:            totalBatches,
@@ -1766,7 +1797,25 @@ func maybeReportTrainProgress(cfg EmbeddingTrainRunConfig, progress EmbeddingTra
 	if progress.Batch%cfg.ProgressEverySteps != 0 && progress.Batch != progress.Batches {
 		return
 	}
+	if progress.Phase == "" {
+		progress.Phase = "train"
+	}
 	cfg.Progress(progress)
+}
+
+func maybeReportEvalProgress(cfg EmbeddingTrainRunConfig, phase string, epoch, step, evalPass int, evalExamples, evalPairs int64, runStart time.Time) {
+	if cfg.Progress == nil || cfg.ProgressEverySteps <= 0 {
+		return
+	}
+	cfg.Progress(EmbeddingTrainProgress{
+		Phase:        phase,
+		Epoch:        epoch,
+		Step:         step,
+		EvalPass:     evalPass,
+		EvalExamples: evalExamples,
+		EvalPairs:    evalPairs,
+		Elapsed:      time.Since(runStart),
+	})
 }
 
 func bucketContrastiveOrderByLength(trainSet []EmbeddingContrastiveExample, order []int, batchSize int) {

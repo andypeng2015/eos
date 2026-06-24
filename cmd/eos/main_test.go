@@ -4979,6 +4979,35 @@ func TestRunTrainEmbedPlanOnlyShowsWorkload(t *testing.T) {
 	}
 }
 
+func TestRunTrainEmbedProgressEveryPrintsInnerProgress(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	trainPath := filepath.Join(t.TempDir(), "train.jsonl")
+	examples := []eosruntime.EmbeddingContrastiveExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
+		{QueryTokens: []int32{3, 4}, PositiveTokens: []int32{3, 4}},
+		{QueryTokens: []int32{4, 5}, PositiveTokens: []int32{4, 5}},
+	}
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
+		t.Fatalf("write train dataset: %v", err)
+	}
+
+	output := captureRunOutput(t, []string{"train-embed", "--epochs", "1", "--batch-size", "2", "--progress-every", "1", path, trainPath})
+	for _, want := range []string{
+		"progress: phase=fit_start mode=train",
+		"progress: phase=train epoch=1 batch=1/2",
+		"batch_examples=2",
+		"epoch_pairs=4/",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("progress output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
 func TestRunTrainEmbedEvalOnlyUsesSingleContrastiveDataset(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {

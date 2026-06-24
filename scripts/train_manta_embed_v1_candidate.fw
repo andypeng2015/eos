@@ -956,7 +956,7 @@ func prepareConfig(root string) (candidateConfig, error) {
 		MinChars:            getenv("EOS_MIN_CHARS", "20"),
 		MaxPairs:            getenv("EOS_MAX_PAIRS", "0"),
 		EvalPairs:           getenv("EOS_EVAL_PAIRS", "512"),
-		ProgressEvery:       getenv("EOS_PROGRESS_EVERY", "0"),
+		ProgressEvery:       getenv("EOS_PROGRESS_EVERY", "100"),
 		LengthBucketBatches: getenv("EOS_LENGTH_BUCKET_BATCHES", "1"),
 		ActivationAccel:     getenv("EOS_TRAIN_ENABLE_ACTIVATION_ACCEL", "1"),
 		FastGELU:            getenv("EOS_TRAIN_ENABLE_FAST_GELU", "1"),
