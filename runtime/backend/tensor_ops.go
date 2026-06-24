@@ -603,6 +603,16 @@ func executeKernelOp(op eosartifact.KernelOp, locals map[string]*Tensor) (*Tenso
 			return nil, err
 		}
 		return softmaxRows(in), nil
+	case "masked_softmax":
+		in, err := tensorByName(locals, op.Inputs, 0)
+		if err != nil {
+			return nil, err
+		}
+		mask, err := tensorByName(locals, op.Inputs, 1)
+		if err != nil {
+			return nil, err
+		}
+		return maskedSoftmaxRows(in, mask)
 	case "gelu":
 		in, err := tensorByName(locals, op.Inputs, 0)
 		if err != nil {
@@ -1403,6 +1413,83 @@ func softmaxRows(in *Tensor) *Tensor {
 	return out
 }
 
+func maskedSoftmaxRows(in, mask *Tensor) (*Tensor, error) {
+	if in == nil {
+		return nil, fmt.Errorf("nil masked_softmax input")
+	}
+	if mask == nil {
+		return nil, fmt.Errorf("nil masked_softmax mask")
+	}
+	if mask.DType != "i32" {
+		return nil, fmt.Errorf("masked_softmax mask dtype %q is not supported", mask.DType)
+	}
+	out := in.Clone()
+	switch len(in.Shape) {
+	case 2:
+		if len(mask.Shape) != 1 || mask.Shape[0] != in.Shape[1] {
+			return nil, fmt.Errorf("masked_softmax mask shape %v does not match input %v", mask.Shape, in.Shape)
+		}
+		maskedSoftmaxRowsF32(out.F32, in.F32, in.Shape[0], in.Shape[1], func(_ int, col int) bool {
+			return mask.I32[col] != 0
+		})
+		return out, nil
+	case 3:
+		if len(mask.Shape) != 2 || mask.Shape[0] != in.Shape[0] || mask.Shape[1] != in.Shape[2] {
+			return nil, fmt.Errorf("masked_softmax mask shape %v does not match input %v", mask.Shape, in.Shape)
+		}
+		queryRows, cols := in.Shape[1], in.Shape[2]
+		maskedSoftmaxRowsF32(out.F32, in.F32, in.Shape[0]*queryRows, cols, func(row int, col int) bool {
+			batch := row / queryRows
+			return mask.I32[batch*cols+col] != 0
+		})
+		return out, nil
+	default:
+		return nil, fmt.Errorf("masked_softmax expects rank-2 or rank-3 tensor input")
+	}
+}
+
+func maskedSoftmaxRowsF32(out, in []float32, rows, cols int, active func(row, col int) bool) {
+	for r := 0; r < rows; r++ {
+		base := r * cols
+		maxV := float32(math.Inf(-1))
+		anyActive := false
+		for c := 0; c < cols; c++ {
+			if !active(r, c) {
+				continue
+			}
+			if !anyActive || in[base+c] > maxV {
+				maxV = in[base+c]
+			}
+			anyActive = true
+		}
+		if !anyActive {
+			for c := 0; c < cols; c++ {
+				out[base+c] = 0
+			}
+			continue
+		}
+		sum := float64(0)
+		for c := 0; c < cols; c++ {
+			if !active(r, c) {
+				out[base+c] = 0
+				continue
+			}
+			ev := math.Exp(float64(in[base+c] - maxV))
+			out[base+c] = float32(ev)
+			sum += ev
+		}
+		if sum == 0 {
+			continue
+		}
+		inv := float32(1 / sum)
+		for c := 0; c < cols; c++ {
+			if active(r, c) {
+				out[base+c] *= inv
+			}
+		}
+	}
+}
+
 func geluTensor(in *Tensor) *Tensor {
 	out := in.Clone()
 	for i, x := range in.F32 {
@@ -1415,13 +1502,24 @@ func geluTensor(in *Tensor) *Tensor {
 
 func ropeRows(in *Tensor) *Tensor {
 	out := in.Clone()
-	if len(in.Shape) != 2 {
+	if len(in.Shape) != 2 && len(in.Shape) != 3 {
 		return out
 	}
-	rows, cols := in.Shape[0], in.Shape[1]
+	rows, cols := in.Shape[0], in.Shape[len(in.Shape)-1]
+	if len(in.Shape) == 3 {
+		rows = in.Shape[0] * in.Shape[1]
+	}
+	seqRows := rows
+	if len(in.Shape) == 3 {
+		seqRows = in.Shape[1]
+	}
 	for r := 0; r < rows; r++ {
+		pos := r
+		if len(in.Shape) == 3 {
+			pos = r % seqRows
+		}
 		for c := 0; c+1 < cols; c += 2 {
-			theta := float64(r) / math.Pow(10000, float64(c)/float64(cols))
+			theta := float64(pos) / math.Pow(10000, float64(c)/float64(cols))
 			cosTheta := float32(math.Cos(theta))
 			sinTheta := float32(math.Sin(theta))
 			x0 := in.F32[r*cols+c]

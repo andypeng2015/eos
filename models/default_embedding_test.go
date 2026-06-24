@@ -46,6 +46,12 @@ func TestInitDefaultEmbeddingPackageCreatesTrainablePackage(t *testing.T) {
 	if manifest.EncoderRepeats != 2 {
 		t.Fatalf("encoder repeats = %d, want 2", manifest.EncoderRepeats)
 	}
+	if manifest.AttentionMaskMode != eosruntime.EmbeddingAttentionMaskModeKey {
+		t.Fatalf("attention mask mode = %q, want %q", manifest.AttentionMaskMode, eosruntime.EmbeddingAttentionMaskModeKey)
+	}
+	if manifest.PositionEncoding != eosruntime.EmbeddingPositionEncodingRoPE {
+		t.Fatalf("position encoding = %q, want %q", manifest.PositionEncoding, eosruntime.EmbeddingPositionEncodingRoPE)
+	}
 	if manifest.Tokenizer.VocabSize != 16 || manifest.Tokenizer.MaxSequence != 8 {
 		t.Fatalf("unexpected tokenizer contract: %+v", manifest.Tokenizer)
 	}

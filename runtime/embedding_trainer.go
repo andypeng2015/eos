@@ -1221,11 +1221,11 @@ func (t *EmbeddingTrainer) TrainContrastiveStep(batch []EmbeddingContrastiveExam
 	) {
 		for i, query := range queries {
 			inputGrad := t.backpropEncodedSequence(query, queryGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
-			accumulateTokenGrad(query.tokens, inputGrad, gradToken, t.tokenEmbed.Shape[1], t.tokenEmbed.Shape[0])
+			t.accumulateInputTokenGrad(query.tokens, inputGrad, gradToken)
 		}
 		for i, positive := range positives {
 			inputGrad := t.backpropEncodedSequence(positive, positiveGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
-			accumulateTokenGrad(positive.tokens, inputGrad, gradToken, t.tokenEmbed.Shape[1], t.tokenEmbed.Shape[0])
+			t.accumulateInputTokenGrad(positive.tokens, inputGrad, gradToken)
 		}
 	}
 
@@ -1421,11 +1421,11 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 	) {
 		for i, query := range queries {
 			inputGrad := t.backpropEncodedSequence(query, queryGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
-			accumulateTokenGrad(query.tokens, inputGrad, gradToken, t.tokenEmbed.Shape[1], t.tokenEmbed.Shape[0])
+			t.accumulateInputTokenGrad(query.tokens, inputGrad, gradToken)
 		}
 		for i, candidate := range candidates {
 			inputGrad := t.backpropEncodedSequence(candidate, candidateGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
-			accumulateTokenGrad(candidate.tokens, inputGrad, gradToken, t.tokenEmbed.Shape[1], t.tokenEmbed.Shape[0])
+			t.accumulateInputTokenGrad(candidate.tokens, inputGrad, gradToken)
 		}
 	}
 
@@ -1715,8 +1715,8 @@ func (t *EmbeddingTrainer) runBatch(batch []EmbeddingPairExample, update bool) (
 		}
 		leftInputGrad := t.backpropEncodedSequence(left, gradLeft, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
 		rightInputGrad := t.backpropEncodedSequence(right, gradRight, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
-		accumulateTokenGrad(left.tokens, leftInputGrad, gradToken, t.tokenEmbed.Shape[1], t.tokenEmbed.Shape[0])
-		accumulateTokenGrad(right.tokens, rightInputGrad, gradToken, t.tokenEmbed.Shape[1], t.tokenEmbed.Shape[0])
+		t.accumulateInputTokenGrad(left.tokens, leftInputGrad, gradToken)
+		t.accumulateInputTokenGrad(right.tokens, rightInputGrad, gradToken)
 		t.releaseEncodedSequenceBindings(left)
 		t.releaseEncodedSequenceBindings(right)
 	}
@@ -1807,11 +1807,11 @@ func (t *EmbeddingTrainer) tryRunPairBatchBatched(batch []EmbeddingPairExample, 
 		) {
 			for i, left := range lefts {
 				inputGrad := t.backpropEncodedSequence(left, leftGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
-				accumulateTokenGrad(left.tokens, inputGrad, gradToken, t.tokenEmbed.Shape[1], t.tokenEmbed.Shape[0])
+				t.accumulateInputTokenGrad(left.tokens, inputGrad, gradToken)
 			}
 			for i, right := range rights {
 				inputGrad := t.backpropEncodedSequence(right, rightGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
-				accumulateTokenGrad(right.tokens, inputGrad, gradToken, t.tokenEmbed.Shape[1], t.tokenEmbed.Shape[0])
+				t.accumulateInputTokenGrad(right.tokens, inputGrad, gradToken)
 			}
 		}
 
@@ -2316,6 +2316,9 @@ func (t *EmbeddingTrainer) newEmbeddingBatchSequence(tokens, mask []int32, token
 	if err != nil {
 		return nil, err
 	}
+	if err := applyEmbeddingPositionEncoding(input, len(tokens), tokenEmbed.Shape[1], t.manifest.PositionEncoding); err != nil {
+		return nil, err
+	}
 	encoded := &embeddingEncodedSequence{
 		layers: make([]*embeddingSequenceState, 0, t.encoderRepeats()),
 		tokens: append([]int32(nil), tokens...),
@@ -2424,7 +2427,7 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 					fillHostMatMul(state.attnQ, seqLen, d, kt, seqLen, state.attnScores)
 				}
 			}
-			softmaxRowsInPlace(state.attnScores, seqLen, seqLen)
+			softmaxAttentionScoresInPlace(state.attnScores, seqLen, state.mask, t.manifest.AttentionMaskMode)
 			if captureBindings {
 				state.attnScoresBinding = t.bindSequenceTensor(state, "scores", tensorF32View([]int{seqLen, seqLen}, state.attnScores), true, t.softmaxBackwardAccelEnabled() && bindSoftmaxActivation)
 			}
@@ -4420,6 +4423,9 @@ func (t *EmbeddingTrainer) encodeSequence(tokens, mask []int32, tokenEmbed, atte
 	if err != nil {
 		return nil, err
 	}
+	if err := applyEmbeddingPositionEncoding(input, len(tokens), tokenEmbed.Shape[1], t.manifest.PositionEncoding); err != nil {
+		return nil, err
+	}
 	encoded := &embeddingEncodedSequence{
 		layers: make([]*embeddingSequenceState, 0, t.encoderRepeats()),
 		pooled: nil,
@@ -4504,7 +4510,7 @@ func (t *EmbeddingTrainer) encodeLayer(tokens, mask []int32, input []float32, at
 			kt := transpose2DData(state.attnK, len(tokens), d)
 			fillHostMatMul(state.attnQ, len(tokens), d, kt, len(tokens), state.attnScores)
 		}
-		softmaxRowsInPlace(state.attnScores, len(tokens), len(tokens))
+		softmaxAttentionScoresInPlace(state.attnScores, len(tokens), mask, t.manifest.AttentionMaskMode)
 		if captureBindings {
 			state.attnScoresBinding = t.bindSequenceTensor(state, "scores", tensorF32View([]int{len(tokens), len(tokens)}, state.attnScores), true, t.softmaxBackwardAccelEnabled())
 		}
@@ -4651,6 +4657,54 @@ func embeddingInputForTokens(tokenEmbed *backend.Tensor, tokens []int32) ([]floa
 		copy(input[row*d:(row+1)*d], tokenEmbed.F32[int(tok)*d:(int(tok)+1)*d])
 	}
 	return input, nil
+}
+
+func applyEmbeddingPositionEncoding(input []float32, rows, width int, mode string) error {
+	switch mode {
+	case "", EmbeddingPositionEncodingNone:
+		return nil
+	case EmbeddingPositionEncodingRoPE:
+		applyRoPEToRowsInPlace(input, rows, width)
+		return nil
+	default:
+		return fmt.Errorf("unsupported position_encoding %q", mode)
+	}
+}
+
+func applyRoPEToRowsInPlace(data []float32, rows, cols int) {
+	if rows <= 0 || cols <= 1 {
+		return
+	}
+	for row := 0; row < rows; row++ {
+		base := row * cols
+		for col := 0; col+1 < cols; col += 2 {
+			theta := float64(row) / math.Pow(10000, float64(col)/float64(cols))
+			cosTheta := float32(math.Cos(theta))
+			sinTheta := float32(math.Sin(theta))
+			x0 := data[base+col]
+			x1 := data[base+col+1]
+			data[base+col] = x0*cosTheta - x1*sinTheta
+			data[base+col+1] = x0*sinTheta + x1*cosTheta
+		}
+	}
+}
+
+func applyRoPETransposeToRowsInPlace(data []float32, rows, cols int) {
+	if rows <= 0 || cols <= 1 {
+		return
+	}
+	for row := 0; row < rows; row++ {
+		base := row * cols
+		for col := 0; col+1 < cols; col += 2 {
+			theta := float64(row) / math.Pow(10000, float64(col)/float64(cols))
+			cosTheta := float32(math.Cos(theta))
+			sinTheta := float32(math.Sin(theta))
+			x0 := data[base+col]
+			x1 := data[base+col+1]
+			data[base+col] = x0*cosTheta + x1*sinTheta
+			data[base+col+1] = -x0*sinTheta + x1*cosTheta
+		}
+	}
 }
 
 func newEmbeddingSequenceState(tokens, mask []int32, input []float32, hiddenProjection, projection *backend.Tensor) (*embeddingSequenceState, error) {
@@ -6061,7 +6115,7 @@ func (t *EmbeddingTrainer) tryBackpropContrastiveBatch(queries, positives []*emb
 		}
 	}
 	for i := range items {
-		accumulateTokenGrad(items[i].seq.tokens, items[i].gradProjected, gradToken, d, t.tokenEmbed.Shape[0])
+		t.accumulateInputTokenGrad(items[i].seq.tokens, items[i].gradProjected, gradToken)
 	}
 	return true
 }
@@ -6941,6 +6995,22 @@ func (t *EmbeddingTrainer) backpropAttentionSequence(state *embeddingSequenceSta
 	return gradInput
 }
 
+func (t *EmbeddingTrainer) accumulateInputTokenGrad(tokens []int32, gradInput, gradToken []float32) {
+	if t == nil || t.tokenEmbed == nil || len(t.tokenEmbed.Shape) != 2 {
+		return
+	}
+	d := t.tokenEmbed.Shape[1]
+	vocab := t.tokenEmbed.Shape[0]
+	if d == 0 || vocab == 0 {
+		return
+	}
+	if t.manifest.PositionEncoding == EmbeddingPositionEncodingRoPE {
+		gradInput = append([]float32(nil), gradInput...)
+		applyRoPETransposeToRowsInPlace(gradInput, len(tokens), d)
+	}
+	accumulateTokenGrad(tokens, gradInput, gradToken, d, vocab)
+}
+
 func accumulateTokenGrad(tokens []int32, gradInput, gradToken []float32, d, vocab int) {
 	if d == 0 || vocab == 0 {
 		return
@@ -6967,6 +7037,15 @@ func backwardSoftmaxRow(dX, dOut, probs []float32) {
 	}
 }
 
+func softmaxAttentionScoresInPlace(data []float32, seqLen int, mask []int32, mode string) {
+	switch mode {
+	case EmbeddingAttentionMaskModeKey:
+		softmaxRowsMaskedColumnsInPlace(data, seqLen, seqLen, mask)
+	default:
+		softmaxRowsInPlace(data, seqLen, seqLen)
+	}
+}
+
 func transpose2DData(data []float32, rows, cols int) []float32 {
 	out := make([]float32, rows*cols)
 	for r := 0; r < rows; r++ {
@@ -6975,6 +7054,52 @@ func transpose2DData(data []float32, rows, cols int) []float32 {
 		}
 	}
 	return out
+}
+
+func softmaxRowsMaskedColumnsInPlace(data []float32, rows, cols int, mask []int32) {
+	if len(mask) != cols {
+		softmaxRowsInPlace(data, rows, cols)
+		return
+	}
+	for row := 0; row < rows; row++ {
+		base := row * cols
+		maxVal := float32(math.Inf(-1))
+		active := false
+		for col := 0; col < cols; col++ {
+			if mask[col] == 0 {
+				continue
+			}
+			if !active || data[base+col] > maxVal {
+				maxVal = data[base+col]
+			}
+			active = true
+		}
+		if !active {
+			for col := 0; col < cols; col++ {
+				data[base+col] = 0
+			}
+			continue
+		}
+		sum := float32(0)
+		for col := 0; col < cols; col++ {
+			if mask[col] == 0 {
+				data[base+col] = 0
+				continue
+			}
+			value := float32(math.Exp(float64(data[base+col] - maxVal)))
+			data[base+col] = value
+			sum += value
+		}
+		if sum == 0 {
+			continue
+		}
+		inv := 1 / sum
+		for col := 0; col < cols; col++ {
+			if mask[col] != 0 {
+				data[base+col] *= inv
+			}
+		}
+	}
 }
 
 func softmaxRowsInPlace(data []float32, rows, cols int) {

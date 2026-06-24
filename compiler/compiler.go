@@ -509,7 +509,7 @@ param projection: %[1]s[H, D] @weight("weights/projection") @trainable
 
 pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[D] {
     let hidden_q = gather(token_embedding, tokens)
-    let hidden = dequant(hidden_q)
+    let hidden = rope(dequant(hidden_q))
     let wq_f = dequant(attn_q)
     let wk_f = dequant(attn_k)
     let wv_f = dequant(attn_v)
@@ -522,7 +522,7 @@ pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[D] {
     let v1 = @matmul(hidden, wv_f)
     let kt1 = transpose(k1)
     let scores1 = @matmul(q1, kt1)
-    let probs1 = softmax(scores1)
+    let probs1 = masked_softmax(scores1, attention_mask)
     let mixed1 = @matmul(probs1, v1)
     let attended1 = @matmul(mixed1, wo_f)
     let attn_hidden1 = layernorm(attended1 + hidden)
@@ -536,7 +536,7 @@ pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[D] {
     let v2 = @matmul(encoded1, wv_f)
     let kt2 = transpose(k2)
     let scores2 = @matmul(q2, kt2)
-    let probs2 = softmax(scores2)
+    let probs2 = masked_softmax(scores2, attention_mask)
     let mixed2 = @matmul(probs2, v2)
     let attended2 = @matmul(mixed2, wo_f)
     let attn_hidden2 = layernorm(attended2 + encoded1)
@@ -551,7 +551,7 @@ pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[D] {
 
 pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, D] {
     let hidden_q = gather(token_embedding, tokens)
-    let hidden = dequant(hidden_q)
+    let hidden = rope(dequant(hidden_q))
     let wq_f = dequant(attn_q)
     let wk_f = dequant(attn_k)
     let wv_f = dequant(attn_v)
@@ -564,7 +564,7 @@ pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16
     let v1 = @matmul(hidden, wv_f)
     let kt1 = transpose(k1)
     let scores1 = @matmul(q1, kt1)
-    let probs1 = softmax(scores1)
+    let probs1 = masked_softmax(scores1, attention_mask)
     let mixed1 = @matmul(probs1, v1)
     let attended1 = @matmul(mixed1, wo_f)
     let attn_hidden1 = layernorm(attended1 + hidden)
@@ -578,7 +578,7 @@ pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16
     let v2 = @matmul(encoded1, wv_f)
     let kt2 = transpose(k2)
     let scores2 = @matmul(q2, kt2)
-    let probs2 = softmax(scores2)
+    let probs2 = masked_softmax(scores2, attention_mask)
     let mixed2 = @matmul(probs2, v2)
     let attended2 = @matmul(mixed2, wo_f)
     let attn_hidden2 = layernorm(attended2 + encoded1)
@@ -1500,6 +1500,8 @@ func lowerOpKind(call *syntax.CallExpr, kernels map[string]bool) mir.OpKind {
 		return mir.OpTopK
 	case "softmax":
 		return mir.OpSoftmax
+	case "masked_softmax":
+		return mir.OpSoftmax
 	case "rope":
 		return mir.OpRoPE
 	case "mean_pool":
@@ -2295,8 +2297,11 @@ func inferExprType(expr syntax.Expr, env map[string]hir.Type) (hir.Type, error) 
 					},
 				}, nil
 			}
-		case "softmax", "rope", "normalize", "rmsnorm", "layernorm", "gelu":
+		case "softmax", "masked_softmax", "rope", "normalize", "rmsnorm", "layernorm", "gelu":
 			if len(argTypes) == 1 {
+				return argTypes[0], nil
+			}
+			if e.Callee == "masked_softmax" && len(argTypes) == 2 {
 				return argTypes[0], nil
 			}
 		case "kv_read":
@@ -2524,7 +2529,7 @@ func lowerKernelExpr(expr syntax.Expr, output string, kernels map[string]bool) (
 func kernelOpForCall(call *syntax.CallExpr, output string, kernels map[string]bool) lir.KernelOp {
 	kind := lir.KernelOpPointwise
 	switch call.Callee {
-	case "normalize", "rmsnorm", "layernorm", "softmax", "dot", "cosine", "l2_distance", "mean_pool":
+	case "normalize", "rmsnorm", "layernorm", "softmax", "masked_softmax", "dot", "cosine", "l2_distance", "mean_pool":
 		kind = lir.KernelOpReduce
 	case "rope", "dequant", "gather", "kv_read", "kv_write":
 		kind = lir.KernelOpBuiltin
@@ -2537,7 +2542,7 @@ func kernelOpForCall(call *syntax.CallExpr, output string, kernels map[string]bo
 	if call.Intrinsic {
 		attrs["intrinsic"] = "true"
 	}
-	if call.Callee == "softmax" {
+	if call.Callee == "softmax" || call.Callee == "masked_softmax" {
 		attrs["axis"] = "-1"
 	}
 	return lir.KernelOp{
@@ -2619,7 +2624,7 @@ func scheduleHintsForKernel(name string, ops []lir.KernelOp) lir.ScheduleHints {
 	}
 	for _, op := range ops {
 		switch op.Op {
-		case "softmax":
+		case "softmax", "masked_softmax":
 			hints.Tile = []int{64}
 			hints.VectorWidth = 1
 			hints.Subgroup = true

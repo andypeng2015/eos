@@ -2,6 +2,7 @@ package eosruntime
 
 import (
 	"context"
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1181,6 +1182,119 @@ func TestEmbeddingTrainerTrainStepSupportsRepeatedEncoderAndExportsQuantizedWeig
 	if !changed {
 		t.Fatal("expected repeated encoder train step to update projection weights")
 	}
+}
+
+func TestEmbeddingTrainerEncoderV2PaddingInvariantAndOrderSensitive(t *testing.T) {
+	trainer := newTinyTrainableRepeatedEncoderEmbeddingTrainer(t, 0.02)
+	trainer.manifest.Tokenizer.MaxSequence = 8
+	trainer.manifest.AttentionMaskMode = EmbeddingAttentionMaskModeKey
+	trainer.manifest.PositionEncoding = EmbeddingPositionEncodingRoPE
+
+	base := embedTrainerTokensForTest(t, trainer, []int32{0, 1}, []int32{1, 1})
+	padded := embedTrainerTokensForTest(t, trainer, []int32{0, 1, 2}, []int32{1, 1, 0})
+	padMaxAbs, padL2 := embeddingVectorDiffStats(base, padded)
+	if padMaxAbs > 1e-6 || padL2 > 1e-6 {
+		t.Fatalf("v2 padding changed embedding: max_abs=%.9g l2=%.9g base=%v padded=%v", padMaxAbs, padL2, base, padded)
+	}
+
+	ordered := embedTrainerTokensForTest(t, trainer, []int32{0, 1, 2}, []int32{1, 1, 1})
+	reordered := embedTrainerTokensForTest(t, trainer, []int32{2, 1, 0}, []int32{1, 1, 1})
+	orderMaxAbs, orderL2 := embeddingVectorDiffStats(ordered, reordered)
+	if orderMaxAbs <= 1e-5 && orderL2 <= 1e-5 {
+		t.Fatalf("v2 positional path is not order-sensitive: max_abs=%.9g l2=%.9g ordered=%v reordered=%v", orderMaxAbs, orderL2, ordered, reordered)
+	}
+}
+
+func TestEmbeddingTrainerRoPEBackwardRotatesTokenEmbeddingGradients(t *testing.T) {
+	trainer := &EmbeddingTrainer{
+		manifest:   EmbeddingManifest{PositionEncoding: EmbeddingPositionEncodingRoPE},
+		tokenEmbed: backend.NewTensorF32([]int{4, 4}, make([]float32, 16)),
+	}
+	tokens := []int32{1, 2, 1}
+	gradInput := []float32{
+		0.2, -0.4, 0.6, -0.8,
+		1.1, 0.7, -0.3, 0.9,
+		-0.5, 0.25, 1.5, -1.25,
+	}
+	originalGradInput := append([]float32(nil), gradInput...)
+	got := make([]float32, len(trainer.tokenEmbed.F32))
+	trainer.accumulateInputTokenGrad(tokens, gradInput, got)
+
+	rotatedRows := append([]float32(nil), gradInput...)
+	applyRoPETransposeToRowsInPlace(rotatedRows, len(tokens), trainer.tokenEmbed.Shape[1])
+	want := make([]float32, len(got))
+	accumulateTokenGrad(tokens, rotatedRows, want, trainer.tokenEmbed.Shape[1], trainer.tokenEmbed.Shape[0])
+
+	raw := make([]float32, len(got))
+	accumulateTokenGrad(tokens, gradInput, raw, trainer.tokenEmbed.Shape[1], trainer.tokenEmbed.Shape[0])
+
+	maxAbs, _ := embeddingVectorDiffStats(got, want)
+	if maxAbs > 1e-6 {
+		t.Fatalf("RoPE token grad mismatch: max_abs=%.9g got=%v want=%v", maxAbs, got, want)
+	}
+	rawMaxAbs, _ := embeddingVectorDiffStats(raw, want)
+	if rawMaxAbs <= 1e-4 {
+		t.Fatalf("test did not distinguish raw accumulation from inverse-RoPE accumulation: raw=%v want=%v", raw, want)
+	}
+	mutatedMaxAbs, _ := embeddingVectorDiffStats(gradInput, originalGradInput)
+	if mutatedMaxAbs != 0 {
+		t.Fatalf("accumulateInputTokenGrad mutated input gradients: before=%v after=%v", originalGradInput, gradInput)
+	}
+}
+
+func TestEmbeddingTrainerEncoderV1RemainsPermutationInvariantWithoutPositionEncoding(t *testing.T) {
+	trainer := newTinyTrainableRepeatedEncoderEmbeddingTrainer(t, 0.02)
+	trainer.manifest.Tokenizer.MaxSequence = 8
+
+	ordered := embedTrainerTokensForTest(t, trainer, []int32{0, 1, 2}, []int32{1, 1, 1})
+	reordered := embedTrainerTokensForTest(t, trainer, []int32{2, 1, 0}, []int32{1, 1, 1})
+	maxAbs, l2 := embeddingVectorDiffStats(ordered, reordered)
+	if maxAbs > 1e-6 || l2 > 1e-6 {
+		t.Fatalf("v1 encoder unexpectedly became order-sensitive: max_abs=%.9g l2=%.9g ordered=%v reordered=%v", maxAbs, l2, ordered, reordered)
+	}
+}
+
+func TestEmbeddingTrainerMaskedAttentionZerosPaddedKeyColumns(t *testing.T) {
+	scores := []float32{
+		1, 2, 8,
+		3, 4, 9,
+		5, 6, 10,
+	}
+	softmaxRowsMaskedColumnsInPlace(scores, 3, 3, []int32{1, 1, 0})
+	for row := 0; row < 3; row++ {
+		base := row * 3
+		if scores[base+2] != 0 {
+			t.Fatalf("masked key probability row %d = %.9g, want 0", row, scores[base+2])
+		}
+		assertClose(t, scores[base]+scores[base+1], 1, 1e-6)
+	}
+}
+
+func embedTrainerTokensForTest(t *testing.T, trainer *EmbeddingTrainer, tokens, mask []int32) []float32 {
+	t.Helper()
+	preparedMask, err := trainer.prepareMask(tokens, mask)
+	if err != nil {
+		t.Fatalf("prepare mask tokens=%v mask=%v: %v", tokens, mask, err)
+	}
+	forward := trainer.prepareForwardWeights()
+	seq, err := trainer.encodeSequence(tokens, preparedMask, forward.token, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, false)
+	if err != nil {
+		t.Fatalf("encode tokens=%v mask=%v: %v", tokens, mask, err)
+	}
+	return append([]float32(nil), seq.pooled...)
+}
+
+func embeddingVectorDiffStats(a, b []float32) (float32, float32) {
+	maxAbs := float32(0)
+	sumSquares := float64(0)
+	for i := range a {
+		diff := abs32(a[i] - b[i])
+		if diff > maxAbs {
+			maxAbs = diff
+		}
+		sumSquares += float64(diff * diff)
+	}
+	return maxAbs, float32(math.Sqrt(sumSquares))
 }
 
 func TestEmbeddingTrainerEncoderCheckpointRoundTrip(t *testing.T) {

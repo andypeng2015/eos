@@ -509,6 +509,49 @@ func TestSoftmaxRows(t *testing.T) {
 	})
 }
 
+func TestMaskedSoftmaxRowsMasksKeyColumns(t *testing.T) {
+	in := NewTensorF16([]int{2, 3}, []float32{
+		0, 1, 9,
+		2, 0, 8,
+	})
+	mask := NewTensorI32([]int{3}, []int32{1, 1, 0})
+	out, err := maskedSoftmaxRows(in, mask)
+	if err != nil {
+		t.Fatalf("masked_softmax: %v", err)
+	}
+	e := float32(math.Exp(1))
+	e2 := float32(math.Exp(2))
+	assertTensorClose(t, out, []int{2, 3}, []float32{
+		1 / (1 + e), e / (1 + e), 0,
+		e2 / (1 + e2), 1 / (1 + e2), 0,
+	})
+}
+
+func TestMaskedSoftmaxRowsBatchedMasksPerBatchKeyColumns(t *testing.T) {
+	in := NewTensorF16([]int{2, 2, 3}, []float32{
+		0, 1, 9,
+		2, 0, 8,
+		5, 1, 0,
+		4, 2, 0,
+	})
+	mask := NewTensorI32([]int{2, 3}, []int32{
+		1, 1, 0,
+		0, 1, 1,
+	})
+	out, err := maskedSoftmaxRows(in, mask)
+	if err != nil {
+		t.Fatalf("batched masked_softmax: %v", err)
+	}
+	e := float32(math.Exp(1))
+	e2 := float32(math.Exp(2))
+	assertTensorClose(t, out, []int{2, 2, 3}, []float32{
+		1 / (1 + e), e / (1 + e), 0,
+		e2 / (1 + e2), 1 / (1 + e2), 0,
+		0, e / (1 + e), 1 / (1 + e),
+		0, e2 / (1 + e2), 1 / (1 + e2),
+	})
+}
+
 func TestGELUTensor(t *testing.T) {
 	in := NewTensorF16([]int{2, 2}, []float32{
 		-1, 0,
@@ -529,6 +572,22 @@ func TestRoPERows(t *testing.T) {
 	})
 	out := ropeRows(in)
 	assertTensorClose(t, out, []int{2, 2}, []float32{
+		1, 0,
+		-0.84147096, 0.5403023,
+	})
+}
+
+func TestRoPERowsBatchedResetsPositionPerBatch(t *testing.T) {
+	in := NewTensorF16([]int{2, 2, 2}, []float32{
+		1, 0,
+		0, 1,
+		1, 0,
+		0, 1,
+	})
+	out := ropeRows(in)
+	assertTensorClose(t, out, []int{2, 2, 2}, []float32{
+		1, 0,
+		-0.84147096, 0.5403023,
 		1, 0,
 		-0.84147096, 0.5403023,
 	})

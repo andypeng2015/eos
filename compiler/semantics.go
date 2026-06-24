@@ -405,6 +405,42 @@ func inferSemanticCallType(call *syntax.CallExpr, callable *syntax.CallableDecl,
 		}
 		diags = append(diags, diagnosticError(call.Span, "transpose expects f*[M, N] or f*[B, M, N]"))
 		return hir.Type{}, diags
+	case "masked_softmax":
+		if len(args) != 2 {
+			diags = append(diags, diagnosticError(call.Span, "masked_softmax expects 2 arguments, got %d", len(args)))
+			return hir.Type{}, diags
+		}
+		if args[0].Kind != hir.TypeTensor || args[0].Tensor == nil {
+			diags = append(diags, diagnosticError(call.Args[0].ExprSpan(), "masked_softmax scores must be a tensor"))
+			return hir.Type{}, diags
+		}
+		if args[1].Kind != hir.TypeTensor || args[1].Tensor == nil || args[1].Tensor.DType != "i32" {
+			diags = append(diags, diagnosticError(call.Args[1].ExprSpan(), "masked_softmax mask must be i32[T] or i32[B, T]"))
+			return hir.Type{}, diags
+		}
+		if isRank2Tensor(args[0]) {
+			if !isRank1Tensor(args[1]) {
+				diags = append(diags, diagnosticError(call.Args[1].ExprSpan(), "masked_softmax mask rank must be 1 for rank-2 scores"))
+			} else if args[0].Tensor.Shape[1].Name != args[1].Tensor.Shape[0].Name {
+				diags = append(diags, diagnosticError(call.Span, "masked_softmax key dimension mismatch: scores %s vs mask %s", args[0].Tensor.Shape[1].Name, args[1].Tensor.Shape[0].Name))
+			}
+			return args[0], diags
+		}
+		if isRank3Tensor(args[0]) {
+			if !isRank2Tensor(args[1]) {
+				diags = append(diags, diagnosticError(call.Args[1].ExprSpan(), "masked_softmax mask rank must be 2 for rank-3 scores"))
+			} else {
+				if args[0].Tensor.Shape[0].Name != args[1].Tensor.Shape[0].Name {
+					diags = append(diags, diagnosticError(call.Span, "masked_softmax batch dimension mismatch: scores %s vs mask %s", args[0].Tensor.Shape[0].Name, args[1].Tensor.Shape[0].Name))
+				}
+				if args[0].Tensor.Shape[2].Name != args[1].Tensor.Shape[1].Name {
+					diags = append(diags, diagnosticError(call.Span, "masked_softmax key dimension mismatch: scores %s vs mask %s", args[0].Tensor.Shape[2].Name, args[1].Tensor.Shape[1].Name))
+				}
+			}
+			return args[0], diags
+		}
+		diags = append(diags, diagnosticError(call.Span, "masked_softmax expects rank-2 or rank-3 score tensor"))
+		return hir.Type{}, diags
 	case "softmax", "rope", "normalize", "rmsnorm", "layernorm", "gelu":
 		if len(args) != 1 {
 			diags = append(diags, diagnosticError(call.Span, "%s expects 1 argument, got %d", call.Callee, len(args)))

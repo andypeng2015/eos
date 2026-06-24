@@ -12,6 +12,13 @@ import (
 
 const EmbeddingManifestVersion = "manta/embedding-manifest/v0alpha1"
 
+const (
+	EmbeddingAttentionMaskModeNone = "none"
+	EmbeddingAttentionMaskModeKey  = "key"
+	EmbeddingPositionEncodingNone  = "none"
+	EmbeddingPositionEncodingRoPE  = "rope"
+)
+
 // TokenizerManifest carries embedding-model tokenization limits and ids.
 type TokenizerManifest struct {
 	VocabSize   int   `json:"vocab_size,omitempty"`
@@ -37,8 +44,10 @@ type EmbeddingManifest struct {
 	AttentionKeyParam     string            `json:"attention_key_param,omitempty"`
 	AttentionValueParam   string            `json:"attention_value_param,omitempty"`
 	AttentionOutputParam  string            `json:"attention_output_param,omitempty"`
+	AttentionMaskMode     string            `json:"attention_mask_mode,omitempty"`
 	AttentionResidual     bool              `json:"attention_residual,omitempty"`
 	AttentionLayerNorm    bool              `json:"attention_layernorm,omitempty"`
+	PositionEncoding      string            `json:"position_encoding,omitempty"`
 	HiddenProjectionParam string            `json:"hidden_projection_param,omitempty"`
 	FFNResidual           bool              `json:"ffn_residual,omitempty"`
 	FFNLayerNorm          bool              `json:"ffn_layernorm,omitempty"`
@@ -136,8 +145,10 @@ func (m EmbeddingManifest) mllValues() map[string]authoredManifestValue {
 		"attention_key_param":     authoredString(m.AttentionKeyParam),
 		"attention_value_param":   authoredString(m.AttentionValueParam),
 		"attention_output_param":  authoredString(m.AttentionOutputParam),
+		"attention_mask_mode":     authoredString(m.AttentionMaskMode),
 		"attention_residual":      authoredBool(m.AttentionResidual),
 		"attention_layernorm":     authoredBool(m.AttentionLayerNorm),
+		"position_encoding":       authoredString(m.PositionEncoding),
 		"hidden_projection_param": authoredString(m.HiddenProjectionParam),
 		"ffn_residual":            authoredBool(m.FFNResidual),
 		"ffn_layernorm":           authoredBool(m.FFNLayerNorm),
@@ -218,6 +229,11 @@ func embeddingManifestFromDoc(doc authoredManifestDoc) (EmbeddingManifest, error
 	} else {
 		manifest.AttentionOutputParam = value
 	}
+	if value, _, err := doc.string("attention_mask_mode"); err != nil {
+		return EmbeddingManifest{}, err
+	} else {
+		manifest.AttentionMaskMode = value
+	}
 	if value, _, err := doc.bool("attention_residual"); err != nil {
 		return EmbeddingManifest{}, err
 	} else {
@@ -227,6 +243,11 @@ func embeddingManifestFromDoc(doc authoredManifestDoc) (EmbeddingManifest, error
 		return EmbeddingManifest{}, err
 	} else {
 		manifest.AttentionLayerNorm = value
+	}
+	if value, _, err := doc.string("position_encoding"); err != nil {
+		return EmbeddingManifest{}, err
+	} else {
+		manifest.PositionEncoding = value
 	}
 	if value, _, err := doc.string("hidden_projection_param"); err != nil {
 		return EmbeddingManifest{}, err
@@ -665,6 +686,12 @@ func (m EmbeddingManifest) normalized() EmbeddingManifest {
 	if m.ProjectionParam == "" {
 		m.ProjectionParam = "projection"
 	}
+	if m.AttentionMaskMode == "" {
+		m.AttentionMaskMode = EmbeddingAttentionMaskModeNone
+	}
+	if m.PositionEncoding == "" {
+		m.PositionEncoding = EmbeddingPositionEncodingNone
+	}
 	return m
 }
 
@@ -678,6 +705,27 @@ func (m EmbeddingManifest) ValidateModule(mod *eosartifact.Module) error {
 	}
 	if (m.FFNResidual || m.FFNLayerNorm) && m.HiddenProjectionParam == "" {
 		return fmt.Errorf("ffn residual/layernorm requires hidden_projection_param")
+	}
+	switch m.AttentionMaskMode {
+	case "", EmbeddingAttentionMaskModeNone:
+	case EmbeddingAttentionMaskModeKey:
+		if m.MaskInput == "" {
+			return fmt.Errorf("attention_mask_mode=%q requires mask_input", m.AttentionMaskMode)
+		}
+		if !moduleHasKernelOp(mod, "masked_softmax") {
+			return fmt.Errorf("attention_mask_mode=%q requires masked_softmax in serving graph", m.AttentionMaskMode)
+		}
+	default:
+		return fmt.Errorf("unsupported attention_mask_mode %q", m.AttentionMaskMode)
+	}
+	switch m.PositionEncoding {
+	case "", EmbeddingPositionEncodingNone:
+	case EmbeddingPositionEncodingRoPE:
+		if !moduleHasKernelOp(mod, "rope") {
+			return fmt.Errorf("position_encoding=%q requires rope in serving graph", m.PositionEncoding)
+		}
+	default:
+		return fmt.Errorf("unsupported position_encoding %q", m.PositionEncoding)
 	}
 	if err := validateEmbeddingEntry(mod, m.PooledEntry, m.TokenInput, m.MaskInput, 1, 1, m.OutputDType); err != nil {
 		return err
@@ -807,6 +855,20 @@ func validateEmbeddingEntry(mod *eosartifact.Module, entryName, tokenInput, mask
 		return fmt.Errorf("entrypoint %q output rank = %d, want %d", entryName, got, outputRank)
 	}
 	return nil
+}
+
+func moduleHasKernelOp(mod *eosartifact.Module, op string) bool {
+	if mod == nil || op == "" {
+		return false
+	}
+	for _, kernel := range mod.Kernels {
+		for _, bodyOp := range kernel.Body {
+			if bodyOp.Op == op {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func validateEmbeddingParam(mod *eosartifact.Module, name string) error {

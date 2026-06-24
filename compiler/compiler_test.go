@@ -281,11 +281,19 @@ func TestBuildEncoderTrainableQ8x2Preset(t *testing.T) {
 		}
 	}
 	foundGELU := false
+	foundRoPE := false
+	foundMaskedSoftmax := false
 	foundMaskedMeanPool := false
 	for _, kernel := range bundle.Artifact.Kernels {
 		for _, op := range kernel.Body {
 			if op.Op == "gelu" {
 				foundGELU = true
+			}
+			if op.Op == "rope" {
+				foundRoPE = true
+			}
+			if op.Op == "masked_softmax" && len(op.Inputs) == 2 {
+				foundMaskedSoftmax = true
 			}
 			if op.Op == "mean_pool" && len(op.Inputs) == 2 {
 				foundMaskedMeanPool = true
@@ -294,6 +302,12 @@ func TestBuildEncoderTrainableQ8x2Preset(t *testing.T) {
 	}
 	if !foundGELU {
 		t.Fatal("expected GELU op in default encoder preset")
+	}
+	if !foundRoPE {
+		t.Fatal("expected RoPE op in default encoder preset")
+	}
+	if !foundMaskedSoftmax {
+		t.Fatal("expected masked_softmax op in default encoder preset")
 	}
 	if !foundMaskedMeanPool {
 		t.Fatal("expected masked mean_pool op in default encoder preset")
