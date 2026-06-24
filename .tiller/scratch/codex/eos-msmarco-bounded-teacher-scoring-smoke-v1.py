@@ -30,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidates", required=True, type=Path)
     parser.add_argument("--source-manifest", required=True, type=Path)
+    parser.add_argument("--source-requests", type=Path)
     parser.add_argument("--run-root", required=True, type=Path)
     parser.add_argument("--max-rows", type=int, default=512)
     parser.add_argument("--model-id", default=DEFAULT_MODEL_ID)
@@ -38,6 +39,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--local-files-only", action="store_true")
+    parser.add_argument("--schema", default="eos.msmarco_bounded_teacher_scoring_smoke.v1")
+    parser.add_argument("--report-title", default="Bounded Teacher Scoring Smoke")
     return parser.parse_args()
 
 
@@ -163,6 +166,8 @@ def main() -> int:
     reports.mkdir(exist_ok=True)
 
     source_manifest = json.loads(args.source_manifest.read_text(encoding="utf-8"))
+    if args.source_requests is not None and not args.source_requests.is_file():
+        raise FileNotFoundError(f"missing source requests JSONL: {args.source_requests}")
     legal_gate = source_manifest.get("legal_gate") or {}
     if legal_gate.get("release_train_allowed") is not False:
         raise SystemExit("source manifest does not preserve release_train_allowed=false")
@@ -272,11 +277,12 @@ def main() -> int:
 
     elapsed_seconds = time.time() - start
     manifest = {
-        "schema": "eos.msmarco_bounded_teacher_scoring_smoke.v1",
+        "schema": args.schema,
         "created_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "run_root": str(args.run_root.resolve()),
         "source_candidate_manifest": str(args.source_manifest.resolve()),
         "source_candidate_jsonl": str(args.candidates.resolve()),
+        "source_teacher_score_requests_jsonl": str(args.source_requests.resolve()) if args.source_requests else None,
         "teacher_model": {
             "model_id": args.model_id,
             "device": args.device,
@@ -337,6 +343,7 @@ def main() -> int:
         "source_sha256": {
             "candidate_jsonl": sha256_file(args.candidates),
             "source_manifest": sha256_file(args.source_manifest),
+            "teacher_score_requests_jsonl": sha256_file(args.source_requests) if args.source_requests else None,
         },
         "runtime": {
             "elapsed_seconds": elapsed_seconds,
@@ -349,7 +356,7 @@ def main() -> int:
     report_path.write_text(
         "\n".join(
             [
-                "# Bounded Teacher Scoring Smoke",
+                f"# {args.report_title}",
                 "",
                 f"- teacher: `{args.model_id}`",
                 f"- bound: first `{len(candidates)}` candidate rows, `{score_rows}` score rows",
