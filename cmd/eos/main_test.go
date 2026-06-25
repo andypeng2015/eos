@@ -5771,6 +5771,118 @@ func TestRunTrainEmbedPlanOnlyCountsGroupedTextHardNegativeEvalPairs(t *testing.
 	}
 }
 
+func TestRunTrainEmbedRejectsScoreSpectrumMutualExclusion(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	trainPath := filepath.Join(t.TempDir(), "train-score-spectrum.jsonl")
+	if err := eosruntime.WriteEmbeddingScoreSpectrumExamplesFile(trainPath, tinyCLIScoreSpectrumExamples(false)); err != nil {
+		t.Fatalf("write score-spectrum dataset: %v", err)
+	}
+	for _, args := range [][]string{
+		{"train-embed", "--score-spectrum-train", "--pairwise-train", "--no-tokenizer", path, trainPath},
+		{"train-embed", "--score-spectrum-train", "--hard-negative-train", "--no-tokenizer", path, trainPath},
+	} {
+		_, err := captureRunOutputAndError(t, args)
+		if err == nil || !strings.Contains(err.Error(), "--score-spectrum-train") {
+			t.Fatalf("args %v error = %v, want score-spectrum mutual exclusion", args, err)
+		}
+	}
+	_, err := captureRunOutputAndError(t, []string{"train-embed", "--allow-research-only-score-spectrum", "--no-tokenizer", path, trainPath})
+	if err == nil || !strings.Contains(err.Error(), "requires --score-spectrum-train") {
+		t.Fatalf("allow research without score-spectrum error = %v", err)
+	}
+}
+
+func TestRunTrainEmbedScoreSpectrumResearchOnlyGate(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	trainPath := filepath.Join(t.TempDir(), "train-score-spectrum.jsonl")
+	if err := eosruntime.WriteEmbeddingScoreSpectrumExamplesFile(trainPath, tinyCLIScoreSpectrumExamples(true), eosruntime.EmbeddingScoreSpectrumReadOptions{AllowResearchOnly: true}); err != nil {
+		t.Fatalf("write score-spectrum dataset: %v", err)
+	}
+	_, err := captureRunOutputAndError(t, []string{"train-embed", "--score-spectrum-train", "--no-tokenizer", "--epochs", "1", "--batch-size", "2", path, trainPath})
+	if err == nil || !strings.Contains(err.Error(), "research-only") {
+		t.Fatalf("research-only without flag error = %v", err)
+	}
+	output := captureRunOutput(t, []string{"train-embed", "--score-spectrum-train", "--allow-research-only-score-spectrum", "--no-tokenizer", "--epochs", "1", "--batch-size", "2", path, trainPath})
+	if !strings.Contains(output, "trained package") || !strings.Contains(output, "train=2 score_spectrum_grouped examples") {
+		t.Fatalf("score-spectrum train output unexpected:\n%s", output)
+	}
+	manifest, err := eosruntime.ReadPackageManifestFile(eosruntime.DefaultPackageManifestPath(path))
+	if err != nil {
+		t.Fatalf("read package manifest: %v", err)
+	}
+	if !manifest.ScoreSpectrum.ScoreSpectrumResearchOnly || manifest.ScoreSpectrum.ScoreSpectrumRowCount != 2 {
+		t.Fatalf("score-spectrum package policy = %+v, want research-only row count 2", manifest.ScoreSpectrum)
+	}
+}
+
+func TestRunTrainEmbedPlanOnlyScoreSpectrumWorkload(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	trainPath := filepath.Join(t.TempDir(), "train-score-spectrum.jsonl")
+	evalPath := filepath.Join(t.TempDir(), "eval-pairs.jsonl")
+	if err := eosruntime.WriteEmbeddingScoreSpectrumExamplesFile(trainPath, tinyCLIScoreSpectrumExamples(false)); err != nil {
+		t.Fatalf("write score-spectrum dataset: %v", err)
+	}
+	if err := eosruntime.WriteEmbeddingPairExamplesFile(evalPath, []eosruntime.EmbeddingPairExample{
+		{LeftTokens: []int32{1}, LeftMask: []int32{1}, RightTokens: []int32{1}, RightMask: []int32{1}, Target: 1},
+	}); err != nil {
+		t.Fatalf("write eval pairs: %v", err)
+	}
+	output := captureRunOutput(t, []string{"train-embed", "--plan-only", "--score-spectrum-train", "--no-tokenizer", "--epochs", "2", "--batch-size", "2", path, trainPath, evalPath})
+	for _, want := range []string{
+		"train=2 score_spectrum_grouped examples",
+		"train_pairs/epoch=4",
+		"eval=1 pairwise examples",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("score-spectrum plan output missing %q\noutput:\n%s", want, output)
+		}
+	}
+}
+
+func tinyCLIScoreSpectrumExamples(researchOnly bool) []eosruntime.EmbeddingScoreSpectrumExample {
+	examples := []eosruntime.EmbeddingScoreSpectrumExample{
+		{
+			RowID:                   "row-a",
+			QueryTokens:             []int32{1},
+			QueryMask:               []int32{1},
+			CandidateTokens:         [][]int32{{1}, {2}},
+			CandidateMasks:          [][]int32{{1}, {1}},
+			PositiveIndexes:         []int{0},
+			HardNegativeEligible:    []bool{false, true},
+			TargetProbabilities:     []float32{1, 0},
+			ReleaseTrainAllowed:     true,
+			CommercialUseAllowed:    true,
+			TrainAllowedForResearch: false,
+			SourceArtifactHash:      "hash-a",
+		},
+		{
+			RowID:                   "row-b",
+			QueryTokens:             []int32{2},
+			QueryMask:               []int32{1},
+			CandidateTokens:         [][]int32{{2}, {1}},
+			CandidateMasks:          [][]int32{{1}, {1}},
+			PositiveIndexes:         []int{0},
+			HardNegativeEligible:    []bool{false, true},
+			TargetProbabilities:     []float32{1, 0},
+			ReleaseTrainAllowed:     true,
+			CommercialUseAllowed:    true,
+			TrainAllowedForResearch: false,
+			SourceArtifactHash:      "hash-b",
+		},
+	}
+	if researchOnly {
+		for i := range examples {
+			examples[i].ReleaseTrainAllowed = false
+			examples[i].CommercialUseAllowed = false
+			examples[i].TrainAllowedForResearch = true
+		}
+	}
+	return examples
+}
+
 func TestRunTokenizeEmbedHardNegativeMode(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	tokenizer := eosruntime.TokenizerFile{

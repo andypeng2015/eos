@@ -112,10 +112,11 @@ type embeddingEvalRankScore struct {
 
 // EmbeddingTrainer trains a pooled embedding model with quantization-aware forward passes.
 type EmbeddingTrainer struct {
-	module     *eosartifact.Module
-	manifest   EmbeddingManifest
-	config     EmbeddingTrainConfig
-	memoryPlan *MemoryPlan
+	module               *eosartifact.Module
+	manifest             EmbeddingManifest
+	config               EmbeddingTrainConfig
+	memoryPlan           *MemoryPlan
+	scoreSpectrumLineage EmbeddingScoreSpectrumPolicy
 	// Retrieval-nDCG eval gate (optional). When enabled, each pairwise/contrastive
 	// eval also embeds a held-out BEIR-style corpus with the current in-training
 	// weights and computes nDCG@10 — the deployment metric — so training can
@@ -171,6 +172,16 @@ type EmbeddingTrainer struct {
 	forwardNeedsBind       bool
 	forwardBindSkips       int64
 	scratchF32             [][]float32
+}
+
+// SetScoreSpectrumLineage records score-spectrum provenance that must follow
+// future training and inference package writes.
+func (t *EmbeddingTrainer) SetScoreSpectrumLineage(policy EmbeddingScoreSpectrumPolicy) {
+	if t == nil {
+		return
+	}
+	policy.SourceArtifactHashes = normalizeScoreSpectrumSourceHashes(policy.SourceArtifactHashes)
+	t.scoreSpectrumLineage = policy
 }
 
 type embeddingSequenceState struct {
@@ -1445,6 +1456,125 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 	}, nil
 }
 
+// TrainScoreSpectrumStep runs one row-local ranked-candidate score-spectrum update.
+func (t *EmbeddingTrainer) TrainScoreSpectrumStep(batch []EmbeddingScoreSpectrumExample) (EmbeddingTrainMetrics, error) {
+	if t == nil {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("embedding trainer is not initialized")
+	}
+	if len(batch) == 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("score-spectrum training batch is empty")
+	}
+	if err := validateScoreSpectrumTrainerConfig(t.config); err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	queryInputs := make([]embeddingSequenceInput, len(batch))
+	candidateInputs := make([]embeddingSequenceInput, 0, len(batch)*2)
+	candidateSpans := make([]embeddingCandidateSpan, len(batch))
+	for i, example := range batch {
+		if err := validateTokenizedScoreSpectrumShape(example); err != nil {
+			return EmbeddingTrainMetrics{}, fmt.Errorf("score-spectrum batch %d: %w", i, err)
+		}
+		queryInputs[i] = embeddingSequenceInput{
+			tokens: example.QueryTokens,
+			mask:   example.QueryMask,
+			label:  fmt.Sprintf("batch %d query", i),
+		}
+		candidateSpans[i].Start = len(candidateInputs)
+		for j, tokens := range example.CandidateTokens {
+			var mask []int32
+			if j < len(example.CandidateMasks) {
+				mask = example.CandidateMasks[j]
+			}
+			candidateInputs = append(candidateInputs, embeddingSequenceInput{
+				tokens: tokens,
+				mask:   mask,
+				label:  fmt.Sprintf("batch %d candidate %d", i, j),
+			})
+		}
+		candidateSpans[i].End = len(candidateInputs)
+	}
+
+	forward := t.prepareForwardWeights()
+	t.primeForwardWeightResidency(forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj)
+	allInputs := make([]embeddingSequenceInput, 0, len(queryInputs)+len(candidateInputs))
+	allInputs = append(allInputs, queryInputs...)
+	allInputs = append(allInputs, candidateInputs...)
+	encoded, err := t.encodeSequenceInputs(allInputs, forward, true)
+	if err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	defer t.releaseEncodedSequences(encoded)
+	queries := encoded[:len(queryInputs)]
+	candidates := encoded[len(queryInputs):]
+
+	gradToken := make([]float32, len(t.tokenEmbed.F32))
+	gradAttnQ := make([]float32, tensorDataLen(t.attentionQuery))
+	gradAttnK := make([]float32, tensorDataLen(t.attentionKey))
+	gradAttnV := make([]float32, tensorDataLen(t.attentionValue))
+	gradAttnO := make([]float32, tensorDataLen(t.attentionOutput))
+	gradHidden := make([]float32, len(t.hiddenProjectionData()))
+	gradProj := make([]float32, len(t.projection.F32))
+	queryGrads := make([][]float32, len(queries))
+	candidateGrads := make([][]float32, len(candidates))
+	for i := range queries {
+		queryGrads[i] = make([]float32, len(queries[i].pooled))
+	}
+	for i := range candidates {
+		candidateGrads[i] = make([]float32, len(candidates[i].pooled))
+	}
+
+	totalLoss, totalScore, pairCount, err := accumulateScoreSpectrumGrads(queries, candidates, candidateSpans, batch, t.config.Temperature, queryGrads, candidateGrads)
+	if err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	if pairCount == 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("score-spectrum training batch has no usable candidates")
+	}
+	if !t.tryBackpropContrastiveBatch(
+		queries,
+		candidates,
+		queryGrads,
+		candidateGrads,
+		forward.attnQ,
+		forward.attnK,
+		forward.attnV,
+		forward.attnO,
+		forward.hidden,
+		forward.proj,
+		gradToken,
+		gradAttnQ,
+		gradAttnK,
+		gradAttnV,
+		gradAttnO,
+		gradHidden,
+		gradProj,
+	) {
+		for i, query := range queries {
+			inputGrad := t.backpropEncodedSequence(query, queryGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
+			t.accumulateInputTokenGrad(query.tokens, inputGrad, gradToken)
+		}
+		for i, candidate := range candidates {
+			inputGrad := t.backpropEncodedSequence(candidate, candidateGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
+			t.accumulateInputTokenGrad(candidate.tokens, inputGrad, gradToken)
+		}
+	}
+
+	batchScale := float32(1) / float32(len(queries))
+	t.step++
+	t.applyOptimizerUpdate(t.tokenParam.Name, t.tokenEmbed, t.tokenMom1, t.tokenMom2, gradToken, batchScale)
+	t.applyOptimizerUpdate(t.attnQParam.Name, t.attentionQuery, t.attnQMom1, t.attnQMom2, gradAttnQ, batchScale)
+	t.applyOptimizerUpdate(t.attnKParam.Name, t.attentionKey, t.attnKMom1, t.attnKMom2, gradAttnK, batchScale)
+	t.applyOptimizerUpdate(t.attnVParam.Name, t.attentionValue, t.attnVMom1, t.attnVMom2, gradAttnV, batchScale)
+	t.applyOptimizerUpdate(t.attnOParam.Name, t.attentionOutput, t.attnOMom1, t.attnOMom2, gradAttnO, batchScale)
+	t.applyOptimizerUpdate(t.hiddenParam.Name, t.hiddenProjection, t.hiddenMom1, t.hiddenMom2, gradHidden, batchScale)
+	t.applyOptimizerUpdate(t.projParam.Name, t.projection, t.projMom1, t.projMom2, gradProj, batchScale)
+	return EmbeddingTrainMetrics{
+		Loss:         totalLoss * batchScale,
+		AverageScore: totalScore / float32(pairCount),
+		BatchSize:    pairCount,
+	}, nil
+}
+
 // ExportInferenceWeights returns runtime-loadable weights in the module's declared dtypes.
 func (t *EmbeddingTrainer) ExportInferenceWeights() (map[string]*backend.Tensor, error) {
 	if t == nil {
@@ -1582,6 +1712,7 @@ func (t *EmbeddingTrainer) WriteEmbeddingPackage(artifactPath string) (Embedding
 	if err != nil {
 		return EmbeddingPackagePaths{}, err
 	}
+	packageManifest.ScoreSpectrum = packageScoreSpectrumPolicy(t.scoreSpectrumLineage)
 	packageManifestPath := DefaultPackageManifestPath(artifactPath)
 	if err := packageManifest.WriteFile(packageManifestPath); err != nil {
 		return EmbeddingPackagePaths{}, err
@@ -1623,9 +1754,10 @@ func (t *EmbeddingTrainer) WriteTrainingPackage(artifactPath string) (EmbeddingT
 	}
 	t.memoryPlan = cloneMemoryPlan(&memoryPlan)
 	trainManifest := EmbeddingTrainManifest{
-		Name:      t.manifest.Name,
-		Embedding: t.manifest,
-		Config:    t.config,
+		Name:          t.manifest.Name,
+		Embedding:     t.manifest,
+		Config:        t.config,
+		ScoreSpectrum: t.scoreSpectrumLineage,
 	}
 	trainManifestPath := DefaultEmbeddingTrainManifestPath(artifactPath)
 	if err := trainManifest.WriteFile(trainManifestPath); err != nil {
@@ -1661,6 +1793,7 @@ func (t *EmbeddingTrainer) WriteTrainingPackage(artifactPath string) (EmbeddingT
 	if err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
+	packageManifest.ScoreSpectrum = packageScoreSpectrumPolicy(t.scoreSpectrumLineage)
 	packageManifestPath := DefaultPackageManifestPath(artifactPath)
 	if err := packageManifest.WriteFile(packageManifestPath); err != nil {
 		return EmbeddingTrainPackagePaths{}, err
@@ -3561,6 +3694,109 @@ func accumulateGroupedInfoNCEHardNegativeGrads(queries, candidates []*embeddingE
 		}
 	}
 	return totalLoss, totalScore
+}
+
+func accumulateScoreSpectrumGrads(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, examples []EmbeddingScoreSpectrumExample, temperature float32, queryGrads, candidateGrads [][]float32) (float32, float32, int, error) {
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	pairCount := 0
+	queryMatrix := newContrastivePooledMatrix(queries)
+	candidateMatrix := newContrastivePooledMatrix(candidates)
+	maxCandidates := 0
+	for i := range queries {
+		span := groupedCandidateSpan(candidateSpans, i, len(candidates))
+		if n := span.End - span.Start; n > maxCandidates {
+			maxCandidates = n
+		}
+	}
+	rowScores := make([]float32, maxCandidates)
+	for i := range queries {
+		span := groupedCandidateSpan(candidateSpans, i, len(candidates))
+		candidateCount := span.End - span.Start
+		if candidateCount <= 0 {
+			return 0, 0, 0, fmt.Errorf("score-spectrum row %d has no candidates", i)
+		}
+		if i >= len(examples) {
+			return 0, 0, 0, fmt.Errorf("score-spectrum row %d missing example metadata", i)
+		}
+		example := examples[i]
+		hardWeight, softWeight := scoreSpectrumEffectiveLossWeights(example.HardLossWeight, example.SoftLossWeight)
+		query := queryMatrix.row(i)
+		queryNorm := queryMatrix.norms[i]
+		scores := rowScores[:candidateCount]
+		for j := span.Start; j < span.End; j++ {
+			local := j - span.Start
+			score := cosineScoreWithNorms(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j])
+			scores[local] = score
+			totalScore += score
+		}
+		loss, err := scoreSpectrumLossAndGrad(scores, example.PositiveIndexes, example.HardNegativeEligible, example.TargetProbabilities, temperature, hardWeight, softWeight)
+		if err != nil {
+			return 0, 0, 0, fmt.Errorf("score-spectrum row %d: %w", i, err)
+		}
+		totalLoss += loss.Loss
+		pairCount += candidateCount
+		for local, scale := range loss.Grad {
+			if scale == 0 {
+				continue
+			}
+			j := span.Start + local
+			accumulateCosineGradFromScore(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j], scores[local], scale, queryGrads[i], candidateGrads[j])
+		}
+	}
+	return totalLoss, totalScore, pairCount, nil
+}
+
+func scoreSpectrumEffectiveLossWeights(hardWeight, softWeight float32) (float32, float32) {
+	// Missing row weights default to the v1 hard-only objective. Rows that set
+	// either weight explicitly preserve the dataset values, including zeros.
+	if hardWeight == 0 && softWeight == 0 {
+		return 1, 0
+	}
+	return hardWeight, softWeight
+}
+
+func validateScoreSpectrumTrainerConfig(cfg EmbeddingTrainConfig) error {
+	if len(cfg.MatryoshkaDims) > 0 {
+		return fmt.Errorf("score-spectrum training does not support matryoshka objectives in v1")
+	}
+	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 || len(turboQuantPrefixObjectivesForConfig(cfg)) > 0 {
+		return fmt.Errorf("score-spectrum training does not support turboquant prefix objectives in v1")
+	}
+	if len(cfg.TurboQuantCompactObjectives) > 0 || len(turboQuantCompactObjectivesForConfig(cfg)) > 0 {
+		return fmt.Errorf("score-spectrum training does not support turboquant compact objectives in v1")
+	}
+	if len(cfg.TurboQuantRankMarginObjectives) > 0 || len(turboQuantRankMarginObjectivesForConfig(cfg)) > 0 {
+		return fmt.Errorf("score-spectrum training does not support turboquant rank-margin objectives in v1")
+	}
+	return nil
+}
+
+func validateTokenizedScoreSpectrumShape(example EmbeddingScoreSpectrumExample) error {
+	if len(example.QueryTokens) == 0 {
+		return fmt.Errorf("query_tokens are empty")
+	}
+	if len(example.QueryMask) > 0 && len(example.QueryMask) != len(example.QueryTokens) {
+		return fmt.Errorf("query_mask length %d does not match query_tokens length %d", len(example.QueryMask), len(example.QueryTokens))
+	}
+	if len(example.CandidateTokens) == 0 {
+		return fmt.Errorf("candidate_tokens are empty")
+	}
+	if len(example.CandidateIDs) > 0 && len(example.CandidateIDs) != len(example.CandidateTokens) {
+		return fmt.Errorf("candidate_ids length %d does not match candidate_tokens length %d", len(example.CandidateIDs), len(example.CandidateTokens))
+	}
+	if len(example.CandidateMasks) > 0 && len(example.CandidateMasks) != len(example.CandidateTokens) {
+		return fmt.Errorf("candidate_masks length %d does not match candidate_tokens length %d", len(example.CandidateMasks), len(example.CandidateTokens))
+	}
+	for i, tokens := range example.CandidateTokens {
+		if len(tokens) == 0 {
+			return fmt.Errorf("candidate_tokens[%d] are empty", i)
+		}
+		if len(example.CandidateMasks) > i && len(example.CandidateMasks[i]) > 0 && len(example.CandidateMasks[i]) != len(tokens) {
+			return fmt.Errorf("candidate_masks[%d] length %d does not match candidate_tokens[%d] length %d", i, len(example.CandidateMasks[i]), i, len(tokens))
+		}
+	}
+	return validateScoreSpectrumLabelsAndProbabilities(len(example.CandidateTokens), example.PositiveIndexes, example.HardNegativeEligible, example.TargetProbabilities)
 }
 
 func accumulatePrefixGroupedInfoNCEHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, dim int, temperature float32, queryGrads, candidateGrads [][]float32) (float32, float32) {

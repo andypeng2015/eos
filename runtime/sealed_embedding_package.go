@@ -12,11 +12,12 @@ import (
 
 // SealedEmbeddingPackage is a monolithic exported embedding package.
 type SealedEmbeddingPackage struct {
-	Module     *eosartifact.Module
-	Manifest   EmbeddingManifest
-	Tokenizer  *TokenizerFile
-	Weights    WeightFile
-	MemoryPlan *MemoryPlan
+	Module          *eosartifact.Module
+	Manifest        EmbeddingManifest
+	Tokenizer       *TokenizerFile
+	Weights         WeightFile
+	MemoryPlan      *MemoryPlan
+	PackageManifest *PackageManifest
 }
 
 // LoadSealedEmbeddingPackage loads an embedding model from a single sealed MLL export.
@@ -27,6 +28,12 @@ func (rt *Runtime) LoadSealedEmbeddingPackage(ctx context.Context, path string, 
 	}
 	loadOpts := make([]LoadOption, 0, len(opts)+len(pkg.Weights.Weights)+1)
 	loadOpts = append(loadOpts, opts...)
+	if pkg.PackageManifest != nil {
+		if err := rejectResearchOnlyScoreSpectrumEmbeddingPackage(*pkg.PackageManifest); err != nil {
+			return nil, err
+		}
+		loadOpts = append(loadOpts, WithPackageManifest(*pkg.PackageManifest))
+	}
 	loadOpts = append(loadOpts, pkg.Weights.LoadOptions()...)
 	if pkg.MemoryPlan != nil {
 		loadOpts = append(loadOpts, WithMemoryPlan(*pkg.MemoryPlan))
@@ -124,11 +131,23 @@ func sealedEmbeddingPackageFromReader(reader *mll.Reader, meta eosartifact.MLLMe
 		}
 		tokenizer = &decoded
 	}
+	var packageManifest *PackageManifest
+	if body, ok := meta.JSONFiles["package_manifest"]; ok {
+		var decoded PackageManifest
+		if err := json.Unmarshal(body, &decoded); err != nil {
+			return SealedEmbeddingPackage{}, false, fmt.Errorf("decode embedded package_manifest: %w", err)
+		}
+		if err := decoded.Validate(); err != nil {
+			return SealedEmbeddingPackage{}, false, fmt.Errorf("validate embedded package_manifest: %w", err)
+		}
+		packageManifest = &decoded
+	}
 	return SealedEmbeddingPackage{
-		Module:     mod,
-		Manifest:   manifest,
-		Tokenizer:  tokenizer,
-		Weights:    weights,
-		MemoryPlan: plan,
+		Module:          mod,
+		Manifest:        manifest,
+		Tokenizer:       tokenizer,
+		Weights:         weights,
+		MemoryPlan:      plan,
+		PackageManifest: packageManifest,
 	}, true, nil
 }

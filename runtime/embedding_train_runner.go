@@ -27,6 +27,8 @@ type EmbeddingTrainRunConfig struct {
 	EvalOnly                       bool
 	PairwiseTrain                  bool
 	HardNegativeTrain              bool
+	ScoreSpectrumTrain             bool
+	AllowResearchOnlyScoreSpectrum bool
 	HardNegativesPerQuery          int
 	HardNegativeSourceWeights      map[string]int
 	LengthBucketBatches            bool
@@ -883,6 +885,251 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 	return summary, nil
 }
 
+// FitScoreSpectrum trains over row-local ranked score-spectrum examples.
+func (t *EmbeddingTrainer) FitScoreSpectrum(trainSet []EmbeddingScoreSpectrumExample, evalSet []EmbeddingPairExample, cfg EmbeddingTrainRunConfig) (EmbeddingTrainRunSummary, error) {
+	if t == nil {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("embedding trainer is not initialized")
+	}
+	cfg = normalizedTrainRunConfig(cfg)
+	if err := validateClearTurboQuantPrefixRunConfig(cfg); err != nil {
+		return EmbeddingTrainRunSummary{}, err
+	}
+	if err := validateClearTurboQuantRankMarginRunConfig(cfg); err != nil {
+		return EmbeddingTrainRunSummary{}, err
+	}
+	if err := validateScoreSpectrumRunConfig(cfg); err != nil {
+		return EmbeddingTrainRunSummary{}, err
+	}
+	if cfg.EvalOnly {
+		if len(evalSet) == 0 {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("eval dataset is empty")
+		}
+	} else {
+		if len(trainSet) == 0 {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("training dataset is empty")
+		}
+		if err := validateScoreSpectrumTrainSetResearchGates(trainSet, cfg.AllowResearchOnlyScoreSpectrum); err != nil {
+			return EmbeddingTrainRunSummary{}, err
+		}
+		if cfg.Epochs <= 0 {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("epochs must be positive")
+		}
+		if cfg.BatchSize <= 0 {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("batch_size must be positive")
+		}
+	}
+	if cfg.EvalEveryEpoch <= 0 {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("eval_every_epoch must be positive")
+	}
+	if cfg.EvalEverySteps < 0 {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("eval_every_steps must be non-negative")
+	}
+	if cfg.EarlyStoppingPatience < 0 {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("early_stopping_patience must be non-negative")
+	}
+	if cfg.ProgressEverySteps < 0 {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("progress_every_steps must be non-negative")
+	}
+	if !validTrainSelectionMetric(cfg.SelectMetric) {
+		return EmbeddingTrainRunSummary{}, fmt.Errorf("unsupported select_metric %q", cfg.SelectMetric)
+	}
+	t.configureRetrievalEval(cfg.RetrievalEvalRuntime, cfg.RetrievalEval, cfg.RetrievalEvalTokenizer)
+	if err := t.applyTrainRunOverrides(cfg); err != nil {
+		return EmbeddingTrainRunSummary{}, err
+	}
+	cfg = t.syncTrainRunObjectiveConfig(cfg)
+	if err := validateScoreSpectrumRunConfig(cfg); err != nil {
+		return EmbeddingTrainRunSummary{}, err
+	}
+	if err := validateScoreSpectrumTrainerConfig(t.config); err != nil {
+		return EmbeddingTrainRunSummary{}, err
+	}
+
+	runStart := time.Now()
+	startStep := t.step
+	summary := EmbeddingTrainRunSummary{
+		Config:       cfg,
+		StartProfile: t.TrainProfile(),
+		Workload:     EstimateScoreSpectrumTrainWorkload(trainSet, len(evalSet), cfg),
+	}
+	if cfg.EvalOnly {
+		evalStart := time.Now()
+		maybeReportEvalProgress(cfg, "eval_start", 0, t.step, 1, int64(len(evalSet)), int64(len(evalSet)), runStart)
+		finalEval, err := t.EvaluatePairs(evalSet)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("eval: %w", err)
+		}
+		summary.EvalDuration = time.Since(evalStart)
+		summary.StepsCompleted = t.step
+		summary.FinalEval = cloneEvalMetrics(finalEval)
+		summary.LastEval = cloneEvalMetrics(finalEval)
+		summary.BestEval = cloneEvalMetrics(finalEval)
+		summary.BestStep = t.step
+		summary.Workload.ActualEvalPasses = 1
+		summary.Workload.ActualEvalPairs = int64(len(evalSet))
+		summary.Workload.ActualEvalExamples = int64(len(evalSet))
+		maybeReportEvalProgress(cfg, "eval_done", 0, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
+		summary.EndProfile = t.TrainProfile()
+		summary.DeltaProfile = diffTrainProfile(summary.StartProfile, summary.EndProfile)
+		summary.Workload.ActualTotalPairs = summary.Workload.ActualEvalPairs
+		summary.Workload.ActualTotalExamples = summary.Workload.ActualEvalExamples
+		summary.Elapsed = time.Since(runStart)
+		return summary, nil
+	}
+
+	indices := make([]int, len(trainSet))
+	for i := range indices {
+		indices[i] = i
+	}
+	rng := rand.New(rand.NewSource(cfg.Seed))
+	var (
+		bestCheckpoint EmbeddingTrainCheckpoint
+		haveBest       bool
+		noImproveEvals int
+	)
+	recordEval := func(epoch int) (*EmbeddingEvalMetrics, bool, error) {
+		evalStart := time.Now()
+		evalPass := summary.Workload.ActualEvalPasses + 1
+		maybeReportEvalProgress(cfg, "eval_start", epoch, t.step, evalPass, int64(len(evalSet)), int64(len(evalSet)), runStart)
+		evalMetrics, err := t.EvaluatePairs(evalSet)
+		if err != nil {
+			return nil, false, err
+		}
+		summary.EvalDuration += time.Since(evalStart)
+		summary.Workload.ActualEvalPasses++
+		summary.Workload.ActualEvalPairs += int64(len(evalSet))
+		summary.Workload.ActualEvalExamples += int64(len(evalSet))
+		summary.LastEval = cloneEvalMetrics(evalMetrics)
+		maybeReportEvalProgress(cfg, "eval_done", epoch, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
+		improved := false
+		if !haveBest || betterEvalMetrics(evalMetrics, *summary.BestEval, cfg.SelectMetric, cfg.MinDelta) {
+			bestCheckpoint, err = t.Checkpoint()
+			if err != nil {
+				return nil, false, err
+			}
+			haveBest = true
+			improved = true
+			summary.BestEval = cloneEvalMetrics(evalMetrics)
+			summary.BestEpoch = epoch
+			summary.BestStep = t.step
+			noImproveEvals = 0
+		} else {
+			noImproveEvals++
+		}
+		return cloneEvalMetrics(evalMetrics), improved, nil
+	}
+	if len(evalSet) > 0 && cfg.RestoreBest {
+		if _, _, err := recordEval(0); err != nil {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("initial eval: %w", err)
+		}
+	}
+
+	for epoch := 1; epoch <= cfg.Epochs; epoch++ {
+		if cfg.Shuffle {
+			rng.Shuffle(len(indices), func(i, j int) {
+				indices[i], indices[j] = indices[j], indices[i]
+			})
+		}
+		trainStart := time.Now()
+		var afterBatch contrastiveEpochBatchHook
+		if len(evalSet) > 0 && cfg.EvalEverySteps > 0 {
+			afterBatch = func(progress EmbeddingTrainProgress) error {
+				if progress.Batch <= 0 || progress.Batch%cfg.EvalEverySteps != 0 {
+					return nil
+				}
+				if _, _, err := recordEval(epoch); err != nil {
+					return fmt.Errorf("step %d eval: %w", progress.Step, err)
+				}
+				return nil
+			}
+		}
+		trainMetrics, err := t.runScoreSpectrumEpoch(trainSet, indices, cfg.BatchSize, cfg, epoch, runStart, afterBatch)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("epoch %d: %w", epoch, err)
+		}
+		summary.TrainDuration += time.Since(trainStart)
+		record := EmbeddingTrainEpochSummary{
+			Epoch: epoch,
+			Step:  t.step,
+			Train: trainMetrics,
+		}
+		summary.FinalTrain = trainMetrics
+		summary.EpochsCompleted = epoch
+		summary.Workload.CompletedEpochs = epoch
+		_, epochPairs := scoreSpectrumBatchWork(scoreSpectrumOrderedExamples(trainSet, indices), cfg.BatchSize)
+		summary.Workload.ActualTrainPairs += epochPairs
+		summary.Workload.ActualTrainExamples += int64(len(indices))
+
+		if len(evalSet) > 0 && epoch%cfg.EvalEveryEpoch == 0 {
+			evalMetrics, improved, err := recordEval(epoch)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, fmt.Errorf("epoch %d eval: %w", epoch, err)
+			}
+			record.Eval = evalMetrics
+			record.Improved = improved
+			if !improved && cfg.EarlyStoppingPatience > 0 && noImproveEvals >= cfg.EarlyStoppingPatience {
+				summary.StoppedEarly = true
+				summary.History = append(summary.History, record)
+				break
+			}
+		}
+
+		summary.History = append(summary.History, record)
+	}
+
+	summary.StepsCompleted = t.step
+	summary.StepsRun = t.step - startStep
+	preRestoreEndProfile := t.TrainProfile()
+	restoreStartProfile := EmbeddingTrainProfile{}
+	restored := false
+	if cfg.RestoreBest && haveBest {
+		if err := t.restoreCheckpoint(bestCheckpoint); err != nil {
+			return EmbeddingTrainRunSummary{}, err
+		}
+		summary.RestoredBest = true
+		restoreStartProfile = t.TrainProfile()
+		restored = true
+	}
+	if len(evalSet) > 0 {
+		evalStart := time.Now()
+		evalPass := summary.Workload.ActualEvalPasses + 1
+		maybeReportEvalProgress(cfg, "eval_start", summary.EpochsCompleted, t.step, evalPass, int64(len(evalSet)), int64(len(evalSet)), runStart)
+		finalEval, err := t.EvaluatePairs(evalSet)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("final eval: %w", err)
+		}
+		summary.EvalDuration += time.Since(evalStart)
+		summary.Workload.ActualEvalPasses++
+		summary.Workload.ActualEvalPairs += int64(len(evalSet))
+		summary.Workload.ActualEvalExamples += int64(len(evalSet))
+		summary.FinalEval = cloneEvalMetrics(finalEval)
+		maybeReportEvalProgress(cfg, "eval_done", summary.EpochsCompleted, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
+		if summary.BestEval == nil {
+			summary.BestEval = cloneEvalMetrics(finalEval)
+			if summary.BestEpoch == 0 {
+				summary.BestEpoch = summary.EpochsCompleted
+			}
+			if summary.BestStep == 0 {
+				summary.BestStep = summary.StepsCompleted
+			}
+		}
+	}
+	finalProfile := t.TrainProfile()
+	if restored {
+		preRestoreDelta := diffTrainProfile(summary.StartProfile, preRestoreEndProfile)
+		postRestoreDelta := diffTrainProfile(restoreStartProfile, finalProfile)
+		summary.DeltaProfile = addTrainProfileDelta(preRestoreDelta, postRestoreDelta)
+		summary.EndProfile = applyTrainProfileDelta(preRestoreEndProfile, postRestoreDelta)
+	} else {
+		summary.EndProfile = finalProfile
+		summary.DeltaProfile = diffTrainProfile(summary.StartProfile, summary.EndProfile)
+	}
+	summary.Workload.ActualTotalPairs = summary.Workload.ActualTrainPairs + summary.Workload.ActualEvalPairs
+	summary.Workload.ActualTotalExamples = summary.Workload.ActualTrainExamples + summary.Workload.ActualEvalExamples
+	summary.Elapsed = time.Since(runStart)
+	return summary, nil
+}
+
 // EstimatePairwiseTrainWorkload returns planned pairwise work for supervised pair training.
 func EstimatePairwiseTrainWorkload(trainExamples, evalExamples int, cfg EmbeddingTrainRunConfig) EmbeddingTrainWorkload {
 	cfg = normalizedTrainRunConfig(cfg)
@@ -998,6 +1245,42 @@ func EstimateHardNegativeTrainWorkload(trainExamples, negativesPerExample, evalE
 		TrainMode:            hardNegativeTrainMode(cfg.ContrastiveLoss),
 		EvalMode:             workloadEvalMode(evalExamples, "pairwise"),
 		TrainExamples:        trainExamples,
+		EvalExamples:         evalExamples,
+		BatchSize:            cfg.BatchSize,
+		PlannedEpochs:        cfg.Epochs,
+		TrainBatchesPerEpoch: batches,
+		TrainPairsPerEpoch:   trainPairsPerEpoch,
+		EvalPairsPerPass:     evalPairsPerPass,
+		PlannedEvalPasses:    evalPasses,
+		PlannedTrainPairs:    trainPairsPerEpoch * int64(cfg.Epochs),
+		PlannedEvalPairs:     evalPairsPerPass * int64(evalPasses),
+		PlannedTotalPairs:    trainPairsPerEpoch*int64(cfg.Epochs) + evalPairsPerPass*int64(evalPasses),
+	}
+}
+
+// EstimateScoreSpectrumTrainWorkload returns planned row-local candidate scoring work.
+func EstimateScoreSpectrumTrainWorkload(trainSet []EmbeddingScoreSpectrumExample, evalExamples int, cfg EmbeddingTrainRunConfig) EmbeddingTrainWorkload {
+	cfg = normalizedTrainRunConfig(cfg)
+	batches, trainPairsPerEpoch := scoreSpectrumBatchWork(trainSet, cfg.BatchSize)
+	evalPasses := plannedEvalPassCount(evalExamples, cfg.Epochs, cfg.EvalEveryEpoch)
+	if cfg.RestoreBest && evalExamples > 0 {
+		evalPasses++
+	}
+	if cfg.EvalEverySteps > 0 && evalExamples > 0 {
+		evalPasses += (batches / cfg.EvalEverySteps) * cfg.Epochs
+	}
+	if cfg.EvalOnly {
+		batches = 0
+		trainPairsPerEpoch = 0
+		if evalExamples > 0 {
+			evalPasses = 1
+		}
+	}
+	evalPairsPerPass := int64(evalExamples)
+	return EmbeddingTrainWorkload{
+		TrainMode:            "score_spectrum_grouped",
+		EvalMode:             workloadEvalMode(evalExamples, "pairwise"),
+		TrainExamples:        len(trainSet),
 		EvalExamples:         evalExamples,
 		BatchSize:            cfg.BatchSize,
 		PlannedEpochs:        cfg.Epochs,
@@ -1155,6 +1438,56 @@ func hardNegativeBatchPairCount(batch []EmbeddingHardNegativeExample) int64 {
 		candidates += 1 + len(example.NegativeTokens)
 	}
 	return int64(len(batch)) * int64(candidates)
+}
+
+func scoreSpectrumBatchWork(trainSet []EmbeddingScoreSpectrumExample, batchSize int) (int, int64) {
+	if len(trainSet) == 0 || batchSize <= 0 {
+		return 0, 0
+	}
+	var pairs int64
+	batches := 0
+	for start := 0; start < len(trainSet); start += batchSize {
+		end := start + batchSize
+		if end > len(trainSet) {
+			end = len(trainSet)
+		}
+		batchPairs := scoreSpectrumBatchPairCount(trainSet[start:end])
+		if batchPairs <= 0 {
+			break
+		}
+		batches++
+		pairs += batchPairs
+	}
+	return batches, pairs
+}
+
+func scoreSpectrumBatchPairCount(batch []EmbeddingScoreSpectrumExample) int64 {
+	var pairs int64
+	for _, example := range batch {
+		pairs += int64(len(example.CandidateTokens))
+	}
+	return pairs
+}
+
+func scoreSpectrumOrderedExamples(trainSet []EmbeddingScoreSpectrumExample, order []int) []EmbeddingScoreSpectrumExample {
+	ordered := make([]EmbeddingScoreSpectrumExample, 0, len(order))
+	for _, idx := range order {
+		ordered = append(ordered, trainSet[idx])
+	}
+	return ordered
+}
+
+func validateScoreSpectrumTrainSetResearchGates(trainSet []EmbeddingScoreSpectrumExample, allowResearchOnly bool) error {
+	for i, example := range trainSet {
+		if err := validateTokenizedScoreSpectrumShape(example); err != nil {
+			return fmt.Errorf("score-spectrum example %d: %w", i, err)
+		}
+		researchOnly := example.TrainAllowedForResearch && !example.ReleaseTrainAllowed && !example.CommercialUseAllowed
+		if researchOnly && !allowResearchOnly {
+			return fmt.Errorf("score-spectrum example %d is research-only; set AllowResearchOnlyScoreSpectrum to train it", i)
+		}
+	}
+	return nil
 }
 
 func spreadHardNegativeOrderByQuery(trainSet []EmbeddingHardNegativeExample, order []int) []int {
@@ -1774,6 +2107,81 @@ func (t *EmbeddingTrainer) runHardNegativeEpoch(trainSet []EmbeddingHardNegative
 	}, nil
 }
 
+func (t *EmbeddingTrainer) runScoreSpectrumEpoch(trainSet []EmbeddingScoreSpectrumExample, order []int, batchSize int, cfg EmbeddingTrainRunConfig, epoch int, runStart time.Time, afterBatch contrastiveEpochBatchHook) (EmbeddingTrainMetrics, error) {
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	totalTrainExamples := 0
+	var totalPairs int64
+	batchIndex := 0
+	ordered := make([]EmbeddingScoreSpectrumExample, 0, len(order))
+	for _, idx := range order {
+		ordered = append(ordered, trainSet[idx])
+	}
+	totalBatches, plannedEpochPairs := scoreSpectrumBatchWork(ordered, batchSize)
+	for start := 0; start < len(order); start += batchSize {
+		end := start + batchSize
+		if end > len(order) {
+			end = len(order)
+		}
+		batch := make([]EmbeddingScoreSpectrumExample, 0, end-start)
+		for _, idx := range order[start:end] {
+			batch = append(batch, trainSet[idx])
+		}
+		if scoreSpectrumBatchPairCount(batch) <= 0 {
+			break
+		}
+		metrics, err := t.TrainScoreSpectrumStep(batch)
+		if err != nil {
+			return EmbeddingTrainMetrics{}, err
+		}
+		// TrainScoreSpectrumStep reports query-averaged loss and pair-averaged
+		// score. Keep epoch loss query-averaged; use pair counts only for score
+		// aggregation, workload accounting, and progress.
+		totalLoss += metrics.Loss * float32(len(batch))
+		totalScore += metrics.AverageScore * float32(metrics.BatchSize)
+		totalTrainExamples += end - start
+		totalPairs += int64(metrics.BatchSize)
+		batchIndex++
+		if n := trainMemReclaimEvery(); n > 0 && batchIndex%n == 0 {
+			debug.FreeOSMemory()
+		}
+		progress := EmbeddingTrainProgress{
+			Phase:              "train",
+			Epoch:              epoch,
+			Batch:              batchIndex,
+			Batches:            totalBatches,
+			Step:               t.step,
+			BatchExamples:      end - start,
+			BatchPairs:         int64(metrics.BatchSize),
+			EpochTrainExamples: int64(totalTrainExamples),
+			EpochTrainPairs:    totalPairs,
+			PlannedEpochPairs:  plannedEpochPairs,
+			Loss:               metrics.Loss,
+			AverageScore:       metrics.AverageScore,
+			Elapsed:            time.Since(runStart),
+		}
+		maybeReportTrainProgress(cfg, progress)
+		if afterBatch != nil {
+			if err := afterBatch(progress); err != nil {
+				return EmbeddingTrainMetrics{}, err
+			}
+		}
+	}
+	if totalTrainExamples == 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("training epoch has no usable score-spectrum batches")
+	}
+	lossInv := float32(1) / float32(totalTrainExamples)
+	scoreAvg := float32(0)
+	if totalPairs > 0 {
+		scoreAvg = totalScore / float32(totalPairs)
+	}
+	return EmbeddingTrainMetrics{
+		Loss:         totalLoss * lossInv,
+		AverageScore: scoreAvg,
+		BatchSize:    totalTrainExamples,
+	}, nil
+}
+
 func (t *EmbeddingTrainer) restoreCheckpoint(checkpoint EmbeddingTrainCheckpoint) error {
 	restored, err := NewEmbeddingTrainerFromCheckpoint(t.module, checkpoint)
 	if err != nil {
@@ -2027,6 +2435,22 @@ func validateClearTurboQuantRankMarginRunConfig(cfg EmbeddingTrainRunConfig) err
 	}
 	if cfg.TurboQuantRankMargin != 0 {
 		return fmt.Errorf("clear_turboquant_rank_margin is mutually exclusive with turboquant_rank_margin")
+	}
+	return nil
+}
+
+func validateScoreSpectrumRunConfig(cfg EmbeddingTrainRunConfig) error {
+	if len(cfg.MatryoshkaDims) > 0 {
+		return fmt.Errorf("score-spectrum training does not support matryoshka objectives in v1")
+	}
+	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 {
+		return fmt.Errorf("score-spectrum training does not support turboquant prefix objectives in v1")
+	}
+	if len(cfg.TurboQuantCompactObjectives) > 0 {
+		return fmt.Errorf("score-spectrum training does not support turboquant compact objectives in v1")
+	}
+	if len(cfg.TurboQuantRankMarginObjectives) > 0 {
+		return fmt.Errorf("score-spectrum training does not support turboquant rank-margin objectives in v1")
 	}
 	return nil
 }

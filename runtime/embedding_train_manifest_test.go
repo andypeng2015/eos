@@ -35,6 +35,15 @@ func TestEmbeddingTrainManifestRoundTrip(t *testing.T) {
 			TurboQuantPrefixSeed:      DefaultTurboQuantMultiVectorQuantizerSeed,
 			TurboQuantPrefixScoreMode: TurboQuantPrefixScoreModePreparedIP,
 		},
+		ScoreSpectrum: EmbeddingScoreSpectrumPolicy{
+			ScoreSpectrumTrain:        true,
+			ScoreSpectrumResearchOnly: true,
+			TrainAllowedForResearch:   true,
+			ReleaseTrainAllowed:       false,
+			CommercialUseAllowed:      false,
+			SourceArtifactHashes:      []string{"bbb", "aaa"},
+			ScoreSpectrumRowCount:     2,
+		},
 	}
 	if err := want.WriteFile(path); err != nil {
 		t.Fatalf("write manifest: %v", err)
@@ -57,6 +66,12 @@ func TestEmbeddingTrainManifestRoundTrip(t *testing.T) {
 	}
 	if got.Config.TurboQuantPrefixScoreMode != TurboQuantPrefixScoreModePreparedIP {
 		t.Fatalf("turboquant prefix score mode = %q, want %q", got.Config.TurboQuantPrefixScoreMode, TurboQuantPrefixScoreModePreparedIP)
+	}
+	if !got.ScoreSpectrum.ScoreSpectrumTrain || !got.ScoreSpectrum.ScoreSpectrumResearchOnly || !got.ScoreSpectrum.TrainAllowedForResearch || got.ScoreSpectrum.ReleaseTrainAllowed || got.ScoreSpectrum.CommercialUseAllowed {
+		t.Fatalf("score-spectrum policy mismatch: %+v", got.ScoreSpectrum)
+	}
+	if got.ScoreSpectrum.ScoreSpectrumRowCount != 2 || len(got.ScoreSpectrum.SourceArtifactHashes) != 2 || got.ScoreSpectrum.SourceArtifactHashes[0] != "aaa" || got.ScoreSpectrum.SourceArtifactHashes[1] != "bbb" {
+		t.Fatalf("score-spectrum provenance mismatch: %+v", got.ScoreSpectrum)
 	}
 }
 

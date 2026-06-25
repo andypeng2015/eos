@@ -2,6 +2,8 @@ package eosruntime
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 )
 
 type EmbeddingCorpusTrainConfig struct {
@@ -31,6 +33,32 @@ func TrainEmbeddingPackageFromContrastiveFiles(artifactPath, trainPath, evalPath
 	if cfg.EvalOnly && evalPath == "" {
 		evalPath = trainPath
 		trainPath = ""
+	}
+	if cfg.ScoreSpectrumTrain {
+		var trainSet []EmbeddingScoreSpectrumExample
+		if !cfg.EvalOnly {
+			trainSet, err = ReadEmbeddingScoreSpectrumExamplesFile(trainPath, EmbeddingScoreSpectrumReadOptions{AllowResearchOnly: cfg.AllowResearchOnlyScoreSpectrum})
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read train score-spectrum dataset: %w", err)
+			}
+			trainer.SetScoreSpectrumLineage(ScoreSpectrumPolicyFromExamples(trainSet))
+		}
+		var evalPairs []EmbeddingPairExample
+		if evalPath != "" {
+			evalPairs, err = ReadEmbeddingPairExamplesFile(evalPath)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read eval pair dataset: %w", err)
+			}
+		}
+		summary, err := trainer.FitScoreSpectrum(trainSet, evalPairs, cfg)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+		}
+		paths, err := trainer.WriteTrainingPackage(artifactPath)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+		}
+		return summary, paths, nil
 	}
 	if cfg.HardNegativeTrain {
 		var trainSet []EmbeddingHardNegativeExample
@@ -163,6 +191,40 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(artifactPath, tokenizerPath, 
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("build tokenizer: %w", err)
 	}
 	tokenCache := embeddingTextTokenCache{}
+	if cfg.ScoreSpectrumTrain {
+		var trainSet []EmbeddingScoreSpectrumExample
+		if !cfg.EvalOnly {
+			trainText, err := ReadEmbeddingTextScoreSpectrumExamplesFile(trainPath, EmbeddingScoreSpectrumReadOptions{AllowResearchOnly: cfg.AllowResearchOnlyScoreSpectrum})
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read train text score-spectrum dataset: %w", err)
+			}
+			trainSet, err = TokenizeEmbeddingTextScoreSpectrumExamples(trainText, tokenizer, EmbeddingScoreSpectrumReadOptions{AllowResearchOnly: cfg.AllowResearchOnlyScoreSpectrum})
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize train score-spectrum dataset: %w", err)
+			}
+			trainer.SetScoreSpectrumLineage(ScoreSpectrumPolicyFromExamples(trainSet))
+		}
+		var evalPairs []EmbeddingPairExample
+		if evalPath != "" {
+			evalText, err := ReadEmbeddingTextPairExamplesFile(evalPath)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read eval text pair dataset: %w", err)
+			}
+			evalPairs, err = tokenizeEmbeddingTextPairExamples(evalText, tokenizer, tokenCache, false)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize eval pair dataset: %w", err)
+			}
+		}
+		summary, err := trainer.FitScoreSpectrum(trainSet, evalPairs, cfg)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+		}
+		paths, err := trainer.WriteTrainingPackage(artifactPath)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+		}
+		return summary, paths, nil
+	}
 	if cfg.HardNegativeTrain {
 		var trainSet []EmbeddingHardNegativeExample
 		if !cfg.EvalOnly {
@@ -394,4 +456,37 @@ func toTextContrastiveExamples(examples []EmbeddingTextPairExample) []EmbeddingT
 		})
 	}
 	return out
+}
+
+func ScoreSpectrumPolicyFromExamples(examples []EmbeddingScoreSpectrumExample) EmbeddingScoreSpectrumPolicy {
+	policy := EmbeddingScoreSpectrumPolicy{
+		ScoreSpectrumTrain:    len(examples) > 0,
+		ReleaseTrainAllowed:   len(examples) > 0,
+		CommercialUseAllowed:  len(examples) > 0,
+		ScoreSpectrumRowCount: len(examples),
+	}
+	hashes := map[string]bool{}
+	for _, example := range examples {
+		if strings.TrimSpace(example.SourceArtifactHash) != "" {
+			hashes[strings.TrimSpace(example.SourceArtifactHash)] = true
+		}
+		if example.TrainAllowedForResearch {
+			policy.TrainAllowedForResearch = true
+		}
+		if !example.ReleaseTrainAllowed {
+			policy.ReleaseTrainAllowed = false
+		}
+		if !example.CommercialUseAllowed {
+			policy.CommercialUseAllowed = false
+		}
+		if example.TrainAllowedForResearch && (!example.ReleaseTrainAllowed || !example.CommercialUseAllowed) {
+			policy.ScoreSpectrumResearchOnly = true
+		}
+	}
+	policy.SourceArtifactHashes = make([]string, 0, len(hashes))
+	for hash := range hashes {
+		policy.SourceArtifactHashes = append(policy.SourceArtifactHashes, hash)
+	}
+	sort.Strings(policy.SourceArtifactHashes)
+	return policy
 }

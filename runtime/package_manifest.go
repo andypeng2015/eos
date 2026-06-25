@@ -34,11 +34,12 @@ type PackageManifestFile struct {
 }
 
 type PackageManifest struct {
-	Version         string                `json:"version"`
-	Kind            PackageKind           `json:"kind"`
-	ModuleName      string                `json:"module_name"`
-	ArtifactVersion string                `json:"artifact_version"`
-	Files           []PackageManifestFile `json:"files"`
+	Version         string                       `json:"version"`
+	Kind            PackageKind                  `json:"kind"`
+	ModuleName      string                       `json:"module_name"`
+	ArtifactVersion string                       `json:"artifact_version"`
+	Files           []PackageManifestFile        `json:"files"`
+	ScoreSpectrum   EmbeddingScoreSpectrumPolicy `json:"score_spectrum,omitempty"`
 }
 
 func DefaultPackageManifestPath(artifactPath string) string {
@@ -135,6 +136,12 @@ func encodePackageManifestMLL(manifest PackageManifest) ([]byte, error) {
 			headStringMeta(strg, "module_name", manifest.ModuleName),
 			headStringMeta(strg, "artifact_version", manifest.ArtifactVersion),
 			headIntMeta(strg, "file_count", int64(len(manifest.Files))),
+			headBoolMeta(strg, "score_spectrum_research_only", manifest.ScoreSpectrum.ScoreSpectrumResearchOnly),
+			headBoolMeta(strg, "train_allowed_for_research", manifest.ScoreSpectrum.TrainAllowedForResearch),
+			headBoolMeta(strg, "release_train_allowed", manifest.ScoreSpectrum.ReleaseTrainAllowed),
+			headBoolMeta(strg, "commercial_use_allowed", manifest.ScoreSpectrum.CommercialUseAllowed),
+			headStringMeta(strg, "source_artifact_hashes", formatScoreSpectrumSourceHashes(manifest.ScoreSpectrum.SourceArtifactHashes)),
+			headIntMeta(strg, "score_spectrum_row_count", int64(manifest.ScoreSpectrum.ScoreSpectrumRowCount)),
 		},
 	}
 
@@ -311,6 +318,36 @@ func decodePackageManifestMLL(data []byte) (PackageManifest, error) {
 		}
 		return entry.I64, nil
 	}
+	readOptionalBool := func(key string) (bool, error) {
+		entry, ok := meta[key]
+		if !ok {
+			return false, nil
+		}
+		if entry.Kind != mll.HeadValueBool {
+			return false, fmt.Errorf("package manifest key %q kind = %d, want bool", key, entry.Kind)
+		}
+		return entry.Bool, nil
+	}
+	readOptionalString := func(key string) (string, error) {
+		entry, ok := meta[key]
+		if !ok {
+			return "", nil
+		}
+		if entry.Kind != mll.HeadValueString {
+			return "", fmt.Errorf("package manifest key %q kind = %d, want string", key, entry.Kind)
+		}
+		return strg.At(entry.StringIdx), nil
+	}
+	readOptionalInt := func(key string) (int64, error) {
+		entry, ok := meta[key]
+		if !ok {
+			return 0, nil
+		}
+		if entry.Kind != mll.HeadValueI64 {
+			return 0, fmt.Errorf("package manifest key %q kind = %d, want int", key, entry.Kind)
+		}
+		return entry.I64, nil
+	}
 
 	version, err := readString(manifestVersionKey)
 	if err != nil {
@@ -332,6 +369,30 @@ func decodePackageManifestMLL(data []byte) (PackageManifest, error) {
 	if err != nil {
 		return PackageManifest{}, err
 	}
+	scorePolicy := EmbeddingScoreSpectrumPolicy{}
+	if scorePolicy.ScoreSpectrumResearchOnly, err = readOptionalBool("score_spectrum_research_only"); err != nil {
+		return PackageManifest{}, err
+	}
+	if scorePolicy.TrainAllowedForResearch, err = readOptionalBool("train_allowed_for_research"); err != nil {
+		return PackageManifest{}, err
+	}
+	if scorePolicy.ReleaseTrainAllowed, err = readOptionalBool("release_train_allowed"); err != nil {
+		return PackageManifest{}, err
+	}
+	if scorePolicy.CommercialUseAllowed, err = readOptionalBool("commercial_use_allowed"); err != nil {
+		return PackageManifest{}, err
+	}
+	if value, err := readOptionalString("source_artifact_hashes"); err != nil {
+		return PackageManifest{}, err
+	} else {
+		scorePolicy.SourceArtifactHashes = parseScoreSpectrumSourceHashes(value)
+	}
+	if value, err := readOptionalInt("score_spectrum_row_count"); err != nil {
+		return PackageManifest{}, err
+	} else {
+		scorePolicy.ScoreSpectrumRowCount = int(value)
+	}
+	scorePolicy.ScoreSpectrumTrain = scorePolicy.ScoreSpectrumResearchOnly || scorePolicy.TrainAllowedForResearch || scorePolicy.ReleaseTrainAllowed || scorePolicy.CommercialUseAllowed || scorePolicy.ScoreSpectrumRowCount > 0 || len(scorePolicy.SourceArtifactHashes) > 0
 
 	r := bytes.NewReader(xpkgBody)
 	readU32 := func() (uint32, error) {
@@ -386,6 +447,7 @@ func decodePackageManifestMLL(data []byte) (PackageManifest, error) {
 		ModuleName:      moduleName,
 		ArtifactVersion: artifactVersion,
 		Files:           files,
+		ScoreSpectrum:   scorePolicy,
 	}
 	if err := manifest.Validate(); err != nil {
 		return PackageManifest{}, err
@@ -447,6 +509,7 @@ func RebuildSiblingPackageManifest(artifactPath string) (PackageManifest, string
 	if err != nil {
 		return PackageManifest{}, "", err
 	}
+	rebuilt.ScoreSpectrum = current.ScoreSpectrum
 	outPath := DefaultPackageManifestPath(artifactPath)
 	if err := rebuilt.WriteFile(outPath); err != nil {
 		return PackageManifest{}, "", err
@@ -518,6 +581,12 @@ func (m PackageManifest) CacheKey() string {
 	write(string(m.Kind))
 	write(m.ModuleName)
 	write(m.ArtifactVersion)
+	write(fmt.Sprintf("%t", m.ScoreSpectrum.ScoreSpectrumResearchOnly))
+	write(fmt.Sprintf("%t", m.ScoreSpectrum.TrainAllowedForResearch))
+	write(fmt.Sprintf("%t", m.ScoreSpectrum.ReleaseTrainAllowed))
+	write(fmt.Sprintf("%t", m.ScoreSpectrum.CommercialUseAllowed))
+	write(formatScoreSpectrumSourceHashes(m.ScoreSpectrum.SourceArtifactHashes))
+	write(fmt.Sprintf("%d", m.ScoreSpectrum.ScoreSpectrumRowCount))
 	for _, item := range m.Files {
 		write(item.Role)
 		write(item.Path)

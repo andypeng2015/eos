@@ -77,6 +77,7 @@ func LoadEmbeddingTrainerPackageWithPaths(paths EmbeddingTrainPackagePaths) (*Em
 			if err != nil {
 				return nil, err
 			}
+			trainer.SetScoreSpectrumLineage(trainManifest.ScoreSpectrum)
 			if paths.MemoryPlanPath != "" {
 				if _, err := os.Stat(paths.MemoryPlanPath); err == nil {
 					plan, err := ReadMemoryPlanFile(paths.MemoryPlanPath)
@@ -97,6 +98,7 @@ func LoadEmbeddingTrainerPackageWithPaths(paths EmbeddingTrainPackagePaths) (*Em
 	if err != nil {
 		return nil, err
 	}
+	trainer.SetScoreSpectrumLineage(trainManifest.ScoreSpectrum)
 	if paths.MemoryPlanPath != "" {
 		if _, err := os.Stat(paths.MemoryPlanPath); err == nil {
 			plan, err := ReadMemoryPlanFile(paths.MemoryPlanPath)

@@ -721,6 +721,14 @@ func headIntMeta(strg *mll.StringTable, key string, value int64) mll.HeadMetadat
 	}
 }
 
+func headBoolMeta(strg *mll.StringTable, key string, value bool) mll.HeadMetadataEntry {
+	return mll.HeadMetadataEntry{
+		Key:  strg.Intern(key),
+		Kind: mll.HeadValueBool,
+		Bool: value,
+	}
+}
+
 func encodeHeadSection(head mll.HeadSection, profile mll.Profile) ([]byte, []byte, error) {
 	var body bytes.Buffer
 	if err := head.Write(&body); err != nil {

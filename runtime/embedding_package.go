@@ -2,6 +2,7 @@ package eosruntime
 
 import (
 	"context"
+	"fmt"
 	"os"
 
 	eosartifact "m31labs.dev/eos/artifact/eos"
@@ -53,6 +54,12 @@ func (rt *Runtime) tryLoadSealedEmbeddingPackage(ctx context.Context, path strin
 		return nil, ok, err
 	}
 	opts := pkg.Weights.LoadOptions()
+	if pkg.PackageManifest != nil {
+		if err := rejectResearchOnlyScoreSpectrumEmbeddingPackage(*pkg.PackageManifest); err != nil {
+			return nil, true, err
+		}
+		opts = append(opts, WithPackageManifest(*pkg.PackageManifest))
+	}
 	if pkg.MemoryPlan != nil {
 		opts = append(opts, WithMemoryPlan(*pkg.MemoryPlan))
 	}
@@ -75,6 +82,9 @@ func (rt *Runtime) LoadEmbeddingPackageWithPaths(ctx context.Context, paths Embe
 		if _, err := os.Stat(paths.PackageManifestPath); err == nil {
 			packageManifest, err := ReadPackageManifestFile(paths.PackageManifestPath)
 			if err != nil {
+				return nil, err
+			}
+			if err := rejectResearchOnlyScoreSpectrumEmbeddingPackage(packageManifest); err != nil {
 				return nil, err
 			}
 			verifyPaths := map[string]string{
@@ -129,6 +139,13 @@ func (rt *Runtime) LoadEmbeddingPackageWithPaths(ctx context.Context, paths Embe
 		}
 	}
 	return model, nil
+}
+
+func rejectResearchOnlyScoreSpectrumEmbeddingPackage(packageManifest PackageManifest) error {
+	if packageManifest.Kind == PackageEmbedding && packageManifest.ScoreSpectrum.ScoreSpectrumResearchOnly {
+		return fmt.Errorf("embedding package was trained with research-only score-spectrum data; use training package load for continued research training")
+	}
+	return nil
 }
 
 func readOptionalTokenizerFile(path string) (TokenizerFile, bool, error) {

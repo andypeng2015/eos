@@ -5142,6 +5142,8 @@ func runTrainEmbed(args []string) error {
 	var evalOnly bool
 	var pairwiseTrain bool
 	var hardNegativeTrain bool
+	var scoreSpectrumTrain bool
+	var allowResearchOnlyScoreSpectrum bool
 	var hardNegativesPerQuery int
 	var hardNegativeSourceWeights string
 	var metricsJSONPath string
@@ -5190,6 +5192,8 @@ func runTrainEmbed(args []string) error {
 	fs.BoolVar(&evalOnly, "eval-only", false, "evaluate the package without running optimizer steps")
 	fs.BoolVar(&pairwiseTrain, "pairwise-train", false, "treat the training JSONL as labeled pair examples instead of contrastive positives")
 	fs.BoolVar(&hardNegativeTrain, "hard-negative-train", false, "group labeled pair JSONL into query-positive-hard-negative contrastive batches")
+	fs.BoolVar(&scoreSpectrumTrain, "score-spectrum-train", false, "treat the training JSONL as grouped score-spectrum examples with row-local candidates")
+	fs.BoolVar(&allowResearchOnlyScoreSpectrum, "allow-research-only-score-spectrum", false, "allow research-only score-spectrum training rows")
 	fs.IntVar(&hardNegativesPerQuery, "hard-negatives-per-query", 1, "maximum explicit negatives to attach to each query-positive example")
 	fs.StringVar(&hardNegativeSourceWeights, "hard-negative-source-weights", "", "comma-separated source=weight hard-negative batch mix, for example scifact=2,nfcorpus=1,fiqa=2")
 	fs.StringVar(&metricsJSONPath, "metrics-json", "", "write machine-readable run metrics JSON to this path")
@@ -5258,7 +5262,10 @@ func runTrainEmbed(args []string) error {
 		return fmt.Errorf("hard-negatives-per-query must be non-negative")
 	}
 	if pairwiseTrain && hardNegativeTrain {
-		return fmt.Errorf("set either --pairwise-train or --hard-negative-train, not both")
+		return fmt.Errorf("set only one of --pairwise-train, --hard-negative-train, or --score-spectrum-train")
+	}
+	if scoreSpectrumTrain && (pairwiseTrain || hardNegativeTrain) {
+		return fmt.Errorf("set only one of --pairwise-train, --hard-negative-train, or --score-spectrum-train")
 	}
 	parsedSourceWeights, parseErr := parsePositiveIntWeightMap(hardNegativeSourceWeights)
 	if parseErr != nil {
@@ -5346,11 +5353,28 @@ func runTrainEmbed(args []string) error {
 	if strings.TrimSpace(teacherScoreNormalization) != "" && !hardNegativeTrain {
 		return fmt.Errorf("--teacher-score-normalization requires --hard-negative-train")
 	}
-	if len(parsedTurboQuantRankMarginObjectives) > 0 && !hardNegativeTrain {
+	if len(parsedTurboQuantRankMarginObjectives) > 0 && !hardNegativeTrain && !scoreSpectrumTrain {
 		return fmt.Errorf("--turboquant-rank-margin-objectives requires --hard-negative-train")
 	}
-	if len(parsedTurboQuantCompactObjectives) > 0 && !hardNegativeTrain {
+	if len(parsedTurboQuantCompactObjectives) > 0 && !hardNegativeTrain && !scoreSpectrumTrain {
 		return fmt.Errorf("--turboquant-compact-objectives requires --hard-negative-train")
+	}
+	if allowResearchOnlyScoreSpectrum && !scoreSpectrumTrain {
+		return fmt.Errorf("--allow-research-only-score-spectrum requires --score-spectrum-train")
+	}
+	if scoreSpectrumTrain {
+		if len(parsedMatryoshkaDims) > 0 {
+			return fmt.Errorf("--score-spectrum-train does not support --matryoshka-dims")
+		}
+		if len(parsedTurboQuantPrefixBits) > 0 || len(parsedTurboQuantPrefixObjectives) > 0 {
+			return fmt.Errorf("--score-spectrum-train does not support TurboQuant prefix objectives")
+		}
+		if len(parsedTurboQuantCompactObjectives) > 0 {
+			return fmt.Errorf("--score-spectrum-train does not support TurboQuant compact objectives")
+		}
+		if len(parsedTurboQuantRankMarginObjectives) > 0 {
+			return fmt.Errorf("--score-spectrum-train does not support TurboQuant rank-margin objectives")
+		}
 	}
 	path := fs.Arg(0)
 	trainPath := fs.Arg(1)
@@ -5409,6 +5433,8 @@ func runTrainEmbed(args []string) error {
 		EvalOnly:                       evalOnly,
 		PairwiseTrain:                  pairwiseTrain,
 		HardNegativeTrain:              hardNegativeTrain,
+		ScoreSpectrumTrain:             scoreSpectrumTrain,
+		AllowResearchOnlyScoreSpectrum: allowResearchOnlyScoreSpectrum,
 		HardNegativesPerQuery:          hardNegativesPerQuery,
 		HardNegativeSourceWeights:      parsedSourceWeights,
 	}
@@ -5714,6 +5740,32 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg e
 			}
 			return eosruntime.EstimatePairwiseTrainWorkload(len(trainPairs), evalCount, cfg), nil
 		}
+		if cfg.ScoreSpectrumTrain {
+			trainSet, err := eosruntime.ReadEmbeddingTextScoreSpectrumExamplesFile(trainPath, eosruntime.EmbeddingScoreSpectrumReadOptions{AllowResearchOnly: cfg.AllowResearchOnlyScoreSpectrum})
+			if err != nil {
+				return eosruntime.EmbeddingTrainWorkload{}, err
+			}
+			evalCount := 0
+			if evalPath != "" {
+				evalPairs, err := eosruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
+				if err != nil {
+					return eosruntime.EmbeddingTrainWorkload{}, err
+				}
+				evalCount = len(evalPairs)
+			}
+			tokenized := make([]eosruntime.EmbeddingScoreSpectrumExample, 0, len(trainSet))
+			for _, example := range trainSet {
+				tokenized = append(tokenized, eosruntime.EmbeddingScoreSpectrumExample{
+					CandidateTokens: make([][]int32, len(example.Candidates)),
+				})
+			}
+			for i, example := range trainSet {
+				for j := range example.Candidates {
+					tokenized[i].CandidateTokens[j] = []int32{1}
+				}
+			}
+			return eosruntime.EstimateScoreSpectrumTrainWorkload(tokenized, evalCount, cfg), nil
+		}
 		if cfg.HardNegativeTrain {
 			trainSet, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(trainPath)
 			if err != nil {
@@ -5789,6 +5841,21 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg e
 			evalCount = len(evalPairs)
 		}
 		return eosruntime.EstimatePairwiseTrainWorkload(len(trainPairs), evalCount, cfg), nil
+	}
+	if cfg.ScoreSpectrumTrain {
+		trainSet, err := eosruntime.ReadEmbeddingScoreSpectrumExamplesFile(trainPath, eosruntime.EmbeddingScoreSpectrumReadOptions{AllowResearchOnly: cfg.AllowResearchOnlyScoreSpectrum})
+		if err != nil {
+			return eosruntime.EmbeddingTrainWorkload{}, err
+		}
+		evalCount := 0
+		if evalPath != "" {
+			evalPairs, err := eosruntime.ReadEmbeddingPairExamplesFile(evalPath)
+			if err != nil {
+				return eosruntime.EmbeddingTrainWorkload{}, err
+			}
+			evalCount = len(evalPairs)
+		}
+		return eosruntime.EstimateScoreSpectrumTrainWorkload(trainSet, evalCount, cfg), nil
 	}
 	if cfg.HardNegativeTrain {
 		trainSet, err := eosruntime.ReadEmbeddingHardNegativeExamplesFile(trainPath)

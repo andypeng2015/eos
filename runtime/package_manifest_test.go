@@ -59,6 +59,15 @@ func TestPackageManifestRoundTripAndVerify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build package manifest: %v", err)
 	}
+	manifest.ScoreSpectrum = EmbeddingScoreSpectrumPolicy{
+		ScoreSpectrumTrain:        true,
+		ScoreSpectrumResearchOnly: true,
+		TrainAllowedForResearch:   true,
+		ReleaseTrainAllowed:       false,
+		CommercialUseAllowed:      false,
+		SourceArtifactHashes:      []string{"hash-b", "hash-a"},
+		ScoreSpectrumRowCount:     3,
+	}
 	path := filepath.Join(dir, "tiny_embed.package.mll")
 	if err := manifest.WriteFile(path); err != nil {
 		t.Fatalf("write package manifest: %v", err)
@@ -74,6 +83,12 @@ func TestPackageManifestRoundTripAndVerify(t *testing.T) {
 		"memory_plan":        memoryPlanPath,
 	}); err != nil {
 		t.Fatalf("verify package manifest: %v", err)
+	}
+	if !loaded.ScoreSpectrum.ScoreSpectrumResearchOnly || !loaded.ScoreSpectrum.TrainAllowedForResearch || loaded.ScoreSpectrum.ReleaseTrainAllowed || loaded.ScoreSpectrum.CommercialUseAllowed {
+		t.Fatalf("score-spectrum policy mismatch: %+v", loaded.ScoreSpectrum)
+	}
+	if loaded.ScoreSpectrum.ScoreSpectrumRowCount != 3 || len(loaded.ScoreSpectrum.SourceArtifactHashes) != 2 || loaded.ScoreSpectrum.SourceArtifactHashes[0] != "hash-a" || loaded.ScoreSpectrum.SourceArtifactHashes[1] != "hash-b" {
+		t.Fatalf("score-spectrum provenance mismatch: %+v", loaded.ScoreSpectrum)
 	}
 	if err := os.WriteFile(weightPath, []byte("tampered\n"), 0o644); err != nil {
 		t.Fatalf("tamper weights: %v", err)
@@ -285,5 +300,114 @@ func TestLoadEmbeddingPackageRejectsTamperedWeightFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "sha256 mismatch") {
 		t.Fatalf("expected sha256 mismatch, got %v", err)
+	}
+}
+
+func TestLoadEmbeddingPackageRejectsResearchOnlyScoreSpectrumPackage(t *testing.T) {
+	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
+	trainer.SetScoreSpectrumLineage(EmbeddingScoreSpectrumPolicy{
+		ScoreSpectrumTrain:        true,
+		ScoreSpectrumResearchOnly: true,
+		TrainAllowedForResearch:   true,
+		ReleaseTrainAllowed:       false,
+		CommercialUseAllowed:      false,
+		SourceArtifactHashes:      []string{"research-source"},
+		ScoreSpectrumRowCount:     2,
+	})
+	packagePath := filepath.Join(t.TempDir(), "tiny_train_embed_q8.mll")
+	if _, err := trainer.WriteEmbeddingPackage(packagePath); err != nil {
+		t.Fatalf("write embedding package: %v", err)
+	}
+	rt := New(cuda.New(), metal.New())
+	_, err := rt.LoadEmbeddingPackage(context.Background(), packagePath)
+	if err == nil || !strings.Contains(err.Error(), "research-only score-spectrum") {
+		t.Fatalf("load embedding package error = %v, want research-only guard", err)
+	}
+}
+
+func TestLoadEmbeddingPackageRejectsSealedResearchOnlyScoreSpectrumPackage(t *testing.T) {
+	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
+	trainer.SetScoreSpectrumLineage(EmbeddingScoreSpectrumPolicy{
+		ScoreSpectrumTrain:        true,
+		ScoreSpectrumResearchOnly: true,
+		TrainAllowedForResearch:   true,
+		ReleaseTrainAllowed:       false,
+		CommercialUseAllowed:      false,
+		SourceArtifactHashes:      []string{"research-source"},
+		ScoreSpectrumRowCount:     2,
+	})
+	packagePath := filepath.Join(t.TempDir(), "tiny_train_embed_q8.mll")
+	if _, err := trainer.WriteEmbeddingPackage(packagePath); err != nil {
+		t.Fatalf("write embedding package: %v", err)
+	}
+	sealedPath, err := ExportPackageToMLL(packagePath, "")
+	if err != nil {
+		t.Fatalf("export sealed package: %v", err)
+	}
+
+	rt := New(cuda.New(), metal.New())
+	if _, err := rt.LoadEmbeddingPackage(context.Background(), sealedPath); err == nil || !strings.Contains(err.Error(), "research-only score-spectrum") {
+		t.Fatalf("load sealed embedding package error = %v, want research-only guard", err)
+	}
+	if _, err := rt.LoadSealedEmbeddingPackage(context.Background(), sealedPath); err == nil || !strings.Contains(err.Error(), "research-only score-spectrum") {
+		t.Fatalf("direct sealed embedding load error = %v, want research-only guard", err)
+	}
+}
+
+func TestLoadEmbeddingPackageAllowsSealedResearchOnlyTrainingPackage(t *testing.T) {
+	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
+	trainer.SetScoreSpectrumLineage(EmbeddingScoreSpectrumPolicy{
+		ScoreSpectrumTrain:        true,
+		ScoreSpectrumResearchOnly: true,
+		TrainAllowedForResearch:   true,
+		ReleaseTrainAllowed:       false,
+		CommercialUseAllowed:      false,
+		SourceArtifactHashes:      []string{"research-source"},
+		ScoreSpectrumRowCount:     2,
+	})
+	packagePath := filepath.Join(t.TempDir(), "tiny_train_embed_q8.mll")
+	if _, err := trainer.WriteTrainingPackage(packagePath); err != nil {
+		t.Fatalf("write training package: %v", err)
+	}
+	sealedPath, err := ExportPackageToMLL(packagePath, "")
+	if err != nil {
+		t.Fatalf("export sealed training package: %v", err)
+	}
+
+	rt := New(cuda.New(), metal.New())
+	if _, err := rt.LoadEmbeddingPackage(context.Background(), sealedPath); err != nil {
+		t.Fatalf("load sealed training package: %v", err)
+	}
+}
+
+func TestLoadEmbeddingTrainerPackageAllowsResearchOnlyScoreSpectrumPackage(t *testing.T) {
+	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
+	trainer.SetScoreSpectrumLineage(EmbeddingScoreSpectrumPolicy{
+		ScoreSpectrumTrain:        true,
+		ScoreSpectrumResearchOnly: true,
+		TrainAllowedForResearch:   true,
+		ReleaseTrainAllowed:       false,
+		CommercialUseAllowed:      false,
+		SourceArtifactHashes:      []string{"research-source"},
+		ScoreSpectrumRowCount:     2,
+	})
+	packagePath := filepath.Join(t.TempDir(), "tiny_train_embed_q8.mll")
+	if _, err := trainer.WriteTrainingPackage(packagePath); err != nil {
+		t.Fatalf("write training package: %v", err)
+	}
+	reloaded, err := LoadEmbeddingTrainerPackage(packagePath)
+	if err != nil {
+		t.Fatalf("load trainer package: %v", err)
+	}
+	paths, err := reloaded.WriteTrainingPackage(packagePath)
+	if err != nil {
+		t.Fatalf("rewrite training package: %v", err)
+	}
+	manifest, err := ReadPackageManifestFile(paths.PackageManifestPath)
+	if err != nil {
+		t.Fatalf("read rewritten package manifest: %v", err)
+	}
+	if !manifest.ScoreSpectrum.ScoreSpectrumResearchOnly || manifest.ScoreSpectrum.ScoreSpectrumRowCount != 2 {
+		t.Fatalf("score-spectrum lineage was not preserved: %+v", manifest.ScoreSpectrum)
 	}
 }

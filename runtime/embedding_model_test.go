@@ -292,6 +292,15 @@ func TestLoadEmbeddingPackageUsesSiblingWeights(t *testing.T) {
 
 func TestLoadEmbeddingPackageAcceptsTrainingPackageManifest(t *testing.T) {
 	trainer := newTinyTrainableEmbeddingTrainer(t, 0.02)
+	trainer.SetScoreSpectrumLineage(EmbeddingScoreSpectrumPolicy{
+		ScoreSpectrumTrain:        true,
+		ScoreSpectrumResearchOnly: true,
+		TrainAllowedForResearch:   true,
+		ReleaseTrainAllowed:       false,
+		CommercialUseAllowed:      false,
+		SourceArtifactHashes:      []string{"research-source"},
+		ScoreSpectrumRowCount:     2,
+	})
 	path := filepath.Join(t.TempDir(), "tiny_train_embed_q8.mll")
 	if _, err := trainer.WriteTrainingPackage(path); err != nil {
 		t.Fatalf("write training package: %v", err)
