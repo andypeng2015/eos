@@ -30,7 +30,7 @@ func TrainEmbeddingPackageFromContrastiveFiles(artifactPath, trainPath, evalPath
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 	}
 	defer trainer.Close()
-	if cfg.EvalOnly && evalPath == "" {
+	if cfg.EvalOnly && evalPath == "" && cfg.ScoreSpectrumEvalPath == "" {
 		evalPath = trainPath
 		trainPath = ""
 	}
@@ -48,6 +48,12 @@ func TrainEmbeddingPackageFromContrastiveFiles(artifactPath, trainPath, evalPath
 			evalPairs, err = ReadEmbeddingPairExamplesFile(evalPath)
 			if err != nil {
 				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read eval pair dataset: %w", err)
+			}
+		}
+		if cfg.ScoreSpectrumEvalPath != "" {
+			cfg.ScoreSpectrumEval, err = ReadEmbeddingScoreSpectrumExamplesFile(cfg.ScoreSpectrumEvalPath, EmbeddingScoreSpectrumReadOptions{AllowResearchOnly: cfg.AllowResearchOnlyScoreSpectrum})
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read score-spectrum eval dataset: %w", err)
 			}
 		}
 		summary, err := trainer.FitScoreSpectrum(trainSet, evalPairs, cfg)
@@ -178,7 +184,7 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(artifactPath, tokenizerPath, 
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 	}
 	defer trainer.Close()
-	if cfg.EvalOnly && evalPath == "" {
+	if cfg.EvalOnly && evalPath == "" && cfg.ScoreSpectrumEvalPath == "" {
 		evalPath = trainPath
 		trainPath = ""
 	}
@@ -213,6 +219,16 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(artifactPath, tokenizerPath, 
 			evalPairs, err = tokenizeEmbeddingTextPairExamples(evalText, tokenizer, tokenCache, false)
 			if err != nil {
 				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize eval pair dataset: %w", err)
+			}
+		}
+		if cfg.ScoreSpectrumEvalPath != "" {
+			evalText, err := ReadEmbeddingTextScoreSpectrumExamplesFile(cfg.ScoreSpectrumEvalPath, EmbeddingScoreSpectrumReadOptions{AllowResearchOnly: cfg.AllowResearchOnlyScoreSpectrum})
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read score-spectrum eval text dataset: %w", err)
+			}
+			cfg.ScoreSpectrumEval, err = TokenizeEmbeddingTextScoreSpectrumExamples(evalText, tokenizer, EmbeddingScoreSpectrumReadOptions{AllowResearchOnly: cfg.AllowResearchOnlyScoreSpectrum})
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize score-spectrum eval dataset: %w", err)
 			}
 		}
 		summary, err := trainer.FitScoreSpectrum(trainSet, evalPairs, cfg)

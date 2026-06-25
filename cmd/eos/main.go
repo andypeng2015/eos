@@ -5144,6 +5144,12 @@ func runTrainEmbed(args []string) error {
 	var hardNegativeTrain bool
 	var scoreSpectrumTrain bool
 	var allowResearchOnlyScoreSpectrum bool
+	var scoreSpectrumEvalPath string
+	var scoreSpectrumLossMode string
+	var scoreSpectrumRecoveryWeight float64
+	var scoreSpectrumRecoveryMargin float64
+	var scoreSpectrumRecoveryTopK int
+	var scoreSpectrumRecoveryTau float64
 	var hardNegativesPerQuery int
 	var hardNegativeSourceWeights string
 	var metricsJSONPath string
@@ -5194,6 +5200,12 @@ func runTrainEmbed(args []string) error {
 	fs.BoolVar(&hardNegativeTrain, "hard-negative-train", false, "group labeled pair JSONL into query-positive-hard-negative contrastive batches")
 	fs.BoolVar(&scoreSpectrumTrain, "score-spectrum-train", false, "treat the training JSONL as grouped score-spectrum examples with row-local candidates")
 	fs.BoolVar(&allowResearchOnlyScoreSpectrum, "allow-research-only-score-spectrum", false, "allow research-only score-spectrum training rows")
+	fs.StringVar(&scoreSpectrumEvalPath, "score-spectrum-eval", "", "path to grouped score-spectrum JSONL for native score-spectrum eval")
+	fs.StringVar(&scoreSpectrumLossMode, "score-spectrum-loss-mode", "", "score-spectrum loss mode: hard_soft, recovery, or hard_soft_recovery")
+	fs.Float64Var(&scoreSpectrumRecoveryWeight, "score-spectrum-recovery-weight", 0, "global recovery loss weight for score-spectrum training")
+	fs.Float64Var(&scoreSpectrumRecoveryMargin, "score-spectrum-recovery-margin", 0, "non-negative recovery margin for score-spectrum training")
+	fs.IntVar(&scoreSpectrumRecoveryTopK, "score-spectrum-recovery-top-k", 0, "top-k hardest eligible negatives for score-spectrum recovery loss (default 4)")
+	fs.Float64Var(&scoreSpectrumRecoveryTau, "score-spectrum-recovery-tau", 0, "positive temperature for score-spectrum recovery loss")
 	fs.IntVar(&hardNegativesPerQuery, "hard-negatives-per-query", 1, "maximum explicit negatives to attach to each query-positive example")
 	fs.StringVar(&hardNegativeSourceWeights, "hard-negative-source-weights", "", "comma-separated source=weight hard-negative batch mix, for example scifact=2,nfcorpus=1,fiqa=2")
 	fs.StringVar(&metricsJSONPath, "metrics-json", "", "write machine-readable run metrics JSON to this path")
@@ -5260,6 +5272,18 @@ func runTrainEmbed(args []string) error {
 	}
 	if hardNegativesPerQuery < 0 {
 		return fmt.Errorf("hard-negatives-per-query must be non-negative")
+	}
+	if scoreSpectrumRecoveryWeight < 0 || math.IsNaN(scoreSpectrumRecoveryWeight) || math.IsInf(scoreSpectrumRecoveryWeight, 0) {
+		return fmt.Errorf("score-spectrum-recovery-weight must be finite and non-negative")
+	}
+	if scoreSpectrumRecoveryMargin < 0 || math.IsNaN(scoreSpectrumRecoveryMargin) || math.IsInf(scoreSpectrumRecoveryMargin, 0) {
+		return fmt.Errorf("score-spectrum-recovery-margin must be finite and non-negative")
+	}
+	if scoreSpectrumRecoveryTopK < 0 {
+		return fmt.Errorf("score-spectrum-recovery-top-k must be non-negative")
+	}
+	if scoreSpectrumRecoveryTau < 0 || math.IsNaN(scoreSpectrumRecoveryTau) || math.IsInf(scoreSpectrumRecoveryTau, 0) {
+		return fmt.Errorf("score-spectrum-recovery-tau must be finite and non-negative")
 	}
 	if pairwiseTrain && hardNegativeTrain {
 		return fmt.Errorf("set only one of --pairwise-train, --hard-negative-train, or --score-spectrum-train")
@@ -5362,6 +5386,20 @@ func runTrainEmbed(args []string) error {
 	if allowResearchOnlyScoreSpectrum && !scoreSpectrumTrain {
 		return fmt.Errorf("--allow-research-only-score-spectrum requires --score-spectrum-train")
 	}
+	parsedScoreSpectrumLossMode := ""
+	if strings.TrimSpace(scoreSpectrumLossMode) != "" {
+		var parseErr error
+		parsedScoreSpectrumLossMode, parseErr = eosruntime.NormalizeScoreSpectrumLossModeForCLI(scoreSpectrumLossMode)
+		if parseErr != nil {
+			return parseErr
+		}
+	}
+	if strings.TrimSpace(scoreSpectrumEvalPath) != "" && !scoreSpectrumTrain {
+		return fmt.Errorf("--score-spectrum-eval requires --score-spectrum-train")
+	}
+	if (parsedScoreSpectrumLossMode != "" || scoreSpectrumRecoveryWeight != 0 || scoreSpectrumRecoveryMargin != 0 || scoreSpectrumRecoveryTopK != 0 || scoreSpectrumRecoveryTau != 0) && !scoreSpectrumTrain {
+		return fmt.Errorf("score-spectrum recovery options require --score-spectrum-train")
+	}
 	if scoreSpectrumTrain {
 		if len(parsedMatryoshkaDims) > 0 {
 			return fmt.Errorf("--score-spectrum-train does not support --matryoshka-dims")
@@ -5382,7 +5420,7 @@ func runTrainEmbed(args []string) error {
 	if fs.NArg() > 2 {
 		evalPath = fs.Arg(2)
 	}
-	if evalOnly && fs.NArg() == 2 {
+	if evalOnly && fs.NArg() == 2 && strings.TrimSpace(scoreSpectrumEvalPath) == "" {
 		evalPath = trainPath
 		trainPath = ""
 	}
@@ -5435,6 +5473,12 @@ func runTrainEmbed(args []string) error {
 		HardNegativeTrain:              hardNegativeTrain,
 		ScoreSpectrumTrain:             scoreSpectrumTrain,
 		AllowResearchOnlyScoreSpectrum: allowResearchOnlyScoreSpectrum,
+		ScoreSpectrumEvalPath:          scoreSpectrumEvalPath,
+		ScoreSpectrumLossMode:          parsedScoreSpectrumLossMode,
+		ScoreSpectrumRecoveryWeight:    float32(scoreSpectrumRecoveryWeight),
+		ScoreSpectrumRecoveryMargin:    float32(scoreSpectrumRecoveryMargin),
+		ScoreSpectrumRecoveryTopK:      scoreSpectrumRecoveryTopK,
+		ScoreSpectrumRecoveryTau:       float32(scoreSpectrumRecoveryTau),
 		HardNegativesPerQuery:          hardNegativesPerQuery,
 		HardNegativeSourceWeights:      parsedSourceWeights,
 	}
@@ -5509,6 +5553,9 @@ func runTrainEmbed(args []string) error {
 	fmt.Printf("final train: loss=%.6f avg_score=%.6f batch=%d\n", summary.FinalTrain.Loss, summary.FinalTrain.AverageScore, summary.FinalTrain.BatchSize)
 	if summary.FinalEval != nil {
 		fmt.Printf("final eval: loss=%.6f margin=%.6f accuracy=%.6f threshold_accuracy=%.6f threshold=%.6f auc=%.6f top1=%.6f top5=%.6f top10=%.6f mrr=%.6f mean_rank=%.3f retrieval_ndcg=%.6f pairs=%d\n", summary.FinalEval.Loss, summary.FinalEval.ScoreMargin, summary.FinalEval.PairAccuracy, summary.FinalEval.ThresholdAccuracy, summary.FinalEval.ScoreThreshold, summary.FinalEval.ROCAUC, summary.FinalEval.Top1Accuracy, summary.FinalEval.Top5Accuracy, summary.FinalEval.Top10Accuracy, summary.FinalEval.MeanReciprocalRank, summary.FinalEval.MeanPositiveRank, summary.FinalEval.RetrievalNDCGAt10, summary.FinalEval.PairCount)
+	}
+	if summary.FinalScoreSpectrumEval != nil {
+		fmt.Printf("final score-spectrum eval: loss=%.6f any_positive_top1=%.6f original_positive_top1=%.6f alternate_recovery=%.6f best_positive_hardest_negative_margin=%.6f rows=%d candidates=%d\n", summary.FinalScoreSpectrumEval.Loss, summary.FinalScoreSpectrumEval.AnyPositiveTop1, summary.FinalScoreSpectrumEval.OriginalPositiveTop1, summary.FinalScoreSpectrumEval.AlternateRelevantRecovery, summary.FinalScoreSpectrumEval.BestPositiveHardestNegativeMargin, summary.FinalScoreSpectrumEval.RowCount, summary.FinalScoreSpectrumEval.CandidateCount)
 	}
 	fmt.Printf("workload: %s\n", formatTrainWorkload(summary.Workload))
 	fmt.Printf("throughput: %s\n", formatTrainThroughput(summary))
@@ -5701,9 +5748,47 @@ func parseNonNegativeFloatMap(raw string) (map[string]float32, error) {
 }
 
 func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg eosruntime.EmbeddingTrainRunConfig) (eosruntime.EmbeddingTrainWorkload, error) {
-	if cfg.EvalOnly && evalPath == "" {
+	if cfg.EvalOnly && evalPath == "" && cfg.ScoreSpectrumEvalPath == "" {
 		evalPath = trainPath
 		trainPath = ""
+	}
+	if cfg.EvalOnly && cfg.ScoreSpectrumTrain {
+		evalCount := 0
+		if evalPath != "" {
+			if tokenizerPath != "" {
+				evalPairs, err := eosruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
+				if err != nil {
+					return eosruntime.EmbeddingTrainWorkload{}, err
+				}
+				evalCount += len(evalPairs)
+			} else {
+				evalPairs, err := eosruntime.ReadEmbeddingPairExamplesFile(evalPath)
+				if err != nil {
+					return eosruntime.EmbeddingTrainWorkload{}, err
+				}
+				evalCount += len(evalPairs)
+			}
+		}
+		if cfg.ScoreSpectrumEvalPath != "" {
+			if tokenizerPath != "" {
+				scoreEval, err := eosruntime.ReadEmbeddingTextScoreSpectrumExamplesFile(cfg.ScoreSpectrumEvalPath, eosruntime.EmbeddingScoreSpectrumReadOptions{AllowResearchOnly: cfg.AllowResearchOnlyScoreSpectrum})
+				if err != nil {
+					return eosruntime.EmbeddingTrainWorkload{}, err
+				}
+				for _, example := range scoreEval {
+					evalCount += len(example.Candidates)
+				}
+			} else {
+				scoreEval, err := eosruntime.ReadEmbeddingScoreSpectrumExamplesFile(cfg.ScoreSpectrumEvalPath, eosruntime.EmbeddingScoreSpectrumReadOptions{AllowResearchOnly: cfg.AllowResearchOnlyScoreSpectrum})
+				if err != nil {
+					return eosruntime.EmbeddingTrainWorkload{}, err
+				}
+				for _, example := range scoreEval {
+					evalCount += len(example.CandidateTokens)
+				}
+			}
+		}
+		return eosruntime.EstimateScoreSpectrumTrainWorkload(nil, evalCount, cfg), nil
 	}
 	if tokenizerPath != "" {
 		if cfg.EvalOnly {
@@ -5752,6 +5837,15 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg e
 					return eosruntime.EmbeddingTrainWorkload{}, err
 				}
 				evalCount = len(evalPairs)
+			}
+			if cfg.ScoreSpectrumEvalPath != "" {
+				scoreEval, err := eosruntime.ReadEmbeddingTextScoreSpectrumExamplesFile(cfg.ScoreSpectrumEvalPath, eosruntime.EmbeddingScoreSpectrumReadOptions{AllowResearchOnly: cfg.AllowResearchOnlyScoreSpectrum})
+				if err != nil {
+					return eosruntime.EmbeddingTrainWorkload{}, err
+				}
+				for _, example := range scoreEval {
+					evalCount += len(example.Candidates)
+				}
 			}
 			tokenized := make([]eosruntime.EmbeddingScoreSpectrumExample, 0, len(trainSet))
 			for _, example := range trainSet {
@@ -5854,6 +5948,15 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg e
 				return eosruntime.EmbeddingTrainWorkload{}, err
 			}
 			evalCount = len(evalPairs)
+		}
+		if cfg.ScoreSpectrumEvalPath != "" {
+			scoreEval, err := eosruntime.ReadEmbeddingScoreSpectrumExamplesFile(cfg.ScoreSpectrumEvalPath, eosruntime.EmbeddingScoreSpectrumReadOptions{AllowResearchOnly: cfg.AllowResearchOnlyScoreSpectrum})
+			if err != nil {
+				return eosruntime.EmbeddingTrainWorkload{}, err
+			}
+			for _, example := range scoreEval {
+				evalCount += len(example.CandidateTokens)
+			}
 		}
 		return eosruntime.EstimateScoreSpectrumTrainWorkload(trainSet, evalCount, cfg), nil
 	}
@@ -6263,23 +6366,26 @@ func runTrainCorpus(args []string) error {
 }
 
 type trainMetricsJSON struct {
-	Schema       string                `json:"schema"`
-	Command      string                `json:"command"`
-	Mode         string                `json:"mode"`
-	Artifact     string                `json:"artifact"`
-	Tokenizer    string                `json:"tokenizer,omitempty"`
-	Summary      trainRunSummaryJSON   `json:"summary"`
-	Config       trainRunConfigJSON    `json:"config"`
-	FinalTrain   trainBatchMetricsJSON `json:"final_train"`
-	LastEval     *evalMetricsJSON      `json:"last_eval,omitempty"`
-	BestEval     *evalMetricsJSON      `json:"best_eval,omitempty"`
-	FinalEval    *evalMetricsJSON      `json:"final_eval,omitempty"`
-	Workload     trainWorkloadJSON     `json:"workload"`
-	Throughput   trainThroughputJSON   `json:"throughput"`
-	Accelerators trainAcceleratorsJSON `json:"accelerators"`
-	ProfileDelta trainProfileDeltaJSON `json:"profile_delta"`
-	Package      trainPackagePathsJSON `json:"package"`
-	Artifacts    map[string]string     `json:"artifacts,omitempty"`
+	Schema                 string                        `json:"schema"`
+	Command                string                        `json:"command"`
+	Mode                   string                        `json:"mode"`
+	Artifact               string                        `json:"artifact"`
+	Tokenizer              string                        `json:"tokenizer,omitempty"`
+	Summary                trainRunSummaryJSON           `json:"summary"`
+	Config                 trainRunConfigJSON            `json:"config"`
+	FinalTrain             trainBatchMetricsJSON         `json:"final_train"`
+	LastEval               *evalMetricsJSON              `json:"last_eval,omitempty"`
+	BestEval               *evalMetricsJSON              `json:"best_eval,omitempty"`
+	FinalEval              *evalMetricsJSON              `json:"final_eval,omitempty"`
+	LastScoreSpectrumEval  *scoreSpectrumEvalMetricsJSON `json:"last_score_spectrum_eval,omitempty"`
+	BestScoreSpectrumEval  *scoreSpectrumEvalMetricsJSON `json:"best_score_spectrum_eval,omitempty"`
+	FinalScoreSpectrumEval *scoreSpectrumEvalMetricsJSON `json:"final_score_spectrum_eval,omitempty"`
+	Workload               trainWorkloadJSON             `json:"workload"`
+	Throughput             trainThroughputJSON           `json:"throughput"`
+	Accelerators           trainAcceleratorsJSON         `json:"accelerators"`
+	ProfileDelta           trainProfileDeltaJSON         `json:"profile_delta"`
+	Package                trainPackagePathsJSON         `json:"package"`
+	Artifacts              map[string]string             `json:"artifacts,omitempty"`
 }
 
 type trainRunSummaryJSON struct {
@@ -6328,6 +6434,13 @@ type trainRunConfigJSON struct {
 	EvalOnly                       bool                                   `json:"eval_only"`
 	PairwiseTrain                  bool                                   `json:"pairwise_train"`
 	HardNegativeTrain              bool                                   `json:"hard_negative_train"`
+	ScoreSpectrumTrain             bool                                   `json:"score_spectrum_train"`
+	ScoreSpectrumEvalPath          string                                 `json:"score_spectrum_eval_path,omitempty"`
+	ScoreSpectrumLossMode          string                                 `json:"score_spectrum_loss_mode,omitempty"`
+	ScoreSpectrumRecoveryWeight    float32                                `json:"score_spectrum_recovery_weight,omitempty"`
+	ScoreSpectrumRecoveryMargin    float32                                `json:"score_spectrum_recovery_margin,omitempty"`
+	ScoreSpectrumRecoveryTopK      int                                    `json:"score_spectrum_recovery_top_k,omitempty"`
+	ScoreSpectrumRecoveryTau       float32                                `json:"score_spectrum_recovery_tau,omitempty"`
 	HardNegativesPerQuery          int                                    `json:"hard_negatives_per_query"`
 	HardNegativeSourceWeights      map[string]int                         `json:"hard_negative_source_weights,omitempty"`
 }
@@ -6356,6 +6469,23 @@ type evalMetricsJSON struct {
 	PairCount          int     `json:"pair_count"`
 	PositiveCount      int     `json:"positive_count"`
 	NegativeCount      int     `json:"negative_count"`
+}
+
+type scoreSpectrumEvalMetricsJSON struct {
+	Loss                              float32 `json:"loss"`
+	AverageScore                      float32 `json:"average_score"`
+	AnyPositiveTop1                   float32 `json:"score_spectrum_any_positive_top1"`
+	OriginalPositiveTop1              float32 `json:"score_spectrum_original_positive_top1"`
+	AlternateRelevantRecovery         float32 `json:"score_spectrum_alternate_recovery"`
+	BestPositiveHardestNegativeMargin float32 `json:"score_spectrum_best_positive_hardest_negative_margin"`
+	TargetCrossEntropy                float32 `json:"target_cross_entropy"`
+	TargetKL                          float32 `json:"target_kl"`
+	RowCount                          int     `json:"row_count"`
+	CandidateCount                    int     `json:"candidate_count"`
+	AnyPositiveRowCount               int     `json:"any_positive_row_count"`
+	OriginalPositiveRowCount          int     `json:"original_positive_row_count"`
+	AlternateRecoveryRowCount         int     `json:"alternate_recovery_row_count"`
+	MarginRowCount                    int     `json:"margin_row_count"`
 }
 
 type trainWorkloadJSON struct {
@@ -6438,23 +6568,26 @@ func writeTrainMetricsJSON(outputPath, command, mode, artifactPath, tokenizerPat
 
 func trainMetricsPayload(command, mode, artifactPath, tokenizerPath string, summary eosruntime.EmbeddingTrainRunSummary, paths eosruntime.EmbeddingTrainPackagePaths, extraArtifacts map[string]string) trainMetricsJSON {
 	return trainMetricsJSON{
-		Schema:       "manta.embedding_train_metrics.v1",
-		Command:      command,
-		Mode:         mode,
-		Artifact:     artifactPath,
-		Tokenizer:    tokenizerPath,
-		Summary:      trainRunSummaryPayload(summary),
-		Config:       trainRunConfigPayload(summary.Config),
-		FinalTrain:   trainBatchMetricsPayload(summary.FinalTrain),
-		LastEval:     evalMetricsPayload(summary.LastEval),
-		BestEval:     evalMetricsPayload(summary.BestEval),
-		FinalEval:    evalMetricsPayload(summary.FinalEval),
-		Workload:     trainWorkloadPayload(summary.Workload),
-		Throughput:   trainThroughputPayload(summary),
-		Accelerators: trainAcceleratorsPayload(summary.EndProfile),
-		ProfileDelta: trainProfileDeltaPayload(summary.DeltaProfile),
-		Package:      trainPackagePathsPayload(paths),
-		Artifacts:    extraArtifacts,
+		Schema:                 "manta.embedding_train_metrics.v1",
+		Command:                command,
+		Mode:                   mode,
+		Artifact:               artifactPath,
+		Tokenizer:              tokenizerPath,
+		Summary:                trainRunSummaryPayload(summary),
+		Config:                 trainRunConfigPayload(summary.Config),
+		FinalTrain:             trainBatchMetricsPayload(summary.FinalTrain),
+		LastEval:               evalMetricsPayload(summary.LastEval),
+		BestEval:               evalMetricsPayload(summary.BestEval),
+		FinalEval:              evalMetricsPayload(summary.FinalEval),
+		LastScoreSpectrumEval:  scoreSpectrumEvalMetricsPayload(summary.LastScoreSpectrumEval),
+		BestScoreSpectrumEval:  scoreSpectrumEvalMetricsPayload(summary.BestScoreSpectrumEval),
+		FinalScoreSpectrumEval: scoreSpectrumEvalMetricsPayload(summary.FinalScoreSpectrumEval),
+		Workload:               trainWorkloadPayload(summary.Workload),
+		Throughput:             trainThroughputPayload(summary),
+		Accelerators:           trainAcceleratorsPayload(summary.EndProfile),
+		ProfileDelta:           trainProfileDeltaPayload(summary.DeltaProfile),
+		Package:                trainPackagePathsPayload(paths),
+		Artifacts:              extraArtifacts,
 	}
 }
 
@@ -6507,6 +6640,13 @@ func trainRunConfigPayload(cfg eosruntime.EmbeddingTrainRunConfig) trainRunConfi
 		EvalOnly:                       cfg.EvalOnly,
 		PairwiseTrain:                  cfg.PairwiseTrain,
 		HardNegativeTrain:              cfg.HardNegativeTrain,
+		ScoreSpectrumTrain:             cfg.ScoreSpectrumTrain,
+		ScoreSpectrumEvalPath:          cfg.ScoreSpectrumEvalPath,
+		ScoreSpectrumLossMode:          cfg.ScoreSpectrumLossMode,
+		ScoreSpectrumRecoveryWeight:    cfg.ScoreSpectrumRecoveryWeight,
+		ScoreSpectrumRecoveryMargin:    cfg.ScoreSpectrumRecoveryMargin,
+		ScoreSpectrumRecoveryTopK:      cfg.ScoreSpectrumRecoveryTopK,
+		ScoreSpectrumRecoveryTau:       cfg.ScoreSpectrumRecoveryTau,
 		HardNegativesPerQuery:          cfg.HardNegativesPerQuery,
 		HardNegativeSourceWeights:      cfg.HardNegativeSourceWeights,
 	}
@@ -6542,6 +6682,28 @@ func evalMetricsPayload(metrics *eosruntime.EmbeddingEvalMetrics) *evalMetricsJS
 		PairCount:          metrics.PairCount,
 		PositiveCount:      metrics.PositiveCount,
 		NegativeCount:      metrics.NegativeCount,
+	}
+}
+
+func scoreSpectrumEvalMetricsPayload(metrics *eosruntime.EmbeddingScoreSpectrumEvalMetrics) *scoreSpectrumEvalMetricsJSON {
+	if metrics == nil {
+		return nil
+	}
+	return &scoreSpectrumEvalMetricsJSON{
+		Loss:                              metrics.Loss,
+		AverageScore:                      metrics.AverageScore,
+		AnyPositiveTop1:                   metrics.AnyPositiveTop1,
+		OriginalPositiveTop1:              metrics.OriginalPositiveTop1,
+		AlternateRelevantRecovery:         metrics.AlternateRelevantRecovery,
+		BestPositiveHardestNegativeMargin: metrics.BestPositiveHardestNegativeMargin,
+		TargetCrossEntropy:                metrics.TargetCrossEntropy,
+		TargetKL:                          metrics.TargetKL,
+		RowCount:                          metrics.RowCount,
+		CandidateCount:                    metrics.CandidateCount,
+		AnyPositiveRowCount:               metrics.AnyPositiveRowCount,
+		OriginalPositiveRowCount:          metrics.OriginalPositiveRowCount,
+		AlternateRecoveryRowCount:         metrics.AlternateRecoveryRowCount,
+		MarginRowCount:                    metrics.MarginRowCount,
 	}
 }
 

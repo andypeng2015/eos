@@ -3,6 +3,7 @@ package eosruntime
 import (
 	"fmt"
 	"math"
+	"sort"
 )
 
 type scoreSpectrumLossResult struct {
@@ -12,7 +13,15 @@ type scoreSpectrumLossResult struct {
 	SoftProbs []float32
 }
 
-func scoreSpectrumLossAndGrad(scores []float32, positives []int, hardEligible []bool, probs []float32, temperature, hardWeight, softWeight float32) (scoreSpectrumLossResult, error) {
+type scoreSpectrumRecoveryLossOptions struct {
+	Enabled bool
+	Weight  float32
+	Margin  float32
+	TopK    int
+	Tau     float32
+}
+
+func scoreSpectrumLossAndGrad(scores []float32, positives []int, hardEligible []bool, probs []float32, temperature, hardWeight, softWeight float32, recoveryOptions ...scoreSpectrumRecoveryLossOptions) (scoreSpectrumLossResult, error) {
 	var result scoreSpectrumLossResult
 	if len(scores) == 0 {
 		return result, fmt.Errorf("score-spectrum loss requires at least one score")
@@ -65,6 +74,17 @@ func scoreSpectrumLossAndGrad(scores []float32, positives []int, hardEligible []
 		result.SoftProbs = softProbs
 		for i, grad := range softGrad {
 			result.Grad[i] += softWeight * grad / temperature
+		}
+	}
+	if len(recoveryOptions) > 0 && recoveryOptions[0].Enabled {
+		recovery := recoveryOptions[0]
+		recoveryLoss, recoveryGrad, err := scoreSpectrumRecoveryLossAndGrad(scores, positives, hardEligible, recovery.Margin, recovery.TopK, recovery.Tau)
+		if err != nil {
+			return result, err
+		}
+		result.Loss += recovery.Weight * recoveryLoss
+		for i, grad := range recoveryGrad {
+			result.Grad[i] += recovery.Weight * grad
 		}
 	}
 	return result, nil
@@ -163,6 +183,111 @@ func scoreSpectrumSoftLossAndGrad(scores []float32, target []float32) (float32, 
 		grad[i] = prob - target[i]
 	}
 	return loss, grad, model
+}
+
+func scoreSpectrumRecoveryLossAndGrad(scores []float32, positives []int, hardEligible []bool, margin float32, topK int, tau float32) (float32, []float32, error) {
+	if !isFiniteNonNegative(margin) {
+		return 0, nil, fmt.Errorf("recovery margin must be finite and non-negative")
+	}
+	if topK <= 0 {
+		return 0, nil, fmt.Errorf("recovery topK must be positive")
+	}
+	if tau <= 0 || !isFinite32(tau) {
+		return 0, nil, fmt.Errorf("recovery tau must be finite and positive")
+	}
+	for i, score := range scores {
+		if !isFinite32(score) {
+			return 0, nil, fmt.Errorf("scores[%d] must be finite", i)
+		}
+	}
+	if len(hardEligible) != len(scores) {
+		return 0, nil, fmt.Errorf("hardEligible length %d does not match scores length %d", len(hardEligible), len(scores))
+	}
+	positiveSet, err := scoreSpectrumPositiveSet(len(scores), positives)
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(positives) == 0 {
+		return 0, nil, fmt.Errorf("recovery loss requires at least one positive")
+	}
+	hardIndexes := make([]int, 0, len(scores))
+	for i, eligible := range hardEligible {
+		if positiveSet[i] && eligible {
+			return 0, nil, fmt.Errorf("positive index %d cannot be hard-negative eligible", i)
+		}
+		if eligible {
+			hardIndexes = append(hardIndexes, i)
+		}
+	}
+	if len(hardIndexes) == 0 {
+		return 0, nil, fmt.Errorf("recovery loss requires at least one eligible hard-negative candidate")
+	}
+	sort.Slice(hardIndexes, func(i, j int) bool {
+		if scores[hardIndexes[i]] == scores[hardIndexes[j]] {
+			return hardIndexes[i] < hardIndexes[j]
+		}
+		return scores[hardIndexes[i]] > scores[hardIndexes[j]]
+	})
+	if topK < len(hardIndexes) {
+		hardIndexes = hardIndexes[:topK]
+	}
+	positiveIndexes := append([]int(nil), positives...)
+	sort.Ints(positiveIndexes)
+	p, positiveSoftmax := scoreSpectrumIndexedTauLogSumExp(scores, positiveIndexes, tau)
+	n, hardSoftmax := scoreSpectrumIndexedTauLogSumExp(scores, hardIndexes, tau)
+	z := (n + margin - p) / tau
+	loss := softplus32(z)
+	scale := sigmoid32(z) / tau
+	grad := make([]float32, len(scores))
+	for i, idx := range positiveIndexes {
+		grad[idx] -= scale * positiveSoftmax[i]
+	}
+	for i, idx := range hardIndexes {
+		grad[idx] += scale * hardSoftmax[i]
+	}
+	return loss, grad, nil
+}
+
+func scoreSpectrumIndexedTauLogSumExp(scores []float32, indexes []int, tau float32) (float32, []float32) {
+	maxScaled := float32(math.Inf(-1))
+	for _, idx := range indexes {
+		scaled := scores[idx] / tau
+		if scaled > maxScaled {
+			maxScaled = scaled
+		}
+	}
+	sum := float32(0)
+	probs := make([]float32, len(indexes))
+	for i, idx := range indexes {
+		value := float32(math.Exp(float64(scores[idx]/tau - maxScaled)))
+		probs[i] = value
+		sum += value
+	}
+	if sum > 0 {
+		for i := range probs {
+			probs[i] /= sum
+		}
+	}
+	return tau * (maxScaled + float32(math.Log(float64(sum)))), probs
+}
+
+func sigmoid32(x float32) float32 {
+	if x >= 0 {
+		z := float32(math.Exp(float64(-x)))
+		return 1 / (1 + z)
+	}
+	z := float32(math.Exp(float64(x)))
+	return z / (1 + z)
+}
+
+func softplus32(x float32) float32 {
+	if x > 20 {
+		return x
+	}
+	if x < -20 {
+		return float32(math.Exp(float64(x)))
+	}
+	return float32(math.Log1p(math.Exp(float64(x))))
 }
 
 func validateScoreSpectrumProbabilities(probs []float32, want int) error {

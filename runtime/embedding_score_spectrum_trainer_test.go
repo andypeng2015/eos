@@ -215,12 +215,88 @@ func TestEmbeddingTrainerScoreSpectrumExcludedHardCandidatesHaveZeroGradient(t *
 		SoftLossWeight:       0,
 	}}
 
-	_, _, _, err := accumulateScoreSpectrumGrads(queries, candidates, []embeddingCandidateSpan{{Start: 0, End: 3}}, examples, 1, queryGrads, candidateGrads)
+	_, _, _, err := accumulateScoreSpectrumGrads(queries, candidates, []embeddingCandidateSpan{{Start: 0, End: 3}}, examples, EmbeddingTrainConfig{Temperature: 1, ScoreSpectrumLossMode: ScoreSpectrumLossModeHardSoft, ScoreSpectrumRecoveryTopK: 4, ScoreSpectrumRecoveryTau: 1}, queryGrads, candidateGrads)
 	if err != nil {
 		t.Fatalf("accumulate score-spectrum grads: %v", err)
 	}
 	if candidateGrads[2][0] != 0 || candidateGrads[2][1] != 0 {
 		t.Fatalf("excluded candidate grad = %v, want zero", candidateGrads[2])
+	}
+}
+
+func TestEmbeddingTrainerScoreSpectrumRecoveryChangesLossAndGradients(t *testing.T) {
+	queries := []*embeddingEncodedSequence{{pooled: []float32{1, 0}}}
+	candidates := []*embeddingEncodedSequence{
+		{pooled: []float32{1, 0}},
+		{pooled: []float32{0, 1}},
+		{pooled: []float32{-1, 0}},
+	}
+	examples := []EmbeddingScoreSpectrumExample{{
+		PositiveIndexes:      []int{0},
+		HardNegativeEligible: []bool{false, true, true},
+		TargetProbabilities:  []float32{1, 0, 0},
+	}}
+	baseQueryGrads := [][]float32{{0, 0}}
+	baseCandidateGrads := [][]float32{{0, 0}, {0, 0}, {0, 0}}
+	baseLoss, _, _, err := accumulateScoreSpectrumGrads(queries, candidates, []embeddingCandidateSpan{{Start: 0, End: 3}}, examples, EmbeddingTrainConfig{
+		Temperature:               0.5,
+		ScoreSpectrumLossMode:     ScoreSpectrumLossModeHardSoft,
+		ScoreSpectrumRecoveryTopK: 4,
+		ScoreSpectrumRecoveryTau:  0.5,
+	}, baseQueryGrads, baseCandidateGrads)
+	if err != nil {
+		t.Fatalf("base score-spectrum grads: %v", err)
+	}
+
+	recoveryQueryGrads := [][]float32{{0, 0}}
+	recoveryCandidateGrads := [][]float32{{0, 0}, {0, 0}, {0, 0}}
+	recoveryLoss, _, _, err := accumulateScoreSpectrumGrads(queries, candidates, []embeddingCandidateSpan{{Start: 0, End: 3}}, examples, EmbeddingTrainConfig{
+		Temperature:                 0.5,
+		ScoreSpectrumLossMode:       ScoreSpectrumLossModeHardSoftRecovery,
+		ScoreSpectrumRecoveryWeight: 1,
+		ScoreSpectrumRecoveryMargin: 0.1,
+		ScoreSpectrumRecoveryTopK:   1,
+		ScoreSpectrumRecoveryTau:    0.25,
+	}, recoveryQueryGrads, recoveryCandidateGrads)
+	if err != nil {
+		t.Fatalf("recovery score-spectrum grads: %v", err)
+	}
+	if recoveryLoss <= baseLoss {
+		t.Fatalf("recovery loss = %f, want above base %f", recoveryLoss, baseLoss)
+	}
+	if recoveryCandidateGrads[1][0] == baseCandidateGrads[1][0] && recoveryCandidateGrads[1][1] == baseCandidateGrads[1][1] {
+		t.Fatalf("selected hard-negative gradient did not change: base=%v recovery=%v", baseCandidateGrads[1], recoveryCandidateGrads[1])
+	}
+	if recoveryCandidateGrads[2][0] != baseCandidateGrads[2][0] || recoveryCandidateGrads[2][1] != baseCandidateGrads[2][1] {
+		t.Fatalf("non-topK hard-negative recovery gradient changed: base=%v recovery=%v", baseCandidateGrads[2], recoveryCandidateGrads[2])
+	}
+}
+
+func TestEmbeddingTrainerScoreSpectrumRecoveryFoldsSelectedOnlyPositive(t *testing.T) {
+	selected := 0
+	batch := []EmbeddingScoreSpectrumExample{{
+		QueryTokens:             []int32{0},
+		QueryMask:               []int32{1},
+		CandidateTokens:         [][]int32{{0}, {1}},
+		CandidateMasks:          [][]int32{{1}, {1}},
+		SelectedPositiveIndex:   &selected,
+		HardNegativeEligible:    []bool{false, true},
+		TargetProbabilities:     []float32{1, 0},
+		CommercialUseAllowed:    true,
+		TrainAllowedForResearch: false,
+		RecoveryLossWeight:      2,
+	}}
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.005)
+	trainer.config.ScoreSpectrumLossMode = ScoreSpectrumLossModeRecovery
+	trainer.config.ScoreSpectrumRecoveryWeight = 1
+	trainer.config.ScoreSpectrumRecoveryTopK = 1
+	trainer.config.ScoreSpectrumRecoveryTau = 0.05
+	metrics, err := trainer.TrainScoreSpectrumStep(batch)
+	if err != nil {
+		t.Fatalf("train recovery selected-only score-spectrum row: %v", err)
+	}
+	if metrics.Loss <= 0 || trainer.step != 1 {
+		t.Fatalf("metrics/step = %+v/%d, want positive loss and one update", metrics, trainer.step)
 	}
 }
 
@@ -239,6 +315,31 @@ func TestEmbeddingTrainerFitScoreSpectrumEvalOnlyDoesNotUpdate(t *testing.T) {
 	}
 	if summary.FinalEval == nil || summary.Workload.ActualEvalPairs == 0 {
 		t.Fatalf("missing eval metrics/workload: final=%v actualEvalPairs=%d", summary.FinalEval, summary.Workload.ActualEvalPairs)
+	}
+}
+
+func TestEmbeddingTrainerFitScoreSpectrumPreservesInheritedRecoveryWeight(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	trainer.config.ScoreSpectrumLossMode = ScoreSpectrumLossModeRecovery
+	trainer.config.ScoreSpectrumRecoveryWeight = 1.5
+	trainer.config.ScoreSpectrumRecoveryTopK = 1
+	trainer.config.ScoreSpectrumRecoveryTau = 0.05
+
+	summary, err := trainer.FitScoreSpectrum(tinyEmbeddingScoreSpectrumDataset(), nil, EmbeddingTrainRunConfig{
+		Epochs:    1,
+		BatchSize: 2,
+	})
+	if err != nil {
+		t.Fatalf("fit score-spectrum with inherited recovery weight: %v", err)
+	}
+	if summary.Config.ScoreSpectrumLossMode != ScoreSpectrumLossModeRecovery {
+		t.Fatalf("summary loss mode = %q, want %q", summary.Config.ScoreSpectrumLossMode, ScoreSpectrumLossModeRecovery)
+	}
+	if summary.Config.ScoreSpectrumRecoveryWeight != 1.5 {
+		t.Fatalf("summary recovery weight = %v, want 1.5", summary.Config.ScoreSpectrumRecoveryWeight)
+	}
+	if trainer.config.ScoreSpectrumRecoveryWeight != 1.5 {
+		t.Fatalf("trainer recovery weight = %v, want 1.5", trainer.config.ScoreSpectrumRecoveryWeight)
 	}
 }
 
@@ -446,6 +547,24 @@ func TestEstimateScoreSpectrumTrainWorkloadCountsRowLocalCandidates(t *testing.T
 	}
 	if workload.TrainPairsPerEpoch != 4 || workload.PlannedTrainPairs != 8 {
 		t.Fatalf("train pairs per epoch/planned = %d/%d, want 4/8", workload.TrainPairsPerEpoch, workload.PlannedTrainPairs)
+	}
+}
+
+func TestEstimateScoreSpectrumTrainWorkloadMixedEvalModeUsesActualEvalSets(t *testing.T) {
+	workload := estimateScoreSpectrumTrainWorkload(tinyEmbeddingScoreSpectrumDataset(), 2, 1, 4, EmbeddingTrainRunConfig{
+		Epochs:    1,
+		BatchSize: 2,
+	})
+	if workload.EvalMode != "mixed" {
+		t.Fatalf("eval mode = %q, want mixed", workload.EvalMode)
+	}
+
+	workload = estimateScoreSpectrumTrainWorkload(tinyEmbeddingScoreSpectrumDataset(), 0, 1, 2, EmbeddingTrainRunConfig{
+		Epochs:    1,
+		BatchSize: 2,
+	})
+	if workload.EvalMode != "score_spectrum_grouped" {
+		t.Fatalf("eval mode = %q, want score_spectrum_grouped", workload.EvalMode)
 	}
 }
 

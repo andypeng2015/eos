@@ -14,6 +14,12 @@ import (
 	"m31labs.dev/turboquant"
 )
 
+const (
+	ScoreSpectrumLossModeHardSoft         = "hard_soft"
+	ScoreSpectrumLossModeRecovery         = "recovery"
+	ScoreSpectrumLossModeHardSoftRecovery = "hard_soft_recovery"
+)
+
 // EmbeddingPairExample is one supervised pairwise training example.
 type EmbeddingPairExample struct {
 	Source      string
@@ -50,6 +56,11 @@ type EmbeddingTrainConfig struct {
 	TurboQuantCompactObjectives    []TurboQuantPrefixObjective
 	TurboQuantRankMarginObjectives []TurboQuantPrefixObjective
 	TurboQuantRankMargin           float32
+	ScoreSpectrumLossMode          string
+	ScoreSpectrumRecoveryWeight    float32
+	ScoreSpectrumRecoveryMargin    float32
+	ScoreSpectrumRecoveryTopK      int
+	ScoreSpectrumRecoveryTau       float32
 }
 
 // TurboQuantPrefixObjective targets one quantized compact-prefix loss.
@@ -1548,7 +1559,7 @@ func (t *EmbeddingTrainer) TrainScoreSpectrumStep(batch []EmbeddingScoreSpectrum
 		candidateGrads[i] = make([]float32, len(candidates[i].pooled))
 	}
 
-	totalLoss, totalScore, pairCount, err := accumulateScoreSpectrumGrads(queries, candidates, candidateSpans, canonicalBatch, t.config.Temperature, queryGrads, candidateGrads)
+	totalLoss, totalScore, pairCount, err := accumulateScoreSpectrumGrads(queries, candidates, candidateSpans, canonicalBatch, t.config, queryGrads, candidateGrads)
 	if err != nil {
 		return EmbeddingTrainMetrics{}, err
 	}
@@ -3753,7 +3764,7 @@ func accumulateGroupedInfoNCEHardNegativeGrads(queries, candidates []*embeddingE
 	return totalLoss, totalScore
 }
 
-func accumulateScoreSpectrumGrads(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, examples []EmbeddingScoreSpectrumExample, temperature float32, queryGrads, candidateGrads [][]float32) (float32, float32, int, error) {
+func accumulateScoreSpectrumGrads(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, examples []EmbeddingScoreSpectrumExample, cfg EmbeddingTrainConfig, queryGrads, candidateGrads [][]float32) (float32, float32, int, error) {
 	totalLoss := float32(0)
 	totalScore := float32(0)
 	pairCount := 0
@@ -3778,6 +3789,10 @@ func accumulateScoreSpectrumGrads(queries, candidates []*embeddingEncodedSequenc
 		}
 		example := examples[i]
 		hardWeight, softWeight := scoreSpectrumEffectiveLossWeights(example.HardLossWeight, example.SoftLossWeight)
+		if !scoreSpectrumLossModeIncludesHardSoft(cfg.ScoreSpectrumLossMode) {
+			hardWeight, softWeight = 0, 0
+		}
+		recoveryWeight := scoreSpectrumEffectiveRecoveryWeight(cfg.ScoreSpectrumRecoveryWeight, example.RecoveryLossWeight)
 		query := queryMatrix.row(i)
 		queryNorm := queryMatrix.norms[i]
 		scores := rowScores[:candidateCount]
@@ -3787,7 +3802,13 @@ func accumulateScoreSpectrumGrads(queries, candidates []*embeddingEncodedSequenc
 			scores[local] = score
 			totalScore += score
 		}
-		loss, err := scoreSpectrumLossAndGrad(scores, example.PositiveIndexes, example.HardNegativeEligible, example.TargetProbabilities, temperature, hardWeight, softWeight)
+		loss, err := scoreSpectrumLossAndGrad(scores, example.PositiveIndexes, example.HardNegativeEligible, example.TargetProbabilities, cfg.Temperature, hardWeight, softWeight, scoreSpectrumRecoveryLossOptions{
+			Enabled: scoreSpectrumLossModeIncludesRecovery(cfg.ScoreSpectrumLossMode) && recoveryWeight > 0,
+			Weight:  recoveryWeight,
+			Margin:  cfg.ScoreSpectrumRecoveryMargin,
+			TopK:    cfg.ScoreSpectrumRecoveryTopK,
+			Tau:     cfg.ScoreSpectrumRecoveryTau,
+		})
 		if err != nil {
 			return 0, 0, 0, fmt.Errorf("score-spectrum row %d: %w", i, err)
 		}
@@ -3895,7 +3916,7 @@ func evaluateScoreSpectrumEncodings(queries, candidates []*embeddingEncodedSeque
 		}
 
 		hardWeight, softWeight := scoreSpectrumEffectiveLossWeights(example.HardLossWeight, example.SoftLossWeight)
-		loss, err := scoreSpectrumLossAndGrad(scores, example.PositiveIndexes, example.HardNegativeEligible, example.TargetProbabilities, temperature, hardWeight, softWeight)
+		loss, err := scoreSpectrumLossAndGrad(scores, example.PositiveIndexes, example.HardNegativeEligible, example.TargetProbabilities, temperature, hardWeight, softWeight, scoreSpectrumRecoveryLossOptions{})
 		if err != nil {
 			return EmbeddingScoreSpectrumEvalMetrics{}, fmt.Errorf("score-spectrum row %d: %w", i, err)
 		}
@@ -3990,6 +4011,16 @@ func scoreSpectrumEffectiveLossWeights(hardWeight, softWeight float32) (float32,
 	return hardWeight, softWeight
 }
 
+func scoreSpectrumEffectiveRecoveryWeight(globalWeight, rowWeight float32) float32 {
+	// A missing per-row weight keeps the global recovery objective weight.
+	// Positive row weights scale that global weight, so datasets can emphasize
+	// recovery rows with values such as 2/1/1 without disabling default rows.
+	if rowWeight > 0 {
+		return globalWeight * rowWeight
+	}
+	return globalWeight
+}
+
 func validateScoreSpectrumTrainerConfig(cfg EmbeddingTrainConfig) error {
 	if len(cfg.MatryoshkaDims) > 0 {
 		return fmt.Errorf("score-spectrum training does not support matryoshka objectives in v1")
@@ -4002,6 +4033,9 @@ func validateScoreSpectrumTrainerConfig(cfg EmbeddingTrainConfig) error {
 	}
 	if len(cfg.TurboQuantRankMarginObjectives) > 0 || len(turboQuantRankMarginObjectivesForConfig(cfg)) > 0 {
 		return fmt.Errorf("score-spectrum training does not support turboquant rank-margin objectives in v1")
+	}
+	if err := validateScoreSpectrumRecoveryConfig(cfg.ScoreSpectrumLossMode, cfg.ScoreSpectrumRecoveryWeight, cfg.ScoreSpectrumRecoveryMargin, cfg.ScoreSpectrumRecoveryTopK, cfg.ScoreSpectrumRecoveryTau); err != nil {
+		return err
 	}
 	return nil
 }
@@ -5602,6 +5636,7 @@ func normalizedTrainConfig(cfg EmbeddingTrainConfig, params ...eosartifact.Param
 	if cfg.TeacherTemperature == 0 {
 		cfg.TeacherTemperature = 1
 	}
+	cfg = normalizedScoreSpectrumTrainConfig(cfg)
 	cfg.TeacherSourceTemperatures = normalizeHardNegativeTeacherTemperatures(cfg.TeacherSourceTemperatures)
 	cfg.TeacherSourceWeights = normalizeHardNegativeTeacherWeights(cfg.TeacherSourceWeights)
 	cfg.GroupedLossWeight = effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
@@ -5638,6 +5673,60 @@ func normalizedTrainConfig(cfg EmbeddingTrainConfig, params ...eosartifact.Param
 		}
 	}
 	return cfg
+}
+
+func normalizedScoreSpectrumTrainConfig(cfg EmbeddingTrainConfig) EmbeddingTrainConfig {
+	mode, err := normalizeScoreSpectrumLossMode(cfg.ScoreSpectrumLossMode)
+	if err == nil {
+		cfg.ScoreSpectrumLossMode = mode
+	}
+	if cfg.ScoreSpectrumRecoveryWeight == 0 && scoreSpectrumLossModeIncludesRecovery(cfg.ScoreSpectrumLossMode) {
+		cfg.ScoreSpectrumRecoveryWeight = 1
+	}
+	if cfg.ScoreSpectrumRecoveryTopK == 0 {
+		cfg.ScoreSpectrumRecoveryTopK = 4
+	}
+	if cfg.ScoreSpectrumRecoveryTau == 0 {
+		if cfg.Temperature > 0 {
+			cfg.ScoreSpectrumRecoveryTau = cfg.Temperature
+		} else {
+			cfg.ScoreSpectrumRecoveryTau = 0.05
+		}
+	}
+	return cfg
+}
+
+func normalizeScoreSpectrumLossMode(mode string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(strings.ReplaceAll(mode, "-", "_"))) {
+	case "", ScoreSpectrumLossModeHardSoft:
+		return ScoreSpectrumLossModeHardSoft, nil
+	case ScoreSpectrumLossModeRecovery:
+		return ScoreSpectrumLossModeRecovery, nil
+	case ScoreSpectrumLossModeHardSoftRecovery:
+		return ScoreSpectrumLossModeHardSoftRecovery, nil
+	default:
+		return "", fmt.Errorf("unsupported score_spectrum_loss_mode %q (supported: %s, %s, %s)", mode, ScoreSpectrumLossModeHardSoft, ScoreSpectrumLossModeRecovery, ScoreSpectrumLossModeHardSoftRecovery)
+	}
+}
+
+func NormalizeScoreSpectrumLossModeForCLI(mode string) (string, error) {
+	return normalizeScoreSpectrumLossMode(mode)
+}
+
+func scoreSpectrumLossModeIncludesHardSoft(mode string) bool {
+	mode, err := normalizeScoreSpectrumLossMode(mode)
+	if err != nil {
+		return false
+	}
+	return mode == ScoreSpectrumLossModeHardSoft || mode == ScoreSpectrumLossModeHardSoftRecovery
+}
+
+func scoreSpectrumLossModeIncludesRecovery(mode string) bool {
+	mode, err := normalizeScoreSpectrumLossMode(mode)
+	if err != nil {
+		return false
+	}
+	return mode == ScoreSpectrumLossModeRecovery || mode == ScoreSpectrumLossModeHardSoftRecovery
 }
 
 func normalizeMatryoshkaTrainConfig(cfg EmbeddingTrainConfig, embeddingDim int) (EmbeddingTrainConfig, error) {
@@ -6042,6 +6131,7 @@ func turboQuantCompactWeightSum(cfg EmbeddingTrainConfig) float32 {
 }
 
 func validateTrainConfig(cfg EmbeddingTrainConfig) error {
+	cfg = normalizedScoreSpectrumTrainConfig(cfg)
 	switch cfg.ContrastiveLoss {
 	case "pair_mse", "infonce", "grouped_infonce", "hybrid_infonce":
 	default:
@@ -6146,6 +6236,32 @@ func validateTrainConfig(cfg EmbeddingTrainConfig) error {
 		if _, err := normalizeTurboQuantPrefixScoreMode(TurboQuantPrefixScoreModePreparedIP); err != nil {
 			return err
 		}
+	}
+	if err := validateScoreSpectrumRecoveryConfig(cfg.ScoreSpectrumLossMode, cfg.ScoreSpectrumRecoveryWeight, cfg.ScoreSpectrumRecoveryMargin, cfg.ScoreSpectrumRecoveryTopK, cfg.ScoreSpectrumRecoveryTau); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateScoreSpectrumRecoveryConfig(mode string, weight, margin float32, topK int, tau float32) error {
+	normalizedMode, err := normalizeScoreSpectrumLossMode(mode)
+	if err != nil {
+		return err
+	}
+	if weight < 0 || math.IsNaN(float64(weight)) || math.IsInf(float64(weight), 0) {
+		return fmt.Errorf("score_spectrum_recovery_weight must be finite and non-negative")
+	}
+	if margin < 0 || math.IsNaN(float64(margin)) || math.IsInf(float64(margin), 0) {
+		return fmt.Errorf("score_spectrum_recovery_margin must be finite and non-negative")
+	}
+	if topK <= 0 {
+		return fmt.Errorf("score_spectrum_recovery_top_k must be positive")
+	}
+	if tau <= 0 || math.IsNaN(float64(tau)) || math.IsInf(float64(tau), 0) {
+		return fmt.Errorf("score_spectrum_recovery_tau must be finite and positive")
+	}
+	if scoreSpectrumLossModeIncludesRecovery(normalizedMode) && weight == 0 {
+		return fmt.Errorf("score_spectrum_recovery_weight must be positive when recovery loss is enabled")
 	}
 	return nil
 }

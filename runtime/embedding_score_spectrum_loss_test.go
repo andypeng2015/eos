@@ -184,6 +184,70 @@ func TestScoreSpectrumLossTemperatureMatchesGroupedInfoNCE(t *testing.T) {
 	}
 }
 
+func TestScoreSpectrumRecoveryLossGradientSignsAndTopK(t *testing.T) {
+	got, err := scoreSpectrumLossAndGrad(
+		[]float32{0.2, 0.7, -0.3, 0.5},
+		[]int{0},
+		[]bool{false, true, true, true},
+		nil,
+		0.5,
+		0,
+		0,
+		scoreSpectrumRecoveryLossOptions{Enabled: true, Weight: 1, Margin: 0.1, TopK: 2, Tau: 0.25},
+	)
+	if err != nil {
+		t.Fatalf("recovery loss: %v", err)
+	}
+	if got.Loss <= 0 {
+		t.Fatalf("recovery loss = %f, want positive", got.Loss)
+	}
+	if got.Grad[0] >= 0 {
+		t.Fatalf("positive grad = %f, want negative", got.Grad[0])
+	}
+	if got.Grad[1] <= 0 || got.Grad[3] <= 0 {
+		t.Fatalf("selected hard-negative grads = [%f %f], want positive", got.Grad[1], got.Grad[3])
+	}
+	if got.Grad[2] != 0 {
+		t.Fatalf("non-topK hard-negative grad = %f, want zero", got.Grad[2])
+	}
+}
+
+func TestScoreSpectrumRecoveryLossValidation(t *testing.T) {
+	tests := []struct {
+		name         string
+		scores       []float32
+		positives    []int
+		hardEligible []bool
+		margin       float32
+		topK         int
+		tau          float32
+		want         string
+	}{
+		{name: "missing positive", scores: []float32{0, 1}, positives: nil, hardEligible: []bool{false, true}, topK: 1, tau: 0.1, want: "positive"},
+		{name: "missing hard", scores: []float32{0, 1}, positives: []int{0}, hardEligible: []bool{false, false}, topK: 1, tau: 0.1, want: "hard-negative"},
+		{name: "bad topk", scores: []float32{0, 1}, positives: []int{0}, hardEligible: []bool{false, true}, topK: 0, tau: 0.1, want: "topK"},
+		{name: "bad tau", scores: []float32{0, 1}, positives: []int{0}, hardEligible: []bool{false, true}, topK: 1, tau: 0, want: "tau"},
+		{name: "bad margin", scores: []float32{0, 1}, positives: []int{0}, hardEligible: []bool{false, true}, margin: -0.1, topK: 1, tau: 0.1, want: "margin"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := scoreSpectrumLossAndGrad(
+				tc.scores,
+				tc.positives,
+				tc.hardEligible,
+				nil,
+				0.5,
+				0,
+				0,
+				scoreSpectrumRecoveryLossOptions{Enabled: true, Weight: 1, Margin: tc.margin, TopK: tc.topK, Tau: tc.tau},
+			)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func assertFiniteProbabilityVector(t *testing.T, probs []float32, tol float32, name string) {
 	t.Helper()
 	sum := float32(0)

@@ -20,20 +20,25 @@ func TestEmbeddingTrainManifestRoundTrip(t *testing.T) {
 		Name:      "tiny_train_embed_q8",
 		Embedding: tinyMaskedEmbeddingManifest(),
 		Config: EmbeddingTrainConfig{
-			LearningRate:              0.05,
-			WeightBits:                8,
-			Optimizer:                 "adamw",
-			Beta1:                     0.9,
-			Beta2:                     0.999,
-			Epsilon:                   1e-8,
-			ContrastiveLoss:           "infonce",
-			Temperature:               0.05,
-			MatryoshkaDims:            []int{64, 128},
-			MatryoshkaWeights:         []float32{0.5, 1},
-			TurboQuantPrefixBits:      []int{2, 4},
-			TurboQuantPrefixWeight:    0.25,
-			TurboQuantPrefixSeed:      DefaultTurboQuantMultiVectorQuantizerSeed,
-			TurboQuantPrefixScoreMode: TurboQuantPrefixScoreModePreparedIP,
+			LearningRate:                0.05,
+			WeightBits:                  8,
+			Optimizer:                   "adamw",
+			Beta1:                       0.9,
+			Beta2:                       0.999,
+			Epsilon:                     1e-8,
+			ContrastiveLoss:             "infonce",
+			Temperature:                 0.05,
+			MatryoshkaDims:              []int{64, 128},
+			MatryoshkaWeights:           []float32{0.5, 1},
+			TurboQuantPrefixBits:        []int{2, 4},
+			TurboQuantPrefixWeight:      0.25,
+			TurboQuantPrefixSeed:        DefaultTurboQuantMultiVectorQuantizerSeed,
+			TurboQuantPrefixScoreMode:   TurboQuantPrefixScoreModePreparedIP,
+			ScoreSpectrumLossMode:       ScoreSpectrumLossModeHardSoftRecovery,
+			ScoreSpectrumRecoveryWeight: 1.5,
+			ScoreSpectrumRecoveryMargin: 0.2,
+			ScoreSpectrumRecoveryTopK:   3,
+			ScoreSpectrumRecoveryTau:    0.07,
 		},
 		ScoreSpectrum: EmbeddingScoreSpectrumPolicy{
 			ScoreSpectrumTrain:        true,
@@ -71,6 +76,9 @@ func TestEmbeddingTrainManifestRoundTrip(t *testing.T) {
 	}
 	if got.Config.TurboQuantPrefixScoreMode != TurboQuantPrefixScoreModePreparedIP {
 		t.Fatalf("turboquant prefix score mode = %q, want %q", got.Config.TurboQuantPrefixScoreMode, TurboQuantPrefixScoreModePreparedIP)
+	}
+	if got.Config.ScoreSpectrumLossMode != ScoreSpectrumLossModeHardSoftRecovery || got.Config.ScoreSpectrumRecoveryWeight != 1.5 || got.Config.ScoreSpectrumRecoveryMargin != 0.2 || got.Config.ScoreSpectrumRecoveryTopK != 3 || got.Config.ScoreSpectrumRecoveryTau != 0.07 {
+		t.Fatalf("score-spectrum recovery config = %+v, want hard_soft_recovery weight=1.5 margin=0.2 topK=3 tau=0.07", got.Config)
 	}
 	if !got.ScoreSpectrum.ScoreSpectrumTrain || !got.ScoreSpectrum.ScoreSpectrumResearchOnly || !got.ScoreSpectrum.TrainAllowedForResearch || got.ScoreSpectrum.ReleaseTrainAllowed || got.ScoreSpectrum.CommercialUseAllowed {
 		t.Fatalf("score-spectrum policy mismatch: %+v", got.ScoreSpectrum)

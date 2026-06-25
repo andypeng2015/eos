@@ -149,6 +149,11 @@ func (m EmbeddingTrainManifest) mllValues() map[string]authoredManifestValue {
 		"config.turboquant_compact_objectives":         authoredString(FormatTurboQuantPrefixObjectives(m.Config.TurboQuantCompactObjectives)),
 		"config.turboquant_rank_margin_objectives":     authoredString(FormatTurboQuantPrefixObjectives(m.Config.TurboQuantRankMarginObjectives)),
 		"config.turboquant_rank_margin":                authoredFloat(float64(m.Config.TurboQuantRankMargin)),
+		"config.score_spectrum_loss_mode":              authoredString(m.Config.ScoreSpectrumLossMode),
+		"config.score_spectrum_recovery_weight":        authoredFloat(float64(m.Config.ScoreSpectrumRecoveryWeight)),
+		"config.score_spectrum_recovery_margin":        authoredFloat(float64(m.Config.ScoreSpectrumRecoveryMargin)),
+		"config.score_spectrum_recovery_top_k":         authoredInt(int64(m.Config.ScoreSpectrumRecoveryTopK)),
+		"config.score_spectrum_recovery_tau":           authoredFloat(float64(m.Config.ScoreSpectrumRecoveryTau)),
 		"score_spectrum.score_spectrum_train":          authoredBool(m.ScoreSpectrum.ScoreSpectrumTrain),
 		"score_spectrum.score_spectrum_research_only":  authoredBool(m.ScoreSpectrum.ScoreSpectrumResearchOnly),
 		"score_spectrum.train_allowed_for_research":    authoredBool(m.ScoreSpectrum.TrainAllowedForResearch),
@@ -314,6 +319,31 @@ func embeddingTrainManifestFromDoc(doc authoredManifestDoc) (EmbeddingTrainManif
 		return EmbeddingTrainManifest{}, err
 	} else if ok {
 		manifest.Config.TurboQuantRankMargin = float32(value)
+	}
+	if value, ok, err := doc.string("config.score_spectrum_loss_mode"); err != nil {
+		return EmbeddingTrainManifest{}, err
+	} else if ok {
+		manifest.Config.ScoreSpectrumLossMode = value
+	}
+	if value, ok, err := doc.float("config.score_spectrum_recovery_weight"); err != nil {
+		return EmbeddingTrainManifest{}, err
+	} else if ok {
+		manifest.Config.ScoreSpectrumRecoveryWeight = float32(value)
+	}
+	if value, ok, err := doc.float("config.score_spectrum_recovery_margin"); err != nil {
+		return EmbeddingTrainManifest{}, err
+	} else if ok {
+		manifest.Config.ScoreSpectrumRecoveryMargin = float32(value)
+	}
+	if value, ok, err := doc.int("config.score_spectrum_recovery_top_k"); err != nil {
+		return EmbeddingTrainManifest{}, err
+	} else if ok {
+		manifest.Config.ScoreSpectrumRecoveryTopK = int(value)
+	}
+	if value, ok, err := doc.float("config.score_spectrum_recovery_tau"); err != nil {
+		return EmbeddingTrainManifest{}, err
+	} else if ok {
+		manifest.Config.ScoreSpectrumRecoveryTau = float32(value)
 	}
 	if manifest.ScoreSpectrum, err = scoreSpectrumPolicyFromAuthoredDoc(doc, "score_spectrum."); err != nil {
 		return EmbeddingTrainManifest{}, err

@@ -5858,6 +5858,90 @@ func TestRunTrainEmbedPlanOnlyScoreSpectrumWorkload(t *testing.T) {
 	}
 }
 
+func TestRunTrainEmbedScoreSpectrumNativeEvalAndRecoveryFlags(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	dir := t.TempDir()
+	trainPath := filepath.Join(dir, "train-score-spectrum.jsonl")
+	evalPath := filepath.Join(dir, "eval-score-spectrum.jsonl")
+	metricsPath := filepath.Join(dir, "metrics.json")
+	if err := eosruntime.WriteEmbeddingScoreSpectrumExamplesFile(trainPath, tinyCLIScoreSpectrumExamples(false)); err != nil {
+		t.Fatalf("write train score-spectrum dataset: %v", err)
+	}
+	evalExamples := tinyCLIScoreSpectrumExamples(false)
+	selected := 0
+	evalExamples[0].SelectedPositiveIndex = &selected
+	evalExamples[0].PositiveIndexes = nil
+	if err := eosruntime.WriteEmbeddingScoreSpectrumExamplesFile(evalPath, evalExamples); err != nil {
+		t.Fatalf("write eval score-spectrum dataset: %v", err)
+	}
+
+	output := captureRunOutput(t, []string{
+		"train-embed",
+		"--score-spectrum-train",
+		"--score-spectrum-eval", evalPath,
+		"--score-spectrum-loss-mode", "hard_soft_recovery",
+		"--score-spectrum-recovery-weight", "1.25",
+		"--score-spectrum-recovery-margin", "0.05",
+		"--score-spectrum-recovery-top-k", "1",
+		"--score-spectrum-recovery-tau", "0.05",
+		"--select-metric", "score_spectrum_any_positive_top1",
+		"--no-tokenizer",
+		"--epochs", "1",
+		"--batch-size", "2",
+		"--metrics-json", metricsPath,
+		path,
+		trainPath,
+	})
+	if !strings.Contains(output, "final score-spectrum eval:") {
+		t.Fatalf("score-spectrum native eval output missing final eval:\n%s", output)
+	}
+	var got struct {
+		Config struct {
+			ScoreSpectrumLossMode       string  `json:"score_spectrum_loss_mode"`
+			ScoreSpectrumRecoveryWeight float32 `json:"score_spectrum_recovery_weight"`
+			ScoreSpectrumRecoveryTopK   int     `json:"score_spectrum_recovery_top_k"`
+		} `json:"config"`
+		FinalScoreSpectrumEval *struct {
+			RowCount       int `json:"row_count"`
+			CandidateCount int `json:"candidate_count"`
+		} `json:"final_score_spectrum_eval"`
+		BestScoreSpectrumEval *struct {
+			RowCount int `json:"row_count"`
+		} `json:"best_score_spectrum_eval"`
+	}
+	data, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatalf("read metrics: %v", err)
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("decode metrics: %v\n%s", err, data)
+	}
+	if got.Config.ScoreSpectrumLossMode != "hard_soft_recovery" || got.Config.ScoreSpectrumRecoveryWeight != 1.25 || got.Config.ScoreSpectrumRecoveryTopK != 1 {
+		t.Fatalf("score-spectrum config JSON = %+v, want recovery flags", got.Config)
+	}
+	if got.FinalScoreSpectrumEval == nil || got.FinalScoreSpectrumEval.RowCount != 2 || got.FinalScoreSpectrumEval.CandidateCount != 4 {
+		t.Fatalf("final score-spectrum eval JSON = %+v, want 2 rows/4 candidates", got.FinalScoreSpectrumEval)
+	}
+	if got.BestScoreSpectrumEval == nil || got.BestScoreSpectrumEval.RowCount != 2 {
+		t.Fatalf("best score-spectrum eval JSON = %+v, want row_count=2", got.BestScoreSpectrumEval)
+	}
+}
+
+func TestRunTrainEmbedRejectsInvalidScoreSpectrumRecoveryFlags(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	trainPath := filepath.Join(t.TempDir(), "train-score-spectrum.jsonl")
+	if err := eosruntime.WriteEmbeddingScoreSpectrumExamplesFile(trainPath, tinyCLIScoreSpectrumExamples(false)); err != nil {
+		t.Fatalf("write score-spectrum dataset: %v", err)
+	}
+	_, err := captureRunOutputAndError(t, []string{"train-embed", "--score-spectrum-train", "--score-spectrum-loss-mode", "recovery", "--score-spectrum-recovery-top-k", "-1", "--no-tokenizer", path, trainPath})
+	if err == nil || !strings.Contains(err.Error(), "score-spectrum-recovery-top-k") {
+		t.Fatalf("invalid recovery top-k error = %v, want rejection", err)
+	}
+}
+
 func tinyCLIScoreSpectrumExamples(researchOnly bool) []eosruntime.EmbeddingScoreSpectrumExample {
 	examples := []eosruntime.EmbeddingScoreSpectrumExample{
 		{
