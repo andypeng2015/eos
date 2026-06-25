@@ -5905,8 +5905,9 @@ func TestRunTrainEmbedScoreSpectrumNativeEvalAndRecoveryFlags(t *testing.T) {
 			ScoreSpectrumRecoveryTopK   int     `json:"score_spectrum_recovery_top_k"`
 		} `json:"config"`
 		FinalScoreSpectrumEval *struct {
-			RowCount       int `json:"row_count"`
-			CandidateCount int `json:"candidate_count"`
+			RowCount                   int `json:"row_count"`
+			CandidateCount             int `json:"candidate_count"`
+			TargetDistributionRowCount int `json:"target_distribution_row_count"`
 		} `json:"final_score_spectrum_eval"`
 		BestScoreSpectrumEval *struct {
 			RowCount int `json:"row_count"`
@@ -5924,6 +5925,9 @@ func TestRunTrainEmbedScoreSpectrumNativeEvalAndRecoveryFlags(t *testing.T) {
 	}
 	if got.FinalScoreSpectrumEval == nil || got.FinalScoreSpectrumEval.RowCount != 2 || got.FinalScoreSpectrumEval.CandidateCount != 4 {
 		t.Fatalf("final score-spectrum eval JSON = %+v, want 2 rows/4 candidates", got.FinalScoreSpectrumEval)
+	}
+	if got.FinalScoreSpectrumEval.TargetDistributionRowCount != 2 {
+		t.Fatalf("target distribution row count = %d, want 2", got.FinalScoreSpectrumEval.TargetDistributionRowCount)
 	}
 	if got.BestScoreSpectrumEval == nil || got.BestScoreSpectrumEval.RowCount != 2 {
 		t.Fatalf("best score-spectrum eval JSON = %+v, want row_count=2", got.BestScoreSpectrumEval)

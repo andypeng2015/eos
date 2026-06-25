@@ -6486,6 +6486,7 @@ type scoreSpectrumEvalMetricsJSON struct {
 	OriginalPositiveRowCount          int     `json:"original_positive_row_count"`
 	AlternateRecoveryRowCount         int     `json:"alternate_recovery_row_count"`
 	MarginRowCount                    int     `json:"margin_row_count"`
+	TargetDistributionRowCount        int     `json:"target_distribution_row_count"`
 }
 
 type trainWorkloadJSON struct {
@@ -6704,6 +6705,7 @@ func scoreSpectrumEvalMetricsPayload(metrics *eosruntime.EmbeddingScoreSpectrumE
 		OriginalPositiveRowCount:          metrics.OriginalPositiveRowCount,
 		AlternateRecoveryRowCount:         metrics.AlternateRecoveryRowCount,
 		MarginRowCount:                    metrics.MarginRowCount,
+		TargetDistributionRowCount:        metrics.TargetDistributionRowCount,
 	}
 }
 

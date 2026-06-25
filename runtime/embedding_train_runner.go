@@ -982,7 +982,7 @@ func (t *EmbeddingTrainer) FitScoreSpectrum(trainSet []EmbeddingScoreSpectrumExa
 			summary.BestEval = cloneEvalMetrics(finalEval)
 		}
 		if len(scoreSpectrumEvalSet) > 0 {
-			finalScoreEval, err := t.EvaluateScoreSpectrum(scoreSpectrumEvalSet)
+			finalScoreEval, err := t.EvaluateScoreSpectrumBatched(scoreSpectrumEvalSet, cfg.BatchSize)
 			if err != nil {
 				return EmbeddingTrainRunSummary{}, fmt.Errorf("score-spectrum eval: %w", err)
 			}
@@ -1031,7 +1031,7 @@ func (t *EmbeddingTrainer) FitScoreSpectrum(trainSet []EmbeddingScoreSpectrumExa
 		}
 		var scoreEvalMetrics *EmbeddingScoreSpectrumEvalMetrics
 		if len(scoreSpectrumEvalSet) > 0 {
-			metrics, err := t.EvaluateScoreSpectrum(scoreSpectrumEvalSet)
+			metrics, err := t.EvaluateScoreSpectrumBatched(scoreSpectrumEvalSet, cfg.BatchSize)
 			if err != nil {
 				return nil, nil, false, err
 			}
@@ -1162,7 +1162,7 @@ func (t *EmbeddingTrainer) FitScoreSpectrum(trainSet []EmbeddingScoreSpectrumExa
 			summary.FinalEval = cloneEvalMetrics(finalEval)
 		}
 		if len(scoreSpectrumEvalSet) > 0 {
-			finalScoreEval, err := t.EvaluateScoreSpectrum(scoreSpectrumEvalSet)
+			finalScoreEval, err := t.EvaluateScoreSpectrumBatched(scoreSpectrumEvalSet, cfg.BatchSize)
 			if err != nil {
 				return EmbeddingTrainRunSummary{}, fmt.Errorf("final score-spectrum eval: %w", err)
 			}

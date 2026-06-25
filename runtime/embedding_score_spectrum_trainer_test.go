@@ -112,6 +112,9 @@ func TestEmbeddingTrainerEvaluateScoreSpectrumNativeMetricsAndNoOptimizerUpdate(
 	if metrics.TargetCrossEntropy <= 0 || metrics.TargetKL < 0 || metrics.Loss < 0 {
 		t.Fatalf("loss/ce/kl = %v/%v/%v, want valid positive metrics", metrics.Loss, metrics.TargetCrossEntropy, metrics.TargetKL)
 	}
+	if metrics.TargetDistributionRowCount != 2 {
+		t.Fatalf("target distribution rows = %d, want 2", metrics.TargetDistributionRowCount)
+	}
 
 	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
 	startProfile := trainer.TrainProfile()
@@ -125,6 +128,91 @@ func TestEmbeddingTrainerEvaluateScoreSpectrumNativeMetricsAndNoOptimizerUpdate(
 	endProfile := trainer.TrainProfile()
 	if endProfile.Step != startProfile.Step || endProfile.Optimizer.UpdateCalls != startProfile.Optimizer.UpdateCalls {
 		t.Fatalf("optimizer state changed after eval: start step/update=%d/%d end step/update=%d/%d", startProfile.Step, startProfile.Optimizer.UpdateCalls, endProfile.Step, endProfile.Optimizer.UpdateCalls)
+	}
+}
+
+func TestEmbeddingTrainerEvaluateScoreSpectrumBatchedMatchesFullEval(t *testing.T) {
+	selected0 := 0
+	selected1 := 1
+	examples := []EmbeddingScoreSpectrumExample{
+		{
+			QueryTokens:             []int32{0},
+			QueryMask:               []int32{1},
+			CandidateTokens:         [][]int32{{0}, {1}},
+			CandidateMasks:          [][]int32{{1}, {1}},
+			PositiveIndexes:         []int{0},
+			SelectedPositiveIndex:   &selected0,
+			HardNegativeEligible:    []bool{false, true},
+			TargetProbabilities:     []float32{0.85, 0.15},
+			CommercialUseAllowed:    true,
+			TrainAllowedForResearch: false,
+		},
+		{
+			QueryTokens:             []int32{1},
+			QueryMask:               []int32{1},
+			CandidateTokens:         [][]int32{{2}, {1}, {0}},
+			CandidateMasks:          [][]int32{{1}, {1}, {1}},
+			PositiveIndexes:         []int{0, 1},
+			SelectedPositiveIndex:   &selected1,
+			HardNegativeEligible:    []bool{false, false, true},
+			TargetProbabilities:     []float32{0.35, 0.55, 0.10},
+			CommercialUseAllowed:    true,
+			TrainAllowedForResearch: false,
+		},
+		{
+			QueryTokens:             []int32{2},
+			QueryMask:               []int32{1},
+			CandidateTokens:         [][]int32{{1}, {2}},
+			CandidateMasks:          [][]int32{{1}, {1}},
+			PositiveIndexes:         []int{1},
+			SelectedPositiveIndex:   &selected1,
+			HardNegativeEligible:    []bool{true, false},
+			TargetProbabilities:     []float32{0, 1},
+			CommercialUseAllowed:    true,
+			TrainAllowedForResearch: false,
+		},
+	}
+
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	full, err := trainer.EvaluateScoreSpectrum(examples)
+	if err != nil {
+		t.Fatalf("full score-spectrum eval: %v", err)
+	}
+	batched, err := trainer.EvaluateScoreSpectrumBatched(examples, 1)
+	if err != nil {
+		t.Fatalf("batched score-spectrum eval: %v", err)
+	}
+	assertScoreSpectrumEvalMetricsClose(t, batched, full)
+	if batched.TargetDistributionRowCount != 3 {
+		t.Fatalf("target distribution rows = %d, want 3", batched.TargetDistributionRowCount)
+	}
+}
+
+func assertScoreSpectrumEvalMetricsClose(t *testing.T, got, want EmbeddingScoreSpectrumEvalMetrics) {
+	t.Helper()
+	const tol = 1e-5
+	checkFloat := func(name string, got, want float32) {
+		t.Helper()
+		if math.Abs(float64(got-want)) > tol {
+			t.Fatalf("%s = %v, want %v", name, got, want)
+		}
+	}
+	checkFloat("loss", got.Loss, want.Loss)
+	checkFloat("average score", got.AverageScore, want.AverageScore)
+	checkFloat("any positive top1", got.AnyPositiveTop1, want.AnyPositiveTop1)
+	checkFloat("original positive top1", got.OriginalPositiveTop1, want.OriginalPositiveTop1)
+	checkFloat("alternate recovery", got.AlternateRelevantRecovery, want.AlternateRelevantRecovery)
+	checkFloat("margin", got.BestPositiveHardestNegativeMargin, want.BestPositiveHardestNegativeMargin)
+	checkFloat("target cross entropy", got.TargetCrossEntropy, want.TargetCrossEntropy)
+	checkFloat("target kl", got.TargetKL, want.TargetKL)
+	if got.RowCount != want.RowCount ||
+		got.CandidateCount != want.CandidateCount ||
+		got.AnyPositiveRowCount != want.AnyPositiveRowCount ||
+		got.OriginalPositiveRowCount != want.OriginalPositiveRowCount ||
+		got.AlternateRecoveryRowCount != want.AlternateRecoveryRowCount ||
+		got.MarginRowCount != want.MarginRowCount ||
+		got.TargetDistributionRowCount != want.TargetDistributionRowCount {
+		t.Fatalf("denominators = %+v, want %+v", got, want)
 	}
 }
 
@@ -305,13 +393,14 @@ func TestEmbeddingTrainerFitScoreSpectrumEvalOnlyDoesNotUpdate(t *testing.T) {
 	startStep := trainer.step
 
 	summary, err := trainer.FitScoreSpectrum(tinyEmbeddingScoreSpectrumDataset(), tinyEncoderPairDataset(), EmbeddingTrainRunConfig{
-		EvalOnly: true,
+		EvalOnly:  true,
+		BatchSize: 1,
 	})
 	if err != nil {
 		t.Fatalf("fit score-spectrum eval-only: %v", err)
 	}
-	if trainer.step != startStep || summary.StepsRun != 0 || summary.DeltaProfile.Step != 0 {
-		t.Fatalf("step changed trainer=%d start=%d stepsRun=%d delta=%d", trainer.step, startStep, summary.StepsRun, summary.DeltaProfile.Step)
+	if trainer.step != startStep || summary.StepsRun != 0 || summary.DeltaProfile.Step != 0 || summary.DeltaProfile.Optimizer.UpdateCalls != 0 {
+		t.Fatalf("optimizer changed trainer_step=%d start=%d stepsRun=%d deltaStep=%d updateCalls=%d", trainer.step, startStep, summary.StepsRun, summary.DeltaProfile.Step, summary.DeltaProfile.Optimizer.UpdateCalls)
 	}
 	if summary.FinalEval == nil || summary.Workload.ActualEvalPairs == 0 {
 		t.Fatalf("missing eval metrics/workload: final=%v actualEvalPairs=%d", summary.FinalEval, summary.Workload.ActualEvalPairs)
