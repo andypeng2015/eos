@@ -5,11 +5,12 @@ import (
 	"testing"
 
 	"github.com/odvcencio/gotreesitter/grammargen"
-	"github.com/odvcencio/gotreesitter/taproot"
+	walk "github.com/odvcencio/gotreesitter/taproot/walk"
+	"m31labs.dev/eos/syntax/dsl"
 )
 
 func TestGrammarBinIsCurrent(t *testing.T) {
-	_, fresh, err := grammargen.GenerateLanguageAndBlob(EosGrammar())
+	_, fresh, err := grammargen.GenerateLanguageAndBlob(dsl.EosGrammar())
 	if err != nil {
 		t.Fatalf("GenerateLanguageAndBlob: %v", err)
 	}
@@ -29,7 +30,7 @@ pipeline embed(tokens: i32[T]) -> f16[T, E] {
     return normalize(hidden)
 }
 `)
-	root, _, err := taproot.ParseFromBlob("eos-blob-test", grammarBlob, nil, src)
+	root, _, err := walk.ParseFromBlob("eos-blob-test", grammarBlob, src)
 	if err != nil {
 		t.Fatalf("ParseFromBlob: %v", err)
 	}

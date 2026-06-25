@@ -6,11 +6,11 @@ import (
 	"os"
 
 	"github.com/odvcencio/gotreesitter/grammargen"
-	"m31labs.dev/eos/syntax"
+	"m31labs.dev/eos/syntax/dsl"
 )
 
 func main() {
-	_, blob, err := grammargen.GenerateLanguageAndBlob(syntax.EosGrammar())
+	_, blob, err := grammargen.GenerateLanguageAndBlob(dsl.EosGrammar())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "eos-grammar: generate parse table:", err)
 		os.Exit(1)

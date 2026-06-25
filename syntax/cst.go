@@ -6,11 +6,11 @@ import (
 	"strings"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
-	"github.com/odvcencio/gotreesitter/taproot"
+	walk "github.com/odvcencio/gotreesitter/taproot/walk"
 )
 
 type cstLowerer struct {
-	*taproot.Walker
+	*walk.Walker
 	diags []Diagnostic
 }
 
@@ -30,7 +30,7 @@ func parseWithTreeSitter(moduleName string, src []byte) (*File, []Diagnostic) {
 	}
 
 	root := tree.RootNode()
-	l := &cstLowerer{Walker: taproot.NewWalker(lang, append([]byte(nil), src...))}
+	l := &cstLowerer{Walker: walk.NewWalker(lang, append([]byte(nil), src...))}
 	if root.HasError() {
 		if !l.collectParseErrors(root) {
 			l.diags = append(l.diags, Diagnostic{
@@ -336,7 +336,7 @@ func (l *cstLowerer) errorf(n *gotreesitter.Node, format string, args ...any) {
 
 // firstNamedChildOfType walks the immediate named children of n and returns
 // the first whose type matches typ.
-func firstNamedChildOfType(w *taproot.Walker, n *gotreesitter.Node, typ string) *gotreesitter.Node {
+func firstNamedChildOfType(w *walk.Walker, n *gotreesitter.Node, typ string) *gotreesitter.Node {
 	if n == nil {
 		return nil
 	}
