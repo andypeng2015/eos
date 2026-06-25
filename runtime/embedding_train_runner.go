@@ -938,6 +938,7 @@ func (t *EmbeddingTrainer) FitScoreSpectrum(trainSet []EmbeddingScoreSpectrumExa
 		return EmbeddingTrainRunSummary{}, err
 	}
 	cfg = t.syncTrainRunObjectiveConfig(cfg)
+	cfg = t.isolateScoreSpectrumObjectiveConfig(cfg)
 	if err := validateScoreSpectrumRunConfig(cfg); err != nil {
 		return EmbeddingTrainRunSummary{}, err
 	}
@@ -2453,6 +2454,91 @@ func validateScoreSpectrumRunConfig(cfg EmbeddingTrainRunConfig) error {
 		return fmt.Errorf("score-spectrum training does not support turboquant rank-margin objectives in v1")
 	}
 	return nil
+}
+
+func (t *EmbeddingTrainer) isolateScoreSpectrumObjectiveConfig(cfg EmbeddingTrainRunConfig) EmbeddingTrainRunConfig {
+	if t == nil {
+		return cfg
+	}
+	cleared := scoreSpectrumIncompatibleObjectiveNames(t.config)
+	if len(cleared) == 0 {
+		return cfg
+	}
+	t.config = clearScoreSpectrumIncompatibleTrainConfig(t.config)
+	cfg = clearScoreSpectrumIncompatibleRunConfig(cfg)
+	t.scoreSpectrumLineage.AutoClearedObjectives = mergeScoreSpectrumObjectiveNames(t.scoreSpectrumLineage.AutoClearedObjectives, cleared)
+	t.scoreSpectrumLineage.IsolatedInheritedObjectives = mergeScoreSpectrumObjectiveNames(t.scoreSpectrumLineage.IsolatedInheritedObjectives, cleared)
+	t.scoreSpectrumLineage.ScoreSpectrumTrain = true
+	return cfg
+}
+
+func scoreSpectrumIncompatibleObjectiveNames(cfg EmbeddingTrainConfig) []string {
+	names := []string{}
+	if len(cfg.MatryoshkaDims) > 0 || len(cfg.MatryoshkaWeights) > 0 {
+		names = append(names, "matryoshka")
+	}
+	if len(cfg.TurboQuantPrefixBits) > 0 {
+		names = append(names, "turboquant_prefix_bits")
+	}
+	if len(cfg.TurboQuantPrefixObjectives) > 0 {
+		names = append(names, "turboquant_prefix_objectives")
+	}
+	if cfg.TurboQuantPrefixWeight != 0 && (len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0) {
+		names = append(names, "turboquant_prefix_weight")
+	}
+	if len(cfg.TurboQuantCompactObjectives) > 0 {
+		names = append(names, "turboquant_compact_objectives")
+	}
+	if len(cfg.TurboQuantRankMarginObjectives) > 0 {
+		names = append(names, "turboquant_rank_margin_objectives")
+	}
+	if cfg.TurboQuantRankMargin != 0 {
+		names = append(names, "turboquant_rank_margin")
+	}
+	if cfg.TurboQuantPrefixSeed != 0 {
+		names = append(names, "turboquant_prefix_seed")
+	}
+	if strings.TrimSpace(cfg.TurboQuantPrefixScoreMode) != "" {
+		names = append(names, "turboquant_prefix_score_mode")
+	}
+	return normalizeScoreSpectrumObjectiveNames(names)
+}
+
+func clearScoreSpectrumIncompatibleTrainConfig(cfg EmbeddingTrainConfig) EmbeddingTrainConfig {
+	cfg.MatryoshkaDims = nil
+	cfg.MatryoshkaWeights = nil
+	cfg.TurboQuantPrefixBits = nil
+	cfg.TurboQuantPrefixObjectives = nil
+	cfg.TurboQuantPrefixWeight = 0
+	cfg.TurboQuantPrefixSeed = 0
+	cfg.TurboQuantPrefixScoreMode = ""
+	cfg.TurboQuantCompactObjectives = nil
+	cfg.TurboQuantRankMarginObjectives = nil
+	cfg.TurboQuantRankMargin = 0
+	return cfg
+}
+
+func clearScoreSpectrumIncompatibleRunConfig(cfg EmbeddingTrainRunConfig) EmbeddingTrainRunConfig {
+	cfg.MatryoshkaDims = nil
+	cfg.MatryoshkaWeights = nil
+	cfg.TurboQuantPrefixBits = nil
+	cfg.TurboQuantPrefixObjectives = nil
+	cfg.TurboQuantPrefixWeight = 0
+	cfg.TurboQuantPrefixSeed = 0
+	cfg.TurboQuantPrefixScoreMode = ""
+	cfg.TurboQuantCompactObjectives = nil
+	cfg.TurboQuantRankMarginObjectives = nil
+	cfg.TurboQuantRankMargin = 0
+	return cfg
+}
+
+func mergeScoreSpectrumObjectiveNames(existing []string, added []string) []string {
+	if len(existing) == 0 {
+		return normalizeScoreSpectrumObjectiveNames(added)
+	}
+	merged := append([]string(nil), existing...)
+	merged = append(merged, added...)
+	return normalizeScoreSpectrumObjectiveNames(merged)
 }
 
 func (t *EmbeddingTrainer) applyTrainRunOverrides(cfg EmbeddingTrainRunConfig) error {

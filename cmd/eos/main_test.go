@@ -5792,6 +5792,22 @@ func TestRunTrainEmbedRejectsScoreSpectrumMutualExclusion(t *testing.T) {
 	}
 }
 
+func TestRunTrainEmbedRejectsExplicitScoreSpectrumTurboQuantCompactObjectives(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	trainPath := filepath.Join(t.TempDir(), "train-score-spectrum.jsonl")
+	if err := eosruntime.WriteEmbeddingScoreSpectrumExamplesFile(trainPath, tinyCLIScoreSpectrumExamples(false)); err != nil {
+		t.Fatalf("write score-spectrum dataset: %v", err)
+	}
+
+	_, err := captureRunOutputAndError(t, []string{"train-embed", "--score-spectrum-train", "--no-tokenizer", "--epochs", "1", "--batch-size", "2", "--turboquant-compact-objectives", "2:2=0.25", path, trainPath})
+	if err == nil || !strings.Contains(err.Error(), "does not support TurboQuant compact objectives") {
+		t.Fatalf("explicit compact objective error = %v, want score-spectrum rejection", err)
+	}
+}
+
 func TestRunTrainEmbedScoreSpectrumResearchOnlyGate(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {

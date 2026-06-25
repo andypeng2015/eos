@@ -43,6 +43,11 @@ func TestEmbeddingTrainManifestRoundTrip(t *testing.T) {
 			CommercialUseAllowed:      false,
 			SourceArtifactHashes:      []string{"bbb", "aaa"},
 			ScoreSpectrumRowCount:     2,
+			AutoClearedObjectives:     []string{"turboquant_prefix_seed", "matryoshka"},
+			IsolatedInheritedObjectives: []string{
+				"turboquant_prefix_seed",
+				"matryoshka",
+			},
 		},
 	}
 	if err := want.WriteFile(path); err != nil {
@@ -72,6 +77,12 @@ func TestEmbeddingTrainManifestRoundTrip(t *testing.T) {
 	}
 	if got.ScoreSpectrum.ScoreSpectrumRowCount != 2 || len(got.ScoreSpectrum.SourceArtifactHashes) != 2 || got.ScoreSpectrum.SourceArtifactHashes[0] != "aaa" || got.ScoreSpectrum.SourceArtifactHashes[1] != "bbb" {
 		t.Fatalf("score-spectrum provenance mismatch: %+v", got.ScoreSpectrum)
+	}
+	if len(got.ScoreSpectrum.AutoClearedObjectives) != 2 || got.ScoreSpectrum.AutoClearedObjectives[0] != "matryoshka" || got.ScoreSpectrum.AutoClearedObjectives[1] != "turboquant_prefix_seed" {
+		t.Fatalf("auto-cleared objectives = %v", got.ScoreSpectrum.AutoClearedObjectives)
+	}
+	if len(got.ScoreSpectrum.IsolatedInheritedObjectives) != 2 || got.ScoreSpectrum.IsolatedInheritedObjectives[0] != "matryoshka" || got.ScoreSpectrum.IsolatedInheritedObjectives[1] != "turboquant_prefix_seed" {
+		t.Fatalf("isolated inherited objectives = %v", got.ScoreSpectrum.IsolatedInheritedObjectives)
 	}
 }
 

@@ -67,6 +67,11 @@ func TestPackageManifestRoundTripAndVerify(t *testing.T) {
 		CommercialUseAllowed:      false,
 		SourceArtifactHashes:      []string{"hash-b", "hash-a"},
 		ScoreSpectrumRowCount:     3,
+		AutoClearedObjectives:     []string{"turboquant_compact_objectives"},
+		IsolatedInheritedObjectives: []string{
+			"turboquant_compact_objectives",
+			"turboquant_prefix_seed",
+		},
 	}
 	path := filepath.Join(dir, "tiny_embed.package.mll")
 	if err := manifest.WriteFile(path); err != nil {
@@ -89,6 +94,12 @@ func TestPackageManifestRoundTripAndVerify(t *testing.T) {
 	}
 	if loaded.ScoreSpectrum.ScoreSpectrumRowCount != 3 || len(loaded.ScoreSpectrum.SourceArtifactHashes) != 2 || loaded.ScoreSpectrum.SourceArtifactHashes[0] != "hash-a" || loaded.ScoreSpectrum.SourceArtifactHashes[1] != "hash-b" {
 		t.Fatalf("score-spectrum provenance mismatch: %+v", loaded.ScoreSpectrum)
+	}
+	if len(loaded.ScoreSpectrum.AutoClearedObjectives) != 1 || loaded.ScoreSpectrum.AutoClearedObjectives[0] != "turboquant_compact_objectives" {
+		t.Fatalf("auto-cleared objectives = %v", loaded.ScoreSpectrum.AutoClearedObjectives)
+	}
+	if len(loaded.ScoreSpectrum.IsolatedInheritedObjectives) != 2 || loaded.ScoreSpectrum.IsolatedInheritedObjectives[0] != "turboquant_compact_objectives" || loaded.ScoreSpectrum.IsolatedInheritedObjectives[1] != "turboquant_prefix_seed" {
+		t.Fatalf("isolated inherited objectives = %v", loaded.ScoreSpectrum.IsolatedInheritedObjectives)
 	}
 	if err := os.WriteFile(weightPath, []byte("tampered\n"), 0o644); err != nil {
 		t.Fatalf("tamper weights: %v", err)

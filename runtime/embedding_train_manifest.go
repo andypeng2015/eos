@@ -22,13 +22,15 @@ type EmbeddingTrainManifest struct {
 // EmbeddingScoreSpectrumPolicy records train-time provenance and usage gates
 // for score-spectrum data carried through training and package manifests.
 type EmbeddingScoreSpectrumPolicy struct {
-	ScoreSpectrumTrain        bool     `json:"score_spectrum_train,omitempty"`
-	ScoreSpectrumResearchOnly bool     `json:"score_spectrum_research_only,omitempty"`
-	TrainAllowedForResearch   bool     `json:"train_allowed_for_research,omitempty"`
-	ReleaseTrainAllowed       bool     `json:"release_train_allowed,omitempty"`
-	CommercialUseAllowed      bool     `json:"commercial_use_allowed,omitempty"`
-	SourceArtifactHashes      []string `json:"source_artifact_hashes,omitempty"`
-	ScoreSpectrumRowCount     int      `json:"score_spectrum_row_count,omitempty"`
+	ScoreSpectrumTrain          bool     `json:"score_spectrum_train,omitempty"`
+	ScoreSpectrumResearchOnly   bool     `json:"score_spectrum_research_only,omitempty"`
+	TrainAllowedForResearch     bool     `json:"train_allowed_for_research,omitempty"`
+	ReleaseTrainAllowed         bool     `json:"release_train_allowed,omitempty"`
+	CommercialUseAllowed        bool     `json:"commercial_use_allowed,omitempty"`
+	SourceArtifactHashes        []string `json:"source_artifact_hashes,omitempty"`
+	ScoreSpectrumRowCount       int      `json:"score_spectrum_row_count,omitempty"`
+	AutoClearedObjectives       []string `json:"auto_cleared_objectives,omitempty"`
+	IsolatedInheritedObjectives []string `json:"isolated_inherited_objectives,omitempty"`
 }
 
 // DefaultEmbeddingTrainManifestPath returns the conventional sibling train-manifest path for an .mll artifact.
@@ -124,36 +126,38 @@ func (m EmbeddingTrainManifest) nameOrDefault() string {
 
 func (m EmbeddingTrainManifest) mllValues() map[string]authoredManifestValue {
 	values := map[string]authoredManifestValue{
-		"name":                                        authoredString(m.Name),
-		"config.optimizer":                            authoredString(m.Config.Optimizer),
-		"config.weight_bits":                          authoredInt(int64(m.Config.WeightBits)),
-		"config.learning_rate":                        authoredFloat(float64(m.Config.LearningRate)),
-		"config.weight_decay":                         authoredFloat(float64(m.Config.WeightDecay)),
-		"config.beta1":                                authoredFloat(float64(m.Config.Beta1)),
-		"config.beta2":                                authoredFloat(float64(m.Config.Beta2)),
-		"config.epsilon":                              authoredFloat(float64(m.Config.Epsilon)),
-		"config.contrastive_loss":                     authoredString(m.Config.ContrastiveLoss),
-		"config.temperature":                          authoredFloat(float64(m.Config.Temperature)),
-		"config.grouped_loss_weight":                  authoredFloat(float64(m.Config.GroupedLossWeight)),
-		"config.teacher_loss_weight":                  authoredFloat(float64(m.Config.TeacherLossWeight)),
-		"config.teacher_temperature":                  authoredFloat(float64(m.Config.TeacherTemperature)),
-		"config.matryoshka_dims":                      authoredString(formatMatryoshkaDims(m.Config.MatryoshkaDims)),
-		"config.matryoshka_weights":                   authoredString(formatMatryoshkaWeights(m.Config.MatryoshkaWeights)),
-		"config.turboquant_prefix_bits":               authoredString(formatIntList(m.Config.TurboQuantPrefixBits)),
-		"config.turboquant_prefix_objectives":         authoredString(FormatTurboQuantPrefixObjectives(m.Config.TurboQuantPrefixObjectives)),
-		"config.turboquant_prefix_weight":             authoredFloat(float64(m.Config.TurboQuantPrefixWeight)),
-		"config.turboquant_prefix_seed":               authoredInt(m.Config.TurboQuantPrefixSeed),
-		"config.turboquant_prefix_score_mode":         authoredString(m.Config.TurboQuantPrefixScoreMode),
-		"config.turboquant_compact_objectives":        authoredString(FormatTurboQuantPrefixObjectives(m.Config.TurboQuantCompactObjectives)),
-		"config.turboquant_rank_margin_objectives":    authoredString(FormatTurboQuantPrefixObjectives(m.Config.TurboQuantRankMarginObjectives)),
-		"config.turboquant_rank_margin":               authoredFloat(float64(m.Config.TurboQuantRankMargin)),
-		"score_spectrum.score_spectrum_train":         authoredBool(m.ScoreSpectrum.ScoreSpectrumTrain),
-		"score_spectrum.score_spectrum_research_only": authoredBool(m.ScoreSpectrum.ScoreSpectrumResearchOnly),
-		"score_spectrum.train_allowed_for_research":   authoredBool(m.ScoreSpectrum.TrainAllowedForResearch),
-		"score_spectrum.release_train_allowed":        authoredBool(m.ScoreSpectrum.ReleaseTrainAllowed),
-		"score_spectrum.commercial_use_allowed":       authoredBool(m.ScoreSpectrum.CommercialUseAllowed),
-		"score_spectrum.source_artifact_hashes":       authoredString(formatScoreSpectrumSourceHashes(m.ScoreSpectrum.SourceArtifactHashes)),
-		"score_spectrum.score_spectrum_row_count":     authoredInt(int64(m.ScoreSpectrum.ScoreSpectrumRowCount)),
+		"name":                                         authoredString(m.Name),
+		"config.optimizer":                             authoredString(m.Config.Optimizer),
+		"config.weight_bits":                           authoredInt(int64(m.Config.WeightBits)),
+		"config.learning_rate":                         authoredFloat(float64(m.Config.LearningRate)),
+		"config.weight_decay":                          authoredFloat(float64(m.Config.WeightDecay)),
+		"config.beta1":                                 authoredFloat(float64(m.Config.Beta1)),
+		"config.beta2":                                 authoredFloat(float64(m.Config.Beta2)),
+		"config.epsilon":                               authoredFloat(float64(m.Config.Epsilon)),
+		"config.contrastive_loss":                      authoredString(m.Config.ContrastiveLoss),
+		"config.temperature":                           authoredFloat(float64(m.Config.Temperature)),
+		"config.grouped_loss_weight":                   authoredFloat(float64(m.Config.GroupedLossWeight)),
+		"config.teacher_loss_weight":                   authoredFloat(float64(m.Config.TeacherLossWeight)),
+		"config.teacher_temperature":                   authoredFloat(float64(m.Config.TeacherTemperature)),
+		"config.matryoshka_dims":                       authoredString(formatMatryoshkaDims(m.Config.MatryoshkaDims)),
+		"config.matryoshka_weights":                    authoredString(formatMatryoshkaWeights(m.Config.MatryoshkaWeights)),
+		"config.turboquant_prefix_bits":                authoredString(formatIntList(m.Config.TurboQuantPrefixBits)),
+		"config.turboquant_prefix_objectives":          authoredString(FormatTurboQuantPrefixObjectives(m.Config.TurboQuantPrefixObjectives)),
+		"config.turboquant_prefix_weight":              authoredFloat(float64(m.Config.TurboQuantPrefixWeight)),
+		"config.turboquant_prefix_seed":                authoredInt(m.Config.TurboQuantPrefixSeed),
+		"config.turboquant_prefix_score_mode":          authoredString(m.Config.TurboQuantPrefixScoreMode),
+		"config.turboquant_compact_objectives":         authoredString(FormatTurboQuantPrefixObjectives(m.Config.TurboQuantCompactObjectives)),
+		"config.turboquant_rank_margin_objectives":     authoredString(FormatTurboQuantPrefixObjectives(m.Config.TurboQuantRankMarginObjectives)),
+		"config.turboquant_rank_margin":                authoredFloat(float64(m.Config.TurboQuantRankMargin)),
+		"score_spectrum.score_spectrum_train":          authoredBool(m.ScoreSpectrum.ScoreSpectrumTrain),
+		"score_spectrum.score_spectrum_research_only":  authoredBool(m.ScoreSpectrum.ScoreSpectrumResearchOnly),
+		"score_spectrum.train_allowed_for_research":    authoredBool(m.ScoreSpectrum.TrainAllowedForResearch),
+		"score_spectrum.release_train_allowed":         authoredBool(m.ScoreSpectrum.ReleaseTrainAllowed),
+		"score_spectrum.commercial_use_allowed":        authoredBool(m.ScoreSpectrum.CommercialUseAllowed),
+		"score_spectrum.source_artifact_hashes":        authoredString(formatScoreSpectrumSourceHashes(m.ScoreSpectrum.SourceArtifactHashes)),
+		"score_spectrum.score_spectrum_row_count":      authoredInt(int64(m.ScoreSpectrum.ScoreSpectrumRowCount)),
+		"score_spectrum.auto_cleared_objectives":       authoredString(formatScoreSpectrumObjectiveNames(m.ScoreSpectrum.AutoClearedObjectives)),
+		"score_spectrum.isolated_inherited_objectives": authoredString(formatScoreSpectrumObjectiveNames(m.ScoreSpectrum.IsolatedInheritedObjectives)),
 	}
 	for key, value := range m.Embedding.mllValues() {
 		values["embedding."+key] = value
@@ -345,18 +349,30 @@ func scoreSpectrumPolicyFromAuthoredDoc(doc authoredManifestDoc, prefix string) 
 	} else {
 		policy.ScoreSpectrumRowCount = int(value)
 	}
+	if value, _, err := doc.string(prefix + "auto_cleared_objectives"); err != nil {
+		return EmbeddingScoreSpectrumPolicy{}, err
+	} else {
+		policy.AutoClearedObjectives = parseScoreSpectrumObjectiveNames(value)
+	}
+	if value, _, err := doc.string(prefix + "isolated_inherited_objectives"); err != nil {
+		return EmbeddingScoreSpectrumPolicy{}, err
+	} else {
+		policy.IsolatedInheritedObjectives = parseScoreSpectrumObjectiveNames(value)
+	}
 	return policy, nil
 }
 
 func packageScoreSpectrumPolicy(policy EmbeddingScoreSpectrumPolicy) EmbeddingScoreSpectrumPolicy {
 	return EmbeddingScoreSpectrumPolicy{
-		ScoreSpectrumTrain:        policy.ScoreSpectrumTrain,
-		ScoreSpectrumResearchOnly: policy.ScoreSpectrumResearchOnly,
-		TrainAllowedForResearch:   policy.TrainAllowedForResearch,
-		ReleaseTrainAllowed:       policy.ReleaseTrainAllowed,
-		CommercialUseAllowed:      policy.CommercialUseAllowed,
-		SourceArtifactHashes:      normalizeScoreSpectrumSourceHashes(policy.SourceArtifactHashes),
-		ScoreSpectrumRowCount:     policy.ScoreSpectrumRowCount,
+		ScoreSpectrumTrain:          policy.ScoreSpectrumTrain,
+		ScoreSpectrumResearchOnly:   policy.ScoreSpectrumResearchOnly,
+		TrainAllowedForResearch:     policy.TrainAllowedForResearch,
+		ReleaseTrainAllowed:         policy.ReleaseTrainAllowed,
+		CommercialUseAllowed:        policy.CommercialUseAllowed,
+		SourceArtifactHashes:        normalizeScoreSpectrumSourceHashes(policy.SourceArtifactHashes),
+		ScoreSpectrumRowCount:       policy.ScoreSpectrumRowCount,
+		AutoClearedObjectives:       normalizeScoreSpectrumObjectiveNames(policy.AutoClearedObjectives),
+		IsolatedInheritedObjectives: normalizeScoreSpectrumObjectiveNames(policy.IsolatedInheritedObjectives),
 	}
 }
 
@@ -376,7 +392,41 @@ func parseScoreSpectrumSourceHashes(raw string) []string {
 	return normalizeScoreSpectrumSourceHashes(strings.Split(raw, ","))
 }
 
+func formatScoreSpectrumObjectiveNames(values []string) string {
+	values = normalizeScoreSpectrumObjectiveNames(values)
+	if len(values) == 0 {
+		return ""
+	}
+	return strings.Join(values, ",")
+}
+
+func parseScoreSpectrumObjectiveNames(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	return normalizeScoreSpectrumObjectiveNames(strings.Split(raw, ","))
+}
+
 func normalizeScoreSpectrumSourceHashes(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func normalizeScoreSpectrumObjectiveNames(values []string) []string {
 	if len(values) == 0 {
 		return nil
 	}

@@ -181,6 +181,8 @@ func (t *EmbeddingTrainer) SetScoreSpectrumLineage(policy EmbeddingScoreSpectrum
 		return
 	}
 	policy.SourceArtifactHashes = normalizeScoreSpectrumSourceHashes(policy.SourceArtifactHashes)
+	policy.AutoClearedObjectives = normalizeScoreSpectrumObjectiveNames(policy.AutoClearedObjectives)
+	policy.IsolatedInheritedObjectives = normalizeScoreSpectrumObjectiveNames(policy.IsolatedInheritedObjectives)
 	t.scoreSpectrumLineage = policy
 }
 

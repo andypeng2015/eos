@@ -1,6 +1,7 @@
 package eosruntime
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -158,6 +159,122 @@ func TestEmbeddingTrainerFitScoreSpectrumRejectsSingleTargetObjectives(t *testin
 			}
 		})
 	}
+}
+
+func TestEmbeddingTrainerFitScoreSpectrumIsolatesInheritedCompactPackageObjectives(t *testing.T) {
+	source := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	source.config.MatryoshkaDims = []int{2}
+	source.config.MatryoshkaWeights = []float32{1}
+	source.config.TurboQuantCompactObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 2, Weight: 0.25}}
+	source.config.TurboQuantPrefixSeed = 11
+	artifactPath := filepath.Join(t.TempDir(), "tiny_train_embed_q8.mll")
+	if _, err := source.WriteTrainingPackage(artifactPath); err != nil {
+		t.Fatalf("write source package: %v", err)
+	}
+
+	trainer, err := LoadEmbeddingTrainerPackage(artifactPath)
+	if err != nil {
+		t.Fatalf("load source package: %v", err)
+	}
+	summary, err := trainer.FitScoreSpectrum(tinyEmbeddingScoreSpectrumDataset(), nil, EmbeddingTrainRunConfig{
+		Epochs:    1,
+		BatchSize: 2,
+	})
+	if err != nil {
+		t.Fatalf("fit score-spectrum from compact package: %v", err)
+	}
+	if len(summary.Config.TurboQuantCompactObjectives) != 0 || len(trainer.config.TurboQuantCompactObjectives) != 0 {
+		t.Fatalf("compact objectives were not isolated: summary=%+v trainer=%+v", summary.Config.TurboQuantCompactObjectives, trainer.config.TurboQuantCompactObjectives)
+	}
+	if len(summary.Config.MatryoshkaDims) != 0 || len(trainer.config.MatryoshkaDims) != 0 {
+		t.Fatalf("matryoshka objectives were not isolated: summary=%v trainer=%v", summary.Config.MatryoshkaDims, trainer.config.MatryoshkaDims)
+	}
+	if trainer.config.TurboQuantPrefixSeed != 0 {
+		t.Fatalf("prefix seed = %d, want cleared", trainer.config.TurboQuantPrefixSeed)
+	}
+
+	paths, err := trainer.WriteTrainingPackage(artifactPath)
+	if err != nil {
+		t.Fatalf("rewrite isolated package: %v", err)
+	}
+	trainManifest, err := ReadEmbeddingTrainManifestFile(paths.TrainManifestPath)
+	if err != nil {
+		t.Fatalf("read train manifest: %v", err)
+	}
+	if len(trainManifest.Config.TurboQuantCompactObjectives) != 0 {
+		t.Fatalf("train manifest compact objectives = %+v, want cleared", trainManifest.Config.TurboQuantCompactObjectives)
+	}
+	checkpoint, err := ReadEmbeddingTrainCheckpointFile(paths.CheckpointPath)
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if len(checkpoint.Config.TurboQuantCompactObjectives) != 0 {
+		t.Fatalf("checkpoint compact objectives = %+v, want cleared", checkpoint.Config.TurboQuantCompactObjectives)
+	}
+	packageManifest, err := ReadPackageManifestFile(paths.PackageManifestPath)
+	if err != nil {
+		t.Fatalf("read package manifest: %v", err)
+	}
+	if err := packageManifest.VerifyFiles(map[string]string{
+		"artifact":           paths.ArtifactPath,
+		"embedding_manifest": paths.EmbeddingManifestPath,
+		"weights":            paths.WeightFilePath,
+		"memory_plan":        paths.MemoryPlanPath,
+		"train_manifest":     paths.TrainManifestPath,
+		"checkpoint":         paths.CheckpointPath,
+		"train_profile":      paths.TrainProfilePath,
+	}); err != nil {
+		t.Fatalf("verify package manifest: %v", err)
+	}
+	for _, want := range []string{"matryoshka", "turboquant_compact_objectives", "turboquant_prefix_seed"} {
+		if !hasScoreSpectrumObjectiveName(packageManifest.ScoreSpectrum.AutoClearedObjectives, want) {
+			t.Fatalf("auto-cleared objectives = %v, missing %q", packageManifest.ScoreSpectrum.AutoClearedObjectives, want)
+		}
+		if !hasScoreSpectrumObjectiveName(trainManifest.ScoreSpectrum.IsolatedInheritedObjectives, want) {
+			t.Fatalf("isolated objectives = %v, missing %q", trainManifest.ScoreSpectrum.IsolatedInheritedObjectives, want)
+		}
+	}
+}
+
+func TestEmbeddingTrainerFitScoreSpectrumIsolatesInheritedPrefixRankAndMatryoshkaObjectives(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	trainer.config.MatryoshkaDims = []int{2}
+	trainer.config.MatryoshkaWeights = []float32{0.5}
+	trainer.config.TurboQuantPrefixBits = []int{2}
+	trainer.config.TurboQuantPrefixObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 2, Weight: 0.25}}
+	trainer.config.TurboQuantPrefixWeight = 0.75
+	trainer.config.TurboQuantPrefixSeed = 17
+	trainer.config.TurboQuantPrefixScoreMode = TurboQuantPrefixScoreModePreparedIP
+	trainer.config.TurboQuantRankMarginObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 2, Weight: 0.5}}
+	trainer.config.TurboQuantRankMargin = 0.03
+
+	summary, err := trainer.FitScoreSpectrum(tinyEmbeddingScoreSpectrumDataset(), nil, EmbeddingTrainRunConfig{
+		Epochs:    1,
+		BatchSize: 2,
+	})
+	if err != nil {
+		t.Fatalf("fit score-spectrum with inherited objectives: %v", err)
+	}
+	if err := validateScoreSpectrumTrainerConfig(trainer.config); err != nil {
+		t.Fatalf("trainer config still has incompatible objectives: %v", err)
+	}
+	if err := validateScoreSpectrumRunConfig(summary.Config); err != nil {
+		t.Fatalf("summary config still has incompatible objectives: %v", err)
+	}
+	for _, want := range []string{"matryoshka", "turboquant_prefix_bits", "turboquant_prefix_objectives", "turboquant_prefix_weight", "turboquant_prefix_seed", "turboquant_prefix_score_mode", "turboquant_rank_margin_objectives", "turboquant_rank_margin"} {
+		if !hasScoreSpectrumObjectiveName(trainer.scoreSpectrumLineage.AutoClearedObjectives, want) {
+			t.Fatalf("auto-cleared objectives = %v, missing %q", trainer.scoreSpectrumLineage.AutoClearedObjectives, want)
+		}
+	}
+}
+
+func hasScoreSpectrumObjectiveName(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestEstimateScoreSpectrumTrainWorkloadCountsRowLocalCandidates(t *testing.T) {

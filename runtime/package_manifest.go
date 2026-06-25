@@ -142,6 +142,8 @@ func encodePackageManifestMLL(manifest PackageManifest) ([]byte, error) {
 			headBoolMeta(strg, "commercial_use_allowed", manifest.ScoreSpectrum.CommercialUseAllowed),
 			headStringMeta(strg, "source_artifact_hashes", formatScoreSpectrumSourceHashes(manifest.ScoreSpectrum.SourceArtifactHashes)),
 			headIntMeta(strg, "score_spectrum_row_count", int64(manifest.ScoreSpectrum.ScoreSpectrumRowCount)),
+			headStringMeta(strg, "auto_cleared_objectives", formatScoreSpectrumObjectiveNames(manifest.ScoreSpectrum.AutoClearedObjectives)),
+			headStringMeta(strg, "isolated_inherited_objectives", formatScoreSpectrumObjectiveNames(manifest.ScoreSpectrum.IsolatedInheritedObjectives)),
 		},
 	}
 
@@ -392,7 +394,17 @@ func decodePackageManifestMLL(data []byte) (PackageManifest, error) {
 	} else {
 		scorePolicy.ScoreSpectrumRowCount = int(value)
 	}
-	scorePolicy.ScoreSpectrumTrain = scorePolicy.ScoreSpectrumResearchOnly || scorePolicy.TrainAllowedForResearch || scorePolicy.ReleaseTrainAllowed || scorePolicy.CommercialUseAllowed || scorePolicy.ScoreSpectrumRowCount > 0 || len(scorePolicy.SourceArtifactHashes) > 0
+	if value, err := readOptionalString("auto_cleared_objectives"); err != nil {
+		return PackageManifest{}, err
+	} else {
+		scorePolicy.AutoClearedObjectives = parseScoreSpectrumObjectiveNames(value)
+	}
+	if value, err := readOptionalString("isolated_inherited_objectives"); err != nil {
+		return PackageManifest{}, err
+	} else {
+		scorePolicy.IsolatedInheritedObjectives = parseScoreSpectrumObjectiveNames(value)
+	}
+	scorePolicy.ScoreSpectrumTrain = scorePolicy.ScoreSpectrumResearchOnly || scorePolicy.TrainAllowedForResearch || scorePolicy.ReleaseTrainAllowed || scorePolicy.CommercialUseAllowed || scorePolicy.ScoreSpectrumRowCount > 0 || len(scorePolicy.SourceArtifactHashes) > 0 || len(scorePolicy.AutoClearedObjectives) > 0 || len(scorePolicy.IsolatedInheritedObjectives) > 0
 
 	r := bytes.NewReader(xpkgBody)
 	readU32 := func() (uint32, error) {
@@ -587,6 +599,8 @@ func (m PackageManifest) CacheKey() string {
 	write(fmt.Sprintf("%t", m.ScoreSpectrum.CommercialUseAllowed))
 	write(formatScoreSpectrumSourceHashes(m.ScoreSpectrum.SourceArtifactHashes))
 	write(fmt.Sprintf("%d", m.ScoreSpectrum.ScoreSpectrumRowCount))
+	write(formatScoreSpectrumObjectiveNames(m.ScoreSpectrum.AutoClearedObjectives))
+	write(formatScoreSpectrumObjectiveNames(m.ScoreSpectrum.IsolatedInheritedObjectives))
 	for _, item := range m.Files {
 		write(item.Role)
 		write(item.Path)
