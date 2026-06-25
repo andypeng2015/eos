@@ -1,6 +1,7 @@
 package eosruntime
 
 import (
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,6 +26,139 @@ func TestEmbeddingTrainerTrainScoreSpectrumStep(t *testing.T) {
 	}
 }
 
+func TestEmbeddingTrainerTrainScoreSpectrumStepFoldsSelectedOnlyPositive(t *testing.T) {
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.005)
+	trainer.config.Temperature = 0.05
+
+	selected := 0
+	batch := []EmbeddingScoreSpectrumExample{
+		{
+			QueryTokens:             []int32{0},
+			QueryMask:               []int32{1},
+			CandidateTokens:         [][]int32{{0}, {1}},
+			CandidateMasks:          [][]int32{{1}, {1}},
+			SelectedPositiveIndex:   &selected,
+			HardNegativeEligible:    []bool{false, true},
+			TargetProbabilities:     []float32{1, 0},
+			CommercialUseAllowed:    true,
+			TrainAllowedForResearch: false,
+		},
+	}
+
+	metrics, err := trainer.TrainScoreSpectrumStep(batch)
+	if err != nil {
+		t.Fatalf("train score-spectrum selected-only step: %v", err)
+	}
+	if metrics.BatchSize != 2 || metrics.Loss < 0 {
+		t.Fatalf("metrics = %+v, want one row with two candidates and non-negative loss", metrics)
+	}
+	if len(batch[0].PositiveIndexes) != 0 {
+		t.Fatalf("caller batch positive indexes mutated to %+v, want unchanged empty slice", batch[0].PositiveIndexes)
+	}
+}
+
+func TestEmbeddingTrainerEvaluateScoreSpectrumNativeMetricsAndNoOptimizerUpdate(t *testing.T) {
+	selected0 := 0
+	examples := []EmbeddingScoreSpectrumExample{
+		{
+			PositiveIndexes:       []int{0},
+			SelectedPositiveIndex: &selected0,
+			HardNegativeEligible:  []bool{false, true},
+			TargetProbabilities:   []float32{1, 0},
+		},
+		{
+			PositiveIndexes:       []int{0, 1},
+			SelectedPositiveIndex: &selected0,
+			HardNegativeEligible:  []bool{false, false, true},
+			TargetProbabilities:   []float32{0.2, 0.7, 0.1},
+		},
+	}
+
+	metrics, err := evaluateScoreSpectrumEncodings(
+		[]*embeddingEncodedSequence{
+			{pooled: []float32{1, 0}},
+			{pooled: []float32{1, 1}},
+		},
+		[]*embeddingEncodedSequence{
+			{pooled: []float32{1, 0}},
+			{pooled: []float32{0, 1}},
+			{pooled: []float32{1, 0}},
+			{pooled: []float32{1, 1}},
+			{pooled: []float32{0, 1}},
+		},
+		[]embeddingCandidateSpan{{Start: 0, End: 2}, {Start: 2, End: 5}},
+		examples,
+		1,
+	)
+	if err != nil {
+		t.Fatalf("evaluate score-spectrum: %v", err)
+	}
+	if metrics.RowCount != 2 || metrics.CandidateCount != 5 {
+		t.Fatalf("row/candidate counts = %d/%d, want 2/5", metrics.RowCount, metrics.CandidateCount)
+	}
+	if metrics.AnyPositiveTop1 != 1 || metrics.AnyPositiveRowCount != 2 {
+		t.Fatalf("any-positive top1/count = %v/%d, want 1/2", metrics.AnyPositiveTop1, metrics.AnyPositiveRowCount)
+	}
+	if metrics.OriginalPositiveTop1 != 0.5 || metrics.OriginalPositiveRowCount != 2 {
+		t.Fatalf("original-positive top1/count = %v/%d, want 0.5/2", metrics.OriginalPositiveTop1, metrics.OriginalPositiveRowCount)
+	}
+	if metrics.AlternateRelevantRecovery != 1 || metrics.AlternateRecoveryRowCount != 1 {
+		t.Fatalf("alternate recovery/count = %v/%d, want 1/1", metrics.AlternateRelevantRecovery, metrics.AlternateRecoveryRowCount)
+	}
+	wantMargin := float32((1 + (1 - 1/math.Sqrt2)) / 2)
+	if math.Abs(float64(metrics.BestPositiveHardestNegativeMargin-wantMargin)) > 1e-5 || metrics.MarginRowCount != 2 {
+		t.Fatalf("margin/count = %v/%d, want %v/2", metrics.BestPositiveHardestNegativeMargin, metrics.MarginRowCount, wantMargin)
+	}
+	if metrics.TargetCrossEntropy <= 0 || metrics.TargetKL < 0 || metrics.Loss < 0 {
+		t.Fatalf("loss/ce/kl = %v/%v/%v, want valid positive metrics", metrics.Loss, metrics.TargetCrossEntropy, metrics.TargetKL)
+	}
+
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	startProfile := trainer.TrainProfile()
+	startStep := trainer.step
+	if _, err := trainer.EvaluateScoreSpectrum(tinyEmbeddingScoreSpectrumDataset()); err != nil {
+		t.Fatalf("evaluate score-spectrum through trainer: %v", err)
+	}
+	if trainer.step != startStep {
+		t.Fatalf("step = %d, want unchanged %d", trainer.step, startStep)
+	}
+	endProfile := trainer.TrainProfile()
+	if endProfile.Step != startProfile.Step || endProfile.Optimizer.UpdateCalls != startProfile.Optimizer.UpdateCalls {
+		t.Fatalf("optimizer state changed after eval: start step/update=%d/%d end step/update=%d/%d", startProfile.Step, startProfile.Optimizer.UpdateCalls, endProfile.Step, endProfile.Optimizer.UpdateCalls)
+	}
+}
+
+func TestEmbeddingTrainerEvaluateScoreSpectrumFoldsSelectedOnlyPositive(t *testing.T) {
+	selected := 0
+	examples := []EmbeddingScoreSpectrumExample{
+		{
+			QueryTokens:             []int32{0},
+			QueryMask:               []int32{1},
+			CandidateTokens:         [][]int32{{0}, {1}},
+			CandidateMasks:          [][]int32{{1}, {1}},
+			SelectedPositiveIndex:   &selected,
+			HardNegativeEligible:    []bool{false, true},
+			TargetProbabilities:     []float32{1, 0},
+			CommercialUseAllowed:    true,
+			TrainAllowedForResearch: false,
+		},
+	}
+
+	metrics, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).EvaluateScoreSpectrum(examples)
+	if err != nil {
+		t.Fatalf("evaluate score-spectrum selected-only row: %v", err)
+	}
+	if metrics.RowCount != 1 || metrics.CandidateCount != 2 {
+		t.Fatalf("row/candidate counts = %d/%d, want 1/2", metrics.RowCount, metrics.CandidateCount)
+	}
+	if metrics.AnyPositiveRowCount != 1 || metrics.OriginalPositiveRowCount != 1 {
+		t.Fatalf("positive denominators = any %d original %d, want 1/1", metrics.AnyPositiveRowCount, metrics.OriginalPositiveRowCount)
+	}
+	if len(examples[0].PositiveIndexes) != 0 {
+		t.Fatalf("caller examples positive indexes mutated to %+v, want unchanged empty slice", examples[0].PositiveIndexes)
+	}
+}
+
 func TestEmbeddingTrainerTrainScoreSpectrumRejectsPositiveMarkedHardEligible(t *testing.T) {
 	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.005)
 	batch := tinyEmbeddingScoreSpectrumDataset()
@@ -36,6 +170,31 @@ func TestEmbeddingTrainerTrainScoreSpectrumRejectsPositiveMarkedHardEligible(t *
 	}
 	if trainer.step != 0 {
 		t.Fatalf("step = %d, want no optimizer update", trainer.step)
+	}
+}
+
+func TestEmbeddingTrainerScoreSpectrumRejectsSelectedPositiveMarkedHardEligible(t *testing.T) {
+	selected := 0
+	batch := []EmbeddingScoreSpectrumExample{
+		{
+			QueryTokens:             []int32{0},
+			QueryMask:               []int32{1},
+			CandidateTokens:         [][]int32{{0}, {1}},
+			CandidateMasks:          [][]int32{{1}, {1}},
+			SelectedPositiveIndex:   &selected,
+			HardNegativeEligible:    []bool{true, true},
+			TargetProbabilities:     []float32{1, 0},
+			CommercialUseAllowed:    true,
+			TrainAllowedForResearch: false,
+		},
+	}
+
+	trainer := newTinyTrainableAttentionEmbeddingTrainer(t, 0.005)
+	if _, err := trainer.TrainScoreSpectrumStep(batch); err == nil || !strings.Contains(err.Error(), "cannot be hard-negative eligible") {
+		t.Fatalf("train error = %v, want selected-positive hard-eligible rejection", err)
+	}
+	if _, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).EvaluateScoreSpectrum(batch); err == nil || !strings.Contains(err.Error(), "cannot be hard-negative eligible") {
+		t.Fatalf("eval error = %v, want selected-positive hard-eligible rejection", err)
 	}
 }
 

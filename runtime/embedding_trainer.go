@@ -93,6 +93,25 @@ type EmbeddingEvalMetrics struct {
 	NegativeCount     int
 }
 
+// EmbeddingScoreSpectrumEvalMetrics summarizes read-only row-local
+// score-spectrum quality over tokenized examples.
+type EmbeddingScoreSpectrumEvalMetrics struct {
+	Loss                              float32
+	AverageScore                      float32
+	AnyPositiveTop1                   float32
+	OriginalPositiveTop1              float32
+	AlternateRelevantRecovery         float32
+	BestPositiveHardestNegativeMargin float32
+	TargetCrossEntropy                float32
+	TargetKL                          float32
+	RowCount                          int
+	CandidateCount                    int
+	AnyPositiveRowCount               int
+	OriginalPositiveRowCount          int
+	AlternateRecoveryRowCount         int
+	MarginRowCount                    int
+}
+
 // EmbeddingForwardResidencyStats summarizes trainer-level bind suppression plus backend prep activity.
 type EmbeddingForwardResidencyStats struct {
 	BindSkips int64
@@ -1469,10 +1488,14 @@ func (t *EmbeddingTrainer) TrainScoreSpectrumStep(batch []EmbeddingScoreSpectrum
 	if err := validateScoreSpectrumTrainerConfig(t.config); err != nil {
 		return EmbeddingTrainMetrics{}, err
 	}
-	queryInputs := make([]embeddingSequenceInput, len(batch))
-	candidateInputs := make([]embeddingSequenceInput, 0, len(batch)*2)
-	candidateSpans := make([]embeddingCandidateSpan, len(batch))
-	for i, example := range batch {
+	canonicalBatch, err := canonicalizeTokenizedScoreSpectrumExamples(batch)
+	if err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	queryInputs := make([]embeddingSequenceInput, len(canonicalBatch))
+	candidateInputs := make([]embeddingSequenceInput, 0, len(canonicalBatch)*2)
+	candidateSpans := make([]embeddingCandidateSpan, len(canonicalBatch))
+	for i, example := range canonicalBatch {
 		if err := validateTokenizedScoreSpectrumShape(example); err != nil {
 			return EmbeddingTrainMetrics{}, fmt.Errorf("score-spectrum batch %d: %w", i, err)
 		}
@@ -1525,7 +1548,7 @@ func (t *EmbeddingTrainer) TrainScoreSpectrumStep(batch []EmbeddingScoreSpectrum
 		candidateGrads[i] = make([]float32, len(candidates[i].pooled))
 	}
 
-	totalLoss, totalScore, pairCount, err := accumulateScoreSpectrumGrads(queries, candidates, candidateSpans, batch, t.config.Temperature, queryGrads, candidateGrads)
+	totalLoss, totalScore, pairCount, err := accumulateScoreSpectrumGrads(queries, candidates, candidateSpans, canonicalBatch, t.config.Temperature, queryGrads, candidateGrads)
 	if err != nil {
 		return EmbeddingTrainMetrics{}, err
 	}
@@ -1575,6 +1598,38 @@ func (t *EmbeddingTrainer) TrainScoreSpectrumStep(batch []EmbeddingScoreSpectrum
 		AverageScore: totalScore / float32(pairCount),
 		BatchSize:    pairCount,
 	}, nil
+}
+
+// EvaluateScoreSpectrum scores tokenized score-spectrum examples without
+// applying optimizer updates or consulting train-policy gates.
+func (t *EmbeddingTrainer) EvaluateScoreSpectrum(examples []EmbeddingScoreSpectrumExample) (EmbeddingScoreSpectrumEvalMetrics, error) {
+	if t == nil {
+		return EmbeddingScoreSpectrumEvalMetrics{}, fmt.Errorf("embedding trainer is not initialized")
+	}
+	if len(examples) == 0 {
+		return EmbeddingScoreSpectrumEvalMetrics{}, fmt.Errorf("score-spectrum eval dataset is empty")
+	}
+	canonicalExamples, err := canonicalizeTokenizedScoreSpectrumExamples(examples)
+	if err != nil {
+		return EmbeddingScoreSpectrumEvalMetrics{}, err
+	}
+	queryInputs, candidateInputs, candidateSpans, err := scoreSpectrumSequenceInputs(canonicalExamples)
+	if err != nil {
+		return EmbeddingScoreSpectrumEvalMetrics{}, err
+	}
+	forward := t.prepareForwardWeights()
+	t.primeForwardWeightResidency(forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj)
+	allInputs := make([]embeddingSequenceInput, 0, len(queryInputs)+len(candidateInputs))
+	allInputs = append(allInputs, queryInputs...)
+	allInputs = append(allInputs, candidateInputs...)
+	encoded, err := t.encodeSequenceInputs(allInputs, forward, false)
+	if err != nil {
+		return EmbeddingScoreSpectrumEvalMetrics{}, err
+	}
+	defer t.releaseEncodedSequences(encoded)
+	queries := encoded[:len(queryInputs)]
+	candidates := encoded[len(queryInputs):]
+	return evaluateScoreSpectrumEncodings(queries, candidates, candidateSpans, canonicalExamples, t.config.Temperature)
 }
 
 // ExportInferenceWeights returns runtime-loadable weights in the module's declared dtypes.
@@ -3749,6 +3804,183 @@ func accumulateScoreSpectrumGrads(queries, candidates []*embeddingEncodedSequenc
 	return totalLoss, totalScore, pairCount, nil
 }
 
+func scoreSpectrumSequenceInputs(examples []EmbeddingScoreSpectrumExample) ([]embeddingSequenceInput, []embeddingSequenceInput, []embeddingCandidateSpan, error) {
+	examples, err := canonicalizeTokenizedScoreSpectrumExamples(examples)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	queryInputs := make([]embeddingSequenceInput, len(examples))
+	candidateInputs := make([]embeddingSequenceInput, 0, len(examples)*2)
+	candidateSpans := make([]embeddingCandidateSpan, len(examples))
+	for i, example := range examples {
+		if err := validateTokenizedScoreSpectrumShape(example); err != nil {
+			return nil, nil, nil, fmt.Errorf("score-spectrum row %d: %w", i, err)
+		}
+		queryInputs[i] = embeddingSequenceInput{
+			tokens: example.QueryTokens,
+			mask:   example.QueryMask,
+			label:  fmt.Sprintf("score-spectrum row %d query", i),
+		}
+		candidateSpans[i].Start = len(candidateInputs)
+		for j, tokens := range example.CandidateTokens {
+			var mask []int32
+			if j < len(example.CandidateMasks) {
+				mask = example.CandidateMasks[j]
+			}
+			candidateInputs = append(candidateInputs, embeddingSequenceInput{
+				tokens: tokens,
+				mask:   mask,
+				label:  fmt.Sprintf("score-spectrum row %d candidate %d", i, j),
+			})
+		}
+		candidateSpans[i].End = len(candidateInputs)
+	}
+	return queryInputs, candidateInputs, candidateSpans, nil
+}
+
+func canonicalizeTokenizedScoreSpectrumExamples(examples []EmbeddingScoreSpectrumExample) ([]EmbeddingScoreSpectrumExample, error) {
+	canonical := make([]EmbeddingScoreSpectrumExample, len(examples))
+	for i, example := range examples {
+		clean, err := canonicalizeTokenizedScoreSpectrumExample(example)
+		if err != nil {
+			return nil, fmt.Errorf("score-spectrum row %d: %w", i, err)
+		}
+		canonical[i] = clean
+	}
+	return canonical, nil
+}
+
+func evaluateScoreSpectrumEncodings(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, examples []EmbeddingScoreSpectrumExample, temperature float32) (EmbeddingScoreSpectrumEvalMetrics, error) {
+	var metrics EmbeddingScoreSpectrumEvalMetrics
+	metrics.RowCount = len(examples)
+	queryMatrix := newContrastivePooledMatrix(queries)
+	candidateMatrix := newContrastivePooledMatrix(candidates)
+	maxCandidates := 0
+	for i := range queries {
+		span := groupedCandidateSpan(candidateSpans, i, len(candidates))
+		if n := span.End - span.Start; n > maxCandidates {
+			maxCandidates = n
+		}
+	}
+	rowScores := make([]float32, maxCandidates)
+	modelProbs := make([]float32, maxCandidates)
+	targetCERows := 0
+	for i := range queries {
+		span := groupedCandidateSpan(candidateSpans, i, len(candidates))
+		candidateCount := span.End - span.Start
+		if candidateCount <= 0 {
+			return EmbeddingScoreSpectrumEvalMetrics{}, fmt.Errorf("score-spectrum row %d has no candidates", i)
+		}
+		if i >= len(examples) {
+			return EmbeddingScoreSpectrumEvalMetrics{}, fmt.Errorf("score-spectrum row %d missing example metadata", i)
+		}
+		example := examples[i]
+		positiveSet, err := scoreSpectrumPositiveSet(candidateCount, example.PositiveIndexes)
+		if err != nil {
+			return EmbeddingScoreSpectrumEvalMetrics{}, fmt.Errorf("score-spectrum row %d: %w", i, err)
+		}
+		query := queryMatrix.row(i)
+		queryNorm := queryMatrix.norms[i]
+		scores := rowScores[:candidateCount]
+		topIndex := 0
+		for j := span.Start; j < span.End; j++ {
+			local := j - span.Start
+			score := cosineScoreWithNorms(query, candidateMatrix.row(j), queryNorm, candidateMatrix.norms[j])
+			scores[local] = score
+			metrics.AverageScore += score
+			metrics.CandidateCount++
+			if local == 0 || score > scores[topIndex] {
+				topIndex = local
+			}
+		}
+
+		hardWeight, softWeight := scoreSpectrumEffectiveLossWeights(example.HardLossWeight, example.SoftLossWeight)
+		loss, err := scoreSpectrumLossAndGrad(scores, example.PositiveIndexes, example.HardNegativeEligible, example.TargetProbabilities, temperature, hardWeight, softWeight)
+		if err != nil {
+			return EmbeddingScoreSpectrumEvalMetrics{}, fmt.Errorf("score-spectrum row %d: %w", i, err)
+		}
+		metrics.Loss += loss.Loss
+
+		if len(example.PositiveIndexes) > 0 {
+			metrics.AnyPositiveRowCount++
+			if positiveSet[topIndex] {
+				metrics.AnyPositiveTop1++
+			}
+		}
+		if example.SelectedPositiveIndex != nil {
+			metrics.OriginalPositiveRowCount++
+			if topIndex == *example.SelectedPositiveIndex {
+				metrics.OriginalPositiveTop1++
+			}
+			if len(example.PositiveIndexes) > 1 {
+				metrics.AlternateRecoveryRowCount++
+				if positiveSet[topIndex] && topIndex != *example.SelectedPositiveIndex {
+					metrics.AlternateRelevantRecovery++
+				}
+			}
+		}
+
+		bestPositive := float32(math.Inf(-1))
+		hardestNegative := float32(math.Inf(-1))
+		for j, score := range scores {
+			if positiveSet[j] {
+				if score > bestPositive {
+					bestPositive = score
+				}
+				continue
+			}
+			if j < len(example.HardNegativeEligible) && example.HardNegativeEligible[j] && score > hardestNegative {
+				hardestNegative = score
+			}
+		}
+		if !math.IsInf(float64(bestPositive), -1) && !math.IsInf(float64(hardestNegative), -1) {
+			metrics.BestPositiveHardestNegativeMargin += bestPositive - hardestNegative
+			metrics.MarginRowCount++
+		}
+
+		if len(example.TargetProbabilities) == candidateCount {
+			probs := modelProbs[:candidateCount]
+			softmaxScoresInto(scores, temperature, probs)
+			for j, target := range example.TargetProbabilities {
+				if target == 0 {
+					continue
+				}
+				prob := probs[j]
+				if prob < 1e-12 {
+					prob = 1e-12
+				}
+				metrics.TargetCrossEntropy -= target * float32(math.Log(float64(prob)))
+				metrics.TargetKL += target * float32(math.Log(float64(target/prob)))
+			}
+			targetCERows++
+		}
+	}
+	if metrics.RowCount > 0 {
+		scale := float32(1) / float32(metrics.RowCount)
+		metrics.Loss *= scale
+	}
+	if metrics.CandidateCount > 0 {
+		metrics.AverageScore /= float32(metrics.CandidateCount)
+	}
+	if metrics.AnyPositiveRowCount > 0 {
+		metrics.AnyPositiveTop1 /= float32(metrics.AnyPositiveRowCount)
+	}
+	if metrics.OriginalPositiveRowCount > 0 {
+		metrics.OriginalPositiveTop1 /= float32(metrics.OriginalPositiveRowCount)
+	}
+	if metrics.AlternateRecoveryRowCount > 0 {
+		metrics.AlternateRelevantRecovery /= float32(metrics.AlternateRecoveryRowCount)
+	}
+	if metrics.MarginRowCount > 0 {
+		metrics.BestPositiveHardestNegativeMargin /= float32(metrics.MarginRowCount)
+	}
+	if targetCERows > 0 {
+		metrics.TargetCrossEntropy /= float32(targetCERows)
+		metrics.TargetKL /= float32(targetCERows)
+	}
+	return metrics, nil
+}
+
 func scoreSpectrumEffectiveLossWeights(hardWeight, softWeight float32) (float32, float32) {
 	// Missing row weights default to the v1 hard-only objective. Rows that set
 	// either weight explicitly preserve the dataset values, including zeros.
@@ -3798,7 +4030,14 @@ func validateTokenizedScoreSpectrumShape(example EmbeddingScoreSpectrumExample) 
 			return fmt.Errorf("candidate_masks[%d] length %d does not match candidate_tokens[%d] length %d", i, len(example.CandidateMasks[i]), i, len(tokens))
 		}
 	}
-	return validateScoreSpectrumLabelsAndProbabilities(len(example.CandidateTokens), example.PositiveIndexes, example.HardNegativeEligible, example.TargetProbabilities)
+	if err := validateScoreSpectrumRecoveryLossWeight(example.RecoveryLossWeight); err != nil {
+		return err
+	}
+	positiveIndexes, err := canonicalizeScoreSpectrumPositiveIndexes(len(example.CandidateTokens), example.PositiveIndexes, example.SelectedPositiveIndex)
+	if err != nil {
+		return err
+	}
+	return validateScoreSpectrumLabelsAndProbabilities(len(example.CandidateTokens), positiveIndexes, example.SelectedPositiveIndex, example.HardNegativeEligible, example.TargetProbabilities)
 }
 
 func accumulatePrefixGroupedInfoNCEHardNegativeGrads(queries, candidates []*embeddingEncodedSequence, candidateSpans []embeddingCandidateSpan, dim int, temperature float32, queryGrads, candidateGrads [][]float32) (float32, float32) {

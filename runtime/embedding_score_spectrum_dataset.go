@@ -18,10 +18,13 @@ type EmbeddingScoreSpectrumExample struct {
 	CandidateTokens         [][]int32
 	CandidateMasks          [][]int32
 	PositiveIndexes         []int
+	SelectedPositiveIndex   *int
 	HardNegativeEligible    []bool
 	TargetProbabilities     []float32
 	HardLossWeight          float32
 	SoftLossWeight          float32
+	RecoveryLossWeight      float32
+	TrainPolicy             string
 	ReleaseTrainAllowed     bool
 	CommercialUseAllowed    bool
 	TrainAllowedForResearch bool
@@ -37,10 +40,13 @@ type EmbeddingTextScoreSpectrumExample struct {
 	CandidateIDs            []string
 	Candidates              []string
 	PositiveIndexes         []int
+	SelectedPositiveIndex   *int
 	HardNegativeEligible    []bool
 	TargetProbabilities     []float32
 	HardLossWeight          float32
 	SoftLossWeight          float32
+	RecoveryLossWeight      float32
+	TrainPolicy             string
 	ReleaseTrainAllowed     bool
 	CommercialUseAllowed    bool
 	TrainAllowedForResearch bool
@@ -61,10 +67,13 @@ type embeddingScoreSpectrumRecord struct {
 	CandidateTokens         [][]int32                   `json:"candidate_tokens"`
 	CandidateMasks          [][]int32                   `json:"candidate_masks,omitempty"`
 	PositiveIndexes         []int                       `json:"positive_indexes"`
+	SelectedPositiveIndex   *int                        `json:"selected_positive_index,omitempty"`
 	HardNegativeEligible    []bool                      `json:"hard_negative_eligible"`
 	TargetProbabilities     []float32                   `json:"target_probabilities"`
 	HardLossWeight          float32                     `json:"hard_loss_weight,omitempty"`
 	SoftLossWeight          float32                     `json:"soft_loss_weight,omitempty"`
+	RecoveryLossWeight      float32                     `json:"recovery_loss_weight,omitempty"`
+	TrainPolicy             string                      `json:"train_policy,omitempty"`
 	LegalGates              embeddingScoreSpectrumGates `json:"legal_gates,omitempty"`
 	ReleaseTrainAllowed     bool                        `json:"release_train_allowed,omitempty"`
 	CommercialUseAllowed    bool                        `json:"commercial_use_allowed,omitempty"`
@@ -89,6 +98,8 @@ type embeddingTextScoreSpectrumRecord struct {
 	CombinedSoftTargets     []float32                       `json:"combined_soft_targets,omitempty"`
 	HardLossWeight          float32                         `json:"hard_loss_weight,omitempty"`
 	SoftLossWeight          float32                         `json:"soft_loss_weight,omitempty"`
+	RecoveryLossWeight      float32                         `json:"recovery_loss_weight,omitempty"`
+	TrainPolicy             string                          `json:"train_policy,omitempty"`
 	LegalGates              embeddingScoreSpectrumGates     `json:"legal_gates,omitempty"`
 	ReleaseTrainAllowed     bool                            `json:"release_train_allowed,omitempty"`
 	CommercialUseAllowed    bool                            `json:"commercial_use_allowed,omitempty"`
@@ -127,6 +138,8 @@ var embeddingTextScoreSpectrumKnownFields = map[string]struct{}{
 	"combined_soft_targets":      {},
 	"hard_loss_weight":           {},
 	"soft_loss_weight":           {},
+	"recovery_loss_weight":       {},
+	"train_policy":               {},
 	"legal_gates":                {},
 	"release_train_allowed":      {},
 	"commercial_use_allowed":     {},
@@ -186,6 +199,9 @@ func (r embeddingTextScoreSpectrumRecord) MarshalJSON() ([]byte, error) {
 	if err := put("positive_indexes", r.PositiveIndexes, len(r.PositiveIndexes) == 0); err != nil {
 		return nil, err
 	}
+	if err := put("selected_positive_index", r.SelectedPositiveIndex, r.SelectedPositiveIndex == nil); err != nil {
+		return nil, err
+	}
 	if err := put("hard_negative_eligible", r.HardNegativeEligible, len(r.HardNegativeEligible) == 0); err != nil {
 		return nil, err
 	}
@@ -196,6 +212,12 @@ func (r embeddingTextScoreSpectrumRecord) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 	if err := put("soft_loss_weight", r.SoftLossWeight, r.SoftLossWeight == 0); err != nil {
+		return nil, err
+	}
+	if err := put("recovery_loss_weight", r.RecoveryLossWeight, r.RecoveryLossWeight == 0); err != nil {
+		return nil, err
+	}
+	if err := put("train_policy", r.TrainPolicy, r.TrainPolicy == ""); err != nil {
 		return nil, err
 	}
 	if err := put("legal_gates", r.LegalGates, false); err != nil {
@@ -360,10 +382,13 @@ func TokenizeEmbeddingTextScoreSpectrumExamples(examples []EmbeddingTextScoreSpe
 			CandidateTokens:         candidateTokens,
 			CandidateMasks:          candidateMasks,
 			PositiveIndexes:         append([]int(nil), clean.PositiveIndexes...),
+			SelectedPositiveIndex:   cloneIntPtr(clean.SelectedPositiveIndex),
 			HardNegativeEligible:    append([]bool(nil), clean.HardNegativeEligible...),
 			TargetProbabilities:     append([]float32(nil), clean.TargetProbabilities...),
 			HardLossWeight:          clean.HardLossWeight,
 			SoftLossWeight:          clean.SoftLossWeight,
+			RecoveryLossWeight:      clean.RecoveryLossWeight,
+			TrainPolicy:             clean.TrainPolicy,
 			ReleaseTrainAllowed:     clean.ReleaseTrainAllowed,
 			CommercialUseAllowed:    clean.CommercialUseAllowed,
 			TrainAllowedForResearch: clean.TrainAllowedForResearch,
@@ -387,10 +412,13 @@ func newEmbeddingTextScoreSpectrumRecord(example EmbeddingTextScoreSpectrumExamp
 		CandidateIDs:            append([]string(nil), clean.CandidateIDs...),
 		CandidateTexts:          append([]string(nil), clean.Candidates...),
 		PositiveIndexes:         append([]int(nil), clean.PositiveIndexes...),
+		SelectedPositiveIndex:   cloneIntPtr(clean.SelectedPositiveIndex),
 		HardNegativeEligible:    append([]bool(nil), clean.HardNegativeEligible...),
 		TargetProbabilities:     append([]float32(nil), clean.TargetProbabilities...),
 		HardLossWeight:          clean.HardLossWeight,
 		SoftLossWeight:          clean.SoftLossWeight,
+		RecoveryLossWeight:      clean.RecoveryLossWeight,
+		TrainPolicy:             clean.TrainPolicy,
 		LegalGates:              gates,
 		ReleaseTrainAllowed:     clean.ReleaseTrainAllowed,
 		CommercialUseAllowed:    clean.CommercialUseAllowed,
@@ -412,9 +440,7 @@ func (r embeddingTextScoreSpectrumRecord) example(allowResearch bool) (Embedding
 		}
 	}
 	positiveIndexes := append([]int(nil), r.PositiveIndexes...)
-	if len(positiveIndexes) == 0 && r.SelectedPositiveIndex != nil {
-		positiveIndexes = []int{*r.SelectedPositiveIndex}
-	} else if r.SelectedPositiveIndex != nil {
+	if r.SelectedPositiveIndex != nil {
 		positiveIndexes = append(positiveIndexes, *r.SelectedPositiveIndex)
 	}
 	if len(r.PositiveDocIDs) > 0 {
@@ -446,10 +472,13 @@ func (r embeddingTextScoreSpectrumRecord) example(allowResearch bool) (Embedding
 		CandidateIDs:            candidateIDs,
 		Candidates:              candidateTexts,
 		PositiveIndexes:         positiveIndexes,
+		SelectedPositiveIndex:   cloneIntPtr(r.SelectedPositiveIndex),
 		HardNegativeEligible:    hardEligible,
 		TargetProbabilities:     append([]float32(nil), targets...),
 		HardLossWeight:          r.HardLossWeight,
 		SoftLossWeight:          r.SoftLossWeight,
+		RecoveryLossWeight:      r.RecoveryLossWeight,
+		TrainPolicy:             r.TrainPolicy,
 		ReleaseTrainAllowed:     r.ReleaseTrainAllowed || r.LegalGates.ReleaseTrainAllowed,
 		CommercialUseAllowed:    r.CommercialUseAllowed || r.LegalGates.CommercialUseAllowed,
 		TrainAllowedForResearch: r.TrainAllowedForResearch || r.LegalGates.TrainAllowedForResearch,
@@ -461,6 +490,10 @@ func (r embeddingTextScoreSpectrumRecord) example(allowResearch bool) (Embedding
 
 func newEmbeddingScoreSpectrumRecord(example EmbeddingScoreSpectrumExample, allowResearch bool) (embeddingScoreSpectrumRecord, error) {
 	if err := validateTokenizedScoreSpectrum(example, allowResearch); err != nil {
+		return embeddingScoreSpectrumRecord{}, err
+	}
+	positiveIndexes, err := canonicalizeScoreSpectrumPositiveIndexes(len(example.CandidateTokens), example.PositiveIndexes, example.SelectedPositiveIndex)
+	if err != nil {
 		return embeddingScoreSpectrumRecord{}, err
 	}
 	probabilities, err := normalizeScoreSpectrumProbabilities(example.TargetProbabilities, len(example.CandidateTokens))
@@ -476,11 +509,14 @@ func newEmbeddingScoreSpectrumRecord(example EmbeddingScoreSpectrumExample, allo
 		CandidateIDs:            append([]string(nil), example.CandidateIDs...),
 		CandidateTokens:         cloneInt32Matrix(example.CandidateTokens),
 		CandidateMasks:          cloneInt32Matrix(example.CandidateMasks),
-		PositiveIndexes:         append([]int(nil), example.PositiveIndexes...),
+		PositiveIndexes:         positiveIndexes,
+		SelectedPositiveIndex:   cloneIntPtr(example.SelectedPositiveIndex),
 		HardNegativeEligible:    append([]bool(nil), example.HardNegativeEligible...),
 		TargetProbabilities:     probabilities,
 		HardLossWeight:          example.HardLossWeight,
 		SoftLossWeight:          example.SoftLossWeight,
+		RecoveryLossWeight:      example.RecoveryLossWeight,
+		TrainPolicy:             example.TrainPolicy,
 		LegalGates:              gates,
 		ReleaseTrainAllowed:     example.ReleaseTrainAllowed,
 		CommercialUseAllowed:    example.CommercialUseAllowed,
@@ -491,6 +527,10 @@ func newEmbeddingScoreSpectrumRecord(example EmbeddingScoreSpectrumExample, allo
 }
 
 func (r embeddingScoreSpectrumRecord) example(allowResearch bool) (EmbeddingScoreSpectrumExample, error) {
+	positiveIndexes := append([]int(nil), r.PositiveIndexes...)
+	if r.SelectedPositiveIndex != nil {
+		positiveIndexes = append(positiveIndexes, *r.SelectedPositiveIndex)
+	}
 	example := EmbeddingScoreSpectrumExample{
 		RowID:                   r.RowID,
 		Source:                  r.Source,
@@ -499,11 +539,14 @@ func (r embeddingScoreSpectrumRecord) example(allowResearch bool) (EmbeddingScor
 		CandidateIDs:            r.CandidateIDs,
 		CandidateTokens:         r.CandidateTokens,
 		CandidateMasks:          r.CandidateMasks,
-		PositiveIndexes:         r.PositiveIndexes,
+		PositiveIndexes:         positiveIndexes,
+		SelectedPositiveIndex:   cloneIntPtr(r.SelectedPositiveIndex),
 		HardNegativeEligible:    r.HardNegativeEligible,
 		TargetProbabilities:     r.TargetProbabilities,
 		HardLossWeight:          r.HardLossWeight,
 		SoftLossWeight:          r.SoftLossWeight,
+		RecoveryLossWeight:      r.RecoveryLossWeight,
+		TrainPolicy:             r.TrainPolicy,
 		ReleaseTrainAllowed:     r.ReleaseTrainAllowed || r.LegalGates.ReleaseTrainAllowed,
 		CommercialUseAllowed:    r.CommercialUseAllowed || r.LegalGates.CommercialUseAllowed,
 		TrainAllowedForResearch: r.TrainAllowedForResearch || r.LegalGates.TrainAllowedForResearch,
@@ -522,7 +565,11 @@ func (r embeddingScoreSpectrumRecord) example(allowResearch bool) (EmbeddingScor
 	example.CandidateIDs = append([]string(nil), r.CandidateIDs...)
 	example.CandidateTokens = cloneInt32Matrix(r.CandidateTokens)
 	example.CandidateMasks = cloneInt32Matrix(r.CandidateMasks)
-	example.PositiveIndexes = append([]int(nil), r.PositiveIndexes...)
+	example.PositiveIndexes, err = canonicalizeScoreSpectrumPositiveIndexes(len(r.CandidateTokens), positiveIndexes, r.SelectedPositiveIndex)
+	if err != nil {
+		return EmbeddingScoreSpectrumExample{}, err
+	}
+	example.SelectedPositiveIndex = cloneIntPtr(r.SelectedPositiveIndex)
 	example.HardNegativeEligible = append([]bool(nil), r.HardNegativeEligible...)
 	example.TargetProbabilities = probabilities
 	example.ExtraFields = cloneRawMessageMap(r.ExtraFields)
@@ -551,14 +598,22 @@ func validateAndCanonicalizeTextScoreSpectrum(example EmbeddingTextScoreSpectrum
 	if err := validateScoreSpectrumLegalGates(example.ReleaseTrainAllowed, example.CommercialUseAllowed, example.TrainAllowedForResearch, allowResearch); err != nil {
 		return EmbeddingTextScoreSpectrumExample{}, err
 	}
-	if err := validateScoreSpectrumLabelsAndProbabilities(len(example.Candidates), example.PositiveIndexes, example.HardNegativeEligible, example.TargetProbabilities); err != nil {
+	if err := validateScoreSpectrumRecoveryLossWeight(example.RecoveryLossWeight); err != nil {
+		return EmbeddingTextScoreSpectrumExample{}, err
+	}
+	positiveIndexes, err := canonicalizeScoreSpectrumPositiveIndexes(len(example.Candidates), example.PositiveIndexes, example.SelectedPositiveIndex)
+	if err != nil {
+		return EmbeddingTextScoreSpectrumExample{}, err
+	}
+	example.PositiveIndexes = positiveIndexes
+	if err := validateScoreSpectrumLabelsAndProbabilities(len(example.Candidates), example.PositiveIndexes, example.SelectedPositiveIndex, example.HardNegativeEligible, example.TargetProbabilities); err != nil {
 		return EmbeddingTextScoreSpectrumExample{}, err
 	}
 	clean, err := mergeDuplicateTextScoreSpectrumCandidates(example)
 	if err != nil {
 		return EmbeddingTextScoreSpectrumExample{}, err
 	}
-	if err := validateScoreSpectrumLabelsAndProbabilities(len(clean.Candidates), clean.PositiveIndexes, clean.HardNegativeEligible, clean.TargetProbabilities); err != nil {
+	if err := validateScoreSpectrumLabelsAndProbabilities(len(clean.Candidates), clean.PositiveIndexes, clean.SelectedPositiveIndex, clean.HardNegativeEligible, clean.TargetProbabilities); err != nil {
 		return EmbeddingTextScoreSpectrumExample{}, err
 	}
 	return clean, nil
@@ -591,7 +646,24 @@ func validateTokenizedScoreSpectrum(example EmbeddingScoreSpectrumExample, allow
 	if err := validateScoreSpectrumLegalGates(example.ReleaseTrainAllowed, example.CommercialUseAllowed, example.TrainAllowedForResearch, allowResearch); err != nil {
 		return err
 	}
-	return validateScoreSpectrumLabelsAndProbabilities(len(example.CandidateTokens), example.PositiveIndexes, example.HardNegativeEligible, example.TargetProbabilities)
+	if err := validateScoreSpectrumRecoveryLossWeight(example.RecoveryLossWeight); err != nil {
+		return err
+	}
+	positiveIndexes, err := canonicalizeScoreSpectrumPositiveIndexes(len(example.CandidateTokens), example.PositiveIndexes, example.SelectedPositiveIndex)
+	if err != nil {
+		return err
+	}
+	return validateScoreSpectrumLabelsAndProbabilities(len(example.CandidateTokens), positiveIndexes, example.SelectedPositiveIndex, example.HardNegativeEligible, example.TargetProbabilities)
+}
+
+func canonicalizeTokenizedScoreSpectrumExample(example EmbeddingScoreSpectrumExample) (EmbeddingScoreSpectrumExample, error) {
+	positiveIndexes, err := canonicalizeScoreSpectrumPositiveIndexes(len(example.CandidateTokens), example.PositiveIndexes, example.SelectedPositiveIndex)
+	if err != nil {
+		return EmbeddingScoreSpectrumExample{}, err
+	}
+	out := example
+	out.PositiveIndexes = positiveIndexes
+	return out, nil
 }
 
 type scoreSpectrumMergeCandidate struct {
@@ -611,6 +683,7 @@ func mergeDuplicateTextScoreSpectrumCandidates(example EmbeddingTextScoreSpectru
 	if err != nil {
 		return EmbeddingTextScoreSpectrumExample{}, err
 	}
+	oldToMerged := make([]int, len(example.Candidates))
 	indexByKey := map[string]int{}
 	merged := []scoreSpectrumMergeCandidate{}
 	for i, text := range example.Candidates {
@@ -619,6 +692,7 @@ func mergeDuplicateTextScoreSpectrumCandidates(example EmbeddingTextScoreSpectru
 		}
 		key := normalizeScoreSpectrumCandidateText(text)
 		if j, ok := indexByKey[key]; ok {
+			oldToMerged[i] = j
 			if (merged[j].positive || positiveSet[i]) && (merged[j].hard || example.HardNegativeEligible[i]) {
 				return EmbeddingTextScoreSpectrumExample{}, fmt.Errorf("duplicate candidate %d conflicts between positive and hard-negative labels", i)
 			}
@@ -628,6 +702,7 @@ func mergeDuplicateTextScoreSpectrumCandidates(example EmbeddingTextScoreSpectru
 			continue
 		}
 		indexByKey[key] = len(merged)
+		oldToMerged[i] = len(merged)
 		merged = append(merged, scoreSpectrumMergeCandidate{
 			id:       example.CandidateIDs[i],
 			text:     text,
@@ -642,6 +717,11 @@ func mergeDuplicateTextScoreSpectrumCandidates(example EmbeddingTextScoreSpectru
 	out.HardNegativeEligible = make([]bool, len(merged))
 	out.TargetProbabilities = make([]float32, len(merged))
 	out.PositiveIndexes = out.PositiveIndexes[:0]
+	out.SelectedPositiveIndex = nil
+	if example.SelectedPositiveIndex != nil {
+		remapped := oldToMerged[*example.SelectedPositiveIndex]
+		out.SelectedPositiveIndex = &remapped
+	}
 	for i, candidate := range merged {
 		out.CandidateIDs[i] = candidate.id
 		out.Candidates[i] = candidate.text
@@ -659,7 +739,7 @@ func mergeDuplicateTextScoreSpectrumCandidates(example EmbeddingTextScoreSpectru
 	return out, nil
 }
 
-func validateScoreSpectrumLabelsAndProbabilities(candidateCount int, positiveIndexes []int, hardEligible []bool, probabilities []float32) error {
+func validateScoreSpectrumLabelsAndProbabilities(candidateCount int, positiveIndexes []int, selectedPositiveIndex *int, hardEligible []bool, probabilities []float32) error {
 	if candidateCount == 0 {
 		return fmt.Errorf("candidates are empty")
 	}
@@ -670,6 +750,15 @@ func validateScoreSpectrumLabelsAndProbabilities(candidateCount int, positiveInd
 	if len(hardEligible) != candidateCount {
 		return fmt.Errorf("hard_negative_eligible length %d does not match candidate count %d", len(hardEligible), candidateCount)
 	}
+	if selectedPositiveIndex != nil {
+		idx := *selectedPositiveIndex
+		if idx < 0 || idx >= candidateCount {
+			return fmt.Errorf("selected_positive_index %d out of range for %d candidates", idx, candidateCount)
+		}
+		if !positiveSet[idx] {
+			return fmt.Errorf("selected_positive_index %d must be included in positive_indexes", idx)
+		}
+	}
 	for i := range hardEligible {
 		if positiveSet[i] && hardEligible[i] {
 			return fmt.Errorf("positive candidate %d cannot be hard-negative eligible", i)
@@ -677,6 +766,38 @@ func validateScoreSpectrumLabelsAndProbabilities(candidateCount int, positiveInd
 	}
 	_, err = normalizeScoreSpectrumProbabilities(probabilities, candidateCount)
 	return err
+}
+
+func canonicalizeScoreSpectrumPositiveIndexes(candidateCount int, positiveIndexes []int, selectedPositiveIndex *int) ([]int, error) {
+	out := append([]int(nil), positiveIndexes...)
+	if selectedPositiveIndex != nil {
+		idx := *selectedPositiveIndex
+		if idx < 0 || idx >= candidateCount {
+			return nil, fmt.Errorf("selected_positive_index %d out of range for %d candidates", idx, candidateCount)
+		}
+		out = append(out, idx)
+	}
+	positiveSet, err := scoreSpectrumPositiveSet(candidateCount, out)
+	if err != nil {
+		return nil, err
+	}
+	out = out[:0]
+	for idx, positive := range positiveSet {
+		if positive {
+			out = append(out, idx)
+		}
+	}
+	return out, nil
+}
+
+func validateScoreSpectrumRecoveryLossWeight(weight float32) error {
+	if math.IsNaN(float64(weight)) || math.IsInf(float64(weight), 0) {
+		return fmt.Errorf("recovery_loss_weight must be finite")
+	}
+	if weight < 0 {
+		return fmt.Errorf("recovery_loss_weight must be nonnegative")
+	}
+	return nil
 }
 
 func normalizeScoreSpectrumProbabilities(probabilities []float32, want int) ([]float32, error) {
@@ -771,4 +892,12 @@ func normalizeScoreSpectrumCandidateText(text string) string {
 
 func scoreSpectrumAllowResearch(opts []EmbeddingScoreSpectrumReadOptions) bool {
 	return len(opts) > 0 && opts[0].AllowResearchOnly
+}
+
+func cloneIntPtr(in *int) *int {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
