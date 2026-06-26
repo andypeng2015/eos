@@ -191,41 +191,42 @@ func inferSemanticCallType(call *syntax.CallExpr, callable *syntax.CallableDecl,
 	}
 
 	if call.Intrinsic {
-		if call.Callee != "matmul" {
+		if call.Callee != "matmul" && call.Callee != "scaled_attention_scores" {
 			diags = append(diags, diagnosticError(call.Span, "unknown intrinsic @%s", call.Callee))
 			return hir.Type{}, diags
 		}
+		intrinsic := "@" + call.Callee
 		if callable.Kind == syntax.CallableKernel {
-			diags = append(diags, diagnosticError(call.Span, "@matmul is not supported inside kernel bodies"))
+			diags = append(diags, diagnosticError(call.Span, "%s is not supported inside kernel bodies", intrinsic))
 		}
 		if len(args) != 2 {
-			diags = append(diags, diagnosticError(call.Span, "@matmul expects 2 arguments, got %d", len(args)))
+			diags = append(diags, diagnosticError(call.Span, "%s expects 2 arguments, got %d", intrinsic, len(args)))
 			return hir.Type{}, diags
 		}
 		if !((isRank2Tensor(args[0]) || isRank3Tensor(args[0])) && (isRank2Tensor(args[1]) || isRank3Tensor(args[1]))) {
-			diags = append(diags, diagnosticError(call.Span, "@matmul expects rank-2 or rank-3 tensor inputs"))
+			diags = append(diags, diagnosticError(call.Span, "%s expects rank-2 or rank-3 tensor inputs", intrinsic))
 			return hir.Type{}, diags
 		}
 		lhs := args[0].Tensor
 		rhs := args[1].Tensor
 		if len(lhs.Shape) != len(rhs.Shape) && !(len(lhs.Shape) == 2 && len(rhs.Shape) == 2) && !(len(lhs.Shape) == 3 && len(rhs.Shape) == 2) {
-			diags = append(diags, diagnosticError(call.Span, "@matmul expects rank-2 x rank-2, rank-3 x rank-2, or rank-3 x rank-3 inputs"))
+			diags = append(diags, diagnosticError(call.Span, "%s expects rank-2 x rank-2, rank-3 x rank-2, or rank-3 x rank-3 inputs", intrinsic))
 			return hir.Type{}, diags
 		}
 		if len(lhs.Shape) == 2 && len(rhs.Shape) != 2 {
-			diags = append(diags, diagnosticError(call.Span, "@matmul rank-2 lhs requires rank-2 rhs"))
+			diags = append(diags, diagnosticError(call.Span, "%s rank-2 lhs requires rank-2 rhs", intrinsic))
 			return hir.Type{}, diags
 		}
 		lhsInner := lhs.Shape[len(lhs.Shape)-1].Name
 		rhsInner := rhs.Shape[len(rhs.Shape)-2].Name
 		if lhsInner != rhsInner {
-			diags = append(diags, diagnosticError(call.Span, "@matmul inner dimensions mismatch: %s vs %s", lhsInner, rhsInner))
+			diags = append(diags, diagnosticError(call.Span, "%s inner dimensions mismatch: %s vs %s", intrinsic, lhsInner, rhsInner))
 		}
 		shape := []hir.DimExpr{{Name: lhs.Shape[0].Name}, {Name: rhs.Shape[1].Name}}
 		if len(lhs.Shape) == 3 {
 			if len(rhs.Shape) == 3 {
 				if lhs.Shape[0].Name != rhs.Shape[0].Name {
-					diags = append(diags, diagnosticError(call.Span, "@matmul batch dimensions mismatch: %s vs %s", lhs.Shape[0].Name, rhs.Shape[0].Name))
+					diags = append(diags, diagnosticError(call.Span, "%s batch dimensions mismatch: %s vs %s", intrinsic, lhs.Shape[0].Name, rhs.Shape[0].Name))
 				}
 				shape = []hir.DimExpr{{Name: lhs.Shape[0].Name}, {Name: lhs.Shape[1].Name}, {Name: rhs.Shape[2].Name}}
 			} else {

@@ -166,6 +166,9 @@ func (e *executor) dispatchStep(_ context.Context, step eosartifact.Step, output
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
 		}
+		if step.Attributes != nil && step.Attributes["scale"] != "" && step.Attributes["scale"] != "none" {
+			return backend.StepDispatchResult{}, false, nil
+		}
 		if !supportsBuiltinMatMul(inputs) {
 			return backend.StepDispatchResult{}, false, nil
 		}

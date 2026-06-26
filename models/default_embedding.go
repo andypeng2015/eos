@@ -95,6 +95,7 @@ func DefaultEmbeddingManifest(cfg DefaultEmbeddingPackageConfig) eosruntime.Embe
 		AttentionValueParam:   "attn_v",
 		AttentionOutputParam:  "attn_o",
 		AttentionMaskMode:     eosruntime.EmbeddingAttentionMaskModeKey,
+		AttentionScoreScale:   eosruntime.EmbeddingAttentionScoreScaleKeyDimRSQ,
 		AttentionResidual:     true,
 		AttentionLayerNorm:    true,
 		PositionEncoding:      eosruntime.EmbeddingPositionEncodingRoPE,

@@ -52,6 +52,9 @@ func TestInitDefaultEmbeddingPackageCreatesTrainablePackage(t *testing.T) {
 	if manifest.AttentionMaskMode != eosruntime.EmbeddingAttentionMaskModeKey {
 		t.Fatalf("attention mask mode = %q, want %q", manifest.AttentionMaskMode, eosruntime.EmbeddingAttentionMaskModeKey)
 	}
+	if manifest.AttentionScoreScale != eosruntime.EmbeddingAttentionScoreScaleKeyDimRSQ {
+		t.Fatalf("attention score scale = %q, want %q", manifest.AttentionScoreScale, eosruntime.EmbeddingAttentionScoreScaleKeyDimRSQ)
+	}
 	if manifest.PositionEncoding != eosruntime.EmbeddingPositionEncodingRoPE {
 		t.Fatalf("position encoding = %q, want %q", manifest.PositionEncoding, eosruntime.EmbeddingPositionEncodingRoPE)
 	}
@@ -136,6 +139,9 @@ func TestDefaultEmbeddingPackageV2PackagedInferenceParity(t *testing.T) {
 	}
 	if manifest.AttentionMaskMode != eosruntime.EmbeddingAttentionMaskModeKey {
 		t.Fatalf("attention mask mode = %q, want %q", manifest.AttentionMaskMode, eosruntime.EmbeddingAttentionMaskModeKey)
+	}
+	if manifest.AttentionScoreScale != eosruntime.EmbeddingAttentionScoreScaleKeyDimRSQ {
+		t.Fatalf("attention score scale = %q, want %q", manifest.AttentionScoreScale, eosruntime.EmbeddingAttentionScoreScaleKeyDimRSQ)
 	}
 	if manifest.PositionEncoding != eosruntime.EmbeddingPositionEncodingRoPE {
 		t.Fatalf("position encoding = %q, want %q", manifest.PositionEncoding, eosruntime.EmbeddingPositionEncodingRoPE)

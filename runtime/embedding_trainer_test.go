@@ -1205,6 +1205,70 @@ func TestEmbeddingTrainerEncoderV2PaddingInvariantAndOrderSensitive(t *testing.T
 	}
 }
 
+func TestEmbeddingTrainerAttentionScoreScaleChangesForward(t *testing.T) {
+	rawTrainer := newTinyTrainableRepeatedEncoderEmbeddingTrainer(t, 0.02)
+	rawTrainer.manifest.Tokenizer.MaxSequence = 8
+	rawTrainer.manifest.AttentionMaskMode = EmbeddingAttentionMaskModeKey
+	rawTrainer.manifest.PositionEncoding = EmbeddingPositionEncodingRoPE
+	rawTrainer.manifest.AttentionScoreScale = EmbeddingAttentionScoreScaleNone
+
+	scaledTrainer := newTinyTrainableRepeatedEncoderEmbeddingTrainer(t, 0.02)
+	scaledTrainer.manifest.Tokenizer.MaxSequence = 8
+	scaledTrainer.manifest.AttentionMaskMode = EmbeddingAttentionMaskModeKey
+	scaledTrainer.manifest.PositionEncoding = EmbeddingPositionEncodingRoPE
+	scaledTrainer.manifest.AttentionScoreScale = EmbeddingAttentionScoreScaleKeyDimRSQ
+
+	raw := embedTrainerTokensForTest(t, rawTrainer, []int32{0, 1, 2}, []int32{1, 1, 1})
+	scaled := embedTrainerTokensForTest(t, scaledTrainer, []int32{0, 1, 2}, []int32{1, 1, 1})
+	maxAbs, l2 := embeddingVectorDiffStats(raw, scaled)
+	if maxAbs <= 1e-6 && l2 <= 1e-6 {
+		t.Fatalf("scaled attention forward matched raw scores: max_abs=%.9g l2=%.9g raw=%v scaled=%v", maxAbs, l2, raw, scaled)
+	}
+}
+
+func TestEmbeddingTrainerAttentionScoreScaleBackpropScalesQKOnly(t *testing.T) {
+	state := func() *embeddingSequenceState {
+		return &embeddingSequenceState{
+			tokens:       []int32{0, 1},
+			input:        []float32{1, 0, 0, 0, 0, 1, 0, 0},
+			attnQ:        []float32{1, 0, 0, 1, -1, 2, 0.5, 0},
+			attnK:        []float32{0.5, -1, 1, 0, 2, 0, -0.5, 1},
+			attnV:        []float32{1, 2, 3, 4, -1, 0.5, 2, -2},
+			attnScores:   []float32{0.8, 0.2, 0.3, 0.7},
+			attnMixed:    []float32{0.6, 1.7, 2.8, 2.8, -0.4, 0.95, 2.3, -0.2},
+			attnResidual: make([]float32, 8),
+			hidden:       make([]float32, 8),
+		}
+	}
+	identity := backend.NewTensorF32([]int{4, 4}, []float32{
+		1, 0, 0, 0,
+		0, 1, 0, 0,
+		0, 0, 1, 0,
+		0, 0, 0, 1,
+	})
+	gradHidden := []float32{
+		0.2, -0.4, 0.6, -0.8,
+		1.1, 0.7, -0.3, 0.9,
+	}
+	run := func(scaleMode string) (gradQ, gradK, gradV []float32) {
+		trainer := &EmbeddingTrainer{manifest: EmbeddingManifest{AttentionScoreScale: scaleMode}}
+		gradQ = make([]float32, 16)
+		gradK = make([]float32, 16)
+		gradV = make([]float32, 16)
+		gradO := make([]float32, 16)
+		trainer.backpropAttentionSequence(state(), gradHidden, identity, identity, identity, identity, gradQ, gradK, gradV, gradO, 4)
+		return gradQ, gradK, gradV
+	}
+	rawQ, rawK, rawV := run(EmbeddingAttentionScoreScaleNone)
+	scaledQ, scaledK, scaledV := run(EmbeddingAttentionScoreScaleKeyDimRSQ)
+
+	for i := range rawQ {
+		assertClose(t, scaledQ[i], rawQ[i]*0.5, 1e-6)
+		assertClose(t, scaledK[i], rawK[i]*0.5, 1e-6)
+		assertClose(t, scaledV[i], rawV[i], 1e-6)
+	}
+}
+
 func TestEmbeddingTrainerRoPEBackwardRotatesTokenEmbeddingGradients(t *testing.T) {
 	trainer := &EmbeddingTrainer{
 		manifest:   EmbeddingManifest{PositionEncoding: EmbeddingPositionEncodingRoPE},

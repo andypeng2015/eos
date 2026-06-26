@@ -155,6 +155,27 @@ func TestMatmulTensor(t *testing.T) {
 	})
 }
 
+func TestMatmulTensorAppliesScaleAttribute(t *testing.T) {
+	lhs := NewTensorF32([]int{2, 4}, []float32{
+		1, 2, 3, 4,
+		5, 6, 7, 8,
+	})
+	rhs := NewTensorF32([]int{4, 2}, []float32{
+		1, 0,
+		0, 1,
+		1, 0,
+		0, 1,
+	})
+	out, err := matmulTensorWithAttributes(lhs, rhs, map[string]string{"scale": "rsqrt_rhs_rows"})
+	if err != nil {
+		t.Fatalf("scaled matmul: %v", err)
+	}
+	assertTensorClose(t, out, []int{2, 2}, []float32{
+		2, 3,
+		6, 7,
+	})
+}
+
 func TestMatmulTensorBatched(t *testing.T) {
 	lhs := NewTensorF16([]int{2, 2, 2}, []float32{
 		1, 2,

@@ -2682,6 +2682,7 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 			}
 		}
 		batchedScores, batchedScoresOK := t.tryBatchedAttentionScores(states, seqLen, d)
+		scoreScale := t.attentionScoreScale(d)
 		for i, state := range states {
 			if batchedScoresOK {
 				state.attnScores = batchedScores[i]
@@ -2702,6 +2703,7 @@ func (t *EmbeddingTrainer) encodeBatchedLayerStates(states []*embeddingSequenceS
 					fillHostMatMul(state.attnQ, seqLen, d, kt, seqLen, state.attnScores)
 				}
 			}
+			scaleFloat32Slice(state.attnScores, scoreScale)
 			softmaxAttentionScoresInPlace(state.attnScores, seqLen, state.mask, t.manifest.AttentionMaskMode)
 			if captureBindings {
 				state.attnScoresBinding = t.bindSequenceTensor(state, "scores", tensorF32View([]int{seqLen, seqLen}, state.attnScores), true, t.softmaxBackwardAccelEnabled() && bindSoftmaxActivation)
@@ -5072,6 +5074,7 @@ func (t *EmbeddingTrainer) encodeLayer(tokens, mask []int32, input []float32, at
 			kt := transpose2DData(state.attnK, len(tokens), d)
 			fillHostMatMul(state.attnQ, len(tokens), d, kt, len(tokens), state.attnScores)
 		}
+		scaleFloat32Slice(state.attnScores, t.attentionScoreScale(d))
 		softmaxAttentionScoresInPlace(state.attnScores, len(tokens), mask, t.manifest.AttentionMaskMode)
 		if captureBindings {
 			state.attnScoresBinding = t.bindSequenceTensor(state, "scores", tensorF32View([]int{len(tokens), len(tokens)}, state.attnScores), true, t.softmaxBackwardAccelEnabled())
@@ -7272,6 +7275,10 @@ func (t *EmbeddingTrainer) backpropAttentionSequences(states []*embeddingSequenc
 			gradPreSoftmaxMatrices[i] = gradPreSoftmaxFlat
 		}
 	}
+	scoreScale := t.attentionScoreScale(d)
+	for i := range gradPreSoftmaxMatrices {
+		scaleFloat32Slice(gradPreSoftmaxMatrices[i], scoreScale)
+	}
 
 	batchedGradV, batchedGradK, combinedVKOK := t.tryCombinedAttentionValueKeyGradMatMul(attnScoreMatrices, gradMixedMatrices, gradPreSoftmaxMatrices, attnQMatrices, seqLen, d)
 	gradVOK := combinedVKOK
@@ -7546,6 +7553,7 @@ func (t *EmbeddingTrainer) backpropAttentionSequence(state *embeddingSequenceSta
 			backwardSoftmaxRow(gradPreSoftmaxFlat[i*seqLen:(i+1)*seqLen], gradScores, rowScores)
 		}
 	}
+	scaleFloat32Slice(gradPreSoftmaxFlat, t.attentionScoreScale(d))
 	if out, ok := t.tryTrainerMatMulBoundLeft(
 		state.attnScoresBinding,
 		tensorF32View([]int{seqLen, seqLen}, state.attnScores),
@@ -8210,6 +8218,27 @@ func (t *EmbeddingTrainer) attentionResidualEnabled() bool {
 
 func (t *EmbeddingTrainer) attentionLayerNormEnabled() bool {
 	return t != nil && t.attentionEnabled() && t.manifest.AttentionLayerNorm
+}
+
+func (t *EmbeddingTrainer) attentionScoreScale(keyWidth int) float32 {
+	if t == nil || keyWidth <= 0 {
+		return 1
+	}
+	switch t.manifest.AttentionScoreScale {
+	case EmbeddingAttentionScoreScaleKeyDimRSQ:
+		return float32(1 / math.Sqrt(float64(keyWidth)))
+	default:
+		return 1
+	}
+}
+
+func scaleFloat32Slice(values []float32, scale float32) {
+	if scale == 1 {
+		return
+	}
+	for i := range values {
+		values[i] *= scale
+	}
 }
 
 func (t *EmbeddingTrainer) ffnResidualEnabled() bool {

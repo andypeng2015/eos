@@ -521,7 +521,7 @@ pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[D] {
     let k1 = @matmul(hidden, wk_f)
     let v1 = @matmul(hidden, wv_f)
     let kt1 = transpose(k1)
-    let scores1 = @matmul(q1, kt1)
+    let scores1 = @scaled_attention_scores(q1, kt1)
     let probs1 = masked_softmax(scores1, attention_mask)
     let mixed1 = @matmul(probs1, v1)
     let attended1 = @matmul(mixed1, wo_f)
@@ -535,7 +535,7 @@ pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[D] {
     let k2 = @matmul(encoded1, wk_f)
     let v2 = @matmul(encoded1, wv_f)
     let kt2 = transpose(k2)
-    let scores2 = @matmul(q2, kt2)
+    let scores2 = @scaled_attention_scores(q2, kt2)
     let probs2 = masked_softmax(scores2, attention_mask)
     let mixed2 = @matmul(probs2, v2)
     let attended2 = @matmul(mixed2, wo_f)
@@ -563,7 +563,7 @@ pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16
     let k1 = @matmul(hidden, wk_f)
     let v1 = @matmul(hidden, wv_f)
     let kt1 = transpose(k1)
-    let scores1 = @matmul(q1, kt1)
+    let scores1 = @scaled_attention_scores(q1, kt1)
     let probs1 = masked_softmax(scores1, attention_mask)
     let mixed1 = @matmul(probs1, v1)
     let attended1 = @matmul(mixed1, wo_f)
@@ -577,7 +577,7 @@ pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16
     let k2 = @matmul(encoded1, wk_f)
     let v2 = @matmul(encoded1, wv_f)
     let kt2 = transpose(k2)
-    let scores2 = @matmul(q2, kt2)
+    let scores2 = @scaled_attention_scores(q2, kt2)
     let probs2 = masked_softmax(scores2, attention_mask)
     let mixed2 = @matmul(probs2, v2)
     let attended2 = @matmul(mixed2, wo_f)
@@ -1488,7 +1488,7 @@ func collectOpsFromExpr(name string, expr syntax.Expr, outputs []string, kernels
 }
 
 func lowerOpKind(call *syntax.CallExpr, kernels map[string]bool) mir.OpKind {
-	if call.Intrinsic && call.Callee == "matmul" {
+	if call.Intrinsic && (call.Callee == "matmul" || call.Callee == "scaled_attention_scores") {
 		return mir.OpMatMul
 	}
 	switch call.Callee {
@@ -1757,9 +1757,9 @@ func inferCallPlan(call *syntax.CallExpr, output string, env map[string]hir.Type
 		inputs = append(inputs, name)
 	}
 	switch {
-	case call.Intrinsic && call.Callee == "matmul":
+	case call.Intrinsic && (call.Callee == "matmul" || call.Callee == "scaled_attention_scores"):
 		if len(call.Args) != 2 {
-			return hir.Type{}, nil, nil, nil, fmt.Errorf("@matmul expects 2 args")
+			return hir.Type{}, nil, nil, nil, fmt.Errorf("@%s expects 2 args", call.Callee)
 		}
 		lhs := argTypes[0]
 		rhs := argTypes[1]
@@ -1773,7 +1773,11 @@ func inferCallPlan(call *syntax.CallExpr, output string, env map[string]hir.Type
 		if lhs.Tensor != nil && rhs.Tensor != nil && len(lhs.Tensor.Shape) == 3 && len(rhs.Tensor.Shape) == 3 {
 			out.Tensor.Shape = []hir.DimExpr{{Name: lhs.Tensor.Shape[0].Name}, {Name: lhs.Tensor.Shape[1].Name}, {Name: rhs.Tensor.Shape[2].Name}}
 		}
-		steps = append(steps, eosartifact.Step{Kind: eosartifact.StepMatMul, Name: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
+		var attrs map[string]string
+		if call.Callee == "scaled_attention_scores" {
+			attrs = map[string]string{"scale": "rsqrt_rhs_rows"}
+		}
+		steps = append(steps, eosartifact.Step{Kind: eosartifact.StepMatMul, Name: call.Callee, Inputs: inputs, Outputs: maybeOutput(output), Attributes: attrs})
 		buffers = appendOutputBuffer(buffers, output, out)
 		return out, steps, buffers, newKernels, nil
 	case call.Callee == "transpose":
@@ -2150,10 +2154,11 @@ func inferExprType(expr syntax.Expr, env map[string]hir.Type) (hir.Type, error) 
 			}
 			argTypes = append(argTypes, typ)
 		}
-		if e.Intrinsic && e.Callee == "matmul" && len(argTypes) == 2 {
+		if e.Intrinsic && (e.Callee == "matmul" || e.Callee == "scaled_attention_scores") && len(argTypes) == 2 {
+			intrinsic := "@" + e.Callee
 			if isRank2HIRTensor(argTypes[0]) {
 				if !isRank2HIRTensor(argTypes[1]) {
-					return hir.Type{}, fmt.Errorf("@matmul rank-2 lhs requires rank-2 rhs")
+					return hir.Type{}, fmt.Errorf("%s rank-2 lhs requires rank-2 rhs", intrinsic)
 				}
 				return hir.Type{
 					Kind: hir.TypeTensor,
@@ -2174,7 +2179,7 @@ func inferExprType(expr syntax.Expr, env map[string]hir.Type) (hir.Type, error) 
 					}, nil
 				}
 				if !isRank2HIRTensor(argTypes[1]) {
-					return hir.Type{}, fmt.Errorf("@matmul rank-3 lhs requires rank-2 or rank-3 rhs")
+					return hir.Type{}, fmt.Errorf("%s rank-3 lhs requires rank-2 or rank-3 rhs", intrinsic)
 				}
 				return hir.Type{
 					Kind: hir.TypeTensor,

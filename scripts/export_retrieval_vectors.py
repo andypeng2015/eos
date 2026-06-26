@@ -38,6 +38,21 @@ PRESETS = {
         "query_prefix": "Represent this sentence for searching relevant passages: ",
         "document_prefix": "",
     },
+    "e5-small-v2": {
+        "model_name": "intfloat/e5-small-v2",
+        "query_prefix": "query: ",
+        "document_prefix": "passage: ",
+    },
+    "bge-small-en-v1.5": {
+        "model_name": "BAAI/bge-small-en-v1.5",
+        "query_prefix": "Represent this sentence for searching relevant passages: ",
+        "document_prefix": "",
+    },
+    "all-minilm-l6-v2": {
+        "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+        "query_prefix": "",
+        "document_prefix": "",
+    },
 }
 
 

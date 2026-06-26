@@ -284,6 +284,7 @@ func TestBuildEncoderTrainableQ8x2Preset(t *testing.T) {
 	foundRoPE := false
 	foundMaskedSoftmax := false
 	foundMaskedMeanPool := false
+	scaledScoreMatMuls := 0
 	for _, kernel := range bundle.Artifact.Kernels {
 		for _, op := range kernel.Body {
 			if op.Op == "gelu" {
@@ -300,6 +301,11 @@ func TestBuildEncoderTrainableQ8x2Preset(t *testing.T) {
 			}
 		}
 	}
+	for _, step := range bundle.Artifact.Steps {
+		if step.Kind == eosartifact.StepMatMul && len(step.Outputs) == 1 && strings.HasPrefix(step.Outputs[0], "scores") && step.Attributes["scale"] == "rsqrt_rhs_rows" {
+			scaledScoreMatMuls++
+		}
+	}
 	if !foundGELU {
 		t.Fatal("expected GELU op in default encoder preset")
 	}
@@ -311,6 +317,9 @@ func TestBuildEncoderTrainableQ8x2Preset(t *testing.T) {
 	}
 	if !foundMaskedMeanPool {
 		t.Fatal("expected masked mean_pool op in default encoder preset")
+	}
+	if scaledScoreMatMuls != 4 {
+		t.Fatalf("scaled score matmul count = %d, want 4", scaledScoreMatMuls)
 	}
 }
 

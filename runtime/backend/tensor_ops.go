@@ -106,7 +106,7 @@ func executeStep(ctx context.Context, mod *eosartifact.Module, entry eosartifact
 				return values, result.VariantEntry, nil
 			}
 		}
-		out, err := matmulTensor(lhs, rhs)
+		out, err := matmulTensorWithAttributes(lhs, rhs, step.Attributes)
 		if err != nil {
 			return nil, "", err
 		}
@@ -1139,6 +1139,49 @@ func matmulTensor(lhs, rhs *Tensor) (*Tensor, error) {
 		}
 	}
 	return out, nil
+}
+
+func matmulTensorWithAttributes(lhs, rhs *Tensor, attrs map[string]string) (*Tensor, error) {
+	out, err := matmulTensor(lhs, rhs)
+	if err != nil {
+		return nil, err
+	}
+	scale, err := matmulScale(lhs, rhs, attrs)
+	if err != nil {
+		return nil, err
+	}
+	if scale != 1 {
+		for i := range out.F32 {
+			out.F32[i] *= scale
+		}
+	}
+	return out, nil
+}
+
+func matmulScale(lhs, rhs *Tensor, attrs map[string]string) (float32, error) {
+	if len(attrs) == 0 || attrs["scale"] == "" || attrs["scale"] == "none" {
+		return 1, nil
+	}
+	switch raw := attrs["scale"]; raw {
+	case "rsqrt_rhs_rows":
+		if rhs == nil || len(rhs.Shape) < 2 {
+			return 0, fmt.Errorf("matmul scale %q requires rank-2 or rank-3 rhs", raw)
+		}
+		keyWidth := rhs.Shape[len(rhs.Shape)-2]
+		if keyWidth <= 0 {
+			return 0, fmt.Errorf("matmul scale %q requires positive key width, got %d", raw, keyWidth)
+		}
+		return float32(1 / math.Sqrt(float64(keyWidth))), nil
+	default:
+		value, err := strconv.ParseFloat(raw, 32)
+		if err != nil {
+			return 0, fmt.Errorf("unsupported matmul scale %q", raw)
+		}
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return 0, fmt.Errorf("matmul scale must be finite, got %q", raw)
+		}
+		return float32(value), nil
+	}
 }
 
 func transposeTensor(in *Tensor) (*Tensor, error) {

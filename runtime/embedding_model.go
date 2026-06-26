@@ -13,10 +13,12 @@ import (
 const EmbeddingManifestVersion = "manta/embedding-manifest/v0alpha1"
 
 const (
-	EmbeddingAttentionMaskModeNone = "none"
-	EmbeddingAttentionMaskModeKey  = "key"
-	EmbeddingPositionEncodingNone  = "none"
-	EmbeddingPositionEncodingRoPE  = "rope"
+	EmbeddingAttentionMaskModeNone        = "none"
+	EmbeddingAttentionMaskModeKey         = "key"
+	EmbeddingPositionEncodingNone         = "none"
+	EmbeddingPositionEncodingRoPE         = "rope"
+	EmbeddingAttentionScoreScaleNone      = "none"
+	EmbeddingAttentionScoreScaleKeyDimRSQ = "key_dim_rsqrt"
 )
 
 // TokenizerManifest carries embedding-model tokenization limits and ids.
@@ -45,6 +47,7 @@ type EmbeddingManifest struct {
 	AttentionValueParam   string            `json:"attention_value_param,omitempty"`
 	AttentionOutputParam  string            `json:"attention_output_param,omitempty"`
 	AttentionMaskMode     string            `json:"attention_mask_mode,omitempty"`
+	AttentionScoreScale   string            `json:"attention_score_scale,omitempty"`
 	AttentionResidual     bool              `json:"attention_residual,omitempty"`
 	AttentionLayerNorm    bool              `json:"attention_layernorm,omitempty"`
 	PositionEncoding      string            `json:"position_encoding,omitempty"`
@@ -146,6 +149,7 @@ func (m EmbeddingManifest) mllValues() map[string]authoredManifestValue {
 		"attention_value_param":   authoredString(m.AttentionValueParam),
 		"attention_output_param":  authoredString(m.AttentionOutputParam),
 		"attention_mask_mode":     authoredString(m.AttentionMaskMode),
+		"attention_score_scale":   authoredString(m.AttentionScoreScale),
 		"attention_residual":      authoredBool(m.AttentionResidual),
 		"attention_layernorm":     authoredBool(m.AttentionLayerNorm),
 		"position_encoding":       authoredString(m.PositionEncoding),
@@ -233,6 +237,11 @@ func embeddingManifestFromDoc(doc authoredManifestDoc) (EmbeddingManifest, error
 		return EmbeddingManifest{}, err
 	} else {
 		manifest.AttentionMaskMode = value
+	}
+	if value, _, err := doc.string("attention_score_scale"); err != nil {
+		return EmbeddingManifest{}, err
+	} else {
+		manifest.AttentionScoreScale = value
 	}
 	if value, _, err := doc.bool("attention_residual"); err != nil {
 		return EmbeddingManifest{}, err
@@ -689,6 +698,9 @@ func (m EmbeddingManifest) normalized() EmbeddingManifest {
 	if m.AttentionMaskMode == "" {
 		m.AttentionMaskMode = EmbeddingAttentionMaskModeNone
 	}
+	if m.AttentionScoreScale == "" {
+		m.AttentionScoreScale = EmbeddingAttentionScoreScaleNone
+	}
 	if m.PositionEncoding == "" {
 		m.PositionEncoding = EmbeddingPositionEncodingNone
 	}
@@ -717,6 +729,15 @@ func (m EmbeddingManifest) ValidateModule(mod *eosartifact.Module) error {
 		}
 	default:
 		return fmt.Errorf("unsupported attention_mask_mode %q", m.AttentionMaskMode)
+	}
+	switch m.AttentionScoreScale {
+	case "", EmbeddingAttentionScoreScaleNone:
+	case EmbeddingAttentionScoreScaleKeyDimRSQ:
+		if !moduleHasScaledAttentionMatMul(mod) {
+			return fmt.Errorf("attention_score_scale=%q requires scaled attention score matmul in serving graph", m.AttentionScoreScale)
+		}
+	default:
+		return fmt.Errorf("unsupported attention_score_scale %q", m.AttentionScoreScale)
 	}
 	switch m.PositionEncoding {
 	case "", EmbeddingPositionEncodingNone:
@@ -748,6 +769,18 @@ func (m EmbeddingManifest) ValidateModule(mod *eosartifact.Module) error {
 		return err
 	}
 	return nil
+}
+
+func moduleHasScaledAttentionMatMul(mod *eosartifact.Module) bool {
+	if mod == nil {
+		return false
+	}
+	for _, step := range mod.Steps {
+		if step.Kind == eosartifact.StepMatMul && step.Attributes != nil && step.Attributes["scale"] == "rsqrt_rhs_rows" {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *EmbeddingModel) validateTokenSequence(tokens []int32) error {
