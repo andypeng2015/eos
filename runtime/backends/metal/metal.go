@@ -166,13 +166,14 @@ func (e *executor) dispatchStep(_ context.Context, step eosartifact.Step, output
 		if e.device == nil {
 			return backend.StepDispatchResult{}, false, nil
 		}
-		if step.Attributes != nil && step.Attributes["scale"] != "" && step.Attributes["scale"] != "none" {
-			return backend.StepDispatchResult{}, false, nil
-		}
 		if !supportsBuiltinMatMul(inputs) {
 			return backend.StepDispatchResult{}, false, nil
 		}
 		result, err := e.device.runMatMul(inputs, outputType)
+		if err != nil {
+			return backend.StepDispatchResult{}, false, err
+		}
+		result, err = backend.ApplyMatMulAttributesToResult(inputs[0], inputs[1], step.Attributes, result)
 		if err != nil {
 			return backend.StepDispatchResult{}, false, err
 		}

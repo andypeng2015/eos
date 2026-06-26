@@ -109,6 +109,96 @@ func TestCUDADeviceExecutionUsesResidentMatMulParam(t *testing.T) {
 	})
 }
 
+func TestCUDADispatchStepScaledMatMulStaysNative(t *testing.T) {
+	device, err := newDeviceRuntime()
+	if err != nil {
+		t.Fatalf("new cuda device runtime: %v", err)
+	}
+	if device == nil {
+		t.Skip("no cuda device runtime available")
+	}
+	defer device.close()
+
+	lhs := backend.NewTensorF32([]int{1, 4}, []float32{1, 2, 3, 4})
+	rhs := backend.NewTensorF32([]int{4, 1}, []float32{1, 1, 1, 1})
+	outputType := eosartifact.ValueType{
+		Kind: eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{
+			DType: "f32",
+		},
+	}
+	step := eosartifact.Step{
+		Kind:       eosartifact.StepMatMul,
+		Name:       "scaled_qk",
+		Inputs:     []string{"q", "k"},
+		Outputs:    []string{"scores"},
+		Attributes: map[string]string{"scale": "rsqrt_rhs_rows"},
+	}
+	exec := &executor{device: device, residentMatMulParams: map[string]bool{}}
+	result, handled, err := exec.dispatchStep(context.Background(), step, outputType, []*backend.Tensor{lhs, rhs})
+	if err != nil {
+		t.Fatalf("dispatch scaled matmul: %v", err)
+	}
+	if !handled {
+		t.Fatal("scaled matmul was not handled by native CUDA dispatch")
+	}
+	if len(result.Outputs) != 1 || result.Outputs[0] == nil {
+		t.Fatalf("outputs = %+v, want one tensor", result.Outputs)
+	}
+	assertTensorClose(t, result.Outputs[0], []int{1, 1}, []float32{5})
+	if result.Metadata["device_execution"] != true {
+		t.Fatalf("device_execution = %v, want true", result.Metadata["device_execution"])
+	}
+	if result.Metadata["launch_api"] != "cublasSgemm" {
+		t.Fatalf("launch_api = %v, want cublasSgemm", result.Metadata["launch_api"])
+	}
+}
+
+func TestCUDADispatchStepScaledBoundRightMatMulStaysNative(t *testing.T) {
+	device, err := newDeviceRuntime()
+	if err != nil {
+		t.Fatalf("new cuda device runtime: %v", err)
+	}
+	if device == nil {
+		t.Skip("no cuda device runtime available")
+	}
+	defer device.close()
+
+	rhs := backend.NewTensorF32([]int{4, 1}, []float32{1, 1, 1, 1})
+	if err := device.bindMatMulRight("k", rhs); err != nil {
+		t.Fatalf("bind rhs: %v", err)
+	}
+	lhs := backend.NewTensorF32([]int{1, 4}, []float32{1, 2, 3, 4})
+	outputType := eosartifact.ValueType{
+		Kind: eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{
+			DType: "f32",
+		},
+	}
+	step := eosartifact.Step{
+		Kind:       eosartifact.StepMatMul,
+		Name:       "scaled_qk_bound",
+		Inputs:     []string{"q", "k"},
+		Outputs:    []string{"scores"},
+		Attributes: map[string]string{"scale": "rsqrt_rhs_rows"},
+	}
+	exec := &executor{device: device, residentMatMulParams: map[string]bool{"k": true}}
+	result, handled, err := exec.dispatchStep(context.Background(), step, outputType, []*backend.Tensor{lhs, rhs})
+	if err != nil {
+		t.Fatalf("dispatch scaled bound-right matmul: %v", err)
+	}
+	if !handled {
+		t.Fatal("scaled bound-right matmul was not handled by native CUDA dispatch")
+	}
+	assertTensorClose(t, result.Outputs[0], []int{1, 1}, []float32{5})
+	if result.Metadata["device_execution"] != true {
+		t.Fatalf("device_execution = %v, want true", result.Metadata["device_execution"])
+	}
+	if result.Metadata["rhs_binding"] != "k" {
+		t.Fatalf("rhs_binding = %v, want k", result.Metadata["rhs_binding"])
+	}
+}
+
 func TestCUDADeviceExecutionTinyScore(t *testing.T) {
 	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_score", Preset: compiler.PresetTinyScore})
 	if err != nil {

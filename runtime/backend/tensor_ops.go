@@ -1146,6 +1146,15 @@ func matmulTensorWithAttributes(lhs, rhs *Tensor, attrs map[string]string) (*Ten
 	if err != nil {
 		return nil, err
 	}
+	return ApplyMatMulAttributes(lhs, rhs, attrs, out)
+}
+
+// ApplyMatMulAttributes applies StepMatMul output attributes to an already
+// computed matmul output tensor.
+func ApplyMatMulAttributes(lhs, rhs *Tensor, attrs map[string]string, out *Tensor) (*Tensor, error) {
+	if out == nil {
+		return nil, fmt.Errorf("matmul output is nil")
+	}
 	scale, err := matmulScale(lhs, rhs, attrs)
 	if err != nil {
 		return nil, err
@@ -1156,6 +1165,20 @@ func matmulTensorWithAttributes(lhs, rhs *Tensor, attrs map[string]string) (*Ten
 		}
 	}
 	return out, nil
+}
+
+// ApplyMatMulAttributesToResult applies StepMatMul output attributes to a
+// backend-owned native matmul result.
+func ApplyMatMulAttributesToResult(lhs, rhs *Tensor, attrs map[string]string, result StepDispatchResult) (StepDispatchResult, error) {
+	if len(result.Outputs) != 1 {
+		return StepDispatchResult{}, fmt.Errorf("matmul dispatch returned %d outputs, want 1", len(result.Outputs))
+	}
+	out, err := ApplyMatMulAttributes(lhs, rhs, attrs, result.Outputs[0])
+	if err != nil {
+		return StepDispatchResult{}, err
+	}
+	result.Outputs[0] = out
+	return result, nil
 }
 
 func matmulScale(lhs, rhs *Tensor, attrs map[string]string) (float32, error) {

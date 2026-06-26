@@ -176,6 +176,63 @@ func TestMatmulTensorAppliesScaleAttribute(t *testing.T) {
 	})
 }
 
+func TestApplyMatMulAttributesToNativeResult(t *testing.T) {
+	lhs := NewTensorF32([]int{2, 4}, []float32{
+		1, 2, 3, 4,
+		5, 6, 7, 8,
+	})
+	rhs := NewTensorF32([]int{4, 2}, []float32{
+		1, 0,
+		0, 1,
+		1, 0,
+		0, 1,
+	})
+	result := StepDispatchResult{
+		Outputs: []*Tensor{NewTensorF32([]int{2, 2}, []float32{
+			4, 6,
+			12, 14,
+		})},
+		VariantEntry: "native_matmul",
+		Metadata:     map[string]any{"dispatch_mode": "backend_native"},
+	}
+	scaled, err := ApplyMatMulAttributesToResult(lhs, rhs, map[string]string{"scale": "rsqrt_rhs_rows"}, result)
+	if err != nil {
+		t.Fatalf("apply native matmul attrs: %v", err)
+	}
+	if scaled.VariantEntry != "native_matmul" {
+		t.Fatalf("variant entry = %q", scaled.VariantEntry)
+	}
+	if scaled.Metadata["dispatch_mode"] != "backend_native" {
+		t.Fatalf("metadata not preserved: %+v", scaled.Metadata)
+	}
+	assertTensorClose(t, scaled.Outputs[0], []int{2, 2}, []float32{
+		2, 3,
+		6, 7,
+	})
+}
+
+func TestApplyMatMulAttributesPreservesNoneScale(t *testing.T) {
+	lhs := NewTensorF32([]int{1, 2}, []float32{1, 2})
+	rhs := NewTensorF32([]int{2, 1}, []float32{3, 4})
+	out := NewTensorF32([]int{1, 1}, []float32{11})
+	got, err := ApplyMatMulAttributes(lhs, rhs, map[string]string{"scale": "none"}, out)
+	if err != nil {
+		t.Fatalf("apply none scale: %v", err)
+	}
+	if got.F32[0] != 11 {
+		t.Fatalf("none scale changed output: %v", got.F32)
+	}
+}
+
+func TestApplyMatMulAttributesRejectsUnsupportedScale(t *testing.T) {
+	lhs := NewTensorF32([]int{1, 2}, []float32{1, 2})
+	rhs := NewTensorF32([]int{2, 1}, []float32{3, 4})
+	out := NewTensorF32([]int{1, 1}, []float32{11})
+	if _, err := ApplyMatMulAttributes(lhs, rhs, map[string]string{"scale": "bogus"}, out); err == nil {
+		t.Fatal("expected unsupported scale error")
+	}
+}
+
 func TestMatmulTensorBatched(t *testing.T) {
 	lhs := NewTensorF16([]int{2, 2, 2}, []float32{
 		1, 2,
