@@ -5180,6 +5180,7 @@ func runTrainEmbed(args []string) error {
 	var retrievalEvalMaxQueries int
 	var retrievalEvalBatchSize int
 	var retrievalEvalTopK int
+	var retrievalEvalTokenizerPath string
 	fs.IntVar(&epochs, "epochs", 10, "number of epochs")
 	fs.IntVar(&batchSize, "batch-size", 8, "batch size")
 	fs.BoolVar(&shuffle, "shuffle", true, "shuffle training set each epoch")
@@ -5236,6 +5237,7 @@ func runTrainEmbed(args []string) error {
 	fs.IntVar(&retrievalEvalMaxQueries, "retrieval-eval-max-queries", 500, "cap queries per retrieval eval (0 = all)")
 	fs.IntVar(&retrievalEvalBatchSize, "retrieval-eval-batch-size", 0, "batch size for retrieval eval embedding (0 = use --batch-size)")
 	fs.IntVar(&retrievalEvalTopK, "retrieval-eval-top-k", 100, "top-k for retrieval eval ranking")
+	fs.StringVar(&retrievalEvalTokenizerPath, "retrieval-eval-tokenizer", "", "tokenizer for raw-text retrieval eval when training uses --no-tokenizer (defaults to --tokenizer or sibling tokenizer)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -5486,10 +5488,14 @@ func runTrainEmbed(args []string) error {
 		runConfig.Progress = printTrainProgress
 	}
 	if strings.TrimSpace(retrievalEvalDir) != "" {
-		if tokenizerPath == "" {
-			return fmt.Errorf("--retrieval-eval-dir needs a tokenizer to embed corpus/query text (set --tokenizer or keep the sibling tokenizer; incompatible with --no-tokenizer)")
+		retrievalTokenizerPath := strings.TrimSpace(retrievalEvalTokenizerPath)
+		if retrievalTokenizerPath == "" {
+			retrievalTokenizerPath = tokenizerPath
 		}
-		tokFile, terr := eosruntime.ReadTokenizerFile(tokenizerPath)
+		if retrievalTokenizerPath == "" {
+			return fmt.Errorf("--retrieval-eval-dir needs a tokenizer to embed corpus/query text (set --retrieval-eval-tokenizer, set --tokenizer, or keep the sibling tokenizer)")
+		}
+		tokFile, terr := eosruntime.ReadTokenizerFile(retrievalTokenizerPath)
 		if terr != nil {
 			return fmt.Errorf("retrieval eval tokenizer: %w", terr)
 		}

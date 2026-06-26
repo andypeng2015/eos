@@ -26,6 +26,109 @@ class FakeModel:
 
 
 class ExportRetrievalVectorsTest(unittest.TestCase):
+    def test_load_docs_skips_empty_rows_and_records_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "corpus.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"_id": "d-empty", "title": "", "text": ""}),
+                        json.dumps({"_id": "d-title", "title": "Only title", "text": ""}),
+                        json.dumps({"_id": "d-text", "title": "", "text": "Only text"}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            selection = exporter.load_docs(path, limit=0, qrels=None)
+
+        self.assertEqual(selection.items, [("d-title", "Only title"), ("d-text", "Only text")])
+        self.assertEqual(selection.empty_skipped, 1)
+        self.assertEqual(selection.empty_sample_ids, ["d-empty"])
+
+    def test_qrels_aware_doc_cap_keeps_relevant_docs_then_fills(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "corpus.jsonl"
+            qrels_path = root / "qrels.tsv"
+            corpus.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"_id": "d1", "title": "", "text": "filler one"}),
+                        json.dumps({"_id": "d2", "title": "", "text": "filler two"}),
+                        json.dumps({"_id": "d3", "title": "", "text": "relevant three"}),
+                        json.dumps({"_id": "d4", "title": "", "text": ""}),
+                        json.dumps({"_id": "d5", "title": "", "text": "relevant five"}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            qrels_path.write_text(
+                "query-id\tcorpus-id\tscore\nq1\td3\t1\nq1\td4\t1\nq2\td5\t1\n",
+                encoding="utf-8",
+            )
+
+            qrels = exporter.parse_qrels(qrels_path)
+            selection = exporter.load_docs(corpus, limit=2, qrels=qrels)
+
+        self.assertEqual([item_id for item_id, _ in selection.items], ["d3", "d5"])
+        self.assertEqual(selection.empty_skipped, 1)
+        self.assertEqual(selection.empty_sample_ids, ["d4"])
+
+    def test_qrels_aware_doc_cap_fills_with_non_relevant_docs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "corpus.jsonl"
+            qrels_path = root / "qrels.tsv"
+            corpus.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"_id": "d1", "text": "filler one"}),
+                        json.dumps({"_id": "d2", "text": "filler two"}),
+                        json.dumps({"_id": "d3", "text": "relevant"}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            qrels_path.write_text("qid\tQ0\tdocid\tscore\nq1\t0\td3\t1\n", encoding="utf-8")
+
+            qrels = exporter.parse_qrels(qrels_path)
+            selection = exporter.load_docs(corpus, limit=3, qrels=qrels)
+
+        self.assertEqual([item_id for item_id, _ in selection.items], ["d3", "d1", "d2"])
+
+    def test_qrels_aware_query_cap_selects_non_empty_qrels_queries_in_file_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            queries = root / "queries.jsonl"
+            qrels_path = root / "qrels.tsv"
+            queries.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"_id": "q0", "text": "not in qrels"}),
+                        json.dumps({"_id": "q1", "text": ""}),
+                        json.dumps({"_id": "q2", "text": "second"}),
+                        json.dumps({"_id": "q3", "text": "third"}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            qrels_path.write_text(
+                "query-id\tcorpus-id\tscore\nq1\td1\t1\nq2\td2\t1\nq3\td3\t1\n",
+                encoding="utf-8",
+            )
+
+            qrels = exporter.parse_qrels(qrels_path)
+            selection = exporter.load_queries(queries, limit=1, qrels=qrels)
+
+        self.assertEqual(selection.items, [("q2", "second")])
+        self.assertEqual(selection.empty_skipped, 1)
+        self.assertEqual(selection.empty_sample_ids, ["q1"])
+
     def test_chunk_document_text_uses_deterministic_overlapping_ids(self) -> None:
         chunks = exporter.chunk_document_text(
             "doc-7",
@@ -107,6 +210,9 @@ class ExportRetrievalVectorsTest(unittest.TestCase):
                 "document_chunk_min_words": 1,
                 "query_prefix": "query: ",
                 "document_prefix": "doc: ",
+                "qrels": Path("datasets/sample/qrels/test.tsv"),
+                "max_docs": 2,
+                "max_queries": 1,
             },
         )()
 
@@ -121,10 +227,31 @@ class ExportRetrievalVectorsTest(unittest.TestCase):
                 vector_result=exporter.WriteResult(rows=1, native_dim=3, output_dim=2),
                 query_result=exporter.WriteResult(rows=1, native_dim=3, output_dim=2),
                 normalize=True,
+                doc_selection=exporter.ItemSelection(
+                    items=[("doc-1", "alpha")],
+                    raw_rows=2,
+                    empty_skipped=1,
+                    empty_sample_ids=["doc-empty"],
+                ),
+                query_selection=exporter.ItemSelection(
+                    items=[("query-1", "beta")],
+                    raw_rows=1,
+                    empty_skipped=0,
+                    empty_sample_ids=[],
+                ),
+                qrels=exporter.Qrels(
+                    by_query={"query-1": {"doc-1": 1.0}},
+                    query_order=["query-1"],
+                    relevant_docs={"doc-1"},
+                ),
             )
             manifest = json.loads(output_path.read_text(encoding="utf-8"))
 
         self.assertIs(manifest["quality_claim"], False)
+        self.assertEqual(manifest["document_empty_rows_skipped"], 1)
+        self.assertEqual(manifest["document_empty_sample_ids"], ["doc-empty"])
+        self.assertEqual(manifest["qrels_path"], "datasets/sample/qrels/test.tsv")
+        self.assertIs(manifest["qrels_aware_cap"], True)
 
 
 if __name__ == "__main__":

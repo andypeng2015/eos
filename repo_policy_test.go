@@ -108,6 +108,29 @@ func TestTrainMantaCandidateDoesNotCarryStaleSealedArtifacts(t *testing.T) {
 	}
 }
 
+func TestTrainMantaCandidatePassesPerEpochRetrievalEvalFlags(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("scripts", "train_manta_embed_v1_candidate.fw"))
+	if err != nil {
+		t.Fatalf("read candidate wrapper: %v", err)
+	}
+	src := string(data)
+	commonBlock := sliceBetween(t, src, `func trainCommonArgs`, `func pairwiseTrainEnabled`)
+	for _, want := range []string{
+		`EOS_TRAIN_RETRIEVAL_EVAL_DIR`,
+		`"--retrieval-eval-dir"`,
+		`"--retrieval-eval-split"`,
+		`"--retrieval-eval-max-docs"`,
+		`"--retrieval-eval-max-queries"`,
+		`"--retrieval-eval-batch-size"`,
+		`"--retrieval-eval-top-k"`,
+		`"--retrieval-eval-tokenizer"`,
+	} {
+		if !strings.Contains(src, want) && !strings.Contains(commonBlock, want) {
+			t.Fatalf("candidate wrapper missing train retrieval eval passthrough %q", want)
+		}
+	}
+}
+
 func sliceBetween(t *testing.T, src string, start string, end string) string {
 	t.Helper()
 	startIdx := strings.Index(src, start)

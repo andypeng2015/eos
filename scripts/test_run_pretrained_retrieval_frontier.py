@@ -38,7 +38,34 @@ class PretrainedRetrievalFrontierTest(unittest.TestCase):
         turbo = payload["commands"][2]["argv"]
         self.assertIn("eval-retrieval-vectors-turboquant", turbo)
         self.assertEqual(turbo[turbo.index("--bits") + 1], "8,4")
+        export = payload["commands"][0]["argv"]
+        self.assertEqual(
+            export[export.index("--qrels") + 1],
+            str(root / "datasets/manta-embed-v1/raw/scifact/scifact/qrels/test.tsv"),
+        )
         self.assertFalse(payload["quality_claim"])
+
+    def test_dry_run_keeps_caps_on_export_and_eval_with_qrels_aware_export(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = args_for(
+                root,
+                presets="e5-small-v2",
+                datasets="scifact",
+                max_docs=200,
+                max_queries=20,
+                dry_run=True,
+            )
+
+            payload = frontier.execute(args)
+
+        export = payload["commands"][0]["argv"]
+        dense = payload["commands"][1]["argv"]
+        self.assertEqual(export[export.index("--qrels") + 1], str(frontier.qrels_path_for(frontier.dataset_dir_for(args, "scifact"))))
+        self.assertEqual(export[export.index("--max-docs") + 1], "200")
+        self.assertEqual(export[export.index("--max-queries") + 1], "20")
+        self.assertEqual(dense[dense.index("--max-docs") + 1], "200")
+        self.assertEqual(dense[dense.index("--max-queries") + 1], "20")
 
     def test_summary_collects_dense_q8_q4_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

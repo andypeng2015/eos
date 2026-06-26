@@ -4979,6 +4979,50 @@ func TestRunTrainEmbedPlanOnlyShowsWorkload(t *testing.T) {
 	}
 }
 
+func TestRunTrainEmbedNoTokenizerAllowsRetrievalEvalTokenizer(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	dir := t.TempDir()
+	trainPath := filepath.Join(dir, "train.tokens.jsonl")
+	evalPath := filepath.Join(dir, "eval.tokens.jsonl")
+	examples := []eosruntime.EmbeddingContrastiveExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
+	}
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
+		t.Fatalf("write train dataset: %v", err)
+	}
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(evalPath, examples); err != nil {
+		t.Fatalf("write eval dataset: %v", err)
+	}
+	tokenizer := eosruntime.TokenizerFile{
+		Version:      eosruntime.TokenizerFileVersion,
+		Tokens:       []string{"<pad>", "<unk>", "alpha", "beta"},
+		PadToken:     "<pad>",
+		UnknownToken: "<unk>",
+	}
+	tokenizerPath := filepath.Join(dir, "retrieval.tokenizer.mll")
+	if err := tokenizer.WriteFile(tokenizerPath); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	output := captureRunOutput(t, []string{
+		"train-embed",
+		"--plan-only",
+		"--no-tokenizer",
+		"--retrieval-eval-dir", filepath.Join(dir, "missing-scifact"),
+		"--retrieval-eval-tokenizer", tokenizerPath,
+		"--select-metric", "retrieval_ndcg",
+		path,
+		trainPath,
+		evalPath,
+	})
+	if !strings.Contains(output, "planned workload:") {
+		t.Fatalf("plan-only output missing workload\noutput:\n%s", output)
+	}
+}
+
 func TestRunTrainEmbedProgressEveryPrintsInnerProgress(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {

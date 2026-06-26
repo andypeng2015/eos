@@ -90,6 +90,10 @@ def dataset_dir_for(args: argparse.Namespace, dataset: str) -> Path:
     return args.repo_root / args.dataset_dir_template.format(dataset=dataset)
 
 
+def qrels_path_for(dataset_dir: Path) -> Path:
+    return dataset_dir / "qrels" / "test.tsv"
+
+
 def cache_dir_for(run_root: Path, preset: str, dataset: str) -> Path:
     return run_root / "vector-caches" / preset / dataset
 
@@ -119,6 +123,8 @@ def command_specs(args: argparse.Namespace, run_root: Path) -> list[CommandSpec]
                     str(cache_root),
                     "--dataset-name",
                     dataset,
+                    "--qrels",
+                    str(qrels_path_for(dataset_dir)),
                     "--batch-size",
                     str(args.batch_size),
                 ]

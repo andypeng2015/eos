@@ -77,6 +77,13 @@ type candidateConfig struct {
 	RestoreBest         string
 	MinDelta            string
 	SelectMetric        string
+	TrainRetrievalEvalDir string
+	TrainRetrievalEvalSplit string
+	TrainRetrievalEvalMaxDocs string
+	TrainRetrievalEvalMaxQueries string
+	TrainRetrievalEvalBatchSize string
+	TrainRetrievalEvalTopK string
+	TrainRetrievalEvalTokenizer string
 	MinFreq             string
 	MinChars            string
 	MaxPairs            string
@@ -976,6 +983,13 @@ func prepareConfig(root string) (candidateConfig, error) {
 		RestoreBest:         getenv("EOS_RESTORE_BEST", "true"),
 		MinDelta:            getenv("EOS_MIN_DELTA", "0"),
 		SelectMetric:        getenv("EOS_SELECT_METRIC", "score_margin"),
+		TrainRetrievalEvalDir: getenv("EOS_TRAIN_RETRIEVAL_EVAL_DIR", ""),
+		TrainRetrievalEvalSplit: getenv("EOS_TRAIN_RETRIEVAL_EVAL_SPLIT", ""),
+		TrainRetrievalEvalMaxDocs: getenv("EOS_TRAIN_RETRIEVAL_EVAL_MAX_DOCS", ""),
+		TrainRetrievalEvalMaxQueries: getenv("EOS_TRAIN_RETRIEVAL_EVAL_MAX_QUERIES", ""),
+		TrainRetrievalEvalBatchSize: getenv("EOS_TRAIN_RETRIEVAL_EVAL_BATCH_SIZE", ""),
+		TrainRetrievalEvalTopK: getenv("EOS_TRAIN_RETRIEVAL_EVAL_TOP_K", ""),
+		TrainRetrievalEvalTokenizer: getenv("EOS_TRAIN_RETRIEVAL_EVAL_TOKENIZER", ""),
 		PairwiseTrain:       getenv("EOS_PAIRWISE_TRAIN", "0"),
 		HardNegativeTrain:   getenv("EOS_HARD_NEGATIVE_TRAIN", "0"),
 		HardNegativesPerQuery: getenv("EOS_HARD_NEGATIVES_PER_QUERY", "1"),
@@ -1077,6 +1091,14 @@ func prepareConfig(root string) (candidateConfig, error) {
 		err = appendSHA256(cfg.DatasetSHAFile, cfg.PackageTokenizerPath)
 		guard err == nil else return candidateConfig{}, err
 	}
+	if cfg.TrainRetrievalEvalTokenizer != "" {
+		cfg.TrainRetrievalEvalTokenizer, err = requireFile(cfg.TrainRetrievalEvalTokenizer, "EOS_TRAIN_RETRIEVAL_EVAL_TOKENIZER")
+		guard err == nil else return candidateConfig{}, err
+		err = rejectTmpPath("train retrieval eval tokenizer", cfg.TrainRetrievalEvalTokenizer)
+		guard err == nil else return candidateConfig{}, err
+		err = appendSHA256(cfg.DatasetSHAFile, cfg.TrainRetrievalEvalTokenizer)
+		guard err == nil else return candidateConfig{}, err
+	}
 	if cfg.TokenizerCorpus != "" {
 		guard cfg.TokenizerPath == "" else return candidateConfig{}, fmt.Errorf("set either EOS_TOKENIZER or EOS_TOKENIZER_CORPUS, not both")
 		cfg.TokenizerCorpus, err = requireFile(cfg.TokenizerCorpus, "EOS_TOKENIZER_CORPUS")
@@ -1142,6 +1164,27 @@ func trainCommonArgs(cfg candidateConfig) []string {
 	}
 	if cfg.TurboQuantPrefixWeight != "" {
 		args = append(args, "--turboquant-prefix-weight", cfg.TurboQuantPrefixWeight)
+	}
+	if cfg.TrainRetrievalEvalDir != "" {
+		args = append(args, "--retrieval-eval-dir", cfg.TrainRetrievalEvalDir)
+	}
+	if cfg.TrainRetrievalEvalSplit != "" {
+		args = append(args, "--retrieval-eval-split", cfg.TrainRetrievalEvalSplit)
+	}
+	if cfg.TrainRetrievalEvalMaxDocs != "" {
+		args = append(args, "--retrieval-eval-max-docs", cfg.TrainRetrievalEvalMaxDocs)
+	}
+	if cfg.TrainRetrievalEvalMaxQueries != "" {
+		args = append(args, "--retrieval-eval-max-queries", cfg.TrainRetrievalEvalMaxQueries)
+	}
+	if cfg.TrainRetrievalEvalBatchSize != "" {
+		args = append(args, "--retrieval-eval-batch-size", cfg.TrainRetrievalEvalBatchSize)
+	}
+	if cfg.TrainRetrievalEvalTopK != "" {
+		args = append(args, "--retrieval-eval-top-k", cfg.TrainRetrievalEvalTopK)
+	}
+	if cfg.TrainRetrievalEvalTokenizer != "" {
+		args = append(args, "--retrieval-eval-tokenizer", cfg.TrainRetrievalEvalTokenizer)
 	}
 	if cfg.TurboQuantPrefixSeed != "" {
 		args = append(args, "--turboquant-prefix-seed", cfg.TurboQuantPrefixSeed)

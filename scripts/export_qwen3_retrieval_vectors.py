@@ -48,6 +48,19 @@ class WriteResult(NamedTuple):
     output_dim: int
 
 
+class ItemSelection(NamedTuple):
+    items: list[tuple[str, str]]
+    raw_rows: int
+    empty_skipped: int
+    empty_sample_ids: list[str]
+
+
+class Qrels(NamedTuple):
+    by_query: dict[str, dict[str, float]]
+    query_order: list[str]
+    relevant_docs: set[str]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Export BEIR-compatible document/query vector caches with SentenceTransformers."
@@ -86,6 +99,16 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="Maximum query rows to export; 0 means all rows.",
+    )
+    parser.add_argument(
+        "--qrels",
+        type=Path,
+        default=None,
+        help=(
+            "Optional BEIR qrels TSV. When caps are used, qrels-relevant docs "
+            "and qrels-covered queries are selected with the same semantics as "
+            "the Go vector evaluators."
+        ),
     )
     parser.add_argument(
         "--device",
@@ -173,6 +196,10 @@ def iter_jsonl(path: Path, limit: int) -> Iterator[dict]:
                 break
 
 
+def iter_jsonl_all(path: Path) -> Iterator[dict]:
+    yield from iter_jsonl(path, 0)
+
+
 def row_id(row: dict, path: Path) -> str:
     value = row.get("_id", row.get("id"))
     if value is None:
@@ -192,20 +219,167 @@ def query_text(row: dict) -> str:
     return str(row.get("text") or row.get("query") or "").strip()
 
 
+def qrels_field_index(header: list[str], candidates: set[str]) -> int | None:
+    normalized = [value.strip().lower().replace("_", "-") for value in header]
+    for candidate in candidates:
+        if candidate in normalized:
+            return normalized.index(candidate)
+    return None
+
+
+def parse_qrels(path: Path) -> Qrels:
+    by_query: dict[str, dict[str, float]] = {}
+    query_order: list[str] = []
+    relevant_docs: set[str] = set()
+    with path.open("r", encoding="utf-8") as handle:
+        query_field = 0
+        doc_field = 1
+        score_field = 2
+        for line_number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("\t")
+            normalized_header = [value.strip().lower().replace("_", "-") for value in parts]
+            header_tokens = {
+                "query-id",
+                "queryid",
+                "qid",
+                "corpus-id",
+                "corpusid",
+                "doc-id",
+                "docid",
+                "document-id",
+                "documentid",
+                "pid",
+                "score",
+                "relevance",
+                "label",
+            }
+            if line_number == 1 and any(value in header_tokens for value in normalized_header):
+                query_index = qrels_field_index(parts, {"query-id", "queryid", "qid"})
+                doc_index = qrels_field_index(parts, {"corpus-id", "corpusid", "doc-id", "docid", "document-id", "documentid", "pid"})
+                score_index = qrels_field_index(parts, {"score", "relevance", "label"})
+                if query_index is not None:
+                    query_field = query_index
+                if doc_index is not None:
+                    doc_field = doc_index
+                elif len(parts) >= 4:
+                    doc_field = 2
+                if score_index is not None:
+                    score_field = score_index
+                elif len(parts) >= 4:
+                    score_field = 3
+                continue
+            if len(parts) < 3:
+                raise ValueError(f"{path}:{line_number}: expected query-id, corpus-id, score")
+            if len(parts) >= 4 and doc_field == 1 and score_field == 2:
+                doc_field = 2
+                score_field = 3
+            if max(query_field, doc_field, score_field) >= len(parts):
+                raise ValueError(f"{path}:{line_number}: expected query-id, corpus-id, score")
+            try:
+                score = float(parts[score_field])
+            except ValueError as exc:
+                raise ValueError(f"{path}:{line_number}: score: {exc}") from exc
+            if score <= 0:
+                continue
+            query_id = parts[query_field].strip()
+            doc_id = parts[doc_field].strip()
+            if not query_id or not doc_id:
+                continue
+            if query_id not in by_query:
+                by_query[query_id] = {}
+                query_order.append(query_id)
+            by_query[query_id][doc_id] = score
+            relevant_docs.add(doc_id)
+    if not by_query:
+        raise ValueError(f"qrels file has no positive relevance rows: {path}")
+    return Qrels(by_query=by_query, query_order=query_order, relevant_docs=relevant_docs)
+
+
 def batches(items: list[tuple[str, str]], batch_size: int) -> Iterable[list[tuple[str, str]]]:
     for start in range(0, len(items), batch_size):
         yield items[start : start + batch_size]
 
 
-def load_items(path: Path, limit: int, text_fn: Callable[[dict], str]) -> list[tuple[str, str]]:
+def load_items(path: Path, limit: int, text_fn: Callable[[dict], str]) -> ItemSelection:
     out: list[tuple[str, str]] = []
-    for row in iter_jsonl(path, limit):
+    raw_rows = 0
+    empty_skipped = 0
+    empty_sample_ids: list[str] = []
+    for row in iter_jsonl_all(path):
+        raw_rows += 1
         item_id = row_id(row, path)
         text = text_fn(row)
         if not text:
-            raise ValueError(f"{path}: row {item_id!r} has empty text")
+            empty_skipped += 1
+            if len(empty_sample_ids) < 10:
+                empty_sample_ids.append(item_id)
+            continue
         out.append((item_id, text))
-    return out
+        if limit > 0 and len(out) >= limit:
+            break
+    return ItemSelection(out, raw_rows, empty_skipped, empty_sample_ids)
+
+
+def load_docs(path: Path, limit: int, qrels: Qrels | None) -> ItemSelection:
+    if qrels is None or limit <= 0:
+        return load_items(path, limit, corpus_text)
+
+    relevant: list[tuple[str, str]] = []
+    filler: list[tuple[str, str]] = []
+    raw_rows = 0
+    empty_skipped = 0
+    empty_sample_ids: list[str] = []
+    for row in iter_jsonl_all(path):
+        raw_rows += 1
+        item_id = row_id(row, path)
+        text = corpus_text(row)
+        if not text:
+            empty_skipped += 1
+            if len(empty_sample_ids) < 10:
+                empty_sample_ids.append(item_id)
+            continue
+        if item_id in qrels.relevant_docs:
+            relevant.append((item_id, text))
+        elif len(filler) < limit:
+            filler.append((item_id, text))
+    selected = list(relevant)
+    seen = {item_id for item_id, _ in selected}
+    for item in filler:
+        if len(selected) >= limit:
+            break
+        if item[0] not in seen:
+            selected.append(item)
+            seen.add(item[0])
+    return ItemSelection(selected, raw_rows, empty_skipped, empty_sample_ids)
+
+
+def load_queries(path: Path, limit: int, qrels: Qrels | None) -> ItemSelection:
+    if qrels is None or limit <= 0:
+        return load_items(path, limit, query_text)
+
+    selected: list[tuple[str, str]] = []
+    raw_rows = 0
+    empty_skipped = 0
+    empty_sample_ids: list[str] = []
+    needed = set(qrels.by_query)
+    for row in iter_jsonl_all(path):
+        raw_rows += 1
+        item_id = row_id(row, path)
+        text = query_text(row)
+        if not text:
+            empty_skipped += 1
+            if len(empty_sample_ids) < 10:
+                empty_sample_ids.append(item_id)
+            continue
+        if item_id not in needed:
+            continue
+        selected.append((item_id, text))
+        if limit > 0 and len(selected) >= limit:
+            break
+    return ItemSelection(selected, raw_rows, empty_skipped, empty_sample_ids)
 
 
 def chunk_document_text(
@@ -370,6 +544,9 @@ def write_manifest(
     vector_result: WriteResult,
     query_result: WriteResult,
     normalize: bool,
+    doc_selection: ItemSelection,
+    query_selection: ItemSelection,
+    qrels: Qrels | None,
 ) -> None:
     if vector_result.native_dim != query_result.native_dim:
         raise ValueError(
@@ -400,6 +577,20 @@ def write_manifest(
         "quality_claim": False,
         "query_prefix": args.query_prefix,
         "document_prefix": args.document_prefix,
+        "qrels_path": str(args.qrels) if args.qrels else "",
+        "qrels_query_count": len(qrels.by_query) if qrels else 0,
+        "qrels_relevant_doc_count": len(qrels.relevant_docs) if qrels else 0,
+        "qrels_aware_cap": bool(qrels and (args.max_docs > 0 or args.max_queries > 0)),
+        "max_docs": args.max_docs,
+        "max_queries": args.max_queries,
+        "document_raw_rows_scanned": doc_selection.raw_rows,
+        "query_raw_rows_scanned": query_selection.raw_rows,
+        "document_empty_rows_skipped": doc_selection.empty_skipped,
+        "query_empty_rows_skipped": query_selection.empty_skipped,
+        "document_empty_sample_ids": doc_selection.empty_sample_ids,
+        "query_empty_sample_ids": query_selection.empty_sample_ids,
+        "selected_document_count": len(docs),
+        "selected_query_count": len(queries),
     }
     output_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"wrote manifest to {output_path}", flush=True)
@@ -430,13 +621,20 @@ def main() -> int:
         raise SystemExit(f"missing corpus file: {corpus_path}")
     if not queries_path.is_file():
         raise SystemExit(f"missing queries file: {queries_path}")
+    qrels = None
+    if args.qrels is not None:
+        if not args.qrels.is_file():
+            raise SystemExit(f"missing qrels file: {args.qrels}")
+        qrels = parse_qrels(args.qrels)
 
     SentenceTransformer = require_sentence_transformers()
     print(f"loading {args.model_name}", flush=True)
     model = SentenceTransformer(args.model_name, device=args.device)
 
-    docs = load_items(corpus_path, args.max_docs, corpus_text)
-    queries = load_items(queries_path, args.max_queries, query_text)
+    doc_selection = load_docs(corpus_path, args.max_docs, qrels)
+    query_selection = load_queries(queries_path, args.max_queries, qrels)
+    docs = doc_selection.items
+    queries = query_selection.items
     if not docs:
         raise SystemExit("no corpus rows selected")
     if not queries:
@@ -497,6 +695,9 @@ def main() -> int:
         vector_result,
         query_result,
         normalize,
+        doc_selection,
+        query_selection,
+        qrels,
     )
     return 0
 
