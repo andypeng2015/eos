@@ -165,6 +165,8 @@ func run(args []string) error {
 		return runInspect(args[1:])
 	case "export-mll":
 		return runExportMLL(args[1:])
+	case "import-pretrained-bert":
+		return runImportPretrainedBERT(args[1:])
 	case "init-model":
 		return runInitModel(args[1:])
 	case "init-mirage":
@@ -8058,6 +8060,7 @@ func printUsage() {
 	fmt.Println("  eos doctor")
 	fmt.Println("  eos inspect <artifact.mll>")
 	fmt.Println("  eos export-mll <artifact.mll> [output.mll]")
+	fmt.Println("  eos import-pretrained-bert --source <hf-snapshot-dir> [--model-name name] [--plan-json plan.json]")
 	fmt.Println("  eos embed-text <artifact.mll> <text...>")
 	fmt.Println("  eos default-embedder [--root dir] [--path-only] [--verify] [--json]")
 	fmt.Println("  eos export-retrieval-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
@@ -8119,6 +8122,7 @@ func printUsage() {
 	fmt.Println("doctor reports Eos runtime, backend, tool, and relevant environment facts.")
 	fmt.Println("inspect summarizes an artifact and verifies its sibling package manifest when present.")
 	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Eos metadata in XMTA.")
+	fmt.Println("import-pretrained-bert writes a plan-only BERT-family HF config/tensor map and optional WordPiece tokenizer smoke check; it does not import weights or build a BERT graph yet.")
 	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
 	fmt.Println("export-retrieval-vectors writes BEIR document/query vector caches from a packaged or sealed Eos embedding .mll, optionally as parent-child document chunks.")
 	fmt.Println("export-sparse-token-pool-vectors writes experimental_sparse_token_pool BEIR vector caches from tokenizer ids, token_embedding rows, and host-reference attention (--attention-mode turboquant_sparse|dense); --token-span-tokens emits child vectors from one encoded document pass; quality_claim=false; --min-observed-doc-tokens can fail runs that never consume the requested document token length.")
