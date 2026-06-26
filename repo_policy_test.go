@@ -74,6 +74,40 @@ func TestTrainMantaCandidateEvalOnlyUsesPairEvalAndExportsBeforeGates(t *testing
 	}
 }
 
+func TestTrainMantaCandidateDoesNotCarryStaleSealedArtifacts(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("scripts", "train_manta_embed_v1_candidate.fw"))
+	if err != nil {
+		t.Fatalf("read candidate wrapper: %v", err)
+	}
+	src := string(data)
+	if !strings.Contains(src, "func isSealedArtifactPath") {
+		t.Fatalf("candidate wrapper must identify sealed artifacts explicitly")
+	}
+	copyPretrainedBlock := sliceBetween(t, src, `func copyPretrainedArtifact`, `func isSealedArtifactPath`)
+	copyEvalBlock := sliceBetween(t, src, `func copyPackageForEval`, `func exportSealedArtifact`)
+	for name, block := range map[string]string{"pretrained": copyPretrainedBlock, "eval": copyEvalBlock} {
+		if !strings.Contains(block, "isSealedArtifactPath(src)") {
+			t.Fatalf("%s package copy must skip sealed artifacts to avoid stale sealed outputs:\n%s", name, block)
+		}
+	}
+	exportBlock := sliceBetween(t, src, `func exportSealedArtifact`, `func prepareConfig`)
+	for _, want := range []string{
+		`tmpSealed := cfg.SealedArtifact + ".tmp"`,
+		`os.Remove(tmpSealed)`,
+		`"export-mll", cfg.Artifact, tmpSealed`,
+		`"inspect", tmpSealed`,
+		`os.Rename(tmpSealed, cfg.SealedArtifact)`,
+		`"inspect", cfg.SealedArtifact`,
+	} {
+		if !strings.Contains(exportBlock, want) {
+			t.Fatalf("atomic sealed export missing %q:\n%s", want, exportBlock)
+		}
+	}
+	if strings.Contains(exportBlock, `"export-mll", cfg.Artifact, cfg.SealedArtifact`) {
+		t.Fatalf("sealed export must not write directly to the final path:\n%s", exportBlock)
+	}
+}
+
 func sliceBetween(t *testing.T, src string, start string, end string) string {
 	t.Helper()
 	startIdx := strings.Index(src, start)

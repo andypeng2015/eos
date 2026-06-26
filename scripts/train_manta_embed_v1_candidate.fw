@@ -850,11 +850,18 @@ func copyPretrainedArtifact(srcArtifact string, dstArtifact string, modelName st
 	guard err == nil else return err
 	guard len(matches) > 0 else return fmt.Errorf("no source package files under %s for model %s", srcDir, modelName)
 	for _, src := range matches {
+		if isSealedArtifactPath(src) {
+			continue
+		}
 		dst := filepath.Join(dstDir, filepath.Base(src))
 		err = copyFile(src, dst)
 		guard err == nil else return fmt.Errorf("copy %s -> %s: %w", src, dst, err)
 	}
 	return nil
+}
+
+func isSealedArtifactPath(path string) bool {
+	return strings.HasSuffix(filepath.Base(path), ".sealed.mll")
 }
 
 func copyPackageForEval(cfg candidateConfig, name string) (string, error) {
@@ -867,10 +874,31 @@ func copyPackageForEval(cfg candidateConfig, name string) (string, error) {
 	guard err == nil else return "", err
 	guard len(matches) > 0 else return "", fmt.Errorf("no package files found in %s", cfg.RunDir)
 	for src in matches {
+		if isSealedArtifactPath(src) {
+			continue
+		}
 		err = copyFile(src, filepath.Join(scratch, filepath.Base(src)))
 		guard err == nil else return "", err
 	}
 	return filepath.Join(scratch, cfg.ModelName+".mll"), nil
+}
+
+func exportSealedArtifact(cfg candidateConfig) error {
+	tmpSealed := cfg.SealedArtifact + ".tmp"
+	err := os.Remove(tmpSealed)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	err = runCmd(cfg, "Export sealed MLL", "export-mll.log", cfg.MantaBin, []string{"export-mll", cfg.Artifact, tmpSealed})
+	guard err == nil else return err
+	err = runCmd(cfg, "Inspect exported sealed MLL", "inspect-exported-sealed.log", cfg.MantaBin, []string{"inspect", tmpSealed})
+	guard err == nil else return err
+	sealedData, err := os.ReadFile(filepath.Join(cfg.LogDir, "inspect-exported-sealed.log"))
+	guard err == nil else return err
+	guard strings.Contains(string(sealedData), "package verify: OK") else return fmt.Errorf("exported sealed package verification did not pass")
+	err = os.Rename(tmpSealed, cfg.SealedArtifact)
+	guard err == nil else return err
+	return runCmd(cfg, "Inspect sealed MLL", "inspect-sealed.log", cfg.MantaBin, []string{"inspect", cfg.SealedArtifact})
 }
 
 func prepareConfig(root string) (candidateConfig, error) {
@@ -1369,9 +1397,7 @@ func runCandidate(cfg candidateConfig) (candidateConfig, error) {
 	guard err == nil else return cfg, err
 	guard strings.Contains(string(inspectData), "package verify: OK") else return cfg, fmt.Errorf("training package verification did not pass")
 
-	err = runCmd(cfg, "Export sealed MLL", "export-mll.log", cfg.MantaBin, []string{"export-mll", cfg.Artifact, cfg.SealedArtifact})
-	guard err == nil else return cfg, err
-	err = runCmd(cfg, "Inspect sealed MLL", "inspect-sealed.log", cfg.MantaBin, []string{"inspect", cfg.SealedArtifact})
+	err = exportSealedArtifact(cfg)
 	guard err == nil else return cfg, err
 	sealedData, err := os.ReadFile(filepath.Join(cfg.LogDir, "inspect-sealed.log"))
 	guard err == nil else return cfg, err
