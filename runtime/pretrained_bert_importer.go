@@ -38,14 +38,37 @@ type PretrainedBERTTensorPlan struct {
 }
 
 type PretrainedBERTImportPlan struct {
-	Version                string                     `json:"version"`
-	ModelName              string                     `json:"model_name,omitempty"`
-	Architecture           string                     `json:"architecture"`
-	Config                 PretrainedBERTConfig       `json:"config"`
-	Tensors                []PretrainedBERTTensorPlan `json:"tensors"`
-	PoolingPolicy          string                     `json:"pooling_policy"`
-	OutputProjectionPolicy string                     `json:"output_projection_policy"`
-	ExecutionStatus        string                     `json:"execution_status"`
+	Version                string                            `json:"version"`
+	ModelName              string                            `json:"model_name,omitempty"`
+	Architecture           string                            `json:"architecture"`
+	Config                 PretrainedBERTConfig              `json:"config"`
+	Tensors                []PretrainedBERTTensorPlan        `json:"tensors"`
+	WeightVerification     *PretrainedBERTWeightVerification `json:"weight_verification,omitempty"`
+	PoolingPolicy          string                            `json:"pooling_policy"`
+	OutputProjectionPolicy string                            `json:"output_projection_policy"`
+	ExecutionStatus        string                            `json:"execution_status"`
+}
+
+type PretrainedBERTWeightVerification struct {
+	Status          string                        `json:"status"`
+	Files           []string                      `json:"files,omitempty"`
+	TensorCount     int                           `json:"tensor_count"`
+	Missing         []string                      `json:"missing,omitempty"`
+	Unexpected      []string                      `json:"unexpected,omitempty"`
+	ShapeMismatches []PretrainedBERTShapeMismatch `json:"shape_mismatches,omitempty"`
+	DTypeMismatches []PretrainedBERTDTypeMismatch `json:"dtype_mismatches,omitempty"`
+}
+
+type PretrainedBERTShapeMismatch struct {
+	Name     string  `json:"name"`
+	Expected []int   `json:"expected"`
+	Actual   []int64 `json:"actual"`
+}
+
+type PretrainedBERTDTypeMismatch struct {
+	Name       string   `json:"name"`
+	Actual     string   `json:"actual"`
+	Acceptable []string `json:"acceptable"`
 }
 
 func LoadPretrainedBERTConfig(path string) (PretrainedBERTConfig, error) {
@@ -126,6 +149,74 @@ func PlanPretrainedBERTImport(cfg PretrainedBERTConfig, modelName string) (Pretr
 	}, nil
 }
 
+func VerifyPretrainedBERTWeightsFromDir(dir string, plan PretrainedBERTImportPlan) (PretrainedBERTWeightVerification, error) {
+	if matches, err := filepath.Glob(filepath.Join(dir, "*.safetensors.index.json")); err != nil {
+		return PretrainedBERTWeightVerification{}, err
+	} else if len(matches) > 0 {
+		slices.Sort(matches)
+		return PretrainedBERTWeightVerification{}, fmt.Errorf("safetensors sharded index is not supported yet: %s", filepath.Base(matches[0]))
+	}
+	path := filepath.Join(dir, "model.safetensors")
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return PretrainedBERTWeightVerification{}, fmt.Errorf("model.safetensors not found in %s", dir)
+		}
+		return PretrainedBERTWeightVerification{}, err
+	}
+	metadata, err := ReadSafeTensorsMetadata(path)
+	if err != nil {
+		return PretrainedBERTWeightVerification{}, err
+	}
+	report := VerifyPretrainedBERTWeights(plan, metadata)
+	report.Files = []string{filepath.Base(path)}
+	return report, nil
+}
+
+func VerifyPretrainedBERTWeights(plan PretrainedBERTImportPlan, metadata SafeTensorsMetadata) PretrainedBERTWeightVerification {
+	report := PretrainedBERTWeightVerification{
+		Status:      "ok",
+		TensorCount: len(metadata.Tensors),
+	}
+	planned := make(map[string]PretrainedBERTTensorPlan, len(plan.Tensors))
+	for _, tensor := range plan.Tensors {
+		planned[tensor.Name] = tensor
+		actual, ok := metadata.Tensors[tensor.Name]
+		if !ok {
+			if tensor.Required {
+				report.Missing = append(report.Missing, tensor.Name)
+			}
+			continue
+		}
+		if !sameBERTTensorShape(tensor.Shape, actual.Shape) {
+			report.ShapeMismatches = append(report.ShapeMismatches, PretrainedBERTShapeMismatch{
+				Name:     tensor.Name,
+				Expected: append([]int(nil), tensor.Shape...),
+				Actual:   append([]int64(nil), actual.Shape...),
+			})
+		}
+		if !acceptablePretrainedBERTDType(actual.DType) {
+			report.DTypeMismatches = append(report.DTypeMismatches, PretrainedBERTDTypeMismatch{
+				Name:       tensor.Name,
+				Actual:     actual.DType,
+				Acceptable: acceptablePretrainedBERTDTypes(),
+			})
+		}
+	}
+	for name := range metadata.Tensors {
+		if _, ok := planned[name]; !ok {
+			report.Unexpected = append(report.Unexpected, name)
+		}
+	}
+	slices.Sort(report.Missing)
+	slices.Sort(report.Unexpected)
+	sortBERTShapeMismatches(report.ShapeMismatches)
+	sortBERTDTypeMismatches(report.DTypeMismatches)
+	if len(report.Missing) > 0 || len(report.Unexpected) > 0 || len(report.ShapeMismatches) > 0 || len(report.DTypeMismatches) > 0 {
+		report.Status = "mismatch"
+	}
+	return report
+}
+
 func (cfg PretrainedBERTConfig) Validate() error {
 	if cfg.ModelType != "" && cfg.ModelType != "bert" {
 		return fmt.Errorf("unsupported model_type %q; only bert is supported", cfg.ModelType)
@@ -191,4 +282,41 @@ func requiredBERTTensor(name, role string, shape ...int) PretrainedBERTTensorPla
 
 func optionalBERTTensor(name, role string, shape ...int) PretrainedBERTTensorPlan {
 	return PretrainedBERTTensorPlan{Name: name, Shape: append([]int(nil), shape...), Required: false, Role: role}
+}
+
+func sameBERTTensorShape(expected []int, actual []int64) bool {
+	if len(expected) != len(actual) {
+		return false
+	}
+	for i := range expected {
+		if int64(expected[i]) != actual[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func acceptablePretrainedBERTDType(dtype string) bool {
+	switch dtype {
+	case "F32", "F16", "BF16":
+		return true
+	default:
+		return false
+	}
+}
+
+func acceptablePretrainedBERTDTypes() []string {
+	return []string{"F32", "F16", "BF16"}
+}
+
+func sortBERTShapeMismatches(items []PretrainedBERTShapeMismatch) {
+	slices.SortFunc(items, func(a, b PretrainedBERTShapeMismatch) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+}
+
+func sortBERTDTypeMismatches(items []PretrainedBERTDTypeMismatch) {
+	slices.SortFunc(items, func(a, b PretrainedBERTDTypeMismatch) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 }

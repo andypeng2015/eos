@@ -16,15 +16,23 @@ func runImportPretrainedBERT(args []string) error {
 	modelName := fs.String("model-name", "", "model identifier to record in the import plan")
 	planJSON := fs.String("plan-json", "", "write the plan JSON to this path instead of stdout")
 	tokenizerSmoke := fs.String("tokenizer-smoke", "", "optional text to tokenize with vocab.txt as a local smoke check")
+	verifyWeights := fs.Bool("verify-weights", false, "metadata-only verification of model.safetensors tensor names, shapes, and dtypes")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *source == "" {
-		return fmt.Errorf("usage: eos import-pretrained-bert --source <hf-snapshot-dir> [--model-name name] [--plan-json plan.json] [--tokenizer-smoke text]")
+		return fmt.Errorf("usage: eos import-pretrained-bert --source <hf-snapshot-dir> [--model-name name] [--plan-json plan.json] [--tokenizer-smoke text] [--verify-weights]")
 	}
 	plan, err := eosruntime.PlanPretrainedBERTImportFromDir(*source, *modelName)
 	if err != nil {
 		return err
+	}
+	if *verifyWeights {
+		report, err := eosruntime.VerifyPretrainedBERTWeightsFromDir(*source, plan)
+		if err != nil {
+			return fmt.Errorf("verify weights metadata: %w", err)
+		}
+		plan.WeightVerification = &report
 	}
 	if *tokenizerSmoke != "" {
 		tokenizer, err := eosruntime.LoadHFWordPieceTokenizerFromDir(*source)

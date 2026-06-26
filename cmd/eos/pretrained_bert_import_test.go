@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -35,12 +37,23 @@ func TestRunImportPretrainedBERTWritesPlanJSON(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(snapshot, "vocab.txt"), []byte(vocab), 0o644); err != nil {
 		t.Fatalf("write vocab: %v", err)
 	}
+	header := map[string]any{
+		"embeddings.word_embeddings.weight": map[string]any{
+			"dtype":        "F32",
+			"shape":        []int64{7, 8},
+			"data_offsets": []int64{0, 1},
+		},
+	}
+	if err := writeCommandSafeTensorsFixture(filepath.Join(snapshot, "model.safetensors"), header, []byte{0}); err != nil {
+		t.Fatalf("write safetensors: %v", err)
+	}
 	planPath := filepath.Join(dir, "plan.json")
 	if err := runImportPretrainedBERT([]string{
 		"--source", snapshot,
 		"--model-name", "fixture/bert",
 		"--plan-json", planPath,
 		"--tokenizer-smoke", "hello world",
+		"--verify-weights",
 	}); err != nil {
 		t.Fatalf("run import-pretrained-bert: %v", err)
 	}
@@ -61,6 +74,15 @@ func TestRunImportPretrainedBERTWritesPlanJSON(t *testing.T) {
 	if !strings.Contains(plan.ExecutionStatus, "plan_only") {
 		t.Fatalf("execution_status = %q", plan.ExecutionStatus)
 	}
+	if plan.WeightVerification == nil {
+		t.Fatal("expected weight verification report")
+	}
+	if plan.WeightVerification.Status != "mismatch" {
+		t.Fatalf("weight verification status = %q", plan.WeightVerification.Status)
+	}
+	if !strings.Contains(strings.Join(plan.WeightVerification.Missing, ","), "embeddings.position_embeddings.weight") {
+		t.Fatalf("expected missing required tensors, got %+v", plan.WeightVerification.Missing)
+	}
 	var foundWordEmbedding bool
 	for _, tensor := range plan.Tensors {
 		if tensor.Name == "embeddings.word_embeddings.weight" {
@@ -76,4 +98,18 @@ func TestRunImportPretrainedBERTWritesPlanJSON(t *testing.T) {
 	if !foundWordEmbedding {
 		t.Fatalf("plan missing embeddings.word_embeddings.weight: %+v", plan.Tensors)
 	}
+}
+
+func writeCommandSafeTensorsFixture(path string, header map[string]any, payload []byte) error {
+	data, err := json.Marshal(header)
+	if err != nil {
+		return err
+	}
+	var buf bytes.Buffer
+	if err := binary.Write(&buf, binary.LittleEndian, uint64(len(data))); err != nil {
+		return err
+	}
+	buf.Write(data)
+	buf.Write(payload)
+	return os.WriteFile(path, buf.Bytes(), 0o644)
 }

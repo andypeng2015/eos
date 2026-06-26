@@ -3,6 +3,7 @@ package eosruntime
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -104,6 +105,90 @@ func TestPlanPretrainedBERTImportRejectsInconsistentHeads(t *testing.T) {
 	}
 }
 
+func TestVerifyPretrainedBERTWeightsFromDirReportsMismatches(t *testing.T) {
+	dir := t.TempDir()
+	cfg := PretrainedBERTConfig{
+		Architectures:         []string{"BertModel"},
+		ModelType:             "bert",
+		VocabSize:             7,
+		HiddenSize:            8,
+		NumHiddenLayers:       1,
+		NumAttentionHeads:     2,
+		IntermediateSize:      16,
+		HiddenAct:             "gelu",
+		MaxPositionEmbeddings: 16,
+		TypeVocabSize:         2,
+	}
+	plan, err := PlanPretrainedBERTImport(cfg, "fixture")
+	if err != nil {
+		t.Fatalf("plan import: %v", err)
+	}
+	header := safeTensorsHeaderForBERTPlan(plan)
+	delete(header, "encoder.layer.0.output.LayerNorm.bias")
+	header["embeddings.word_embeddings.weight"] = map[string]any{
+		"dtype":        "F32",
+		"shape":        []int64{8, 8},
+		"data_offsets": []int64{0, 1},
+	}
+	header["encoder.layer.0.attention.self.query.bias"] = map[string]any{
+		"dtype":        "I64",
+		"shape":        []int64{8},
+		"data_offsets": []int64{1, 2},
+	}
+	header["cls.predictions.decoder.weight"] = map[string]any{
+		"dtype":        "F32",
+		"shape":        []int64{7, 8},
+		"data_offsets": []int64{int64(len(header) + 1), int64(len(header) + 2)},
+	}
+	renumberSafeTensorFixtureOffsets(header)
+	if err := writeSafeTensorsFixture(filepath.Join(dir, "model.safetensors"), header, make([]byte, len(header))); err != nil {
+		t.Fatalf("write safetensors: %v", err)
+	}
+	report, err := VerifyPretrainedBERTWeightsFromDir(dir, plan)
+	if err != nil {
+		t.Fatalf("verify weights: %v", err)
+	}
+	if report.Status != "mismatch" {
+		t.Fatalf("status = %q", report.Status)
+	}
+	if !slices.Contains(report.Missing, "encoder.layer.0.output.LayerNorm.bias") {
+		t.Fatalf("missing = %+v", report.Missing)
+	}
+	assertBERTShapeMismatch(t, report, "embeddings.word_embeddings.weight", []int{7, 8}, []int64{8, 8})
+	assertBERTDTypeMismatch(t, report, "encoder.layer.0.attention.self.query.bias", "I64")
+	if !slices.Contains(report.Unexpected, "cls.predictions.decoder.weight") {
+		t.Fatalf("unexpected = %+v", report.Unexpected)
+	}
+	if slices.Contains(report.Missing, "pooler.dense.weight") {
+		t.Fatalf("optional pooler should not be missing: %+v", report.Missing)
+	}
+}
+
+func TestVerifyPretrainedBERTWeightsFromDirRejectsShardedIndex(t *testing.T) {
+	dir := t.TempDir()
+	cfg := PretrainedBERTConfig{
+		ModelType:             "bert",
+		VocabSize:             7,
+		HiddenSize:            8,
+		NumHiddenLayers:       1,
+		NumAttentionHeads:     2,
+		IntermediateSize:      16,
+		MaxPositionEmbeddings: 16,
+		TypeVocabSize:         2,
+	}
+	plan, err := PlanPretrainedBERTImport(cfg, "fixture")
+	if err != nil {
+		t.Fatalf("plan import: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "model.safetensors.index.json"), []byte(`{"metadata":{},"weight_map":{}}`), 0o644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+	_, err = VerifyPretrainedBERTWeightsFromDir(dir, plan)
+	if err == nil || !strings.Contains(err.Error(), "sharded index is not supported") {
+		t.Fatalf("expected sharded index error, got %v", err)
+	}
+}
+
 func assertBERTTensorPlan(t *testing.T, plan PretrainedBERTImportPlan, name string, shape []int, required bool) {
 	t.Helper()
 	for _, tensor := range plan.Tensors {
@@ -124,4 +209,62 @@ func assertBERTTensorPlan(t *testing.T, plan PretrainedBERTImportPlan, name stri
 		return
 	}
 	t.Fatalf("tensor %q not found in plan", name)
+}
+
+func safeTensorsHeaderForBERTPlan(plan PretrainedBERTImportPlan) map[string]any {
+	header := make(map[string]any)
+	var offset int64
+	for _, tensor := range plan.Tensors {
+		if !tensor.Required {
+			continue
+		}
+		shape := make([]int64, len(tensor.Shape))
+		for i, dim := range tensor.Shape {
+			shape[i] = int64(dim)
+		}
+		header[tensor.Name] = map[string]any{
+			"dtype":        "F32",
+			"shape":        shape,
+			"data_offsets": []int64{offset, offset + 1},
+		}
+		offset++
+	}
+	return header
+}
+
+func renumberSafeTensorFixtureOffsets(header map[string]any) {
+	var offset int64
+	for _, raw := range header {
+		tensor := raw.(map[string]any)
+		tensor["data_offsets"] = []int64{offset, offset + 1}
+		offset++
+	}
+}
+
+func assertBERTShapeMismatch(t *testing.T, report PretrainedBERTWeightVerification, name string, expected []int, actual []int64) {
+	t.Helper()
+	for _, mismatch := range report.ShapeMismatches {
+		if mismatch.Name != name {
+			continue
+		}
+		if !slices.Equal(mismatch.Expected, expected) || !slices.Equal(mismatch.Actual, actual) {
+			t.Fatalf("shape mismatch = %+v, want expected=%v actual=%v", mismatch, expected, actual)
+		}
+		return
+	}
+	t.Fatalf("shape mismatch %q not found in %+v", name, report.ShapeMismatches)
+}
+
+func assertBERTDTypeMismatch(t *testing.T, report PretrainedBERTWeightVerification, name, actual string) {
+	t.Helper()
+	for _, mismatch := range report.DTypeMismatches {
+		if mismatch.Name != name {
+			continue
+		}
+		if mismatch.Actual != actual {
+			t.Fatalf("dtype mismatch = %+v, want actual=%q", mismatch, actual)
+		}
+		return
+	}
+	t.Fatalf("dtype mismatch %q not found in %+v", name, report.DTypeMismatches)
 }
