@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -283,6 +284,143 @@ func TestBuildPretrainedBERTSingleLayerModuleValidation(t *testing.T) {
 	_, err = BuildPretrainedBERTSingleLayerModule(unsupported, 0)
 	if err == nil || !strings.Contains(err.Error(), "unsupported hidden_act") {
 		t.Fatalf("expected unsupported activation error, got %v", err)
+	}
+}
+
+func TestBuildPretrainedBERTEmbedderModuleExecutesWeightFile(t *testing.T) {
+	cfg := PretrainedBERTConfig{
+		ModelType:             "bert",
+		VocabSize:             2,
+		HiddenSize:            2,
+		NumHiddenLayers:       2,
+		NumAttentionHeads:     1,
+		IntermediateSize:      3,
+		HiddenAct:             "gelu",
+		MaxPositionEmbeddings: 3,
+		TypeVocabSize:         2,
+		LayerNormEps:          0.25,
+	}
+	plan, err := PlanPretrainedBERTImport(cfg, "fixture")
+	if err != nil {
+		t.Fatalf("plan import: %v", err)
+	}
+	mod, err := BuildPretrainedBERTEmbedderModule(plan)
+	if err != nil {
+		t.Fatalf("build embedder module: %v", err)
+	}
+	if got, want := mod.EntryPoints[0].Name, "bert_embed"; got != want {
+		t.Fatalf("entrypoint = %q, want %q", got, want)
+	}
+	if len(mod.Steps) == 0 || mod.Steps[0].Kind != eosartifact.StepBERTEmbedder {
+		t.Fatalf("first step = %+v, want bert_embedder", mod.Steps)
+	}
+	if mod.Steps[0].Attributes["num_hidden_layers"] != "2" || mod.Steps[0].Attributes["pooling"] != "masked_mean" {
+		t.Fatalf("step attrs = %+v", mod.Steps[0].Attributes)
+	}
+
+	decoded := pretrainedBERTFullStackDecodedWeights()
+	weights, _, err := BuildPretrainedBERTWeightFileFromDecoded(PretrainedBERTDecodedWeightSet{Tensors: decoded})
+	if err != nil {
+		t.Fatalf("build weight file: %v", err)
+	}
+	rt := New(bertEmbeddingHostBackend{})
+	prog, err := rt.Load(context.Background(), mod, weights.LoadOptions()...)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	inputIDs := backend.NewTensorI32([]int{2, 3}, []int32{0, 1, 0, 1, 0, 1})
+	attentionMask := backend.NewTensorI32([]int{2, 3}, []int32{1, 1, 0, 0, 0, 0})
+	tokenTypeIDs := backend.NewTensorI32([]int{2, 3}, []int32{0, 1, 1, 1, 0, 1})
+	result, err := prog.Run(context.Background(), backend.Request{
+		Entry: "bert_embed",
+		Inputs: map[string]any{
+			"input_ids":      inputIDs,
+			"attention_mask": attentionMask,
+			"token_type_ids": tokenTypeIDs,
+		},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	value, ok := result.Outputs["embeddings"]
+	if !ok {
+		t.Fatalf("missing embeddings output: %+v", result.Outputs)
+	}
+	tensor, ok := value.Data.(*backend.Tensor)
+	if !ok {
+		t.Fatalf("output data type = %T, want *backend.Tensor", value.Data)
+	}
+	expectedWeights := weights.Weights
+	want, err := backend.BERTEmbedderReference(
+		inputIDs, attentionMask, tokenTypeIDs,
+		expectedWeights["token_embeddings"],
+		expectedWeights["position_embeddings"],
+		expectedWeights["token_type_embeddings"],
+		expectedWeights["embedding_layernorm_weight"],
+		expectedWeights["embedding_layernorm_bias"],
+		pretrainedBERTEmbedderLayerWeights(expectedWeights, 2),
+		2, 1, 0.25, "gelu",
+	)
+	if err != nil {
+		t.Fatalf("expected reference: %v", err)
+	}
+	assertTensorClose(t, tensor, want.Shape, want.F32)
+	if value.Metadata["dispatch_mode"] != "host_reference" || value.Metadata["pooling"] != "masked_mean" || value.Metadata["normalization"] != "l2" {
+		t.Fatalf("metadata = %+v", value.Metadata)
+	}
+	if value.Metadata["execution_status"] != "host_reference_full_stack" {
+		t.Fatalf("execution_status = %v", value.Metadata["execution_status"])
+	}
+	for i, value := range tensor.F32[2:] {
+		if value != 0 || math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+			t.Fatalf("all-masked output %d = %v, want finite zero", i, value)
+		}
+	}
+}
+
+func TestBuildPretrainedBERTEmbedderModuleValidation(t *testing.T) {
+	cfg := PretrainedBERTConfig{
+		ModelType:             "bert",
+		VocabSize:             2,
+		HiddenSize:            2,
+		NumHiddenLayers:       1,
+		NumAttentionHeads:     1,
+		IntermediateSize:      3,
+		HiddenAct:             "gelu",
+		MaxPositionEmbeddings: 2,
+		TypeVocabSize:         2,
+	}
+	plan, err := PlanPretrainedBERTImport(cfg, "fixture")
+	if err != nil {
+		t.Fatalf("plan import: %v", err)
+	}
+	missing := plan
+	missing.Tensors = nil
+	for _, tensor := range plan.Tensors {
+		if tensor.Role == "encoder_layer_0_attention_query_weight" {
+			continue
+		}
+		missing.Tensors = append(missing.Tensors, tensor)
+	}
+	_, err = BuildPretrainedBERTEmbedderModule(missing)
+	if err == nil || !strings.Contains(err.Error(), "missing planned role") {
+		t.Fatalf("expected missing role error, got %v", err)
+	}
+	unsupported := plan
+	unsupported.Config.HiddenAct = "relu"
+	_, err = BuildPretrainedBERTEmbedderModule(unsupported)
+	if err == nil || !strings.Contains(err.Error(), "unsupported hidden_act") {
+		t.Fatalf("expected unsupported activation error, got %v", err)
+	}
+	badShape := plan
+	for i := range badShape.Tensors {
+		if badShape.Tensors[i].Role == "encoder_layer_0_intermediate_weight" {
+			badShape.Tensors[i].Shape = []int{4, 2}
+		}
+	}
+	_, err = BuildPretrainedBERTEmbedderModule(badShape)
+	if err == nil || !strings.Contains(err.Error(), "does not match config shape") {
+		t.Fatalf("expected shape error, got %v", err)
 	}
 }
 
@@ -689,6 +827,42 @@ func pretrainedBERTSingleLayerDecodedWeights() []PretrainedBERTDecodedWeightTens
 		{Name: "encoder.layer.0.output.LayerNorm.weight", Role: "encoder_layer_0_output_layernorm_weight", SourceDType: "F32", Shape: []int64{2}, Values: []float32{0.9, 1.4}},
 		{Name: "encoder.layer.0.output.LayerNorm.bias", Role: "encoder_layer_0_output_layernorm_bias", SourceDType: "F32", Shape: []int64{2}, Values: []float32{-0.2, 0.4}},
 	}
+}
+
+func pretrainedBERTFullStackDecodedWeights() []PretrainedBERTDecodedWeightTensor {
+	decoded := []PretrainedBERTDecodedWeightTensor{
+		{Name: "embeddings.word_embeddings.weight", Role: "token_embeddings", SourceDType: "F32", Shape: []int64{2, 2}, Values: []float32{1, 2, 10, 20}},
+		{Name: "embeddings.position_embeddings.weight", Role: "position_embeddings", SourceDType: "F32", Shape: []int64{3, 2}, Values: []float32{0, 1, 1, 0, -1, 0.5}},
+		{Name: "embeddings.token_type_embeddings.weight", Role: "token_type_embeddings", SourceDType: "F32", Shape: []int64{2, 2}, Values: []float32{0, 0, 2, -2}},
+		{Name: "embeddings.LayerNorm.weight", Role: "embedding_layernorm_weight", SourceDType: "F32", Shape: []int64{2}, Values: []float32{2, 3}},
+		{Name: "embeddings.LayerNorm.bias", Role: "embedding_layernorm_bias", SourceDType: "F32", Shape: []int64{2}, Values: []float32{0.5, -0.5}},
+	}
+	layer0 := pretrainedBERTSingleLayerDecodedWeights()
+	decoded = append(decoded, layer0...)
+	for _, tensor := range layer0 {
+		tensor.Name = strings.Replace(tensor.Name, ".0.", ".1.", 1)
+		tensor.Role = strings.Replace(tensor.Role, "_0_", "_1_", 1)
+		decoded = append(decoded, tensor)
+	}
+	return decoded
+}
+
+func pretrainedBERTEmbedderLayerWeights(weights map[string]*backend.Tensor, layers int) []*backend.Tensor {
+	out := make([]*backend.Tensor, 0, layers*16)
+	for layer := 0; layer < layers; layer++ {
+		prefix := "encoder_layer_" + strconv.Itoa(layer) + "_"
+		out = append(out,
+			weights[prefix+"attention_query_weight"], weights[prefix+"attention_query_bias"],
+			weights[prefix+"attention_key_weight"], weights[prefix+"attention_key_bias"],
+			weights[prefix+"attention_value_weight"], weights[prefix+"attention_value_bias"],
+			weights[prefix+"attention_output_weight"], weights[prefix+"attention_output_bias"],
+			weights[prefix+"attention_layernorm_weight"], weights[prefix+"attention_layernorm_bias"],
+			weights[prefix+"intermediate_weight"], weights[prefix+"intermediate_bias"],
+			weights[prefix+"output_weight"], weights[prefix+"output_bias"],
+			weights[prefix+"output_layernorm_weight"], weights[prefix+"output_layernorm_bias"],
+		)
+	}
+	return out
 }
 
 type bertEmbeddingHostBackend struct{}

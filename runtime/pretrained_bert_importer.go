@@ -687,6 +687,171 @@ func BuildPretrainedBERTSingleLayerModule(plan PretrainedBERTImportPlan, layer i
 	return mod, nil
 }
 
+// BuildPretrainedBERTEmbedderModule builds a host-reference full-stack BERT
+// sentence embedder: embeddings, every encoder layer, masked mean pooling, and
+// row L2 normalization.
+func BuildPretrainedBERTEmbedderModule(plan PretrainedBERTImportPlan) (*eosartifact.Module, error) {
+	if err := plan.Config.Validate(); err != nil {
+		return nil, err
+	}
+	hiddenAct := plan.Config.HiddenAct
+	if hiddenAct == "" {
+		hiddenAct = "gelu"
+	}
+	if hiddenAct != "gelu" {
+		return nil, fmt.Errorf("pretrained BERT embedder unsupported hidden_act %q; only gelu is supported", hiddenAct)
+	}
+	hidden := plan.Config.HiddenSize
+	intermediate := plan.Config.IntermediateSize
+	requiredRoles := map[string][]int{
+		"token_embeddings":           {plan.Config.VocabSize, hidden},
+		"position_embeddings":        {plan.Config.MaxPositionEmbeddings, hidden},
+		"token_type_embeddings":      {plan.Config.TypeVocabSize, hidden},
+		"embedding_layernorm_weight": {hidden},
+		"embedding_layernorm_bias":   {hidden},
+	}
+	for layer := 0; layer < plan.Config.NumHiddenLayers; layer++ {
+		rolePrefix := fmt.Sprintf("encoder_layer_%d_", layer)
+		requiredRoles[rolePrefix+"attention_query_weight"] = []int{hidden, hidden}
+		requiredRoles[rolePrefix+"attention_query_bias"] = []int{hidden}
+		requiredRoles[rolePrefix+"attention_key_weight"] = []int{hidden, hidden}
+		requiredRoles[rolePrefix+"attention_key_bias"] = []int{hidden}
+		requiredRoles[rolePrefix+"attention_value_weight"] = []int{hidden, hidden}
+		requiredRoles[rolePrefix+"attention_value_bias"] = []int{hidden}
+		requiredRoles[rolePrefix+"attention_output_weight"] = []int{hidden, hidden}
+		requiredRoles[rolePrefix+"attention_output_bias"] = []int{hidden}
+		requiredRoles[rolePrefix+"attention_layernorm_weight"] = []int{hidden}
+		requiredRoles[rolePrefix+"attention_layernorm_bias"] = []int{hidden}
+		requiredRoles[rolePrefix+"intermediate_weight"] = []int{intermediate, hidden}
+		requiredRoles[rolePrefix+"intermediate_bias"] = []int{intermediate}
+		requiredRoles[rolePrefix+"output_weight"] = []int{hidden, intermediate}
+		requiredRoles[rolePrefix+"output_bias"] = []int{hidden}
+		requiredRoles[rolePrefix+"output_layernorm_weight"] = []int{hidden}
+		requiredRoles[rolePrefix+"output_layernorm_bias"] = []int{hidden}
+	}
+	plannedRoles := map[string]PretrainedBERTTensorPlan{}
+	for _, tensor := range plan.Tensors {
+		plannedRoles[tensor.Role] = tensor
+	}
+	for role, shape := range requiredRoles {
+		tensor, ok := plannedRoles[role]
+		if !ok {
+			return nil, fmt.Errorf("pretrained BERT embedder module missing planned role %q", role)
+		}
+		if !slices.Equal(tensor.Shape, shape) {
+			return nil, fmt.Errorf("pretrained BERT embedder module role %q shape %v does not match config shape %v", role, tensor.Shape, shape)
+		}
+	}
+
+	mod := eosartifact.NewModule("pretrained_bert_embedder")
+	mod.Requirements.Capabilities = []string{eosartifact.CapabilityHostFallback}
+	mod.Metadata = map[string]any{
+		"source":           "pretrained_bert_import_plan",
+		"model_name":       plan.ModelName,
+		"architecture":     plan.Architecture,
+		"pooling":          "masked_mean",
+		"normalization":    "l2",
+		"execution_status": "host_reference_full_stack: embeddings plus all encoder layers plus masked mean pooling and L2 normalization; no tokenizer, package export, quantized execution, or device execution claim",
+	}
+	hiddenStr := strconv.Itoa(hidden)
+	intermediateStr := strconv.Itoa(intermediate)
+	mod.Params = []eosartifact.Param{
+		bertEmbeddingParam("token_embeddings", "V", hiddenStr),
+		bertEmbeddingParam("position_embeddings", "P", hiddenStr),
+		bertEmbeddingParam("token_type_embeddings", "TT", hiddenStr),
+		bertEmbeddingParam("embedding_layernorm_weight", hiddenStr),
+		bertEmbeddingParam("embedding_layernorm_bias", hiddenStr),
+	}
+	stepInputs := []string{
+		"input_ids",
+		"attention_mask",
+		"token_type_ids",
+		"token_embeddings",
+		"position_embeddings",
+		"token_type_embeddings",
+		"embedding_layernorm_weight",
+		"embedding_layernorm_bias",
+	}
+	for layer := 0; layer < plan.Config.NumHiddenLayers; layer++ {
+		rolePrefix := fmt.Sprintf("encoder_layer_%d_", layer)
+		paramRoles := []struct {
+			role  string
+			shape []string
+		}{
+			{rolePrefix + "attention_query_weight", []string{hiddenStr, hiddenStr}},
+			{rolePrefix + "attention_query_bias", []string{hiddenStr}},
+			{rolePrefix + "attention_key_weight", []string{hiddenStr, hiddenStr}},
+			{rolePrefix + "attention_key_bias", []string{hiddenStr}},
+			{rolePrefix + "attention_value_weight", []string{hiddenStr, hiddenStr}},
+			{rolePrefix + "attention_value_bias", []string{hiddenStr}},
+			{rolePrefix + "attention_output_weight", []string{hiddenStr, hiddenStr}},
+			{rolePrefix + "attention_output_bias", []string{hiddenStr}},
+			{rolePrefix + "attention_layernorm_weight", []string{hiddenStr}},
+			{rolePrefix + "attention_layernorm_bias", []string{hiddenStr}},
+			{rolePrefix + "intermediate_weight", []string{intermediateStr, hiddenStr}},
+			{rolePrefix + "intermediate_bias", []string{intermediateStr}},
+			{rolePrefix + "output_weight", []string{hiddenStr, intermediateStr}},
+			{rolePrefix + "output_bias", []string{hiddenStr}},
+			{rolePrefix + "output_layernorm_weight", []string{hiddenStr}},
+			{rolePrefix + "output_layernorm_bias", []string{hiddenStr}},
+		}
+		for _, param := range paramRoles {
+			mod.Params = append(mod.Params, bertEmbeddingParam(param.role, param.shape...))
+			stepInputs = append(stepInputs, param.role)
+		}
+	}
+	idType := bertTensorType("i32", "B", "T")
+	embeddingType := bertTensorType("f32", "B", hiddenStr)
+	mod.EntryPoints = []eosartifact.EntryPoint{{
+		Name: "bert_embed",
+		Kind: eosartifact.EntryPointPipeline,
+		Inputs: []eosartifact.ValueBinding{
+			{Name: "input_ids", Type: idType},
+			{Name: "attention_mask", Type: idType},
+			{Name: "token_type_ids", Type: idType},
+		},
+		Outputs: []eosartifact.ValueBinding{
+			{Name: "embeddings", Type: embeddingType},
+		},
+	}}
+	mod.Buffers = []eosartifact.Buffer{{
+		Name:  "embeddings",
+		DType: "f32",
+		Shape: []string{"B", hiddenStr},
+	}}
+	epsilon := plan.Config.LayerNormEps
+	if epsilon == 0 {
+		epsilon = 1e-12
+	}
+	mod.Steps = []eosartifact.Step{
+		{
+			Entry:   "bert_embed",
+			Kind:    eosartifact.StepBERTEmbedder,
+			Name:    "bert_embedder_reference",
+			Inputs:  stepInputs,
+			Outputs: []string{"embeddings"},
+			Attributes: map[string]string{
+				"epsilon":             strconv.FormatFloat(epsilon, 'g', -1, 64),
+				"hidden_act":          hiddenAct,
+				"num_attention_heads": strconv.Itoa(plan.Config.NumAttentionHeads),
+				"num_hidden_layers":   strconv.Itoa(plan.Config.NumHiddenLayers),
+				"pooling":             "masked_mean",
+				"normalization":       "l2",
+			},
+		},
+		{
+			Entry:   "bert_embed",
+			Kind:    eosartifact.StepReturn,
+			Name:    "return_embeddings",
+			Outputs: []string{"embeddings"},
+		},
+	}
+	if err := mod.Validate(); err != nil {
+		return nil, err
+	}
+	return mod, nil
+}
+
 func bertEmbeddingParam(name string, shape ...string) eosartifact.Param {
 	return eosartifact.Param{
 		Name:    name,
