@@ -42,20 +42,21 @@ type PretrainedBERTTensorPlan struct {
 }
 
 type PretrainedBERTImportPlan struct {
-	Version                string                            `json:"version"`
-	ModelName              string                            `json:"model_name,omitempty"`
-	Architecture           string                            `json:"architecture"`
-	Config                 PretrainedBERTConfig              `json:"config"`
-	SentenceTransformers   *PretrainedBERTSTMetadata         `json:"sentence_transformers,omitempty"`
-	Tensors                []PretrainedBERTTensorPlan        `json:"tensors"`
-	WeightVerification     *PretrainedBERTWeightVerification `json:"weight_verification,omitempty"`
-	WeightLoadSmoke        *PretrainedBERTWeightLoadReport   `json:"weight_load_smoke,omitempty"`
-	WeightDecodeSmoke      *PretrainedBERTWeightDecodeReport `json:"weight_decode_smoke,omitempty"`
-	WeightFileExport       *PretrainedBERTWeightFileReport   `json:"weight_file_export,omitempty"`
-	ModuleExport           *PretrainedBERTModuleExportReport `json:"module_export,omitempty"`
-	PoolingPolicy          string                            `json:"pooling_policy"`
-	OutputProjectionPolicy string                            `json:"output_projection_policy"`
-	ExecutionStatus        string                            `json:"execution_status"`
+	Version                string                             `json:"version"`
+	ModelName              string                             `json:"model_name,omitempty"`
+	Architecture           string                             `json:"architecture"`
+	Config                 PretrainedBERTConfig               `json:"config"`
+	SentenceTransformers   *PretrainedBERTSTMetadata          `json:"sentence_transformers,omitempty"`
+	Tensors                []PretrainedBERTTensorPlan         `json:"tensors"`
+	WeightVerification     *PretrainedBERTWeightVerification  `json:"weight_verification,omitempty"`
+	WeightLoadSmoke        *PretrainedBERTWeightLoadReport    `json:"weight_load_smoke,omitempty"`
+	WeightDecodeSmoke      *PretrainedBERTWeightDecodeReport  `json:"weight_decode_smoke,omitempty"`
+	WeightFileExport       *PretrainedBERTWeightFileReport    `json:"weight_file_export,omitempty"`
+	ModuleExport           *PretrainedBERTModuleExportReport  `json:"module_export,omitempty"`
+	PackageExport          *PretrainedBERTPackageExportReport `json:"package_export,omitempty"`
+	PoolingPolicy          string                             `json:"pooling_policy"`
+	OutputProjectionPolicy string                             `json:"output_projection_policy"`
+	ExecutionStatus        string                             `json:"execution_status"`
 }
 
 type PretrainedBERTSTMetadata struct {

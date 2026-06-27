@@ -33,12 +33,17 @@ type PretrainedBERTTextEmbedder struct {
 	modelName       string
 	architecture    string
 	dynamicTokens   bool
+	packagePath     string
+	packageSHA256   string
+	packageIdentity string
+	packageFileSHA  map[string]string
 }
 
 type PretrainedBERTTextEmbedderConfig struct {
 	SourceDir   string
 	ModulePath  string
 	WeightsPath string
+	PackagePath string
 	MaxLength   int
 	Runtime     *Runtime
 }
@@ -53,6 +58,7 @@ type PretrainedBERTRetrievalVectorExportConfig struct {
 	SourceDir          string
 	ModulePath         string
 	WeightsPath        string
+	PackagePath        string
 	QueryPrefix        string
 	DocumentPrefix     string
 	BatchSize          int
@@ -75,6 +81,9 @@ type PretrainedBERTRetrievalVectorExportSummary struct {
 	SourceDir                         string    `json:"source_dir"`
 	ModulePath                        string    `json:"module_path"`
 	WeightsPath                       string    `json:"weights_path"`
+	PackagePath                       string    `json:"package_path,omitempty"`
+	PackageSHA256                     string    `json:"package_sha256,omitempty"`
+	PackageIdentitySHA256             string    `json:"package_identity_sha256,omitempty"`
 	ExecutionMode                     string    `json:"execution_mode"`
 	QualityClaim                      bool      `json:"quality_claim"`
 	EmbeddingSpaceID                  string    `json:"embedding_space_id,omitempty"`
@@ -136,11 +145,14 @@ type PretrainedBERTRetrievalVectorExportProgress struct {
 }
 
 func LoadPretrainedBERTTextEmbedder(ctx context.Context, cfg PretrainedBERTTextEmbedderConfig) (*PretrainedBERTTextEmbedder, error) {
-	if cfg.SourceDir == "" || cfg.ModulePath == "" || cfg.WeightsPath == "" {
-		return nil, fmt.Errorf("source dir, module path, and weights path are required")
-	}
 	if cfg.Runtime == nil {
 		return nil, fmt.Errorf("runtime is required")
+	}
+	if cfg.PackagePath != "" {
+		return loadPretrainedBERTTextEmbedderFromPackage(ctx, cfg)
+	}
+	if cfg.SourceDir == "" || cfg.ModulePath == "" || cfg.WeightsPath == "" {
+		return nil, fmt.Errorf("source dir, module path, and weights path are required")
 	}
 	config, err := LoadPretrainedBERTConfig(filepath.Join(cfg.SourceDir, "config.json"))
 	if err != nil {
@@ -198,6 +210,76 @@ func LoadPretrainedBERTTextEmbedder(ctx context.Context, cfg PretrainedBERTTextE
 		modelName:       modelName,
 		architecture:    architecture,
 		dynamicTokens:   pretrainedBERTProgramSupportsDynamicTokens(program, "bert_embed"),
+	}, nil
+}
+
+func loadPretrainedBERTTextEmbedderFromPackage(ctx context.Context, cfg PretrainedBERTTextEmbedderConfig) (*PretrainedBERTTextEmbedder, error) {
+	pkg, err := ReadPretrainedBERTPackageFile(cfg.PackagePath)
+	if err != nil {
+		return nil, err
+	}
+	config := pkg.Config
+	stMeta := pkg.STMetadata
+	maxLength, maxLengthSource := resolvePretrainedBERTMaxLength(cfg.MaxLength, config, stMeta)
+	if maxLength <= 0 || maxLength > config.MaxPositionEmbeddings {
+		return nil, fmt.Errorf("max length must be in [1,%d], got %d", config.MaxPositionEmbeddings, maxLength)
+	}
+	tokenizer, err := pkg.Tokenizer()
+	if err != nil {
+		return nil, err
+	}
+	module, err := pkg.Module()
+	if err != nil {
+		return nil, err
+	}
+	pooling := pkg.Pooling
+	if value, ok := module.Metadata["pooling"].(string); ok && value != "" {
+		pooling = value
+	}
+	normalization := pkg.Normalization
+	if value, ok := module.Metadata["normalization"].(string); ok && value != "" {
+		normalization = value
+	}
+	modelName := pkg.ModelName
+	if value, ok := module.Metadata["model_name"].(string); ok && value != "" {
+		modelName = value
+	}
+	architecture := pkg.Architecture
+	if value, ok := module.Metadata["architecture"].(string); ok && value != "" {
+		architecture = value
+	}
+	weights, err := pkg.Weights()
+	if err != nil {
+		return nil, err
+	}
+	program, err := cfg.Runtime.Load(ctx, module, weights.LoadOptions()...)
+	if err != nil {
+		return nil, err
+	}
+	packageSHA, err := sha256FileHex(cfg.PackagePath)
+	if err != nil {
+		return nil, fmt.Errorf("hash package: %w", err)
+	}
+	fileHashes := make(map[string]string, len(pkg.Files))
+	for _, file := range pkg.Files {
+		fileHashes[file.Role] = file.SHA256
+	}
+	return &PretrainedBERTTextEmbedder{
+		config:          config,
+		stMeta:          stMeta,
+		tokenizer:       tokenizer,
+		program:         program,
+		maxLength:       maxLength,
+		maxLengthSource: maxLengthSource,
+		pooling:         pooling,
+		normalization:   normalization,
+		modelName:       modelName,
+		architecture:    architecture,
+		dynamicTokens:   pretrainedBERTProgramSupportsDynamicTokens(program, "bert_embed"),
+		packagePath:     cfg.PackagePath,
+		packageSHA256:   packageSHA,
+		packageIdentity: pkg.IdentitySHA256,
+		packageFileSHA:  fileHashes,
 	}, nil
 }
 
@@ -364,8 +446,14 @@ func pretrainedBERTProgramSupportsDynamicTokens(program *Program, entryName stri
 
 func ExportPretrainedBERTRetrievalVectors(ctx context.Context, cfg PretrainedBERTRetrievalVectorExportConfig) (PretrainedBERTRetrievalVectorExportSummary, error) {
 	cfg = normalizePretrainedBERTRetrievalVectorExportConfig(cfg)
-	if cfg.OutputDir == "" || cfg.SourceDir == "" || cfg.ModulePath == "" || cfg.WeightsPath == "" {
-		return PretrainedBERTRetrievalVectorExportSummary{}, fmt.Errorf("output dir, source dir, module path, and weights path are required")
+	if cfg.OutputDir == "" {
+		return PretrainedBERTRetrievalVectorExportSummary{}, fmt.Errorf("output dir is required")
+	}
+	if cfg.PackagePath == "" && (cfg.SourceDir == "" || cfg.ModulePath == "" || cfg.WeightsPath == "") {
+		return PretrainedBERTRetrievalVectorExportSummary{}, fmt.Errorf("source dir, module path, and weights path are required unless package path is provided")
+	}
+	if cfg.PackagePath != "" && (cfg.SourceDir != "" || cfg.ModulePath != "" || cfg.WeightsPath != "") {
+		return PretrainedBERTRetrievalVectorExportSummary{}, fmt.Errorf("package path cannot be combined with source dir, module path, or weights path")
 	}
 	if cfg.CorpusPath == "" || cfg.QueriesPath == "" {
 		return PretrainedBERTRetrievalVectorExportSummary{}, fmt.Errorf("corpus path and queries path are required")
@@ -387,6 +475,7 @@ func ExportPretrainedBERTRetrievalVectors(ctx context.Context, cfg PretrainedBER
 		SourceDir:   cfg.SourceDir,
 		ModulePath:  cfg.ModulePath,
 		WeightsPath: cfg.WeightsPath,
+		PackagePath: cfg.PackagePath,
 		MaxLength:   cfg.MaxLength,
 		Runtime:     cfg.Runtime,
 	})
@@ -484,6 +573,9 @@ func ExportPretrainedBERTRetrievalVectors(ctx context.Context, cfg PretrainedBER
 		SourceDir:                         cfg.SourceDir,
 		ModulePath:                        cfg.ModulePath,
 		WeightsPath:                       cfg.WeightsPath,
+		PackagePath:                       cfg.PackagePath,
+		PackageSHA256:                     identity.PackageSHA256,
+		PackageIdentitySHA256:             identity.PackageIdentitySHA256,
 		ExecutionMode:                     "pretrained_bert_host_reference",
 		QualityClaim:                      false,
 		EmbeddingSpaceID:                  identity.EmbeddingSpaceID,
@@ -561,6 +653,8 @@ type pretrainedBERTRetrievalEmbeddingSpaceIdentity struct {
 	ModelType                         string `json:"model_type,omitempty"`
 	ModuleSHA256                      string `json:"module_sha256"`
 	WeightsSHA256                     string `json:"weights_sha256"`
+	PackageSHA256                     string `json:"package_sha256,omitempty"`
+	PackageIdentitySHA256             string `json:"package_identity_sha256,omitempty"`
 	ConfigSHA256                      string `json:"config_sha256"`
 	VocabSHA256                       string `json:"vocab_sha256"`
 	TokenizerJSONSHA256               string `json:"tokenizer_json_sha256,omitempty"`
@@ -601,32 +695,46 @@ func buildPretrainedBERTRetrievalEmbeddingSpaceIdentity(cfg PretrainedBERTRetrie
 		ProjectionHeadPath:  cfg.ProjectionHeadPath,
 	}
 	var err error
-	if identity.ModuleSHA256, err = sha256FileHex(cfg.ModulePath); err != nil {
-		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("hash module: %w", err)
-	}
-	if identity.WeightsSHA256, err = sha256FileHex(cfg.WeightsPath); err != nil {
-		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("hash weights: %w", err)
-	}
-	if identity.ConfigSHA256, err = sha256FileHex(filepath.Join(cfg.SourceDir, "config.json")); err != nil {
-		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("hash config.json: %w", err)
-	}
-	if identity.VocabSHA256, err = sha256FileHex(filepath.Join(cfg.SourceDir, "vocab.txt")); err != nil {
-		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("hash vocab.txt: %w", err)
-	}
-	if identity.TokenizerJSONSHA256, err = optionalSHA256FileHex(filepath.Join(cfg.SourceDir, "tokenizer.json")); err != nil {
-		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
-	}
-	if identity.TokenizerConfigSHA256, err = optionalSHA256FileHex(filepath.Join(cfg.SourceDir, "tokenizer_config.json")); err != nil {
-		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
-	}
-	if identity.SpecialTokensMapSHA256, err = optionalSHA256FileHex(filepath.Join(cfg.SourceDir, "special_tokens_map.json")); err != nil {
-		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
-	}
-	if identity.SentenceTransformersPoolingSHA256, err = optionalSHA256FileHex(filepath.Join(cfg.SourceDir, "1_Pooling", "config.json")); err != nil {
-		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
-	}
-	if identity.SentenceTransformersConfigSHA256, err = optionalSHA256FileHex(filepath.Join(cfg.SourceDir, "sentence_bert_config.json")); err != nil {
-		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
+	if embedder.packagePath != "" {
+		identity.PackageSHA256 = embedder.packageSHA256
+		identity.PackageIdentitySHA256 = embedder.packageIdentity
+		identity.ModuleSHA256 = embedder.packageFileSHA["module"]
+		identity.WeightsSHA256 = embedder.packageFileSHA["weights"]
+		identity.ConfigSHA256 = embedder.packageFileSHA["config"]
+		identity.VocabSHA256 = embedder.packageFileSHA["vocab"]
+		identity.TokenizerJSONSHA256 = embedder.packageFileSHA["tokenizer_json"]
+		identity.TokenizerConfigSHA256 = embedder.packageFileSHA["tokenizer_config"]
+		identity.SpecialTokensMapSHA256 = embedder.packageFileSHA["special_tokens_map"]
+		identity.SentenceTransformersPoolingSHA256 = embedder.packageFileSHA["sentence_transformers_pooling"]
+		identity.SentenceTransformersConfigSHA256 = embedder.packageFileSHA["sentence_transformers_config"]
+	} else {
+		if identity.ModuleSHA256, err = sha256FileHex(cfg.ModulePath); err != nil {
+			return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("hash module: %w", err)
+		}
+		if identity.WeightsSHA256, err = sha256FileHex(cfg.WeightsPath); err != nil {
+			return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("hash weights: %w", err)
+		}
+		if identity.ConfigSHA256, err = sha256FileHex(filepath.Join(cfg.SourceDir, "config.json")); err != nil {
+			return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("hash config.json: %w", err)
+		}
+		if identity.VocabSHA256, err = sha256FileHex(filepath.Join(cfg.SourceDir, "vocab.txt")); err != nil {
+			return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("hash vocab.txt: %w", err)
+		}
+		if identity.TokenizerJSONSHA256, err = optionalSHA256FileHex(filepath.Join(cfg.SourceDir, "tokenizer.json")); err != nil {
+			return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
+		}
+		if identity.TokenizerConfigSHA256, err = optionalSHA256FileHex(filepath.Join(cfg.SourceDir, "tokenizer_config.json")); err != nil {
+			return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
+		}
+		if identity.SpecialTokensMapSHA256, err = optionalSHA256FileHex(filepath.Join(cfg.SourceDir, "special_tokens_map.json")); err != nil {
+			return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
+		}
+		if identity.SentenceTransformersPoolingSHA256, err = optionalSHA256FileHex(filepath.Join(cfg.SourceDir, "1_Pooling", "config.json")); err != nil {
+			return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
+		}
+		if identity.SentenceTransformersConfigSHA256, err = optionalSHA256FileHex(filepath.Join(cfg.SourceDir, "sentence_bert_config.json")); err != nil {
+			return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
+		}
 	}
 	if cfg.ProjectionHeadPath != "" {
 		head, err := ReadPretrainedBERTProjectionHeadFile(cfg.ProjectionHeadPath)
@@ -670,6 +778,9 @@ func validatePretrainedBERTRetrievalVectorExportResumeManifest(cfg PretrainedBER
 	}
 	data, err := os.ReadFile(cfg.ManifestJSONPath)
 	if os.IsNotExist(err) {
+		if cfg.PackagePath != "" {
+			return fmt.Errorf("resume with package requires manifest %s with matching embedding_space_id", cfg.ManifestJSONPath)
+		}
 		if cfg.ProjectionHeadPath != "" {
 			return fmt.Errorf("resume with projection head requires manifest %s with matching embedding_space_id", cfg.ManifestJSONPath)
 		}
@@ -685,10 +796,16 @@ func validatePretrainedBERTRetrievalVectorExportResumeManifest(cfg PretrainedBER
 	// Legacy manifests predate embedding_space_id. Keep compatibility for
 	// no-head partial caches and rely on row ID/dimension prefix checks.
 	if manifest.EmbeddingSpaceID == "" {
+		if cfg.PackagePath != "" {
+			return fmt.Errorf("resume manifest %s is missing embedding_space_id required for package resume", cfg.ManifestJSONPath)
+		}
 		if cfg.ProjectionHeadPath != "" {
 			return fmt.Errorf("resume manifest %s is missing embedding_space_id required for projection head resume", cfg.ManifestJSONPath)
 		}
 		return nil
+	}
+	if cfg.PackagePath != "" && manifest.PackageIdentitySHA256 == "" {
+		return fmt.Errorf("resume manifest %s is missing package_identity_sha256 required for package resume", cfg.ManifestJSONPath)
 	}
 	if cfg.ProjectionHeadPath != "" && manifest.ProjectionHeadIdentity == "" {
 		return fmt.Errorf("resume manifest %s is missing projection_head_identity required for projection head resume", cfg.ManifestJSONPath)

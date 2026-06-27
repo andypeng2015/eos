@@ -124,6 +124,12 @@ func TestRunImportPretrainedBERTLoadWeightsSmoke(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(snapshot, "config.json"), []byte(config), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(snapshot, "vocab.txt"), []byte("[PAD]\n[UNK]\n[CLS]\n[SEP]\n[MASK]\n"), 0o644); err != nil {
+		t.Fatalf("write vocab: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(snapshot, "tokenizer_config.json"), []byte(`{"do_lower_case":true}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write tokenizer config: %v", err)
+	}
 	plan, err := eosruntime.PlanPretrainedBERTImportFromDir(snapshot, "fixture")
 	if err != nil {
 		t.Fatalf("plan fixture: %v", err)
@@ -200,6 +206,12 @@ func TestRunImportPretrainedBERTWeightsOutWritesReadableWeightFile(t *testing.T)
 	if err := os.WriteFile(filepath.Join(snapshot, "config.json"), []byte(config), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(snapshot, "vocab.txt"), []byte("[PAD]\n[UNK]\n[CLS]\n[SEP]\n[MASK]\n"), 0o644); err != nil {
+		t.Fatalf("write vocab: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(snapshot, "tokenizer_config.json"), []byte(`{"do_lower_case":true}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write tokenizer config: %v", err)
+	}
 	plan, err := eosruntime.PlanPretrainedBERTImportFromDir(snapshot, "fixture")
 	if err != nil {
 		t.Fatalf("plan fixture: %v", err)
@@ -216,11 +228,13 @@ func TestRunImportPretrainedBERTWeightsOutWritesReadableWeightFile(t *testing.T)
 	planPath := filepath.Join(dir, "plan.json")
 	weightsPath := filepath.Join(dir, "bert.weights.mll")
 	modulePath := filepath.Join(dir, "bert.module.mll")
+	packagePath := filepath.Join(dir, "bert.imported.mll")
 	if err := runImportPretrainedBERT([]string{
 		"--source", snapshot,
 		"--plan-json", planPath,
 		"--weights-out", weightsPath,
 		"--module-out", modulePath,
+		"--package-out", packagePath,
 	}); err != nil {
 		t.Fatalf("run import-pretrained-bert: %v", err)
 	}
@@ -290,6 +304,27 @@ func TestRunImportPretrainedBERTWeightsOutWritesReadableWeightFile(t *testing.T)
 	}
 	if len(mod.Steps) == 0 || mod.Steps[0].Kind != eosartifact.StepBERTEmbedder {
 		t.Fatalf("first module step = %+v", mod.Steps)
+	}
+	if loaded.PackageExport == nil {
+		t.Fatal("expected package export report")
+	}
+	if loaded.PackageExport.OutputPath != packagePath || loaded.PackageExport.NativeDim != 2 || loaded.PackageExport.MaxLength != 4 {
+		t.Fatalf("package export = %+v", loaded.PackageExport)
+	}
+	if !isCommandSHA256Hex(loaded.PackageExport.IdentitySHA256) || !isCommandSHA256Hex(loaded.PackageExport.ModuleSHA256) ||
+		!isCommandSHA256Hex(loaded.PackageExport.WeightsSHA256) || !isCommandSHA256Hex(loaded.PackageExport.ConfigSHA256) ||
+		!isCommandSHA256Hex(loaded.PackageExport.VocabSHA256) {
+		t.Fatalf("package export hashes = %+v", loaded.PackageExport)
+	}
+	pkg, err := eosruntime.ReadPretrainedBERTPackageFile(packagePath)
+	if err != nil {
+		t.Fatalf("read package: %v", err)
+	}
+	if pkg.IdentitySHA256 != loaded.PackageExport.IdentitySHA256 || pkg.ModelName != "" || pkg.NativeDim != 2 {
+		t.Fatalf("package identity/model/dim = %q/%q/%d", pkg.IdentitySHA256, pkg.ModelName, pkg.NativeDim)
+	}
+	if _, err := pkg.Tokenizer(); err != nil {
+		t.Fatalf("package tokenizer: %v", err)
 	}
 }
 
@@ -388,4 +423,16 @@ func assertCommandFloat32Values(t *testing.T, got, want []float32) {
 			t.Fatalf("got[%d]=%f want %f; got=%v want=%v", i, got[i], want[i], got, want)
 		}
 	}
+}
+
+func isCommandSHA256Hex(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return false
+		}
+	}
+	return true
 }

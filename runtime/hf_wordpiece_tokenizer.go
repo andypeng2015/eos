@@ -2,6 +2,7 @@ package eosruntime
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -76,14 +77,36 @@ func LoadHFWordPieceTokenizerFromDir(dir string) (*HFWordPieceTokenizer, error) 
 	return NewHFWordPieceTokenizerFromVocabFile(filepath.Join(dir, "vocab.txt"), cfg)
 }
 
+func LoadHFWordPieceTokenizerFromBytes(vocab, tokenizerConfig, specialTokensMap []byte) (*HFWordPieceTokenizer, error) {
+	cfg := DefaultHFWordPieceTokenizerConfig()
+	if len(tokenizerConfig) > 0 {
+		if err := applyHFTokenizerConfigBytes("tokenizer_config.json", tokenizerConfig, &cfg); err != nil {
+			return nil, err
+		}
+	}
+	if len(specialTokensMap) > 0 {
+		if err := applyHFSpecialTokensMapBytes("special_tokens_map.json", specialTokensMap, &cfg); err != nil {
+			return nil, err
+		}
+	}
+	return NewHFWordPieceTokenizerFromVocabBytes(vocab, cfg)
+}
+
 func NewHFWordPieceTokenizerFromVocabFile(path string, cfg HFWordPieceTokenizerConfig) (*HFWordPieceTokenizer, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
+	return newHFWordPieceTokenizerFromScanner(path, bufio.NewScanner(file), cfg)
+}
+
+func NewHFWordPieceTokenizerFromVocabBytes(data []byte, cfg HFWordPieceTokenizerConfig) (*HFWordPieceTokenizer, error) {
+	return newHFWordPieceTokenizerFromScanner("vocab.txt", bufio.NewScanner(bytes.NewReader(data)), cfg)
+}
+
+func newHFWordPieceTokenizerFromScanner(path string, scanner *bufio.Scanner, cfg HFWordPieceTokenizerConfig) (*HFWordPieceTokenizer, error) {
 	var vocab []string
-	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		token := strings.TrimRight(scanner.Text(), "\r")
 		if token == "" {
@@ -440,6 +463,10 @@ func applyHFTokenizerConfig(path string, cfg *HFWordPieceTokenizerConfig) error 
 	if err != nil {
 		return err
 	}
+	return applyHFTokenizerConfigBytes(path, data, cfg)
+}
+
+func applyHFTokenizerConfigBytes(source string, data []byte, cfg *HFWordPieceTokenizerConfig) error {
 	var raw struct {
 		DoLowerCase          *bool `json:"do_lower_case"`
 		StripAccents         *bool `json:"strip_accents"`
@@ -447,7 +474,7 @@ func applyHFTokenizerConfig(path string, cfg *HFWordPieceTokenizerConfig) error 
 		ModelMaxLength       int   `json:"model_max_length"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return fmt.Errorf("parse %s: %w", path, err)
+		return fmt.Errorf("parse %s: %w", source, err)
 	}
 	if raw.DoLowerCase != nil {
 		cfg.DoLowerCase = *raw.DoLowerCase
@@ -472,9 +499,13 @@ func applyHFSpecialTokensMap(path string, cfg *HFWordPieceTokenizerConfig) error
 	if err != nil {
 		return err
 	}
+	return applyHFSpecialTokensMapBytes(path, data, cfg)
+}
+
+func applyHFSpecialTokensMapBytes(source string, data []byte, cfg *HFWordPieceTokenizerConfig) error {
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return fmt.Errorf("parse %s: %w", path, err)
+		return fmt.Errorf("parse %s: %w", source, err)
 	}
 	if value := specialTokenString(raw["pad_token"]); value != "" {
 		cfg.PadToken = value

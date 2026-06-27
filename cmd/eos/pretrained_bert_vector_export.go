@@ -21,6 +21,7 @@ func runExportPretrainedBERTRetrievalVectors(args []string) error {
 	sourceDir := fs.String("source", "", "local Hugging Face BERT-family snapshot directory containing config.json and vocab.txt")
 	modulePath := fs.String("module", "", "Eos MLL BERT embedder module artifact produced by import-pretrained-bert --module-out")
 	weightsPath := fs.String("weights", "", "Eos MLL role-named BERT weights file produced by import-pretrained-bert --weights-out")
+	packagePath := fs.String("package", "", "source-free imported BERT package produced by import-pretrained-bert --package-out")
 	datasetName := fs.String("dataset", "", "dataset name for manifest/status output")
 	split := fs.String("split", "test", "qrels split under <beir-dataset-dir>/qrels")
 	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path; when present, export keeps qrels-relevant docs/queries under caps")
@@ -44,10 +45,13 @@ func runExportPretrainedBERTRetrievalVectors(args []string) error {
 		return err
 	}
 	if fs.NArg() != 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
-		return fmt.Errorf("usage: eos export-pretrained-bert-retrieval-vectors --source <hf-snapshot> --module <bert_embed.mll> --weights <weights.mll> [flags] <beir-dataset-dir> <output-dir>")
+		return fmt.Errorf("usage: eos export-pretrained-bert-retrieval-vectors (--package <imported.mll> | --source <hf-snapshot> --module <bert_embed.mll> --weights <weights.mll>) [flags] <beir-dataset-dir> <output-dir>")
 	}
-	if *sourceDir == "" || *modulePath == "" || *weightsPath == "" {
-		return fmt.Errorf("--source, --module, and --weights are required")
+	if *packagePath == "" && (*sourceDir == "" || *modulePath == "" || *weightsPath == "") {
+		return fmt.Errorf("--source, --module, and --weights are required unless --package is provided")
+	}
+	if *packagePath != "" && (*sourceDir != "" || *modulePath != "" || *weightsPath != "") {
+		return fmt.Errorf("--package cannot be combined with --source, --module, or --weights")
 	}
 	datasetDir := fs.Arg(0)
 	outputDir := fs.Arg(1)
@@ -67,6 +71,7 @@ func runExportPretrainedBERTRetrievalVectors(args []string) error {
 		SourceDir:          *sourceDir,
 		ModulePath:         *modulePath,
 		WeightsPath:        *weightsPath,
+		PackagePath:        *packagePath,
 		QueryPrefix:        *queryPrefix,
 		DocumentPrefix:     resolvedDocumentPrefix,
 		BatchSize:          *batchSize,

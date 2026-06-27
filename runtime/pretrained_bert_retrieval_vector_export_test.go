@@ -15,6 +15,7 @@ import (
 	eosartifact "m31labs.dev/eos/artifact/eos"
 	"m31labs.dev/eos/runtime/backend"
 	"m31labs.dev/eos/runtime/backends/cuda"
+	mll "m31labs.dev/mll"
 )
 
 func TestPretrainedBERTRetrievalVectorExportWritesEvaluatorCompatibleCaches(t *testing.T) {
@@ -121,6 +122,226 @@ func TestPretrainedBERTRetrievalVectorExportWritesEvaluatorCompatibleCaches(t *t
 	}
 	if metrics.Inputs.Documents != 1 || metrics.Inputs.Queries != 1 || metrics.Quality.HitAt1 != 1 {
 		t.Fatalf("metrics = %+v", metrics)
+	}
+}
+
+func TestPretrainedBERTRetrievalVectorExportLoadsSourceFreePackage(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	packagePath := writeTinyPretrainedBERTPackageFromFixture(t, sourceDir, modulePath, weightsPath)
+	datasetDir := writeTinyPretrainedBERTBEIRFixture(t)
+	outputDir := filepath.Join(t.TempDir(), "vectors")
+
+	summary, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName:    "tiny-bert",
+		DatasetDir:     datasetDir,
+		OutputDir:      outputDir,
+		PackagePath:    packagePath,
+		QueryPrefix:    "query ",
+		DocumentPrefix: "doc ",
+		BatchSize:      1,
+		MaxLength:      4,
+		Runtime:        New(cuda.New()),
+	})
+	if err != nil {
+		t.Fatalf("export package pretrained BERT retrieval vectors: %v", err)
+	}
+	if summary.SourceDir != "" || summary.ModulePath != "" || summary.WeightsPath != "" {
+		t.Fatalf("package summary should not require source/module/weights paths: %+v", summary)
+	}
+	if summary.PackagePath != packagePath || !isSHA256Hex(summary.PackageSHA256) || !isSHA256Hex(summary.PackageIdentitySHA256) {
+		t.Fatalf("package identity fields = %+v", summary)
+	}
+	if summary.QualityClaim {
+		t.Fatalf("package summary quality claim = true")
+	}
+	if !isSHA256Hex(summary.EmbeddingSpaceID) || !isSHA256Hex(summary.ModuleSHA256) || !isSHA256Hex(summary.WeightsSHA256) ||
+		!isSHA256Hex(summary.ConfigSHA256) || !isSHA256Hex(summary.VocabSHA256) || !isSHA256Hex(summary.TokenizerConfigSHA256) {
+		t.Fatalf("package summary hashes = %+v", summary)
+	}
+	assertFiniteUnitishVector(t, readTinyVectorRows(t, summary.DocVectorPath)[0].Embedding, 2)
+	assertFiniteUnitishVector(t, readTinyVectorRows(t, summary.QueryVectorPath)[0].Embedding, 2)
+
+	data, err := os.ReadFile(filepath.Join(outputDir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var manifest PretrainedBERTRetrievalVectorExportSummary
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("parse manifest: %v", err)
+	}
+	if manifest.PackagePath != packagePath || manifest.PackageIdentitySHA256 != summary.PackageIdentitySHA256 || manifest.QualityClaim {
+		t.Fatalf("manifest package fields = %+v", manifest)
+	}
+}
+
+func TestPretrainedBERTRetrievalVectorExportPackageResumeRequiresManifestIdentity(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	packagePath := writeTinyPretrainedBERTPackageFromFixture(t, sourceDir, modulePath, weightsPath)
+	datasetDir := writeTinyPretrainedBERTBEIRFixtureN(t, 2)
+	outputDir := filepath.Join(t.TempDir(), "vectors")
+	seed, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName: "tiny-bert",
+		DatasetDir:  datasetDir,
+		OutputDir:   outputDir,
+		PackagePath: packagePath,
+		BatchSize:   1,
+		MaxLength:   4,
+		Runtime:     New(cuda.New()),
+	})
+	if err != nil {
+		t.Fatalf("seed package export: %v", err)
+	}
+	beforeDocs := fileSize(t, seed.DocVectorPath)
+
+	manifestPath := filepath.Join(outputDir, "manifest.json")
+	if err := os.Remove(manifestPath); err != nil {
+		t.Fatalf("remove manifest: %v", err)
+	}
+	_, err = ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName: "tiny-bert",
+		DatasetDir:  datasetDir,
+		OutputDir:   outputDir,
+		PackagePath: packagePath,
+		BatchSize:   1,
+		MaxLength:   4,
+		Runtime:     New(cuda.New()),
+		Resume:      true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires manifest") {
+		t.Fatalf("err = %v, want missing manifest error", err)
+	}
+	if got := fileSize(t, seed.DocVectorPath); got != beforeDocs {
+		t.Fatalf("doc vector size changed after rejected missing-manifest package resume: got %d want %d", got, beforeDocs)
+	}
+
+	legacy := PretrainedBERTRetrievalVectorExportSummary{
+		Schema:    PretrainedBERTRetrievalVectorExportManifestSchema,
+		OutputDim: seed.OutputDim,
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy manifest: %v", err)
+	}
+	if err := os.WriteFile(manifestPath, append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("write legacy manifest: %v", err)
+	}
+	_, err = ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName: "tiny-bert",
+		DatasetDir:  datasetDir,
+		OutputDir:   outputDir,
+		PackagePath: packagePath,
+		BatchSize:   1,
+		MaxLength:   4,
+		Runtime:     New(cuda.New()),
+		Resume:      true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "missing embedding_space_id") {
+		t.Fatalf("err = %v, want missing embedding_space_id error", err)
+	}
+	if got := fileSize(t, seed.DocVectorPath); got != beforeDocs {
+		t.Fatalf("doc vector size changed after rejected legacy-manifest package resume: got %d want %d", got, beforeDocs)
+	}
+}
+
+func TestPretrainedBERTPackageReadRejectsTamperedEmbeddedBytes(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	packagePath := writeTinyPretrainedBERTPackageFromFixture(t, sourceDir, modulePath, weightsPath)
+
+	tests := []struct {
+		name   string
+		tamper func(*PretrainedBERTPackage)
+	}{
+		{
+			name: "vocab",
+			tamper: func(pkg *PretrainedBERTPackage) {
+				pkg.Vocab = append([]byte(nil), pkg.Vocab...)
+				pkg.Vocab = append(pkg.Vocab, []byte("tampered_token\n")...)
+			},
+		},
+		{
+			name: "config",
+			tamper: func(pkg *PretrainedBERTPackage) {
+				pkg.ConfigJSON = append([]byte(nil), pkg.ConfigJSON...)
+				pkg.ConfigJSON = append(pkg.ConfigJSON, '\n')
+			},
+		},
+		{
+			name: "tokenizer_config",
+			tamper: func(pkg *PretrainedBERTPackage) {
+				pkg.TokenizerConfigJSON = []byte(`{"do_lower_case":false}` + "\n")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tampered := writeTamperedPretrainedBERTPackage(t, packagePath, tt.tamper)
+			_, err := ReadPretrainedBERTPackageFile(tampered)
+			if err == nil || !strings.Contains(err.Error(), "file table") {
+				t.Fatalf("read tampered package err = %v, want file table mismatch", err)
+			}
+		})
+	}
+}
+
+func TestPretrainedBERTPackageReadRejectsTamperedParsedConfig(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	packagePath := writeTinyPretrainedBERTPackageFromFixture(t, sourceDir, modulePath, weightsPath)
+
+	tampered := writeTamperedPretrainedBERTPackage(t, packagePath, func(pkg *PretrainedBERTPackage) {
+		pkg.Config.HiddenAct = "relu"
+	})
+	_, err := ReadPretrainedBERTPackageFile(tampered)
+	if err == nil || !strings.Contains(err.Error(), "config does not match embedded config.json") {
+		t.Fatalf("read tampered parsed config err = %v, want embedded config mismatch", err)
+	}
+}
+
+func TestPretrainedBERTPackageReadRejectsTamperedParsedSTMetadata(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixtureWithST(t, "cls", 3)
+	packagePath := writeTinyPretrainedBERTPackageFromFixture(t, sourceDir, modulePath, weightsPath)
+
+	tampered := writeTamperedPretrainedBERTPackage(t, packagePath, func(pkg *PretrainedBERTPackage) {
+		if pkg.STMetadata == nil {
+			t.Fatalf("test package missing ST metadata")
+		}
+		pkg.STMetadata.Pooling = "masked_mean"
+		pkg.STMetadata.MaxSeqLength = 4
+	})
+	_, err := ReadPretrainedBERTPackageFile(tampered)
+	if err == nil || !strings.Contains(err.Error(), "sentence-transformers metadata does not match embedded metadata files") {
+		t.Fatalf("read tampered parsed ST metadata err = %v, want embedded ST metadata mismatch", err)
+	}
+}
+
+func TestPretrainedBERTPackageReadRejectsHiddenSTMetadataWithoutEmbeddedFiles(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	packagePath := writeTinyPretrainedBERTPackageFromFixture(t, sourceDir, modulePath, weightsPath)
+
+	tampered := writeTamperedPretrainedBERTPackage(t, packagePath, func(pkg *PretrainedBERTPackage) {
+		pkg.STMetadata = &PretrainedBERTSTMetadata{
+			Pooling:         "cls",
+			PoolingSource:   filepath.Join("1_Pooling", "config.json"),
+			MaxSeqLength:    3,
+			MaxLengthSource: "sentence_bert_config.json",
+		}
+	})
+	_, err := ReadPretrainedBERTPackageFile(tampered)
+	if err == nil || !strings.Contains(err.Error(), "sentence-transformers metadata does not match embedded metadata files") {
+		t.Fatalf("read hidden ST metadata err = %v, want embedded ST metadata mismatch", err)
+	}
+}
+
+func TestPretrainedBERTPackageReadRejectsTamperedResolvedMaxLength(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixtureWithST(t, "cls", 3)
+	packagePath := writeTinyPretrainedBERTPackageFromFixture(t, sourceDir, modulePath, weightsPath)
+
+	tampered := writeTamperedPretrainedBERTPackage(t, packagePath, func(pkg *PretrainedBERTPackage) {
+		pkg.MaxLength = 4
+		pkg.IdentitySHA256 = pkg.IdentityHash()
+	})
+	_, err := ReadPretrainedBERTPackageFile(tampered)
+	if err == nil || !strings.Contains(err.Error(), "max_length 4 does not match embedded config/sentence-transformers max length 3") {
+		t.Fatalf("read tampered max length err = %v, want resolved max length mismatch", err)
 	}
 }
 
@@ -947,7 +1168,7 @@ func writeTinyPretrainedBERTExportFixture(t testing.TB) (sourceDir, modulePath, 
 		t.Fatalf("write tokenizer config: %v", err)
 	}
 
-	plan, err := PlanPretrainedBERTImport(cfg, "fixture")
+	plan, err := PlanPretrainedBERTImportFromDir(sourceDir, "fixture")
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
@@ -1023,6 +1244,140 @@ func writeTinyPretrainedBERTExportFixtureWithST(t testing.TB, pooling string, ma
 		t.Fatalf("rewrite st module: %v", err)
 	}
 	return sourceDir, modulePath, weightsPath
+}
+
+func writeTinyPretrainedBERTPackageFromFixture(t testing.TB, sourceDir, modulePath, weightsPath string) string {
+	t.Helper()
+	cfg, err := LoadPretrainedBERTConfig(filepath.Join(sourceDir, "config.json"))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	plan, err := PlanPretrainedBERTImportFromDir(sourceDir, "fixture")
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	moduleBytes, err := os.ReadFile(modulePath)
+	if err != nil {
+		t.Fatalf("read module: %v", err)
+	}
+	weightsBytes, err := os.ReadFile(weightsPath)
+	if err != nil {
+		t.Fatalf("read weights: %v", err)
+	}
+	configJSON, err := os.ReadFile(filepath.Join(sourceDir, "config.json"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	vocab, err := os.ReadFile(filepath.Join(sourceDir, "vocab.txt"))
+	if err != nil {
+		t.Fatalf("read vocab: %v", err)
+	}
+	tokenizerConfig, err := os.ReadFile(filepath.Join(sourceDir, "tokenizer_config.json"))
+	if err != nil {
+		t.Fatalf("read tokenizer config: %v", err)
+	}
+	stPooling, err := readOptionalPretrainedBERTPackageFile(sourceDir, filepath.Join("1_Pooling", "config.json"))
+	if err != nil {
+		t.Fatalf("read ST pooling config: %v", err)
+	}
+	stConfig, err := readOptionalPretrainedBERTPackageFile(sourceDir, "sentence_bert_config.json")
+	if err != nil {
+		t.Fatalf("read ST config: %v", err)
+	}
+	stMetadata, err := parsePretrainedBERTPackageSTMetadata(stPooling, stConfig)
+	if err != nil {
+		t.Fatalf("parse ST metadata: %v", err)
+	}
+	maxLength, _ := resolvePretrainedBERTMaxLength(0, cfg, stMetadata)
+	pkg := PretrainedBERTPackage{
+		Version:                PretrainedBERTPackageVersion,
+		ModelName:              plan.ModelName,
+		Architecture:           plan.Architecture,
+		Config:                 cfg,
+		STMetadata:             stMetadata,
+		Pooling:                plan.PoolingPolicy,
+		Normalization:          "l2",
+		MaxLength:              maxLength,
+		NativeDim:              cfg.HiddenSize,
+		ModuleSHA256:           sha256BytesHex(moduleBytes),
+		WeightsSHA256:          sha256BytesHex(weightsBytes),
+		ModuleBytes:            moduleBytes,
+		WeightsBytes:           weightsBytes,
+		ConfigJSON:             configJSON,
+		Vocab:                  vocab,
+		TokenizerConfigJSON:    tokenizerConfig,
+		STPoolingConfigJSON:    stPooling,
+		SentenceBERTConfigJSON: stConfig,
+	}
+	pkg.Files = pretrainedBERTPackageFiles(pkg)
+	pkg.IdentitySHA256 = pkg.IdentityHash()
+	data, err := encodePretrainedBERTPackageMLL(pkg)
+	if err != nil {
+		t.Fatalf("encode package: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "tiny-pretrained-bert.imported.mll")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write package: %v", err)
+	}
+	return path
+}
+
+func writeTamperedPretrainedBERTPackage(t testing.TB, sourcePath string, tamper func(*PretrainedBERTPackage)) string {
+	t.Helper()
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read source package: %v", err)
+	}
+	reader, err := mll.ReadBytes(data, mll.WithDigestVerification())
+	if err != nil {
+		t.Fatalf("parse source package: %v", err)
+	}
+	body, ok := reader.Section(tagXPBT)
+	if !ok {
+		t.Fatalf("source package missing XPBT section")
+	}
+	var pkg PretrainedBERTPackage
+	if err := json.Unmarshal(body, &pkg); err != nil {
+		t.Fatalf("parse source package payload: %v", err)
+	}
+	tamper(&pkg)
+	tamperedBody, err := json.Marshal(pkg)
+	if err != nil {
+		t.Fatalf("marshal tampered package payload: %v", err)
+	}
+	sections := make([]mll.SectionInput, 0, reader.SectionCount())
+	for _, entry := range reader.DirectoryEntries() {
+		sectionBody, ok := reader.Section(entry.Tag)
+		if !ok {
+			t.Fatalf("source package missing section %q", string(entry.Tag[:]))
+		}
+		input := mll.SectionInput{
+			Tag:           entry.Tag,
+			Body:          append([]byte(nil), sectionBody...),
+			Flags:         entry.Flags,
+			SchemaVersion: entry.SchemaVersion,
+		}
+		if entry.Tag == mll.TagHEAD {
+			head, err := mll.ReadHeadSection(input.Body)
+			if err != nil {
+				t.Fatalf("parse HEAD section: %v", err)
+			}
+			input.DigestBody = head.DigestBody(reader.Profile())
+		}
+		if entry.Tag == tagXPBT {
+			input.Body = tamperedBody
+		}
+		sections = append(sections, input)
+	}
+	tamperedData, err := mll.WriteToBytes(reader.Profile(), reader.Version(), sections)
+	if err != nil {
+		t.Fatalf("encode tampered package: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "tampered-"+filepath.Base(sourcePath))
+	if err := os.WriteFile(path, tamperedData, 0o644); err != nil {
+		t.Fatalf("write tampered package: %v", err)
+	}
+	return path
 }
 
 func tinyPretrainedBERTExportDecodedWeights() []PretrainedBERTDecodedWeightTensor {
