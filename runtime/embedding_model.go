@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 
 	eosartifact "m31labs.dev/eos/artifact/eos"
 	"m31labs.dev/eos/runtime/backend"
@@ -19,6 +20,11 @@ const (
 	EmbeddingPositionEncodingRoPE         = "rope"
 	EmbeddingAttentionScoreScaleNone      = "none"
 	EmbeddingAttentionScoreScaleKeyDimRSQ = "key_dim_rsqrt"
+	EmbeddingRoleConditioningNone         = "none"
+	EmbeddingRoleConditioningAdditiveV1   = "additive_token_embedding_v1"
+	EmbeddingRoleRaw                      = "raw"
+	EmbeddingRoleQuery                    = "query"
+	EmbeddingRoleDocument                 = "document"
 )
 
 // TokenizerManifest carries embedding-model tokenization limits and ids.
@@ -42,6 +48,13 @@ type EmbeddingManifest struct {
 	OutputName            string            `json:"output_name,omitempty"`
 	OutputDType           string            `json:"output_dtype,omitempty"`
 	TokenEmbeddingParam   string            `json:"token_embedding_param,omitempty"`
+	RoleConditioning      string            `json:"role_conditioning,omitempty"`
+	RoleEmbeddingParam    string            `json:"role_embedding_param,omitempty"`
+	RoleInput             string            `json:"role_input,omitempty"`
+	BatchRoleInput        string            `json:"batch_role_input,omitempty"`
+	RawRoleIndex          int32             `json:"raw_role_index,omitempty"`
+	QueryRoleIndex        int32             `json:"query_role_index,omitempty"`
+	DocumentRoleIndex     int32             `json:"document_role_index,omitempty"`
 	AttentionQueryParam   string            `json:"attention_query_param,omitempty"`
 	AttentionKeyParam     string            `json:"attention_key_param,omitempty"`
 	AttentionValueParam   string            `json:"attention_value_param,omitempty"`
@@ -144,6 +157,13 @@ func (m EmbeddingManifest) mllValues() map[string]authoredManifestValue {
 		"output_name":             authoredString(m.OutputName),
 		"output_dtype":            authoredString(m.OutputDType),
 		"token_embedding_param":   authoredString(m.TokenEmbeddingParam),
+		"role_conditioning":       authoredString(m.RoleConditioning),
+		"role_embedding_param":    authoredString(m.RoleEmbeddingParam),
+		"role_input":              authoredString(m.RoleInput),
+		"batch_role_input":        authoredString(m.BatchRoleInput),
+		"raw_role_index":          authoredInt(int64(m.RawRoleIndex)),
+		"query_role_index":        authoredInt(int64(m.QueryRoleIndex)),
+		"document_role_index":     authoredInt(int64(m.DocumentRoleIndex)),
 		"attention_query_param":   authoredString(m.AttentionQueryParam),
 		"attention_key_param":     authoredString(m.AttentionKeyParam),
 		"attention_value_param":   authoredString(m.AttentionValueParam),
@@ -212,6 +232,41 @@ func embeddingManifestFromDoc(doc authoredManifestDoc) (EmbeddingManifest, error
 		return EmbeddingManifest{}, err
 	} else {
 		manifest.TokenEmbeddingParam = value
+	}
+	if value, _, err := doc.string("role_conditioning"); err != nil {
+		return EmbeddingManifest{}, err
+	} else {
+		manifest.RoleConditioning = value
+	}
+	if value, _, err := doc.string("role_embedding_param"); err != nil {
+		return EmbeddingManifest{}, err
+	} else {
+		manifest.RoleEmbeddingParam = value
+	}
+	if value, _, err := doc.string("role_input"); err != nil {
+		return EmbeddingManifest{}, err
+	} else {
+		manifest.RoleInput = value
+	}
+	if value, _, err := doc.string("batch_role_input"); err != nil {
+		return EmbeddingManifest{}, err
+	} else {
+		manifest.BatchRoleInput = value
+	}
+	if value, _, err := doc.int("raw_role_index"); err != nil {
+		return EmbeddingManifest{}, err
+	} else {
+		manifest.RawRoleIndex = int32(value)
+	}
+	if value, _, err := doc.int("query_role_index"); err != nil {
+		return EmbeddingManifest{}, err
+	} else {
+		manifest.QueryRoleIndex = int32(value)
+	}
+	if value, _, err := doc.int("document_role_index"); err != nil {
+		return EmbeddingManifest{}, err
+	} else {
+		manifest.DocumentRoleIndex = int32(value)
 	}
 	if value, _, err := doc.string("attention_query_param"); err != nil {
 		return EmbeddingManifest{}, err
@@ -397,15 +452,25 @@ func (m *EmbeddingModel) TokenizeText(text string) ([]int32, []int32, error) {
 
 // EmbedText tokenizes text and executes the pooled embedding entrypoint.
 func (m *EmbeddingModel) EmbedText(ctx context.Context, text string) (EmbeddingResult, error) {
+	return m.EmbedTextWithRole(ctx, text, EmbeddingRoleRaw)
+}
+
+// EmbedTextWithRole tokenizes text and executes the pooled embedding entrypoint with an explicit semantic role.
+func (m *EmbeddingModel) EmbedTextWithRole(ctx context.Context, text, role string) (EmbeddingResult, error) {
 	tokens, _, err := m.TokenizeText(text)
 	if err != nil {
 		return EmbeddingResult{}, err
 	}
-	return m.Embed(ctx, tokens)
+	return m.EmbedWithRole(ctx, tokens, role)
 }
 
 // EmbedTextBatch tokenizes text rows and executes the batched pooled embedding entrypoint.
 func (m *EmbeddingModel) EmbedTextBatch(ctx context.Context, texts []string) (EmbeddingResult, error) {
+	return m.EmbedTextBatchWithRole(ctx, texts, EmbeddingRoleRaw)
+}
+
+// EmbedTextBatchWithRole tokenizes text rows and executes the batched pooled embedding entrypoint with an explicit role.
+func (m *EmbeddingModel) EmbedTextBatchWithRole(ctx context.Context, texts []string, role string) (EmbeddingResult, error) {
 	if m == nil {
 		return EmbeddingResult{}, fmt.Errorf("embedding model is not loaded")
 	}
@@ -420,18 +485,35 @@ func (m *EmbeddingModel) EmbedTextBatch(ctx context.Context, texts []string) (Em
 		}
 		batches = append(batches, tokens)
 	}
-	return m.EmbedBatch(ctx, batches)
+	return m.EmbedBatchWithRole(ctx, batches, role)
+}
+
+func (m *EmbeddingModel) EmbedQueryText(ctx context.Context, text string) (EmbeddingResult, error) {
+	return m.EmbedTextWithRole(ctx, text, EmbeddingRoleQuery)
+}
+
+func (m *EmbeddingModel) EmbedDocumentText(ctx context.Context, text string) (EmbeddingResult, error) {
+	return m.EmbedTextWithRole(ctx, text, EmbeddingRoleDocument)
 }
 
 // Embed executes the pooled embedding entrypoint for one token sequence.
 func (m *EmbeddingModel) Embed(ctx context.Context, tokens []int32) (EmbeddingResult, error) {
+	return m.EmbedWithRole(ctx, tokens, EmbeddingRoleRaw)
+}
+
+// EmbedWithRole executes the pooled embedding entrypoint for one token sequence with an explicit semantic role.
+func (m *EmbeddingModel) EmbedWithRole(ctx context.Context, tokens []int32, role string) (EmbeddingResult, error) {
 	if m == nil || m.program == nil {
 		return EmbeddingResult{}, fmt.Errorf("embedding model is not loaded")
 	}
 	if err := m.validateTokenSequence(tokens); err != nil {
 		return EmbeddingResult{}, err
 	}
-	if m.manifest.MaskInput == "" {
+	roleIndex, err := m.manifest.roleIndex(role)
+	if err != nil {
+		return EmbeddingResult{}, err
+	}
+	if m.manifest.MaskInput == "" && !m.manifest.roleConditioned() {
 		result, err := m.program.RunEmbed(ctx, m.manifest.PooledEntry, tokens)
 		if err != nil {
 			return EmbeddingResult{}, err
@@ -449,20 +531,39 @@ func (m *EmbeddingModel) Embed(ctx context.Context, tokens []int32) (EmbeddingRe
 	if err != nil {
 		return EmbeddingResult{}, err
 	}
-	maskInput, err := requireEntryInput(entry, m.manifest.MaskInput)
-	if err != nil {
-		return EmbeddingResult{}, err
+	var tokenTensor *backend.Tensor
+	inputs := map[string]any{
+		tokenInput.Name: tokenTensor,
 	}
-	tokenTensor, maskTensor, err := buildMaskedTokenInputs([][]int32{tokens}, m.manifest.Tokenizer.PadID, false)
-	if err != nil {
-		return EmbeddingResult{}, err
+	if m.manifest.MaskInput != "" {
+		maskInput, err := requireEntryInput(entry, m.manifest.MaskInput)
+		if err != nil {
+			return EmbeddingResult{}, err
+		}
+		var maskTensor *backend.Tensor
+		tokenTensor, maskTensor, err = buildMaskedTokenInputs([][]int32{tokens}, m.manifest.Tokenizer.PadID, false)
+		if err != nil {
+			return EmbeddingResult{}, err
+		}
+		inputs[tokenInput.Name] = tokenTensor
+		inputs[maskInput.Name] = maskTensor
+	} else {
+		tokenTensor, err = buildTokenInputTensor([][]int32{tokens}, m.manifest.Tokenizer.PadID, false)
+		if err != nil {
+			return EmbeddingResult{}, err
+		}
+		inputs[tokenInput.Name] = tokenTensor
+	}
+	if m.manifest.roleConditioned() {
+		roleInput, err := requireEntryInput(entry, m.manifest.RoleInput)
+		if err != nil {
+			return EmbeddingResult{}, err
+		}
+		inputs[roleInput.Name] = buildRoleInputTensor([][]int32{tokens}, roleIndex, false)
 	}
 	raw, err := m.program.Run(ctx, backend.Request{
-		Entry: m.manifest.PooledEntry,
-		Inputs: map[string]any{
-			tokenInput.Name: tokenTensor,
-			maskInput.Name:  maskTensor,
-		},
+		Entry:  m.manifest.PooledEntry,
+		Inputs: inputs,
 	})
 	if err != nil {
 		return EmbeddingResult{}, err
@@ -479,6 +580,11 @@ func (m *EmbeddingModel) Embed(ctx context.Context, tokens []int32) (EmbeddingRe
 
 // EmbedBatch executes the batched pooled embedding entrypoint.
 func (m *EmbeddingModel) EmbedBatch(ctx context.Context, batches [][]int32) (EmbeddingResult, error) {
+	return m.EmbedBatchWithRole(ctx, batches, EmbeddingRoleRaw)
+}
+
+// EmbedBatchWithRole executes the batched pooled embedding entrypoint with an explicit semantic role.
+func (m *EmbeddingModel) EmbedBatchWithRole(ctx context.Context, batches [][]int32, role string) (EmbeddingResult, error) {
 	if m == nil || m.program == nil {
 		return EmbeddingResult{}, fmt.Errorf("embedding model is not loaded")
 	}
@@ -490,10 +596,14 @@ func (m *EmbeddingModel) EmbedBatch(ctx context.Context, batches [][]int32) (Emb
 			return EmbeddingResult{}, fmt.Errorf("batch %d: %w", i, err)
 		}
 	}
-	if m.manifest.MaskInput != "" && raggedTokenBatches(batches) {
-		return m.embedBatchByTokenLength(ctx, batches)
+	roleIndex, err := m.manifest.roleIndex(role)
+	if err != nil {
+		return EmbeddingResult{}, err
 	}
-	if m.manifest.MaskInput == "" {
+	if m.manifest.MaskInput != "" && raggedTokenBatches(batches) {
+		return m.embedBatchByTokenLength(ctx, batches, role)
+	}
+	if m.manifest.MaskInput == "" && !m.manifest.roleConditioned() {
 		result, err := m.program.RunEmbedBatch(ctx, m.manifest.BatchEntry, batches)
 		if err != nil {
 			return EmbeddingResult{}, err
@@ -511,20 +621,39 @@ func (m *EmbeddingModel) EmbedBatch(ctx context.Context, batches [][]int32) (Emb
 	if err != nil {
 		return EmbeddingResult{}, err
 	}
-	maskInput, err := requireEntryInput(entry, m.manifest.MaskInput)
-	if err != nil {
-		return EmbeddingResult{}, err
+	var tokenTensor *backend.Tensor
+	inputs := map[string]any{
+		tokenInput.Name: tokenTensor,
 	}
-	tokenTensor, maskTensor, err := buildMaskedTokenInputs(batches, m.manifest.Tokenizer.PadID, true)
-	if err != nil {
-		return EmbeddingResult{}, err
+	if m.manifest.MaskInput != "" {
+		maskInput, err := requireEntryInput(entry, m.manifest.MaskInput)
+		if err != nil {
+			return EmbeddingResult{}, err
+		}
+		var maskTensor *backend.Tensor
+		tokenTensor, maskTensor, err = buildMaskedTokenInputs(batches, m.manifest.Tokenizer.PadID, true)
+		if err != nil {
+			return EmbeddingResult{}, err
+		}
+		inputs[tokenInput.Name] = tokenTensor
+		inputs[maskInput.Name] = maskTensor
+	} else {
+		tokenTensor, err = buildTokenInputTensor(batches, m.manifest.Tokenizer.PadID, true)
+		if err != nil {
+			return EmbeddingResult{}, err
+		}
+		inputs[tokenInput.Name] = tokenTensor
+	}
+	if m.manifest.roleConditioned() {
+		roleInput, err := requireEntryInput(entry, m.manifest.BatchRoleInput)
+		if err != nil {
+			return EmbeddingResult{}, err
+		}
+		inputs[roleInput.Name] = buildRoleInputTensor(batches, roleIndex, true)
 	}
 	raw, err := m.program.Run(ctx, backend.Request{
-		Entry: m.manifest.BatchEntry,
-		Inputs: map[string]any{
-			tokenInput.Name: tokenTensor,
-			maskInput.Name:  maskTensor,
-		},
+		Entry:  m.manifest.BatchEntry,
+		Inputs: inputs,
 	})
 	if err != nil {
 		return EmbeddingResult{}, err
@@ -557,7 +686,7 @@ func raggedTokenBatches(batches [][]int32) bool {
 	return false
 }
 
-func (m *EmbeddingModel) embedBatchByTokenLength(ctx context.Context, batches [][]int32) (EmbeddingResult, error) {
+func (m *EmbeddingModel) embedBatchByTokenLength(ctx context.Context, batches [][]int32, role string) (EmbeddingResult, error) {
 	groups := map[int][]embeddingBatchSlot{}
 	lengths := []int{}
 	for i, batch := range batches {
@@ -579,7 +708,7 @@ func (m *EmbeddingModel) embedBatchByTokenLength(ctx context.Context, batches []
 		for i, slot := range slots {
 			groupBatches[i] = slot.tokens
 		}
-		result, err := m.EmbedBatch(ctx, groupBatches)
+		result, err := m.EmbedBatchWithRole(ctx, groupBatches, role)
 		if err != nil {
 			return EmbeddingResult{}, err
 		}
@@ -692,6 +821,25 @@ func (m EmbeddingManifest) normalized() EmbeddingManifest {
 	if m.TokenEmbeddingParam == "" {
 		m.TokenEmbeddingParam = "token_embedding"
 	}
+	if m.RoleConditioning == "" {
+		m.RoleConditioning = EmbeddingRoleConditioningNone
+	}
+	if m.roleConditioned() {
+		if m.RoleEmbeddingParam == "" {
+			m.RoleEmbeddingParam = "role_embedding"
+		}
+		if m.RoleInput == "" {
+			m.RoleInput = "role_ids"
+		}
+		if m.BatchRoleInput == "" {
+			m.BatchRoleInput = "role_ids"
+		}
+		if m.QueryRoleIndex == 0 && m.DocumentRoleIndex == 0 {
+			m.RawRoleIndex = 0
+			m.QueryRoleIndex = 1
+			m.DocumentRoleIndex = 2
+		}
+	}
 	if m.ProjectionParam == "" {
 		m.ProjectionParam = "projection"
 	}
@@ -705,6 +853,33 @@ func (m EmbeddingManifest) normalized() EmbeddingManifest {
 		m.PositionEncoding = EmbeddingPositionEncodingNone
 	}
 	return m
+}
+
+func (m EmbeddingManifest) roleConditioned() bool {
+	return m.RoleConditioning == EmbeddingRoleConditioningAdditiveV1
+}
+
+func (m EmbeddingManifest) roleIndex(role string) (int32, error) {
+	role = strings.TrimSpace(strings.ToLower(role))
+	if role == "" {
+		role = EmbeddingRoleRaw
+	}
+	switch role {
+	case EmbeddingRoleRaw:
+		return m.RawRoleIndex, nil
+	case EmbeddingRoleQuery:
+		if !m.roleConditioned() {
+			return 0, fmt.Errorf("embedding model does not support query role")
+		}
+		return m.QueryRoleIndex, nil
+	case EmbeddingRoleDocument:
+		if !m.roleConditioned() {
+			return 0, fmt.Errorf("embedding model does not support document role")
+		}
+		return m.DocumentRoleIndex, nil
+	default:
+		return 0, fmt.Errorf("unsupported embedding role %q", role)
+	}
 }
 
 // ValidateModule checks that a module satisfies the embedding serving contract.
@@ -748,11 +923,28 @@ func (m EmbeddingManifest) ValidateModule(mod *eosartifact.Module) error {
 	default:
 		return fmt.Errorf("unsupported position_encoding %q", m.PositionEncoding)
 	}
+	switch m.RoleConditioning {
+	case "", EmbeddingRoleConditioningNone:
+	case EmbeddingRoleConditioningAdditiveV1:
+		if err := validateEmbeddingParam(mod, m.RoleEmbeddingParam); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported role_conditioning %q", m.RoleConditioning)
+	}
 	if err := validateEmbeddingEntry(mod, m.PooledEntry, m.TokenInput, m.MaskInput, 1, 1, m.OutputDType); err != nil {
 		return err
 	}
 	if err := validateEmbeddingEntry(mod, m.BatchEntry, m.TokenInput, m.MaskInput, 2, 2, m.OutputDType); err != nil {
 		return err
+	}
+	if m.roleConditioned() {
+		if err := validateEmbeddingRoleEntry(mod, m.PooledEntry, m.RoleInput, 1); err != nil {
+			return err
+		}
+		if err := validateEmbeddingRoleEntry(mod, m.BatchEntry, m.BatchRoleInput, 2); err != nil {
+			return err
+		}
 	}
 	if err := validateEmbeddingParam(mod, m.TokenEmbeddingParam); err != nil {
 		return err
@@ -767,6 +959,27 @@ func (m EmbeddingManifest) ValidateModule(mod *eosartifact.Module) error {
 	}
 	if err := validateEmbeddingParam(mod, m.ProjectionParam); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateEmbeddingRoleEntry(mod *eosartifact.Module, entryName, roleInput string, rank int) error {
+	entry, err := findEntryPoint(mod, entryName)
+	if err != nil {
+		return err
+	}
+	input, err := requireEntryInput(entry, roleInput)
+	if err != nil {
+		return err
+	}
+	if input.Type.Kind != eosartifact.ValueTensor || input.Type.Tensor == nil {
+		return fmt.Errorf("entrypoint %q input %q is not a tensor", entryName, roleInput)
+	}
+	if input.Type.Tensor.DType != "i32" {
+		return fmt.Errorf("entrypoint %q input %q dtype = %q, want i32", entryName, roleInput, input.Type.Tensor.DType)
+	}
+	if got := len(input.Type.Tensor.Shape); got != rank {
+		return fmt.Errorf("entrypoint %q input %q rank = %d, want %d", entryName, roleInput, got, rank)
 	}
 	return nil
 }
@@ -1008,4 +1221,51 @@ func buildMaskedTokenInputs(batches [][]int32, padID int32, batched bool) (*back
 	}
 	shape := []int{len(batches), maxLen}
 	return backend.NewTensorI32(shape, tokenData), backend.NewTensorI32(shape, maskData), nil
+}
+
+func buildTokenInputTensor(batches [][]int32, padID int32, batched bool) (*backend.Tensor, error) {
+	if len(batches) == 0 {
+		return nil, fmt.Errorf("token batches are empty")
+	}
+	maxLen := 0
+	for i, batch := range batches {
+		if len(batch) == 0 {
+			return nil, fmt.Errorf("token batch %d is empty", i)
+		}
+		if len(batch) > maxLen {
+			maxLen = len(batch)
+		}
+	}
+	tokenData := make([]int32, 0, len(batches)*maxLen)
+	for _, batch := range batches {
+		tokenData = append(tokenData, batch...)
+		for i := len(batch); i < maxLen; i++ {
+			tokenData = append(tokenData, padID)
+		}
+	}
+	if !batched {
+		return backend.NewTensorI32([]int{maxLen}, tokenData[:maxLen]), nil
+	}
+	return backend.NewTensorI32([]int{len(batches), maxLen}, tokenData), nil
+}
+
+func buildRoleInputTensor(batches [][]int32, role int32, batched bool) *backend.Tensor {
+	maxLen := 0
+	for _, batch := range batches {
+		if len(batch) > maxLen {
+			maxLen = len(batch)
+		}
+	}
+	if !batched {
+		data := make([]int32, maxLen)
+		for i := range data {
+			data[i] = role
+		}
+		return backend.NewTensorI32([]int{maxLen}, data)
+	}
+	data := make([]int32, len(batches)*maxLen)
+	for i := range data {
+		data[i] = role
+	}
+	return backend.NewTensorI32([]int{len(batches), maxLen}, data)
 }

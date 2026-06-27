@@ -2059,7 +2059,7 @@ func TestSpreadHardNegativeOrderByQuerySeparatesRepeatedQueries(t *testing.T) {
 		}
 		seenQueries := map[string]bool{}
 		for _, idx := range got[start:end] {
-			key := embeddingBatchSequenceKey(trainSet[idx].QueryTokens, trainSet[idx].QueryMask)
+			key := embeddingBatchSequenceKey(trainSet[idx].QueryTokens, trainSet[idx].QueryMask, 0)
 			if seenQueries[key] {
 				t.Fatalf("chunk %v has repeated query in order %v", got[start:end], got)
 			}

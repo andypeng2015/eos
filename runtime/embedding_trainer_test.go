@@ -1341,7 +1341,7 @@ func embedTrainerTokensForTest(t *testing.T, trainer *EmbeddingTrainer, tokens, 
 		t.Fatalf("prepare mask tokens=%v mask=%v: %v", tokens, mask, err)
 	}
 	forward := trainer.prepareForwardWeights()
-	seq, err := trainer.encodeSequence(tokens, preparedMask, forward.token, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, false)
+	seq, err := trainer.encodeSequence(tokens, preparedMask, 0, forward.token, forward.role, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, false)
 	if err != nil {
 		t.Fatalf("encode tokens=%v mask=%v: %v", tokens, mask, err)
 	}
@@ -2138,7 +2138,7 @@ func TestEmbeddingTrainerSingleForwardKeepsActivationBindings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare mask: %v", err)
 	}
-	seq, err := trainer.encodeSequence([]int32{0, 2}, mask, forward.token, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, true)
+	seq, err := trainer.encodeSequence([]int32{0, 2}, mask, 0, forward.token, forward.role, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, true)
 	if err != nil {
 		t.Fatalf("encode sequence: %v", err)
 	}
@@ -2166,7 +2166,7 @@ func TestEmbeddingTrainerAttentionActivationsBindAndRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare mask: %v", err)
 	}
-	state, err := trainer.encodeSequence([]int32{0, 2}, mask, tokenForward, attnQForward, attnKForward, attnVForward, attnOForward, nil, projForward, true)
+	state, err := trainer.encodeSequence([]int32{0, 2}, mask, 0, tokenForward, nil, attnQForward, attnKForward, attnVForward, attnOForward, nil, projForward, true)
 	if err != nil {
 		t.Fatalf("encode sequence: %v", err)
 	}
@@ -2242,7 +2242,7 @@ func TestEmbeddingTrainerFFNActivationsBindAndRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare mask: %v", err)
 	}
-	state, err := trainer.encodeSequence([]int32{0, 2}, mask, tokenForward, nil, nil, nil, nil, hiddenForward, projForward, true)
+	state, err := trainer.encodeSequence([]int32{0, 2}, mask, 0, tokenForward, nil, nil, nil, nil, nil, hiddenForward, projForward, true)
 	if err != nil {
 		t.Fatalf("encode sequence: %v", err)
 	}

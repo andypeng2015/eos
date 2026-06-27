@@ -118,11 +118,15 @@ func ExportTimeSeriesWindowVectors(ctx context.Context, model *EmbeddingModel, c
 	if err := writeTimeSeriesBEIRQueries(queries, beirQueriesPath); err != nil {
 		return TimeSeriesVectorExportSummary{}, fmt.Errorf("write BEIR queries helper: %w", err)
 	}
-	dim, modelDim, err := writeRetrievalChildVectorCache(ctx, model, windows, childPath, cfg.BatchSize, cfg.SeriesPrefix, cfg.OutputDim)
+	docRole, queryRole, _, err := resolveEmbeddingRetrievalRoles(model, EmbeddingRoleModeAuto)
+	if err != nil {
+		return TimeSeriesVectorExportSummary{}, err
+	}
+	dim, modelDim, err := writeRetrievalChildVectorCache(ctx, model, windows, childPath, cfg.BatchSize, cfg.SeriesPrefix, cfg.OutputDim, docRole)
 	if err != nil {
 		return TimeSeriesVectorExportSummary{}, fmt.Errorf("write child window vectors: %w", err)
 	}
-	queryDim, queryModelDim, err := writeRetrievalVectorCache(ctx, model, queries, queryPath, cfg.BatchSize, cfg.QueryPrefix, cfg.OutputDim)
+	queryDim, queryModelDim, err := writeRetrievalVectorCache(ctx, model, queries, queryPath, cfg.BatchSize, cfg.QueryPrefix, cfg.OutputDim, queryRole)
 	if err != nil {
 		return TimeSeriesVectorExportSummary{}, fmt.Errorf("write query vectors: %w", err)
 	}

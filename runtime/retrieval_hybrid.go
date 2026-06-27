@@ -51,7 +51,11 @@ func EvaluateHybridRetrieval(ctx context.Context, model *EmbeddingModel, cfg Ret
 	}
 
 	docStart := time.Now()
-	docVectors, err := embedRetrievalTexts(ctx, model, corpus, cfg.BatchSize)
+	docRole, queryRole, _, err := resolveEmbeddingRetrievalRoles(model, cfg.RoleMode)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
+	docVectors, err := embedRetrievalTexts(ctx, model, corpus, cfg.BatchSize, docRole)
 	if err != nil {
 		return RetrievalEvalMetrics{}, fmt.Errorf("embed corpus: %w", err)
 	}
@@ -62,7 +66,7 @@ func EvaluateHybridRetrieval(ctx context.Context, model *EmbeddingModel, cfg Ret
 	docDuration := time.Since(docStart)
 
 	queryStart := time.Now()
-	queryVectors, err := embedRetrievalTexts(ctx, model, queries, cfg.BatchSize)
+	queryVectors, err := embedRetrievalTexts(ctx, model, queries, cfg.BatchSize, queryRole)
 	if err != nil {
 		return RetrievalEvalMetrics{}, fmt.Errorf("embed queries: %w", err)
 	}

@@ -412,11 +412,17 @@ func runArtifact(args []string) error {
 }
 
 func runEmbedText(args []string) error {
-	if len(args) < 2 || args[0] == "" {
-		return fmt.Errorf("usage: eos embed-text <artifact.mll> <text...>")
+	fs := flag.NewFlagSet("embed-text", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	role := fs.String("role", eosruntime.EmbeddingRoleRaw, "embedding role: raw, query, or document")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
-	path := args[0]
-	text := strings.Join(args[1:], " ")
+	if fs.NArg() < 2 || fs.Arg(0) == "" {
+		return fmt.Errorf("usage: eos embed-text [--role raw|query|document] <artifact.mll> <text...>")
+	}
+	path := fs.Arg(0)
+	text := strings.Join(fs.Args()[1:], " ")
 	rt := eosruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
 	model, err := rt.LoadEmbeddingPackage(context.Background(), path)
 	if err != nil {
@@ -426,7 +432,7 @@ func runEmbedText(args []string) error {
 	if err != nil {
 		return err
 	}
-	result, err := model.EmbedText(context.Background(), text)
+	result, err := model.EmbedTextWithRole(context.Background(), text, *role)
 	if err != nil {
 		return err
 	}
@@ -517,6 +523,7 @@ func runExportRetrievalVectors(args []string) error {
 	documentChunkMinWords := fs.Int("document-chunk-min-words", 1, "minimum words for a trailing document chunk")
 	documentPrefix := fs.String("document-prefix", "", "prefix prepended to document/chunk text before embedding")
 	queryPrefix := fs.String("query-prefix", "", "prefix prepended to query text before embedding")
+	roleMode := fs.String("role-mode", eosruntime.EmbeddingRoleModeAuto, "embedding role mode: auto, raw, or query-document")
 	manifestPath := fs.String("manifest-json", "", "write export summary JSON manifest")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -556,6 +563,7 @@ func runExportRetrievalVectors(args []string) error {
 		DocumentChunkMinWords: *documentChunkMinWords,
 		DocumentPrefix:        *documentPrefix,
 		QueryPrefix:           *queryPrefix,
+		RoleMode:              *roleMode,
 		ManifestJSONPath:      *manifestPath,
 	})
 	if err != nil {
@@ -985,6 +993,7 @@ func runEvalRetrieval(args []string) error {
 	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
 	metricsPath := fs.String("metrics-json", "", "write retrieval metrics JSON")
 	perQueryPath := fs.String("per-query-jsonl", "", "write one retrieval diagnostics JSONL row per evaluated query")
+	roleMode := fs.String("role-mode", eosruntime.EmbeddingRoleModeAuto, "embedding role mode: auto, raw, or query-document")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1017,6 +1026,7 @@ func runEvalRetrieval(args []string) error {
 		MaxDocs:           *maxDocs,
 		MaxQueries:        *maxQueries,
 		PerQueryJSONLPath: *perQueryPath,
+		RoleMode:          *roleMode,
 	})
 	if err != nil {
 		return err

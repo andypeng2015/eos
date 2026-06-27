@@ -500,6 +500,7 @@ pipeline rerank_candidates_packed(query: f16[D], docs: q4[N, D], candidate_ids: 
 func encoderTrainableSource(weightDType string) string {
 	return fmt.Sprintf(`
 param token_embedding: %[1]s[V, D] @weight("weights/token_embedding") @trainable
+param role_embedding: %[1]s[3, D] @weight("weights/role_embedding") @trainable
 param attn_q: %[1]s[D, D] @weight("weights/attn_q") @trainable
 param attn_k: %[1]s[D, D] @weight("weights/attn_k") @trainable
 param attn_v: %[1]s[D, D] @weight("weights/attn_v") @trainable
@@ -507,9 +508,12 @@ param attn_o: %[1]s[D, D] @weight("weights/attn_o") @trainable
 param ffn_up: %[1]s[D, H] @weight("weights/ffn_up") @trainable
 param projection: %[1]s[H, D] @weight("weights/projection") @trainable
 
-pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[D] {
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T], role_ids: i32[T]) -> f16[D] {
     let hidden_q = gather(token_embedding, tokens)
-    let hidden = rope(dequant(hidden_q))
+    let role_hidden_q = gather(role_embedding, role_ids)
+    let hidden_f = dequant(hidden_q)
+    let role_hidden_f = dequant(role_hidden_q)
+    let hidden = rope(hidden_f + role_hidden_f)
     let wq_f = dequant(attn_q)
     let wk_f = dequant(attn_k)
     let wv_f = dequant(attn_v)
@@ -549,9 +553,12 @@ pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[D] {
     return mean_pool(normalized, attention_mask)
 }
 
-pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, D] {
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T], role_ids: i32[B, T]) -> f16[B, D] {
     let hidden_q = gather(token_embedding, tokens)
-    let hidden = rope(dequant(hidden_q))
+    let role_hidden_q = gather(role_embedding, role_ids)
+    let hidden_f = dequant(hidden_q)
+    let role_hidden_f = dequant(role_hidden_q)
+    let hidden = rope(hidden_f + role_hidden_f)
     let wq_f = dequant(attn_q)
     let wk_f = dequant(attn_k)
     let wv_f = dequant(attn_v)

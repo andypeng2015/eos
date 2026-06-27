@@ -2050,7 +2050,7 @@ func spreadHardNegativeOrderByQuery(trainSet []EmbeddingHardNegativeExample, ord
 			return order
 		}
 		example := trainSet[idx]
-		key := embeddingBatchSequenceKey(example.QueryTokens, example.QueryMask)
+		key := embeddingBatchSequenceKey(example.QueryTokens, example.QueryMask, 0)
 		bucketIndex, ok := bucketByKey[key]
 		if !ok {
 			bucketIndex = len(buckets)

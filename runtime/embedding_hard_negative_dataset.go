@@ -196,7 +196,7 @@ func BuildEmbeddingHardNegativeExamplesFromPairs(pairs []EmbeddingPairExample, m
 	groups := map[string]*queryGroup{}
 	order := []string{}
 	for _, pair := range pairs {
-		key := embeddingBatchSequenceKey(pair.LeftTokens, pair.LeftMask)
+		key := embeddingBatchSequenceKey(pair.LeftTokens, pair.LeftMask, 0)
 		group := groups[key]
 		if group == nil {
 			group = &queryGroup{

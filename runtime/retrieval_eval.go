@@ -22,6 +22,12 @@ import (
 const RetrievalEvalMetricsSchema = "manta.embedding_retrieval_metrics.v1"
 const RetrievalEvalPerQuerySchema = "manta.embedding_retrieval_per_query.v1"
 
+const (
+	EmbeddingRoleModeAuto          = "auto"
+	EmbeddingRoleModeRaw           = "raw"
+	EmbeddingRoleModeQueryDocument = "query-document"
+)
+
 // RetrievalEvalConfig describes a BEIR-style retrieval eval.
 type RetrievalEvalConfig struct {
 	DatasetName                  string
@@ -44,6 +50,7 @@ type RetrievalEvalConfig struct {
 	MultiVectorAggregation       string
 	MultiVectorChildCountPenalty float64
 	Hybrid                       RetrievalEvalHybridConfig
+	RoleMode                     string
 }
 
 type RetrievalEvalHybridConfig struct {
@@ -90,6 +97,7 @@ type RetrievalEvalConfigMetrics struct {
 	MaxDocs    int                         `json:"max_docs,omitempty"`
 	MaxQueries int                         `json:"max_queries,omitempty"`
 	Hybrid     *RetrievalEvalHybridMetrics `json:"hybrid,omitempty"`
+	RoleMode   string                      `json:"role_mode,omitempty"`
 }
 
 type RetrievalEvalHybridMetrics struct {
@@ -238,14 +246,18 @@ func EvaluateEmbeddingRetrieval(ctx context.Context, model *EmbeddingModel, cfg 
 	}
 
 	docStart := time.Now()
-	docVectors, err := embedRetrievalTexts(ctx, model, corpus, cfg.BatchSize)
+	docRole, queryRole, effectiveRoleMode, err := resolveEmbeddingRetrievalRoles(model, cfg.RoleMode)
+	if err != nil {
+		return RetrievalEvalMetrics{}, err
+	}
+	docVectors, err := embedRetrievalTexts(ctx, model, corpus, cfg.BatchSize, docRole)
 	if err != nil {
 		return RetrievalEvalMetrics{}, fmt.Errorf("embed corpus: %w", err)
 	}
 	docDuration := time.Since(docStart)
 
 	queryStart := time.Now()
-	queryVectors, err := embedRetrievalTexts(ctx, model, queries, cfg.BatchSize)
+	queryVectors, err := embedRetrievalTexts(ctx, model, queries, cfg.BatchSize, queryRole)
 	if err != nil {
 		return RetrievalEvalMetrics{}, fmt.Errorf("embed queries: %w", err)
 	}
@@ -282,6 +294,7 @@ func EvaluateEmbeddingRetrieval(ctx context.Context, model *EmbeddingModel, cfg 
 			TopK:       cfg.TopK,
 			MaxDocs:    cfg.MaxDocs,
 			MaxQueries: cfg.MaxQueries,
+			RoleMode:   effectiveRoleMode,
 		},
 		Quality: quality,
 		Throughput: RetrievalEvalThroughput{
@@ -426,7 +439,33 @@ func normalizeRetrievalEvalConfig(cfg RetrievalEvalConfig) RetrievalEvalConfig {
 	if cfg.MultiVectorAggregation == "" {
 		cfg.MultiVectorAggregation = TurboQuantMultiVectorAggregationMax
 	}
+	if cfg.RoleMode == "" {
+		cfg.RoleMode = EmbeddingRoleModeAuto
+	}
 	return cfg
+}
+
+func resolveEmbeddingRetrievalRoles(model *EmbeddingModel, mode string) (docRole, queryRole, effectiveMode string, err error) {
+	if mode == "" {
+		mode = EmbeddingRoleModeAuto
+	}
+	roleConditioned := model != nil && model.Manifest().normalized().roleConditioned()
+	switch mode {
+	case EmbeddingRoleModeAuto:
+		if roleConditioned {
+			return EmbeddingRoleDocument, EmbeddingRoleQuery, EmbeddingRoleModeQueryDocument, nil
+		}
+		return EmbeddingRoleRaw, EmbeddingRoleRaw, EmbeddingRoleModeRaw, nil
+	case EmbeddingRoleModeRaw:
+		return EmbeddingRoleRaw, EmbeddingRoleRaw, EmbeddingRoleModeRaw, nil
+	case EmbeddingRoleModeQueryDocument:
+		if !roleConditioned {
+			return "", "", "", fmt.Errorf("role-mode query-document requires a role-conditioned embedding model")
+		}
+		return EmbeddingRoleDocument, EmbeddingRoleQuery, EmbeddingRoleModeQueryDocument, nil
+	default:
+		return "", "", "", fmt.Errorf("unsupported role-mode %q", mode)
+	}
 }
 
 type beirJSONRecord struct {
@@ -769,7 +808,7 @@ func readBEIRQrels(path string) (retrievalQrels, error) {
 	return qrels, nil
 }
 
-func embedRetrievalTexts(ctx context.Context, model *EmbeddingModel, records []retrievalTextRecord, batchSize int) ([]retrievalVectorRecord, error) {
+func embedRetrievalTexts(ctx context.Context, model *EmbeddingModel, records []retrievalTextRecord, batchSize int, role string) ([]retrievalVectorRecord, error) {
 	if batchSize <= 0 {
 		batchSize = 64
 	}
@@ -793,7 +832,7 @@ func embedRetrievalTexts(ctx context.Context, model *EmbeddingModel, records []r
 			for i, record := range chunk {
 				batches[i] = record.Tokens
 			}
-			result, err := model.EmbedBatch(ctx, batches)
+			result, err := model.EmbedBatchWithRole(ctx, batches, role)
 			if err != nil {
 				return nil, err
 			}

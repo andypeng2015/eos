@@ -31,6 +31,7 @@ type RetrievalVectorExportConfig struct {
 	DocumentChunkMinWords int
 	DocumentPrefix        string
 	QueryPrefix           string
+	RoleMode              string
 	ManifestJSONPath      string
 }
 
@@ -51,6 +52,7 @@ type RetrievalVectorExportSummary struct {
 	QueryVectorPath       string    `json:"query_vector_path"`
 	DocumentRoleApplied   bool      `json:"document_role_applied"`
 	QueryRoleApplied      bool      `json:"query_role_applied"`
+	RoleMode              string    `json:"role_mode,omitempty"`
 	DocumentChunkWords    int       `json:"document_chunk_words,omitempty"`
 	DocumentChunkOverlap  int       `json:"document_chunk_overlap,omitempty"`
 	DocumentChunkMinWords int       `json:"document_chunk_min_words,omitempty"`
@@ -122,25 +124,29 @@ func ExportEmbeddingRetrievalVectors(ctx context.Context, model *EmbeddingModel,
 	queryVectorPath := filepath.Join(cfg.OutputDir, "query-vectors.jsonl")
 	var docVectorPath, childDocVectorPath string
 	var dim, modelDim, childCount int
+	docRole, queryRole, effectiveRoleMode, err := resolveEmbeddingRetrievalRoles(model, cfg.RoleMode)
+	if err != nil {
+		return RetrievalVectorExportSummary{}, err
+	}
 	if cfg.DocumentChunkWords > 0 {
 		chunks := chunkRetrievalDocuments(corpus, cfg.DocumentChunkWords, cfg.DocumentChunkOverlap, cfg.DocumentChunkMinWords)
 		if len(chunks) == 0 {
 			return RetrievalVectorExportSummary{}, fmt.Errorf("document chunking selected no chunks")
 		}
 		childDocVectorPath = filepath.Join(cfg.OutputDir, "child-doc-vectors.jsonl")
-		dim, modelDim, err = writeRetrievalChildVectorCache(ctx, model, chunks, childDocVectorPath, cfg.BatchSize, cfg.DocumentPrefix, cfg.OutputDim)
+		dim, modelDim, err = writeRetrievalChildVectorCache(ctx, model, chunks, childDocVectorPath, cfg.BatchSize, cfg.DocumentPrefix, cfg.OutputDim, docRole)
 		if err != nil {
 			return RetrievalVectorExportSummary{}, fmt.Errorf("write child document vectors: %w", err)
 		}
 		childCount = len(chunks)
 	} else {
 		docVectorPath = filepath.Join(cfg.OutputDir, "doc-vectors.jsonl")
-		dim, modelDim, err = writeRetrievalVectorCache(ctx, model, corpus, docVectorPath, cfg.BatchSize, cfg.DocumentPrefix, cfg.OutputDim)
+		dim, modelDim, err = writeRetrievalVectorCache(ctx, model, corpus, docVectorPath, cfg.BatchSize, cfg.DocumentPrefix, cfg.OutputDim, docRole)
 		if err != nil {
 			return RetrievalVectorExportSummary{}, fmt.Errorf("write document vectors: %w", err)
 		}
 	}
-	queryDim, queryModelDim, err := writeRetrievalVectorCache(ctx, model, queries, queryVectorPath, cfg.BatchSize, cfg.QueryPrefix, cfg.OutputDim)
+	queryDim, queryModelDim, err := writeRetrievalVectorCache(ctx, model, queries, queryVectorPath, cfg.BatchSize, cfg.QueryPrefix, cfg.OutputDim, queryRole)
 	if err != nil {
 		return RetrievalVectorExportSummary{}, fmt.Errorf("write query vectors: %w", err)
 	}
@@ -165,8 +171,9 @@ func ExportEmbeddingRetrievalVectors(ctx context.Context, model *EmbeddingModel,
 		DocVectorPath:         docVectorPath,
 		ChildDocVectorPath:    childDocVectorPath,
 		QueryVectorPath:       queryVectorPath,
-		DocumentRoleApplied:   cfg.DocumentPrefix != "",
-		QueryRoleApplied:      cfg.QueryPrefix != "",
+		DocumentRoleApplied:   cfg.DocumentPrefix != "" || effectiveRoleMode == EmbeddingRoleModeQueryDocument,
+		QueryRoleApplied:      cfg.QueryPrefix != "" || effectiveRoleMode == EmbeddingRoleModeQueryDocument,
+		RoleMode:              effectiveRoleMode,
 		DocumentChunkWords:    cfg.DocumentChunkWords,
 		DocumentChunkOverlap:  cfg.DocumentChunkOverlap,
 		DocumentChunkMinWords: cfg.DocumentChunkMinWords,
@@ -209,6 +216,9 @@ func normalizeRetrievalVectorExportConfig(cfg RetrievalVectorExportConfig) Retri
 	}
 	if cfg.DocumentChunkMinWords == 0 {
 		cfg.DocumentChunkMinWords = 1
+	}
+	if cfg.RoleMode == "" {
+		cfg.RoleMode = EmbeddingRoleModeAuto
 	}
 	return cfg
 }
@@ -299,9 +309,9 @@ func chunkRetrievalDocumentText(parentID, text string, chunkWords, overlap, minW
 	return chunks
 }
 
-func writeRetrievalVectorCache(ctx context.Context, model *EmbeddingModel, records []retrievalTextRecord, path string, batchSize int, prefix string, outputDim int) (int, int, error) {
+func writeRetrievalVectorCache(ctx context.Context, model *EmbeddingModel, records []retrievalTextRecord, path string, batchSize int, prefix string, outputDim int, role string) (int, int, error) {
 	prefixed := prefixRetrievalRecords(records, prefix)
-	vectors, err := embedRetrievalTexts(ctx, model, prefixed, batchSize)
+	vectors, err := embedRetrievalTexts(ctx, model, prefixed, batchSize, role)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -345,12 +355,12 @@ func writeRetrievalVectorCache(ctx context.Context, model *EmbeddingModel, recor
 	return dim, modelDim, nil
 }
 
-func writeRetrievalChildVectorCache(ctx context.Context, model *EmbeddingModel, chunks []retrievalDocumentChunk, path string, batchSize int, prefix string, outputDim int) (int, int, error) {
+func writeRetrievalChildVectorCache(ctx context.Context, model *EmbeddingModel, chunks []retrievalDocumentChunk, path string, batchSize int, prefix string, outputDim int, role string) (int, int, error) {
 	records := make([]retrievalTextRecord, len(chunks))
 	for i, chunk := range chunks {
 		records[i] = retrievalTextRecord{ID: chunk.ChildID, Text: chunk.Text}
 	}
-	vectors, err := embedRetrievalTexts(ctx, model, prefixRetrievalRecords(records, prefix), batchSize)
+	vectors, err := embedRetrievalTexts(ctx, model, prefixRetrievalRecords(records, prefix), batchSize, role)
 	if err != nil {
 		return 0, 0, err
 	}

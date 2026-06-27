@@ -1632,7 +1632,7 @@ func TestEmbedRetrievalTextsGroupsByTokenLengthAndPreservesOrder(t *testing.T) {
 		{ID: "long-2", Text: "aa"},
 	}
 
-	got, err := embedRetrievalTexts(context.Background(), model, records, 2)
+	got, err := embedRetrievalTexts(context.Background(), model, records, 2, EmbeddingRoleRaw)
 	if err != nil {
 		t.Fatalf("embed retrieval texts: %v", err)
 	}

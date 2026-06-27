@@ -125,6 +125,108 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 	}
 }
 
+func TestInitializeEmbeddingTrainerPackageNormalizesRoleManifestBeforeWeights(t *testing.T) {
+	bundle, err := compiler.Build([]byte(tinyRoleEmbeddingSource()), compiler.Options{ModuleName: "role_train_init"})
+	if err != nil {
+		t.Fatalf("build role source: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "role_train_init.mll")
+	if err := eosartifact.WriteFile(path, bundle.Artifact); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	manifest := tinyRoleEmbeddingManifest()
+	manifest.Name = "role_train_init"
+	manifest.RoleEmbeddingParam = ""
+	manifest.RoleInput = ""
+	manifest.BatchRoleInput = ""
+	paths, err := InitializeEmbeddingTrainerPackageWithManifest(path, manifest, EmbeddingTrainConfig{LearningRate: 0.02}, EmbeddingTrainInitOptions{
+		Seed:       7,
+		ShapeSizes: map[string]int{"D": 2},
+	})
+	if err != nil {
+		t.Fatalf("initialize role package: %v", err)
+	}
+	trainer, err := LoadEmbeddingTrainerPackage(path)
+	if err != nil {
+		t.Fatalf("load role package: %v", err)
+	}
+	if trainer.roleEmbed == nil || trainer.roleParam.Name != "role_embedding" {
+		t.Fatalf("role tensor/param = %q %+v", trainer.roleParam.Name, trainer.roleEmbed)
+	}
+	for i, v := range trainer.roleEmbed.F32 {
+		if v != 0 {
+			t.Fatalf("role embedding[%d] = %f, want zero init", i, v)
+		}
+	}
+	checkpoint, err := ReadEmbeddingTrainCheckpointFile(paths.CheckpointPath)
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if checkpoint.Manifest.RoleEmbeddingParam != "role_embedding" || checkpoint.RoleEmbedding == nil {
+		t.Fatalf("checkpoint role manifest/tensor = %q %+v", checkpoint.Manifest.RoleEmbeddingParam, checkpoint.RoleEmbedding)
+	}
+}
+
+func TestInitializeEmbeddingTrainerPackageBootstrapsDefaultedRoleEmbedding(t *testing.T) {
+	dir := t.TempDir()
+	bundle, err := compiler.Build([]byte(tinyRoleEmbeddingSource()), compiler.Options{ModuleName: "role_bootstrap_init"})
+	if err != nil {
+		t.Fatalf("build role source: %v", err)
+	}
+	sourcePath := filepath.Join(dir, "role_bootstrap_source.mll")
+	if err := eosartifact.WriteFile(sourcePath, bundle.Artifact); err != nil {
+		t.Fatalf("write source artifact: %v", err)
+	}
+	sourceManifest := tinyRoleEmbeddingManifest()
+	sourceManifest.Name = "role_bootstrap_init"
+	sourcePaths, err := InitializeEmbeddingTrainerPackageWithManifest(sourcePath, sourceManifest, EmbeddingTrainConfig{LearningRate: 0.02}, EmbeddingTrainInitOptions{
+		Seed:       3,
+		ShapeSizes: map[string]int{"D": 2},
+	})
+	if err != nil {
+		t.Fatalf("initialize source package: %v", err)
+	}
+	sourceCheckpoint, err := ReadEmbeddingTrainCheckpointFile(sourcePaths.CheckpointPath)
+	if err != nil {
+		t.Fatalf("read source checkpoint: %v", err)
+	}
+	sourceCheckpoint.RoleEmbedding = backend.NewTensorF32([]int{3, 2}, []float32{
+		0, 0,
+		11, 12,
+		21, 22,
+	})
+	if err := sourceCheckpoint.WriteFile(sourcePaths.CheckpointPath); err != nil {
+		t.Fatalf("rewrite source checkpoint: %v", err)
+	}
+
+	targetPath := filepath.Join(dir, "role_bootstrap_target.mll")
+	if err := eosartifact.WriteFile(targetPath, bundle.Artifact); err != nil {
+		t.Fatalf("write target artifact: %v", err)
+	}
+	targetManifest := tinyRoleEmbeddingManifest()
+	targetManifest.Name = "role_bootstrap_init"
+	targetManifest.RoleEmbeddingParam = ""
+	targetManifest.RoleInput = ""
+	targetManifest.BatchRoleInput = ""
+	targetPaths, err := InitializeEmbeddingTrainerPackageWithManifest(targetPath, targetManifest, EmbeddingTrainConfig{LearningRate: 0.02}, EmbeddingTrainInitOptions{
+		Seed:                  7,
+		BootstrapArtifactPath: sourcePath,
+		ShapeSizes:            map[string]int{"D": 2},
+	})
+	if err != nil {
+		t.Fatalf("initialize target package: %v", err)
+	}
+	targetCheckpoint, err := ReadEmbeddingTrainCheckpointFile(targetPaths.CheckpointPath)
+	if err != nil {
+		t.Fatalf("read target checkpoint: %v", err)
+	}
+	for i, got := range targetCheckpoint.RoleEmbedding.F32 {
+		if want := sourceCheckpoint.RoleEmbedding.F32[i]; got != want {
+			t.Fatalf("target role embedding[%d] = %f, want bootstrap %f", i, got, want)
+		}
+	}
+}
+
 func TestInitializeEmbeddingTrainerPackageBootstrapCopiesOverlap(t *testing.T) {
 	dir := t.TempDir()
 	sourcePath, sourceManifest := buildTinyTrainInitArtifact(t, dir, "source_embed.mll")

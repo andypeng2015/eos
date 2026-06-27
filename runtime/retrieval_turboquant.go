@@ -187,11 +187,15 @@ func EvaluateTurboQuantRetrievalWithRerankStorage(ctx context.Context, model *Em
 		return TurboQuantRetrievalEvalMetrics{}, fmt.Errorf("no qrels queries found in queries file")
 	}
 
-	docVectors, err := embedRetrievalTexts(ctx, model, corpus, cfg.BatchSize)
+	docRole, queryRole, _, err := resolveEmbeddingRetrievalRoles(model, cfg.RoleMode)
+	if err != nil {
+		return TurboQuantRetrievalEvalMetrics{}, err
+	}
+	docVectors, err := embedRetrievalTexts(ctx, model, corpus, cfg.BatchSize, docRole)
 	if err != nil {
 		return TurboQuantRetrievalEvalMetrics{}, fmt.Errorf("embed corpus: %w", err)
 	}
-	queryVectors, err := embedRetrievalTexts(ctx, model, queries, cfg.BatchSize)
+	queryVectors, err := embedRetrievalTexts(ctx, model, queries, cfg.BatchSize, queryRole)
 	if err != nil {
 		return TurboQuantRetrievalEvalMetrics{}, fmt.Errorf("embed queries: %w", err)
 	}

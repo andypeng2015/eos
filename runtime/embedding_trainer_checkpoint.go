@@ -23,6 +23,7 @@ type EmbeddingTrainCheckpoint struct {
 	Config            EmbeddingTrainConfig `json:"config"`
 	Step              int                  `json:"step"`
 	TokenEmbedding    *backend.Tensor      `json:"token_embedding"`
+	RoleEmbedding     *backend.Tensor      `json:"role_embedding,omitempty"`
 	AttentionQuery    *backend.Tensor      `json:"attention_query,omitempty"`
 	AttentionKey      *backend.Tensor      `json:"attention_key,omitempty"`
 	AttentionValue    *backend.Tensor      `json:"attention_value,omitempty"`
@@ -31,6 +32,8 @@ type EmbeddingTrainCheckpoint struct {
 	Projection        *backend.Tensor      `json:"projection"`
 	TokenMoment1      *backend.Tensor      `json:"token_moment_1,omitempty"`
 	TokenMoment2      *backend.Tensor      `json:"token_moment_2,omitempty"`
+	RoleMoment1       *backend.Tensor      `json:"role_moment_1,omitempty"`
+	RoleMoment2       *backend.Tensor      `json:"role_moment_2,omitempty"`
 	AttentionQMoment1 *backend.Tensor      `json:"attention_query_moment_1,omitempty"`
 	AttentionQMoment2 *backend.Tensor      `json:"attention_query_moment_2,omitempty"`
 	AttentionKMoment1 *backend.Tensor      `json:"attention_key_moment_1,omitempty"`
@@ -71,6 +74,7 @@ func (t *EmbeddingTrainer) Checkpoint() (EmbeddingTrainCheckpoint, error) {
 		Config:            t.config,
 		Step:              t.step,
 		TokenEmbedding:    t.tokenEmbed.Clone(),
+		RoleEmbedding:     cloneTensorOrNil(t.roleEmbed),
 		AttentionQuery:    cloneTensorOrNil(t.attentionQuery),
 		AttentionKey:      cloneTensorOrNil(t.attentionKey),
 		AttentionValue:    cloneTensorOrNil(t.attentionValue),
@@ -79,6 +83,8 @@ func (t *EmbeddingTrainer) Checkpoint() (EmbeddingTrainCheckpoint, error) {
 		Projection:        t.projection.Clone(),
 		TokenMoment1:      t.tokenMom1.Clone(),
 		TokenMoment2:      t.tokenMom2.Clone(),
+		RoleMoment1:       cloneTensorOrNil(t.roleMom1),
+		RoleMoment2:       cloneTensorOrNil(t.roleMom2),
 		AttentionQMoment1: cloneTensorOrNil(t.attnQMom1),
 		AttentionQMoment2: cloneTensorOrNil(t.attnQMom2),
 		AttentionKMoment1: cloneTensorOrNil(t.attnKMom1),
@@ -335,6 +341,7 @@ func decodeEmbeddingCheckpointMLL(data []byte) (EmbeddingTrainCheckpoint, error)
 		Config:            meta.Config,
 		Step:              int(optm.Step),
 		TokenEmbedding:    cloneTensorOrNil(tensors["token_embedding"]),
+		RoleEmbedding:     cloneTensorOrNil(tensors["role_embedding"]),
 		AttentionQuery:    cloneTensorOrNil(tensors["attention_query"]),
 		AttentionKey:      cloneTensorOrNil(tensors["attention_key"]),
 		AttentionValue:    cloneTensorOrNil(tensors["attention_value"]),
@@ -343,6 +350,8 @@ func decodeEmbeddingCheckpointMLL(data []byte) (EmbeddingTrainCheckpoint, error)
 		Projection:        cloneTensorOrNil(tensors["projection"]),
 		TokenMoment1:      cloneTensorOrNil(tensors["token_moment_1"]),
 		TokenMoment2:      cloneTensorOrNil(tensors["token_moment_2"]),
+		RoleMoment1:       cloneTensorOrNil(tensors["role_moment_1"]),
+		RoleMoment2:       cloneTensorOrNil(tensors["role_moment_2"]),
 		AttentionQMoment1: cloneTensorOrNil(tensors["attention_query_moment_1"]),
 		AttentionQMoment2: cloneTensorOrNil(tensors["attention_query_moment_2"]),
 		AttentionKMoment1: cloneTensorOrNil(tensors["attention_key_moment_1"]),
@@ -365,6 +374,7 @@ func decodeEmbeddingCheckpointMLL(data []byte) (EmbeddingTrainCheckpoint, error)
 func checkpointTensorMap(c EmbeddingTrainCheckpoint) map[string]*backend.Tensor {
 	return map[string]*backend.Tensor{
 		"token_embedding":            c.TokenEmbedding,
+		"role_embedding":             c.RoleEmbedding,
 		"attention_query":            c.AttentionQuery,
 		"attention_key":              c.AttentionKey,
 		"attention_value":            c.AttentionValue,
@@ -373,6 +383,8 @@ func checkpointTensorMap(c EmbeddingTrainCheckpoint) map[string]*backend.Tensor 
 		"projection":                 c.Projection,
 		"token_moment_1":             c.TokenMoment1,
 		"token_moment_2":             c.TokenMoment2,
+		"role_moment_1":              c.RoleMoment1,
+		"role_moment_2":              c.RoleMoment2,
 		"attention_query_moment_1":   c.AttentionQMoment1,
 		"attention_query_moment_2":   c.AttentionQMoment2,
 		"attention_key_moment_1":     c.AttentionKMoment1,
@@ -393,6 +405,8 @@ func checkpointMomentNames(c EmbeddingTrainCheckpoint) []string {
 	for name, tensor := range map[string]*backend.Tensor{
 		"token_moment_1":             c.TokenMoment1,
 		"token_moment_2":             c.TokenMoment2,
+		"role_moment_1":              c.RoleMoment1,
+		"role_moment_2":              c.RoleMoment2,
 		"attention_query_moment_1":   c.AttentionQMoment1,
 		"attention_query_moment_2":   c.AttentionQMoment2,
 		"attention_key_moment_1":     c.AttentionKMoment1,
@@ -459,6 +473,19 @@ func (c EmbeddingTrainCheckpoint) Validate() error {
 	if len(c.TokenEmbedding.Shape) != 2 {
 		return fmt.Errorf("checkpoint token_embedding rank = %d, want 2", len(c.TokenEmbedding.Shape))
 	}
+	if c.Manifest.normalized().roleConditioned() {
+		if c.RoleEmbedding == nil {
+			return fmt.Errorf("checkpoint role_embedding is required for role-conditioned manifest")
+		}
+		if len(c.RoleEmbedding.Shape) != 2 {
+			return fmt.Errorf("checkpoint role_embedding rank = %d, want 2", len(c.RoleEmbedding.Shape))
+		}
+		if c.RoleEmbedding.Shape[1] != c.TokenEmbedding.Shape[1] {
+			return fmt.Errorf("checkpoint role/token embedding width mismatch %v x %v", c.RoleEmbedding.Shape, c.TokenEmbedding.Shape)
+		}
+	} else if c.RoleEmbedding != nil {
+		return fmt.Errorf("checkpoint role_embedding requires role-conditioned manifest")
+	}
 	if len(c.Projection.Shape) != 2 {
 		return fmt.Errorf("checkpoint projection rank = %d, want 2", len(c.Projection.Shape))
 	}
@@ -486,6 +513,12 @@ func (c EmbeddingTrainCheckpoint) Validate() error {
 	}
 	if c.TokenMoment2 != nil && !sameTensorShape(c.TokenEmbedding, c.TokenMoment2) {
 		return fmt.Errorf("checkpoint token_moment_2 shape %v does not match token_embedding %v", c.TokenMoment2.Shape, c.TokenEmbedding.Shape)
+	}
+	if c.RoleMoment1 != nil && !sameTensorShape(c.RoleEmbedding, c.RoleMoment1) {
+		return fmt.Errorf("checkpoint role_moment_1 shape %v does not match role_embedding %v", c.RoleMoment1.Shape, c.RoleEmbedding.Shape)
+	}
+	if c.RoleMoment2 != nil && !sameTensorShape(c.RoleEmbedding, c.RoleMoment2) {
+		return fmt.Errorf("checkpoint role_moment_2 shape %v does not match role_embedding %v", c.RoleMoment2.Shape, c.RoleEmbedding.Shape)
 	}
 	if c.AttentionQMoment1 != nil && !sameTensorShape(c.AttentionQuery, c.AttentionQMoment1) {
 		return fmt.Errorf("checkpoint attention_query_moment_1 shape %v does not match attention_query %v", c.AttentionQMoment1.Shape, c.AttentionQuery.Shape)
@@ -531,9 +564,13 @@ func NewEmbeddingTrainerFromCheckpoint(mod *eosartifact.Module, checkpoint Embed
 	if err := checkpoint.Validate(); err != nil {
 		return nil, err
 	}
+	checkpoint.Manifest = checkpoint.Manifest.normalized()
 	weights := map[string]*backend.Tensor{
 		checkpoint.Manifest.TokenEmbeddingParam: checkpoint.TokenEmbedding,
 		checkpoint.Manifest.ProjectionParam:     checkpoint.Projection,
+	}
+	if checkpoint.Manifest.roleConditioned() {
+		weights[checkpoint.Manifest.RoleEmbeddingParam] = checkpoint.RoleEmbedding
 	}
 	if checkpoint.Manifest.AttentionQueryParam != "" {
 		weights[checkpoint.Manifest.AttentionQueryParam] = checkpoint.AttentionQuery
@@ -554,6 +591,12 @@ func NewEmbeddingTrainerFromCheckpoint(mod *eosartifact.Module, checkpoint Embed
 	}
 	if checkpoint.TokenMoment2 != nil {
 		trainer.tokenMom2 = checkpoint.TokenMoment2.Clone()
+	}
+	if checkpoint.RoleMoment1 != nil {
+		trainer.roleMom1 = checkpoint.RoleMoment1.Clone()
+	}
+	if checkpoint.RoleMoment2 != nil {
+		trainer.roleMom2 = checkpoint.RoleMoment2.Clone()
 	}
 	if checkpoint.AttentionQMoment1 != nil {
 		trainer.attnQMom1 = checkpoint.AttentionQMoment1.Clone()

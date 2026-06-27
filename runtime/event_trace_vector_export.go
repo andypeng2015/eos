@@ -125,11 +125,15 @@ func ExportEventTraceVectors(ctx context.Context, model *EmbeddingModel, cfg Eve
 	if err := writeEventTraceBEIRQueries(queries, beirQueriesPath); err != nil {
 		return EventTraceVectorExportSummary{}, fmt.Errorf("write BEIR queries helper: %w", err)
 	}
-	dim, modelDim, err := writeRetrievalChildVectorCache(ctx, model, events, childPath, cfg.BatchSize, cfg.TracePrefix, cfg.OutputDim)
+	docRole, queryRole, _, err := resolveEmbeddingRetrievalRoles(model, EmbeddingRoleModeAuto)
+	if err != nil {
+		return EventTraceVectorExportSummary{}, err
+	}
+	dim, modelDim, err := writeRetrievalChildVectorCache(ctx, model, events, childPath, cfg.BatchSize, cfg.TracePrefix, cfg.OutputDim, docRole)
 	if err != nil {
 		return EventTraceVectorExportSummary{}, fmt.Errorf("write child event vectors: %w", err)
 	}
-	queryDim, queryModelDim, err := writeRetrievalVectorCache(ctx, model, queries, queryPath, cfg.BatchSize, cfg.QueryPrefix, cfg.OutputDim)
+	queryDim, queryModelDim, err := writeRetrievalVectorCache(ctx, model, queries, queryPath, cfg.BatchSize, cfg.QueryPrefix, cfg.OutputDim, queryRole)
 	if err != nil {
 		return EventTraceVectorExportSummary{}, fmt.Errorf("write query vectors: %w", err)
 	}

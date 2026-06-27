@@ -189,6 +189,7 @@ type EmbeddingTrainer struct {
 	retrievalEvalEnabled   bool
 	step                   int
 	tokenParam             eosartifact.Param
+	roleParam              eosartifact.Param
 	attnQParam             eosartifact.Param
 	attnKParam             eosartifact.Param
 	attnVParam             eosartifact.Param
@@ -196,6 +197,7 @@ type EmbeddingTrainer struct {
 	hiddenParam            eosartifact.Param
 	projParam              eosartifact.Param
 	tokenEmbed             *backend.Tensor
+	roleEmbed              *backend.Tensor
 	attentionQuery         *backend.Tensor
 	attentionKey           *backend.Tensor
 	attentionValue         *backend.Tensor
@@ -204,6 +206,8 @@ type EmbeddingTrainer struct {
 	projection             *backend.Tensor
 	tokenMom1              *backend.Tensor
 	tokenMom2              *backend.Tensor
+	roleMom1               *backend.Tensor
+	roleMom2               *backend.Tensor
 	attnQMom1              *backend.Tensor
 	attnQMom2              *backend.Tensor
 	attnKMom1              *backend.Tensor
@@ -300,6 +304,7 @@ type embeddingEncodedSequence struct {
 	layers []*embeddingSequenceState
 	pooled []float32
 	tokens []int32
+	role   int32
 }
 
 func (s *embeddingEncodedSequence) finalLayer() *embeddingSequenceState {
@@ -311,6 +316,7 @@ func (s *embeddingEncodedSequence) finalLayer() *embeddingSequenceState {
 
 type embeddingForwardWeights struct {
 	token  *backend.Tensor
+	role   *backend.Tensor
 	attnQ  *backend.Tensor
 	attnK  *backend.Tensor
 	attnV  *backend.Tensor
@@ -321,6 +327,7 @@ type embeddingForwardWeights struct {
 
 type embeddingTrainerParams struct {
 	token         eosartifact.Param
+	role          eosartifact.Param
 	attnQ         eosartifact.Param
 	attnK         eosartifact.Param
 	attnV         eosartifact.Param
@@ -333,6 +340,7 @@ type embeddingTrainerParams struct {
 
 type embeddingTrainerWeights struct {
 	token            *backend.Tensor
+	role             *backend.Tensor
 	attentionQuery   *backend.Tensor
 	attentionKey     *backend.Tensor
 	attentionValue   *backend.Tensor
@@ -403,6 +411,7 @@ func NewEmbeddingTrainer(mod *eosartifact.Module, manifest EmbeddingManifest, we
 		config:               cfg,
 		memoryPlan:           nil,
 		tokenParam:           params.token,
+		roleParam:            params.role,
 		attnQParam:           params.attnQ,
 		attnKParam:           params.attnK,
 		attnVParam:           params.attnV,
@@ -410,6 +419,7 @@ func NewEmbeddingTrainer(mod *eosartifact.Module, manifest EmbeddingManifest, we
 		hiddenParam:          params.hidden,
 		projParam:            params.proj,
 		tokenEmbed:           tensorAsMasterF32(tensors.token),
+		roleEmbed:            tensorAsMasterF32(tensors.role),
 		attentionQuery:       tensorAsMasterF32(tensors.attentionQuery),
 		attentionKey:         tensorAsMasterF32(tensors.attentionKey),
 		attentionValue:       tensorAsMasterF32(tensors.attentionValue),
@@ -418,6 +428,8 @@ func NewEmbeddingTrainer(mod *eosartifact.Module, manifest EmbeddingManifest, we
 		projection:           tensorAsMasterF32(tensors.projection),
 		tokenMom1:            zeroLikeMaster(tensors.token),
 		tokenMom2:            zeroLikeMaster(tensors.token),
+		roleMom1:             zeroLikeMaster(tensors.role),
+		roleMom2:             zeroLikeMaster(tensors.role),
 		attnQMom1:            zeroLikeMaster(tensors.attentionQuery),
 		attnQMom2:            zeroLikeMaster(tensors.attentionQuery),
 		attnKMom1:            zeroLikeMaster(tensors.attentionKey),
@@ -445,6 +457,10 @@ func NewEmbeddingTrainer(mod *eosartifact.Module, manifest EmbeddingManifest, we
 
 func resolveEmbeddingTrainerParams(mod *eosartifact.Module, manifest EmbeddingManifest) (embeddingTrainerParams, error) {
 	tokenParam, err := requireTrainableEmbeddingParam(mod, manifest.TokenEmbeddingParam)
+	if err != nil {
+		return embeddingTrainerParams{}, err
+	}
+	roleParam, err := optionalRoleEmbeddingParam(mod, manifest)
 	if err != nil {
 		return embeddingTrainerParams{}, err
 	}
@@ -480,6 +496,7 @@ func resolveEmbeddingTrainerParams(mod *eosartifact.Module, manifest EmbeddingMa
 	}
 	return embeddingTrainerParams{
 		token:         tokenParam,
+		role:          roleParam,
 		attnQ:         attnQParam,
 		attnK:         attnKParam,
 		attnV:         attnVParam,
@@ -503,6 +520,12 @@ func resolveEmbeddingTrainerWeights(params embeddingTrainerParams, manifest Embe
 	out := embeddingTrainerWeights{
 		token:      tokenEmbed,
 		projection: projection,
+	}
+	if manifest.roleConditioned() {
+		out.role, err = requireTrainingWeight(weights, params.role.Name)
+		if err != nil {
+			return embeddingTrainerWeights{}, err
+		}
 	}
 	if params.attnEnabled {
 		out.attentionQuery, err = requireTrainingWeight(weights, params.attnQ.Name)
@@ -542,9 +565,41 @@ func requireTrainingWeight(weights map[string]*backend.Tensor, name string) (*ba
 	return tensor, nil
 }
 
+func optionalRoleEmbeddingParam(mod *eosartifact.Module, manifest EmbeddingManifest) (eosartifact.Param, error) {
+	if !manifest.roleConditioned() {
+		return eosartifact.Param{}, nil
+	}
+	if manifest.RoleEmbeddingParam == "" {
+		return eosartifact.Param{}, fmt.Errorf("role-conditioned manifest requires role_embedding_param")
+	}
+	return requireTrainableEmbeddingParam(mod, manifest.RoleEmbeddingParam)
+}
+
+func maxInt32(values ...int32) int32 {
+	var out int32
+	for _, value := range values {
+		if value > out {
+			out = value
+		}
+	}
+	return out
+}
+
 func validateEmbeddingTrainerWeightShapes(params embeddingTrainerParams, manifest EmbeddingManifest, weights embeddingTrainerWeights) error {
 	if len(weights.token.Shape) != 2 {
 		return fmt.Errorf("training weight %q rank = %d, want 2", params.token.Name, len(weights.token.Shape))
+	}
+	if manifest.roleConditioned() {
+		if len(weights.role.Shape) != 2 {
+			return fmt.Errorf("training weight %q rank = %d, want 2", params.role.Name, len(weights.role.Shape))
+		}
+		if weights.role.Shape[1] != weights.token.Shape[1] {
+			return fmt.Errorf("role embedding width %d does not match token embedding width %d", weights.role.Shape[1], weights.token.Shape[1])
+		}
+		maxRole := maxInt32(manifest.RawRoleIndex, manifest.QueryRoleIndex, manifest.DocumentRoleIndex)
+		if int(maxRole) >= weights.role.Shape[0] {
+			return fmt.Errorf("role embedding rows %d cannot cover role index %d", weights.role.Shape[0], maxRole)
+		}
 	}
 	if params.attnEnabled {
 		for name, tensor := range map[string]*backend.Tensor{
@@ -634,6 +689,7 @@ func (t *EmbeddingTrainer) syncOptimizerState(includeMoments bool) error {
 		m2   *backend.Tensor
 	}{
 		{name: t.tokenParam.Name, t: t.tokenEmbed, m1: t.tokenMom1, m2: t.tokenMom2},
+		{name: t.roleParam.Name, t: t.roleEmbed, m1: t.roleMom1, m2: t.roleMom2},
 		{name: t.attnQParam.Name, t: t.attentionQuery, m1: t.attnQMom1, m2: t.attnQMom2},
 		{name: t.attnKParam.Name, t: t.attentionKey, m1: t.attnKMom1, m2: t.attnKMom2},
 		{name: t.attnVParam.Name, t: t.attentionValue, m1: t.attnVMom1, m2: t.attnVMom2},
@@ -1050,7 +1106,7 @@ func appendEvalRankScore(scores *[]embeddingEvalRankScore, example EmbeddingPair
 		return
 	}
 	*scores = append(*scores, embeddingEvalRankScore{
-		QueryKey: embeddingBatchSequenceKey(example.LeftTokens, example.LeftMask),
+		QueryKey: embeddingBatchSequenceKey(example.LeftTokens, example.LeftMask, 0),
 		Score:    score,
 		Positive: example.Target > 0,
 	})
@@ -1244,6 +1300,7 @@ func (t *EmbeddingTrainer) TrainContrastiveStep(batch []EmbeddingContrastiveExam
 	defer t.releaseEncodedSequences(positives)
 
 	gradToken := make([]float32, len(t.tokenEmbed.F32))
+	gradRole := make([]float32, tensorDataLen(t.roleEmbed))
 	gradAttnQ := make([]float32, tensorDataLen(t.attentionQuery))
 	gradAttnK := make([]float32, tensorDataLen(t.attentionKey))
 	gradAttnV := make([]float32, tensorDataLen(t.attentionValue))
@@ -1309,15 +1366,18 @@ func (t *EmbeddingTrainer) TrainContrastiveStep(batch []EmbeddingContrastiveExam
 		for i, query := range queries {
 			inputGrad := t.backpropEncodedSequence(query, queryGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
 			t.accumulateInputTokenGrad(query.tokens, inputGrad, gradToken)
+			t.accumulateInputRoleGrad(query.role, len(query.tokens), inputGrad, gradRole)
 		}
 		for i, positive := range positives {
 			inputGrad := t.backpropEncodedSequence(positive, positiveGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
 			t.accumulateInputTokenGrad(positive.tokens, inputGrad, gradToken)
+			t.accumulateInputRoleGrad(positive.role, len(positive.tokens), inputGrad, gradRole)
 		}
 	}
 
 	t.step++
 	t.applyOptimizerUpdate(t.tokenParam.Name, t.tokenEmbed, t.tokenMom1, t.tokenMom2, gradToken, batchScale)
+	t.applyOptimizerUpdate(t.roleParam.Name, t.roleEmbed, t.roleMom1, t.roleMom2, gradRole, batchScale)
 	t.applyOptimizerUpdate(t.attnQParam.Name, t.attentionQuery, t.attnQMom1, t.attnQMom2, gradAttnQ, batchScale)
 	t.applyOptimizerUpdate(t.attnKParam.Name, t.attentionKey, t.attnKMom1, t.attnKMom2, gradAttnK, batchScale)
 	t.applyOptimizerUpdate(t.attnVParam.Name, t.attentionValue, t.attnVMom1, t.attnVMom2, gradAttnV, batchScale)
@@ -1348,6 +1408,7 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 		queryInputs[i] = embeddingSequenceInput{
 			tokens: example.QueryTokens,
 			mask:   example.QueryMask,
+			role:   t.queryRoleIndex(),
 			label:  fmt.Sprintf("batch %d query", i),
 		}
 		targetIndexes[i] = len(candidateInputs)
@@ -1355,6 +1416,7 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 		candidateInputs = append(candidateInputs, embeddingSequenceInput{
 			tokens: example.PositiveTokens,
 			mask:   example.PositiveMask,
+			role:   t.documentRoleIndex(),
 			label:  fmt.Sprintf("batch %d positive", i),
 		})
 		for j, tokens := range example.NegativeTokens {
@@ -1365,6 +1427,7 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 			candidateInputs = append(candidateInputs, embeddingSequenceInput{
 				tokens: tokens,
 				mask:   mask,
+				role:   t.documentRoleIndex(),
 				label:  fmt.Sprintf("batch %d negative %d", i, j),
 			})
 		}
@@ -1399,6 +1462,7 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 	candidates := encoded[len(queryInputs):]
 
 	gradToken := make([]float32, len(t.tokenEmbed.F32))
+	gradRole := make([]float32, tensorDataLen(t.roleEmbed))
 	gradAttnQ := make([]float32, tensorDataLen(t.attentionQuery))
 	gradAttnK := make([]float32, tensorDataLen(t.attentionKey))
 	gradAttnV := make([]float32, tensorDataLen(t.attentionValue))
@@ -1509,16 +1573,19 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 		for i, query := range queries {
 			inputGrad := t.backpropEncodedSequence(query, queryGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
 			t.accumulateInputTokenGrad(query.tokens, inputGrad, gradToken)
+			t.accumulateInputRoleGrad(query.role, len(query.tokens), inputGrad, gradRole)
 		}
 		for i, candidate := range candidates {
 			inputGrad := t.backpropEncodedSequence(candidate, candidateGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
 			t.accumulateInputTokenGrad(candidate.tokens, inputGrad, gradToken)
+			t.accumulateInputRoleGrad(candidate.role, len(candidate.tokens), inputGrad, gradRole)
 		}
 	}
 
 	batchScale := float32(1) / float32(len(queries))
 	t.step++
 	t.applyOptimizerUpdate(t.tokenParam.Name, t.tokenEmbed, t.tokenMom1, t.tokenMom2, gradToken, batchScale)
+	t.applyOptimizerUpdate(t.roleParam.Name, t.roleEmbed, t.roleMom1, t.roleMom2, gradRole, batchScale)
 	t.applyOptimizerUpdate(t.attnQParam.Name, t.attentionQuery, t.attnQMom1, t.attnQMom2, gradAttnQ, batchScale)
 	t.applyOptimizerUpdate(t.attnKParam.Name, t.attentionKey, t.attnKMom1, t.attnKMom2, gradAttnK, batchScale)
 	t.applyOptimizerUpdate(t.attnVParam.Name, t.attentionValue, t.attnVMom1, t.attnVMom2, gradAttnV, batchScale)
@@ -1557,6 +1624,7 @@ func (t *EmbeddingTrainer) TrainScoreSpectrumStep(batch []EmbeddingScoreSpectrum
 		queryInputs[i] = embeddingSequenceInput{
 			tokens: example.QueryTokens,
 			mask:   example.QueryMask,
+			role:   t.queryRoleIndex(),
 			label:  fmt.Sprintf("batch %d query", i),
 		}
 		candidateSpans[i].Start = len(candidateInputs)
@@ -1568,6 +1636,7 @@ func (t *EmbeddingTrainer) TrainScoreSpectrumStep(batch []EmbeddingScoreSpectrum
 			candidateInputs = append(candidateInputs, embeddingSequenceInput{
 				tokens: tokens,
 				mask:   mask,
+				role:   t.documentRoleIndex(),
 				label:  fmt.Sprintf("batch %d candidate %d", i, j),
 			})
 		}
@@ -1588,6 +1657,7 @@ func (t *EmbeddingTrainer) TrainScoreSpectrumStep(batch []EmbeddingScoreSpectrum
 	candidates := encoded[len(queryInputs):]
 
 	gradToken := make([]float32, len(t.tokenEmbed.F32))
+	gradRole := make([]float32, tensorDataLen(t.roleEmbed))
 	gradAttnQ := make([]float32, tensorDataLen(t.attentionQuery))
 	gradAttnK := make([]float32, tensorDataLen(t.attentionKey))
 	gradAttnV := make([]float32, tensorDataLen(t.attentionValue))
@@ -1632,16 +1702,19 @@ func (t *EmbeddingTrainer) TrainScoreSpectrumStep(batch []EmbeddingScoreSpectrum
 		for i, query := range queries {
 			inputGrad := t.backpropEncodedSequence(query, queryGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
 			t.accumulateInputTokenGrad(query.tokens, inputGrad, gradToken)
+			t.accumulateInputRoleGrad(query.role, len(query.tokens), inputGrad, gradRole)
 		}
 		for i, candidate := range candidates {
 			inputGrad := t.backpropEncodedSequence(candidate, candidateGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
 			t.accumulateInputTokenGrad(candidate.tokens, inputGrad, gradToken)
+			t.accumulateInputRoleGrad(candidate.role, len(candidate.tokens), inputGrad, gradRole)
 		}
 	}
 
 	batchScale := float32(1) / float32(len(queries))
 	t.step++
 	t.applyOptimizerUpdate(t.tokenParam.Name, t.tokenEmbed, t.tokenMom1, t.tokenMom2, gradToken, batchScale)
+	t.applyOptimizerUpdate(t.roleParam.Name, t.roleEmbed, t.roleMom1, t.roleMom2, gradRole, batchScale)
 	t.applyOptimizerUpdate(t.attnQParam.Name, t.attentionQuery, t.attnQMom1, t.attnQMom2, gradAttnQ, batchScale)
 	t.applyOptimizerUpdate(t.attnKParam.Name, t.attentionKey, t.attnKMom1, t.attnKMom2, gradAttnK, batchScale)
 	t.applyOptimizerUpdate(t.attnVParam.Name, t.attentionValue, t.attnVMom1, t.attnVMom2, gradAttnV, batchScale)
@@ -1670,7 +1743,7 @@ func (t *EmbeddingTrainer) TrainListwiseGeometryStepWithDiagnostics(batch []Embe
 	if err := validateListwiseGeometryTrainerConfig(t.config); err != nil {
 		return EmbeddingTrainMetrics{}, err
 	}
-	queryInputs, documentInputs, spans, err := listwiseGeometrySequenceInputs(batch)
+	queryInputs, documentInputs, spans, err := listwiseGeometrySequenceInputs(batch, t.queryRoleIndex(), t.documentRoleIndex())
 	if err != nil {
 		return EmbeddingTrainMetrics{}, err
 	}
@@ -1688,6 +1761,7 @@ func (t *EmbeddingTrainer) TrainListwiseGeometryStepWithDiagnostics(batch []Embe
 	documents := encoded[len(queryInputs):]
 
 	gradToken := make([]float32, len(t.tokenEmbed.F32))
+	gradRole := make([]float32, tensorDataLen(t.roleEmbed))
 	gradAttnQ := make([]float32, tensorDataLen(t.attentionQuery))
 	gradAttnK := make([]float32, tensorDataLen(t.attentionKey))
 	gradAttnV := make([]float32, tensorDataLen(t.attentionValue))
@@ -1735,10 +1809,12 @@ func (t *EmbeddingTrainer) TrainListwiseGeometryStepWithDiagnostics(batch []Embe
 		for i, query := range queries {
 			inputGrad := t.backpropEncodedSequence(query, queryGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
 			t.accumulateInputTokenGrad(query.tokens, inputGrad, gradToken)
+			t.accumulateInputRoleGrad(query.role, len(query.tokens), inputGrad, gradRole)
 		}
 		for i, document := range documents {
 			inputGrad := t.backpropEncodedSequence(document, documentGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
 			t.accumulateInputTokenGrad(document.tokens, inputGrad, gradToken)
+			t.accumulateInputRoleGrad(document.role, len(document.tokens), inputGrad, gradRole)
 		}
 	}
 
@@ -1753,6 +1829,7 @@ func (t *EmbeddingTrainer) TrainListwiseGeometryStepWithDiagnostics(batch []Embe
 	}
 	t.step++
 	t.applyOptimizerUpdate(t.tokenParam.Name, t.tokenEmbed, t.tokenMom1, t.tokenMom2, gradToken, batchScale)
+	t.applyOptimizerUpdate(t.roleParam.Name, t.roleEmbed, t.roleMom1, t.roleMom2, gradRole, batchScale)
 	t.applyOptimizerUpdate(t.attnQParam.Name, t.attentionQuery, t.attnQMom1, t.attnQMom2, gradAttnQ, batchScale)
 	t.applyOptimizerUpdate(t.attnKParam.Name, t.attentionKey, t.attnKMom1, t.attnKMom2, gradAttnK, batchScale)
 	t.applyOptimizerUpdate(t.attnVParam.Name, t.attentionValue, t.attnVMom1, t.attnVMom2, gradAttnV, batchScale)
@@ -1815,7 +1892,7 @@ func (t *EmbeddingTrainer) evaluateScoreSpectrumCanonicalBatch(canonicalExamples
 	if len(canonicalExamples) == 0 {
 		return EmbeddingScoreSpectrumEvalMetrics{}, fmt.Errorf("score-spectrum eval batch is empty")
 	}
-	queryInputs, candidateInputs, candidateSpans, err := scoreSpectrumSequenceInputs(canonicalExamples)
+	queryInputs, candidateInputs, candidateSpans, err := scoreSpectrumSequenceInputs(canonicalExamples, t.queryRoleIndex(), t.documentRoleIndex())
 	if err != nil {
 		return EmbeddingScoreSpectrumEvalMetrics{}, err
 	}
@@ -1876,7 +1953,7 @@ func (t *EmbeddingTrainer) evaluateListwiseGeometryBatch(batches []EmbeddingToke
 	if len(batches) == 0 {
 		return EmbeddingListwiseGeometryEvalMetrics{}, fmt.Errorf("listwise geometry eval batch is empty")
 	}
-	queryInputs, documentInputs, spans, err := listwiseGeometrySequenceInputs(batches)
+	queryInputs, documentInputs, spans, err := listwiseGeometrySequenceInputs(batches, t.queryRoleIndex(), t.documentRoleIndex())
 	if err != nil {
 		return EmbeddingListwiseGeometryEvalMetrics{}, err
 	}
@@ -1974,6 +2051,13 @@ func (t *EmbeddingTrainer) ExportInferenceWeights() (map[string]*backend.Tensor,
 	token, err := exportTensorForParam(t.tokenParam, t.tokenEmbed)
 	if err != nil {
 		return nil, err
+	}
+	if t.roleEmbed != nil {
+		role, err := exportTensorForParam(t.roleParam, t.roleEmbed)
+		if err != nil {
+			return nil, err
+		}
+		out[t.roleParam.Name] = role
 	}
 	if t.attentionQuery != nil {
 		query, err := exportTensorForParam(t.attnQParam, t.attentionQuery)
@@ -2217,6 +2301,7 @@ func (t *EmbeddingTrainer) runBatch(batch []EmbeddingPairExample, update bool) (
 		return metrics, err
 	}
 	gradToken := make([]float32, len(t.tokenEmbed.F32))
+	gradRole := make([]float32, tensorDataLen(t.roleEmbed))
 	gradAttnQ := make([]float32, tensorDataLen(t.attentionQuery))
 	gradAttnK := make([]float32, tensorDataLen(t.attentionKey))
 	gradAttnV := make([]float32, tensorDataLen(t.attentionValue))
@@ -2227,7 +2312,7 @@ func (t *EmbeddingTrainer) runBatch(batch []EmbeddingPairExample, update bool) (
 	totalLoss := float32(0)
 	totalScore := float32(0)
 	for i, example := range batch {
-		left, right, err := t.encodeExamplePair(example, forward.token, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, update)
+		left, right, err := t.encodeExamplePair(example, forward.token, forward.role, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, update)
 		if err != nil {
 			return EmbeddingTrainMetrics{}, fmt.Errorf("batch %d: %w", i, err)
 		}
@@ -2243,6 +2328,8 @@ func (t *EmbeddingTrainer) runBatch(batch []EmbeddingPairExample, update bool) (
 		rightInputGrad := t.backpropEncodedSequence(right, gradRight, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
 		t.accumulateInputTokenGrad(left.tokens, leftInputGrad, gradToken)
 		t.accumulateInputTokenGrad(right.tokens, rightInputGrad, gradToken)
+		t.accumulateInputRoleGrad(left.role, len(left.tokens), leftInputGrad, gradRole)
+		t.accumulateInputRoleGrad(right.role, len(right.tokens), rightInputGrad, gradRole)
 		t.releaseEncodedSequenceBindings(left)
 		t.releaseEncodedSequenceBindings(right)
 	}
@@ -2251,6 +2338,7 @@ func (t *EmbeddingTrainer) runBatch(batch []EmbeddingPairExample, update bool) (
 	if update {
 		t.step++
 		t.applyOptimizerUpdate(t.tokenParam.Name, t.tokenEmbed, t.tokenMom1, t.tokenMom2, gradToken, batchScale)
+		t.applyOptimizerUpdate(t.roleParam.Name, t.roleEmbed, t.roleMom1, t.roleMom2, gradRole, batchScale)
 		t.applyOptimizerUpdate(t.attnQParam.Name, t.attentionQuery, t.attnQMom1, t.attnQMom2, gradAttnQ, batchScale)
 		t.applyOptimizerUpdate(t.attnKParam.Name, t.attentionKey, t.attnKMom1, t.attnKMom2, gradAttnK, batchScale)
 		t.applyOptimizerUpdate(t.attnVParam.Name, t.attentionValue, t.attnVMom1, t.attnVMom2, gradAttnV, batchScale)
@@ -2284,6 +2372,7 @@ func (t *EmbeddingTrainer) tryRunPairBatchBatched(batch []EmbeddingPairExample, 
 	defer t.releaseEncodedSequences(rights)
 
 	gradToken := make([]float32, len(t.tokenEmbed.F32))
+	gradRole := make([]float32, tensorDataLen(t.roleEmbed))
 	gradAttnQ := make([]float32, tensorDataLen(t.attentionQuery))
 	gradAttnK := make([]float32, tensorDataLen(t.attentionKey))
 	gradAttnV := make([]float32, tensorDataLen(t.attentionValue))
@@ -2334,16 +2423,19 @@ func (t *EmbeddingTrainer) tryRunPairBatchBatched(batch []EmbeddingPairExample, 
 			for i, left := range lefts {
 				inputGrad := t.backpropEncodedSequence(left, leftGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
 				t.accumulateInputTokenGrad(left.tokens, inputGrad, gradToken)
+				t.accumulateInputRoleGrad(left.role, len(left.tokens), inputGrad, gradRole)
 			}
 			for i, right := range rights {
 				inputGrad := t.backpropEncodedSequence(right, rightGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
 				t.accumulateInputTokenGrad(right.tokens, inputGrad, gradToken)
+				t.accumulateInputRoleGrad(right.role, len(right.tokens), inputGrad, gradRole)
 			}
 		}
 
 		batchScale := float32(1) / float32(len(batch))
 		t.step++
 		t.applyOptimizerUpdate(t.tokenParam.Name, t.tokenEmbed, t.tokenMom1, t.tokenMom2, gradToken, batchScale)
+		t.applyOptimizerUpdate(t.roleParam.Name, t.roleEmbed, t.roleMom1, t.roleMom2, gradRole, batchScale)
 		t.applyOptimizerUpdate(t.attnQParam.Name, t.attentionQuery, t.attnQMom1, t.attnQMom2, gradAttnQ, batchScale)
 		t.applyOptimizerUpdate(t.attnKParam.Name, t.attentionKey, t.attnKMom1, t.attnKMom2, gradAttnK, batchScale)
 		t.applyOptimizerUpdate(t.attnVParam.Name, t.attentionValue, t.attnVMom1, t.attnVMom2, gradAttnV, batchScale)
@@ -2364,7 +2456,7 @@ func (t *EmbeddingTrainer) scoreExamplePair(example EmbeddingPairExample, forwar
 	if forward == nil {
 		return 0, 0, fmt.Errorf("missing forward weights")
 	}
-	left, right, err := t.encodeExamplePair(example, forward.token, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, false)
+	left, right, err := t.encodeExamplePair(example, forward.token, forward.role, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, false)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -2397,13 +2489,13 @@ func (t *EmbeddingTrainer) encodeContrastiveBatch(batch []EmbeddingContrastiveEx
 			t.releaseEncodedSequences(positives)
 			return nil, nil, fmt.Errorf("batch %d positive: %w", i, err)
 		}
-		query, err := t.encodeSequence(example.QueryTokens, queryMask, forward.token, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, captureBindings)
+		query, err := t.encodeSequence(example.QueryTokens, queryMask, t.queryRoleIndex(), forward.token, forward.role, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, captureBindings)
 		if err != nil {
 			t.releaseEncodedSequences(queries)
 			t.releaseEncodedSequences(positives)
 			return nil, nil, fmt.Errorf("batch %d query: %w", i, err)
 		}
-		positive, err := t.encodeSequence(example.PositiveTokens, positiveMask, forward.token, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, captureBindings)
+		positive, err := t.encodeSequence(example.PositiveTokens, positiveMask, t.documentRoleIndex(), forward.token, forward.role, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, captureBindings)
 		if err != nil {
 			t.releaseEncodedSequenceBindings(query)
 			t.releaseEncodedSequences(queries)
@@ -2419,6 +2511,7 @@ func (t *EmbeddingTrainer) encodeContrastiveBatch(batch []EmbeddingContrastiveEx
 type embeddingBatchSequence struct {
 	tokens  []int32
 	mask    []int32
+	role    int32
 	current []float32
 	encoded *embeddingEncodedSequence
 }
@@ -2430,15 +2523,18 @@ type embeddingBatchSequenceSlot struct {
 type embeddingSequenceInput struct {
 	tokens []int32
 	mask   []int32
+	role   int32
 	label  string
 }
 
-func embeddingBatchSequenceKey(tokens, mask []int32) string {
+func embeddingBatchSequenceKey(tokens, mask []int32, role int32) string {
 	var b strings.Builder
-	b.Grow((len(tokens)+len(mask))*4 + 1)
+	b.Grow((len(tokens)+len(mask))*4 + 5)
 	writeInt32KeyPart(&b, tokens)
 	b.WriteByte('|')
 	writeInt32KeyPart(&b, mask)
+	b.WriteByte('|')
+	writeInt32KeyPart(&b, []int32{role})
 	return b.String()
 }
 
@@ -2451,12 +2547,12 @@ func writeInt32KeyPart(b *strings.Builder, values []int32) {
 	}
 }
 
-func (t *EmbeddingTrainer) cachedEmbeddingBatchSequence(cache map[string]*embeddingBatchSequence, sequences *[]*embeddingBatchSequence, groups map[int][]embeddingBatchSequenceSlot, lengths *[]int, tokens, mask []int32, tokenEmbed *backend.Tensor) (*embeddingBatchSequence, error) {
-	key := embeddingBatchSequenceKey(tokens, mask)
+func (t *EmbeddingTrainer) cachedEmbeddingBatchSequence(cache map[string]*embeddingBatchSequence, sequences *[]*embeddingBatchSequence, groups map[int][]embeddingBatchSequenceSlot, lengths *[]int, tokens, mask []int32, role int32, forward *embeddingForwardWeights) (*embeddingBatchSequence, error) {
+	key := embeddingBatchSequenceKey(tokens, mask, role)
 	if sequence, ok := cache[key]; ok {
 		return sequence, nil
 	}
-	sequence, err := t.newEmbeddingBatchSequence(tokens, mask, tokenEmbed)
+	sequence, err := t.newEmbeddingBatchSequence(tokens, mask, role, forward)
 	if err != nil {
 		return nil, err
 	}
@@ -2484,7 +2580,7 @@ func (t *EmbeddingTrainer) encodeSequenceInputs(inputs []embeddingSequenceInput,
 			t.releaseEncodedSequences(out)
 			return nil, fmt.Errorf("%s: %w", embeddingSequenceInputLabel(input, i), err)
 		}
-		seq, err := t.encodeSequence(input.tokens, mask, forward.token, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, captureBindings)
+		seq, err := t.encodeSequence(input.tokens, mask, input.role, forward.token, forward.role, forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, captureBindings)
 		if err != nil {
 			t.releaseEncodedSequences(out)
 			return nil, fmt.Errorf("%s: %w", embeddingSequenceInputLabel(input, i), err)
@@ -2508,7 +2604,7 @@ func (t *EmbeddingTrainer) tryEncodeSequenceInputsBatchedForward(inputs []embedd
 		if err != nil {
 			return nil, true, fmt.Errorf("%s: %w", embeddingSequenceInputLabel(input, i), err)
 		}
-		seq, err := t.cachedEmbeddingBatchSequence(sequenceCache, &sequences, groups, &lengths, input.tokens, mask, forward.token)
+		seq, err := t.cachedEmbeddingBatchSequence(sequenceCache, &sequences, groups, &lengths, input.tokens, mask, input.role, forward)
 		if err != nil {
 			t.releaseBatchEncodedSequences(sequences)
 			return nil, true, fmt.Errorf("%s: %w", embeddingSequenceInputLabel(input, i), err)
@@ -2551,12 +2647,12 @@ func (t *EmbeddingTrainer) tryEncodeContrastiveBatchBatchedForward(batch []Embed
 		if err != nil {
 			return nil, nil, true, fmt.Errorf("batch %d positive: %w", i, err)
 		}
-		query, err := t.cachedEmbeddingBatchSequence(sequenceCache, &sequences, groups, &lengths, example.QueryTokens, queryMask, forward.token)
+		query, err := t.cachedEmbeddingBatchSequence(sequenceCache, &sequences, groups, &lengths, example.QueryTokens, queryMask, t.queryRoleIndex(), forward)
 		if err != nil {
 			t.releaseBatchEncodedSequences(sequences)
 			return nil, nil, true, fmt.Errorf("batch %d query: %w", i, err)
 		}
-		positive, err := t.cachedEmbeddingBatchSequence(sequenceCache, &sequences, groups, &lengths, example.PositiveTokens, positiveMask, forward.token)
+		positive, err := t.cachedEmbeddingBatchSequence(sequenceCache, &sequences, groups, &lengths, example.PositiveTokens, positiveMask, t.documentRoleIndex(), forward)
 		if err != nil {
 			t.releaseBatchEncodedSequences(sequences)
 			return nil, nil, true, fmt.Errorf("batch %d positive: %w", i, err)
@@ -2593,12 +2689,12 @@ func (t *EmbeddingTrainer) tryEncodePairBatchBatchedForward(batch []EmbeddingPai
 		if err != nil {
 			return nil, nil, true, fmt.Errorf("batch %d right: %w", i, err)
 		}
-		left, err := t.cachedEmbeddingBatchSequence(sequenceCache, &sequences, groups, &lengths, example.LeftTokens, leftMask, forward.token)
+		left, err := t.cachedEmbeddingBatchSequence(sequenceCache, &sequences, groups, &lengths, example.LeftTokens, leftMask, t.rawRoleIndex(), forward)
 		if err != nil {
 			t.releaseBatchEncodedSequences(sequences)
 			return nil, nil, true, fmt.Errorf("batch %d left: %w", i, err)
 		}
-		right, err := t.cachedEmbeddingBatchSequence(sequenceCache, &sequences, groups, &lengths, example.RightTokens, rightMask, forward.token)
+		right, err := t.cachedEmbeddingBatchSequence(sequenceCache, &sequences, groups, &lengths, example.RightTokens, rightMask, t.rawRoleIndex(), forward)
 		if err != nil {
 			t.releaseBatchEncodedSequences(sequences)
 			return nil, nil, true, fmt.Errorf("batch %d right: %w", i, err)
@@ -2837,21 +2933,29 @@ func trainEnv(name string) string {
 	return ""
 }
 
-func (t *EmbeddingTrainer) newEmbeddingBatchSequence(tokens, mask []int32, tokenEmbed *backend.Tensor) (*embeddingBatchSequence, error) {
-	input, err := embeddingInputForTokens(tokenEmbed, tokens)
+func (t *EmbeddingTrainer) newEmbeddingBatchSequence(tokens, mask []int32, role int32, forward *embeddingForwardWeights) (*embeddingBatchSequence, error) {
+	if forward == nil {
+		return nil, fmt.Errorf("missing forward weights")
+	}
+	input, err := embeddingInputForTokens(forward.token, tokens)
 	if err != nil {
 		return nil, err
 	}
-	if err := applyEmbeddingPositionEncoding(input, len(tokens), tokenEmbed.Shape[1], t.manifest.PositionEncoding); err != nil {
+	if err := addRoleEmbeddingToInput(input, forward.role, role, len(tokens)); err != nil {
+		return nil, err
+	}
+	if err := applyEmbeddingPositionEncoding(input, len(tokens), forward.token.Shape[1], t.manifest.PositionEncoding); err != nil {
 		return nil, err
 	}
 	encoded := &embeddingEncodedSequence{
 		layers: make([]*embeddingSequenceState, 0, t.encoderRepeats()),
 		tokens: append([]int32(nil), tokens...),
+		role:   role,
 	}
 	return &embeddingBatchSequence{
 		tokens:  append([]int32(nil), tokens...),
 		mask:    append([]int32(nil), mask...),
+		role:    role,
 		current: input,
 		encoded: encoded,
 	}, nil
@@ -4284,7 +4388,7 @@ func evaluateListwiseGeometryEncodings(queries, documents []*embeddingEncodedSeq
 	return metrics, nil
 }
 
-func listwiseGeometrySequenceInputs(batches []EmbeddingTokenizedListwiseGeometryBatch) ([]embeddingSequenceInput, []embeddingSequenceInput, []embeddingCandidateSpan, error) {
+func listwiseGeometrySequenceInputs(batches []EmbeddingTokenizedListwiseGeometryBatch, queryRole, documentRole int32) ([]embeddingSequenceInput, []embeddingSequenceInput, []embeddingCandidateSpan, error) {
 	queryInputs := []embeddingSequenceInput{}
 	documentInputs := []embeddingSequenceInput{}
 	documentSpans := make([]embeddingCandidateSpan, len(batches))
@@ -4300,6 +4404,7 @@ func listwiseGeometrySequenceInputs(batches []EmbeddingTokenizedListwiseGeometry
 			queryInputs = append(queryInputs, embeddingSequenceInput{
 				tokens: tokens,
 				mask:   mask,
+				role:   queryRole,
 				label:  fmt.Sprintf("listwise geometry batch %d query %d", i, j),
 			})
 		}
@@ -4312,6 +4417,7 @@ func listwiseGeometrySequenceInputs(batches []EmbeddingTokenizedListwiseGeometry
 			documentInputs = append(documentInputs, embeddingSequenceInput{
 				tokens: tokens,
 				mask:   mask,
+				role:   documentRole,
 				label:  fmt.Sprintf("listwise geometry batch %d document %d", i, j),
 			})
 		}
@@ -4419,7 +4525,7 @@ func validateListwiseGeometryTrainerConfig(cfg EmbeddingTrainConfig) error {
 	return nil
 }
 
-func scoreSpectrumSequenceInputs(examples []EmbeddingScoreSpectrumExample) ([]embeddingSequenceInput, []embeddingSequenceInput, []embeddingCandidateSpan, error) {
+func scoreSpectrumSequenceInputs(examples []EmbeddingScoreSpectrumExample, queryRole, documentRole int32) ([]embeddingSequenceInput, []embeddingSequenceInput, []embeddingCandidateSpan, error) {
 	examples, err := canonicalizeTokenizedScoreSpectrumExamples(examples)
 	if err != nil {
 		return nil, nil, nil, err
@@ -4434,6 +4540,7 @@ func scoreSpectrumSequenceInputs(examples []EmbeddingScoreSpectrumExample) ([]em
 		queryInputs[i] = embeddingSequenceInput{
 			tokens: example.QueryTokens,
 			mask:   example.QueryMask,
+			role:   queryRole,
 			label:  fmt.Sprintf("score-spectrum row %d query", i),
 		}
 		candidateSpans[i].Start = len(candidateInputs)
@@ -4445,6 +4552,7 @@ func scoreSpectrumSequenceInputs(examples []EmbeddingScoreSpectrumExample) ([]em
 			candidateInputs = append(candidateInputs, embeddingSequenceInput{
 				tokens: tokens,
 				mask:   mask,
+				role:   documentRole,
 				label:  fmt.Sprintf("score-spectrum row %d candidate %d", i, j),
 			})
 		}
@@ -5418,6 +5526,7 @@ func (t *EmbeddingTrainer) prepareForwardWeights() *embeddingForwardWeights {
 		t.forwardCache = &embeddingForwardWeights{}
 	}
 	t.forwardCache.token = refreshForwardTensorForParam(t.tokenParam, t.tokenEmbed, t.config.WeightBits, t.forwardCache.token)
+	t.forwardCache.role = refreshForwardTensorForParam(t.roleParam, t.roleEmbed, t.config.WeightBits, t.forwardCache.role)
 	t.forwardCache.attnQ = refreshForwardMatMulTensorForParam(t.attnQParam, t.attentionQuery, t.forwardCache.attnQ)
 	t.forwardCache.attnK = refreshForwardMatMulTensorForParam(t.attnKParam, t.attentionKey, t.forwardCache.attnK)
 	t.forwardCache.attnV = refreshForwardMatMulTensorForParam(t.attnVParam, t.attentionValue, t.forwardCache.attnV)
@@ -5436,7 +5545,7 @@ func (t *EmbeddingTrainer) invalidateForwardWeights() {
 	t.forwardNeedsBind = true
 }
 
-func (t *EmbeddingTrainer) encodeExamplePair(example EmbeddingPairExample, tokenForward, attnQForward, attnKForward, attnVForward, attnOForward, hiddenForward, projForward *backend.Tensor, captureBindings bool) (*embeddingEncodedSequence, *embeddingEncodedSequence, error) {
+func (t *EmbeddingTrainer) encodeExamplePair(example EmbeddingPairExample, tokenForward, roleForward, attnQForward, attnKForward, attnVForward, attnOForward, hiddenForward, projForward *backend.Tensor, captureBindings bool) (*embeddingEncodedSequence, *embeddingEncodedSequence, error) {
 	leftMask, err := t.prepareMask(example.LeftTokens, example.LeftMask)
 	if err != nil {
 		return nil, nil, fmt.Errorf("left: %w", err)
@@ -5445,11 +5554,11 @@ func (t *EmbeddingTrainer) encodeExamplePair(example EmbeddingPairExample, token
 	if err != nil {
 		return nil, nil, fmt.Errorf("right: %w", err)
 	}
-	left, err := t.encodeSequence(example.LeftTokens, leftMask, tokenForward, attnQForward, attnKForward, attnVForward, attnOForward, hiddenForward, projForward, captureBindings)
+	left, err := t.encodeSequence(example.LeftTokens, leftMask, t.rawRoleIndex(), tokenForward, roleForward, attnQForward, attnKForward, attnVForward, attnOForward, hiddenForward, projForward, captureBindings)
 	if err != nil {
 		return nil, nil, fmt.Errorf("left: %w", err)
 	}
-	right, err := t.encodeSequence(example.RightTokens, rightMask, tokenForward, attnQForward, attnKForward, attnVForward, attnOForward, hiddenForward, projForward, captureBindings)
+	right, err := t.encodeSequence(example.RightTokens, rightMask, t.rawRoleIndex(), tokenForward, roleForward, attnQForward, attnKForward, attnVForward, attnOForward, hiddenForward, projForward, captureBindings)
 	if err != nil {
 		t.releaseEncodedSequenceBindings(left)
 		return nil, nil, fmt.Errorf("right: %w", err)
@@ -5483,6 +5592,27 @@ func (t *EmbeddingTrainer) prepareMask(tokens, mask []int32) ([]int32, error) {
 	return append([]int32(nil), mask...), nil
 }
 
+func (t *EmbeddingTrainer) rawRoleIndex() int32 {
+	if t == nil || !t.manifest.roleConditioned() {
+		return 0
+	}
+	return t.manifest.RawRoleIndex
+}
+
+func (t *EmbeddingTrainer) queryRoleIndex() int32 {
+	if t == nil || !t.manifest.roleConditioned() {
+		return 0
+	}
+	return t.manifest.QueryRoleIndex
+}
+
+func (t *EmbeddingTrainer) documentRoleIndex() int32 {
+	if t == nil || !t.manifest.roleConditioned() {
+		return 0
+	}
+	return t.manifest.DocumentRoleIndex
+}
+
 func (t *EmbeddingTrainer) validateTokenSequence(tokens []int32) error {
 	if len(tokens) == 0 {
 		return fmt.Errorf("tokens are empty")
@@ -5500,9 +5630,12 @@ func (t *EmbeddingTrainer) validateTokenSequence(tokens []int32) error {
 	return nil
 }
 
-func (t *EmbeddingTrainer) encodeSequence(tokens, mask []int32, tokenEmbed, attentionQuery, attentionKey, attentionValue, attentionOutput, hiddenProjection, projection *backend.Tensor, captureBindings bool) (*embeddingEncodedSequence, error) {
+func (t *EmbeddingTrainer) encodeSequence(tokens, mask []int32, role int32, tokenEmbed, roleEmbed, attentionQuery, attentionKey, attentionValue, attentionOutput, hiddenProjection, projection *backend.Tensor, captureBindings bool) (*embeddingEncodedSequence, error) {
 	input, err := embeddingInputForTokens(tokenEmbed, tokens)
 	if err != nil {
+		return nil, err
+	}
+	if err := addRoleEmbeddingToInput(input, roleEmbed, role, len(tokens)); err != nil {
 		return nil, err
 	}
 	if err := applyEmbeddingPositionEncoding(input, len(tokens), tokenEmbed.Shape[1], t.manifest.PositionEncoding); err != nil {
@@ -5512,6 +5645,7 @@ func (t *EmbeddingTrainer) encodeSequence(tokens, mask []int32, tokenEmbed, atte
 		layers: make([]*embeddingSequenceState, 0, t.encoderRepeats()),
 		pooled: nil,
 		tokens: append([]int32(nil), tokens...),
+		role:   role,
 	}
 	current := input
 	for layer := 0; layer < t.encoderRepeats(); layer++ {
@@ -5740,6 +5874,30 @@ func embeddingInputForTokens(tokenEmbed *backend.Tensor, tokens []int32) ([]floa
 		copy(input[row*d:(row+1)*d], tokenEmbed.F32[int(tok)*d:(int(tok)+1)*d])
 	}
 	return input, nil
+}
+
+func addRoleEmbeddingToInput(input []float32, roleEmbed *backend.Tensor, role int32, rows int) error {
+	if roleEmbed == nil {
+		return nil
+	}
+	if len(roleEmbed.Shape) != 2 {
+		return fmt.Errorf("role embedding rank = %d, want 2", len(roleEmbed.Shape))
+	}
+	d := roleEmbed.Shape[1]
+	if rows*d != len(input) {
+		return fmt.Errorf("role embedding width %d does not match input shape rows=%d values=%d", d, rows, len(input))
+	}
+	if role < 0 || int(role) >= roleEmbed.Shape[0] {
+		return fmt.Errorf("role index %d is outside role embedding rows %d", role, roleEmbed.Shape[0])
+	}
+	roleBase := int(role) * d
+	for row := 0; row < rows; row++ {
+		base := row * d
+		for col := 0; col < d; col++ {
+			input[base+col] += roleEmbed.F32[roleBase+col]
+		}
+	}
+	return nil
 }
 
 func applyEmbeddingPositionEncoding(input []float32, rows, width int, mode string) error {
@@ -7201,6 +7359,9 @@ func (t *EmbeddingTrainer) tryBackpropContrastiveBatch(queries, positives []*emb
 	if t == nil || !batchedBackwardEnabled() || hiddenProjection == nil || projection == nil {
 		return false
 	}
+	if t.roleEmbed != nil {
+		return false
+	}
 	items := make([]embeddingBackpropItem, 0, len(queries)+len(positives))
 	for i, seq := range queries {
 		if i >= len(queryGrads) || seq == nil || len(seq.layers) == 0 {
@@ -8179,6 +8340,28 @@ func (t *EmbeddingTrainer) accumulateInputTokenGrad(tokens []int32, gradInput, g
 		applyRoPETransposeToRowsInPlace(gradInput, len(tokens), d)
 	}
 	accumulateTokenGrad(tokens, gradInput, gradToken, d, vocab)
+}
+
+func (t *EmbeddingTrainer) accumulateInputRoleGrad(role int32, tokenCount int, gradInput, gradRole []float32) {
+	if t == nil || t.roleEmbed == nil || len(t.roleEmbed.Shape) != 2 || len(gradRole) == 0 {
+		return
+	}
+	d := t.roleEmbed.Shape[1]
+	rows := t.roleEmbed.Shape[0]
+	if d == 0 || rows == 0 || role < 0 || int(role) >= rows {
+		return
+	}
+	if t.manifest.PositionEncoding == EmbeddingPositionEncodingRoPE {
+		gradInput = append([]float32(nil), gradInput...)
+		applyRoPETransposeToRowsInPlace(gradInput, tokenCount, d)
+	}
+	roleBase := int(role) * d
+	for row := 0; row < tokenCount; row++ {
+		inputBase := row * d
+		for col := 0; col < d; col++ {
+			gradRole[roleBase+col] += gradInput[inputBase+col]
+		}
+	}
 }
 
 func accumulateTokenGrad(tokens []int32, gradInput, gradToken []float32, d, vocab int) {

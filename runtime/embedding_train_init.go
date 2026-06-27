@@ -35,6 +35,7 @@ func InitializeEmbeddingTrainerPackageWithManifest(artifactPath string, manifest
 	if err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
+	manifest = manifest.normalized()
 	trainManifest := EmbeddingTrainManifest{
 		Name:      manifest.Name,
 		Embedding: manifest,
@@ -43,7 +44,7 @@ func InitializeEmbeddingTrainerPackageWithManifest(artifactPath string, manifest
 	if err := trainManifest.ValidateModule(mod); err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
-	weights, err := initializedTrainingWeights(mod, manifest.Tokenizer, opts)
+	weights, err := initializedTrainingWeights(mod, manifest, opts)
 	if err != nil {
 		return EmbeddingTrainPackagePaths{}, err
 	}
@@ -59,7 +60,7 @@ func InitializeEmbeddingTrainerPackageWithManifest(artifactPath string, manifest
 	return trainer.WriteTrainingPackage(artifactPath)
 }
 
-func initializedTrainingWeights(mod *eosartifact.Module, tokenizer TokenizerManifest, opts EmbeddingTrainInitOptions) (map[string]*backend.Tensor, error) {
+func initializedTrainingWeights(mod *eosartifact.Module, manifest EmbeddingManifest, opts EmbeddingTrainInitOptions) (map[string]*backend.Tensor, error) {
 	if mod == nil {
 		return nil, fmt.Errorf("nil module")
 	}
@@ -73,7 +74,7 @@ func initializedTrainingWeights(mod *eosartifact.Module, tokenizer TokenizerMani
 		if param.Type.Kind != eosartifact.ValueTensor || param.Type.Tensor == nil {
 			return nil, fmt.Errorf("param %q is not a tensor weight", param.Name)
 		}
-		shape, err := resolveTrainingInitShape(param.Type.Tensor.Shape, tokenizer, opts.ShapeSizes)
+		shape, err := resolveTrainingInitShape(param.Type.Tensor.Shape, manifest.Tokenizer, opts.ShapeSizes)
 		if err != nil {
 			return nil, fmt.Errorf("param %q: %w", param.Name, err)
 		}
@@ -81,9 +82,30 @@ func initializedTrainingWeights(mod *eosartifact.Module, tokenizer TokenizerMani
 		if err != nil {
 			return nil, fmt.Errorf("param %q: %w", param.Name, err)
 		}
+		if manifest.roleConditioned() && param.Name == manifest.RoleEmbeddingParam {
+			tensor = zeroInitializedTensor(param.Type.Tensor.DType, shape)
+		}
 		weights[param.Name] = tensor
 	}
 	return weights, nil
+}
+
+func zeroInitializedTensor(dtype string, shape []int) *backend.Tensor {
+	n := 1
+	for _, dim := range shape {
+		n *= dim
+	}
+	data := make([]float32, n)
+	switch dtype {
+	case "f16":
+		return backend.NewTensorF16(shape, data)
+	case "q4":
+		return backend.NewTensorQ4(shape, data)
+	case "q8":
+		return backend.NewTensorQ8(shape, data)
+	default:
+		return backend.NewTensorF32(shape, data)
+	}
 }
 
 func resolveTrainingInitShape(shape []string, tokenizer TokenizerManifest, sizes map[string]int) ([]int, error) {
@@ -176,6 +198,7 @@ func bootstrapTrainingWeights(weights map[string]*backend.Tensor, targetManifest
 		source     *backend.Tensor
 	}{
 		{role: "token_embedding", targetName: targetManifest.TokenEmbeddingParam, source: checkpoint.TokenEmbedding},
+		{role: "role_embedding", targetName: targetManifest.RoleEmbeddingParam, source: checkpoint.RoleEmbedding},
 		{role: "attention_query", targetName: targetManifest.AttentionQueryParam, source: checkpoint.AttentionQuery},
 		{role: "attention_key", targetName: targetManifest.AttentionKeyParam, source: checkpoint.AttentionKey},
 		{role: "attention_value", targetName: targetManifest.AttentionValueParam, source: checkpoint.AttentionValue},

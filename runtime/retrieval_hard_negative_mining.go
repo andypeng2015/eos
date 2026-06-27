@@ -175,11 +175,11 @@ func MineModelTextHardNegatives(ctx context.Context, model *EmbeddingModel, cfg 
 	if len(queries) == 0 {
 		return nil, RetrievalHardNegativeMiningSummary{}, fmt.Errorf("no qrels queries found in queries file")
 	}
-	docVectors, err := embedRetrievalTexts(ctx, model, corpus, cfg.BatchSize)
+	docVectors, err := embedRetrievalTexts(ctx, model, corpus, cfg.BatchSize, EmbeddingRoleRaw)
 	if err != nil {
 		return nil, RetrievalHardNegativeMiningSummary{}, fmt.Errorf("embed corpus: %w", err)
 	}
-	queryVectors, err := embedRetrievalTexts(ctx, model, queries, cfg.BatchSize)
+	queryVectors, err := embedRetrievalTexts(ctx, model, queries, cfg.BatchSize, EmbeddingRoleRaw)
 	if err != nil {
 		return nil, RetrievalHardNegativeMiningSummary{}, fmt.Errorf("embed queries: %w", err)
 	}
