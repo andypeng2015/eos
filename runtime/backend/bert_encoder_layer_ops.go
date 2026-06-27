@@ -3,9 +3,13 @@ package backend
 import (
 	"fmt"
 	"math"
+	"math/bits"
+	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 
 	eosartifact "m31labs.dev/eos/artifact/eos"
 )
@@ -26,6 +30,11 @@ func bertEncoderLayerTensor(inputs []*Tensor, outputType eosartifact.ValueType, 
 		inputs[16], inputs[17],
 		cfg.NumAttentionHeads, cfg.Epsilon, cfg.HiddenAct, outputType,
 	)
+}
+
+type bertDenseProjector interface {
+	DenseHF(input []float32, rows, in int, weight, bias *Tensor) ([]float32, bool)
+	DenseHFMany(input []float32, rows, in int, weights, biases []*Tensor) ([][]float32, bool)
 }
 
 type bertEncoderLayerConfig struct {
@@ -77,6 +86,28 @@ func BERTEncoderLayerReference(
 	numAttentionHeads int,
 	epsilon float64,
 	hiddenAct string,
+	outTypes ...eosartifact.ValueType,
+) (*Tensor, error) {
+	return bertEncoderLayerReferenceWithProjector(
+		hiddenStates, attentionMask,
+		queryWeight, queryBias, keyWeight, keyBias, valueWeight, valueBias,
+		attentionOutputWeight, attentionOutputBias, attentionLayerNormWeight, attentionLayerNormBias,
+		intermediateWeight, intermediateBias, outputWeight, outputBias,
+		outputLayerNormWeight, outputLayerNormBias,
+		numAttentionHeads, epsilon, hiddenAct, defaultBERTDenseProjector(), outTypes...,
+	)
+}
+
+func bertEncoderLayerReferenceWithProjector(
+	hiddenStates, attentionMask *Tensor,
+	queryWeight, queryBias, keyWeight, keyBias, valueWeight, valueBias *Tensor,
+	attentionOutputWeight, attentionOutputBias, attentionLayerNormWeight, attentionLayerNormBias *Tensor,
+	intermediateWeight, intermediateBias, outputWeight, outputBias *Tensor,
+	outputLayerNormWeight, outputLayerNormBias *Tensor,
+	numAttentionHeads int,
+	epsilon float64,
+	hiddenAct string,
+	projector bertDenseProjector,
 	outTypes ...eosartifact.ValueType,
 ) (*Tensor, error) {
 	if hiddenAct == "" {
@@ -159,29 +190,54 @@ func BERTEncoderLayerReference(
 	}
 
 	rows := batch * tokens
-	q := denseHF(hiddenStates.F32, rows, hidden, queryWeight, queryBias)
-	k := denseHF(hiddenStates.F32, rows, hidden, keyWeight, keyBias)
-	v := denseHF(hiddenStates.F32, rows, hidden, valueWeight, valueBias)
+	qkv, ok := denseHFManyWithProjector(projector, hiddenStates.F32, rows, hidden,
+		[]*Tensor{queryWeight, keyWeight, valueWeight},
+		[]*Tensor{queryBias, keyBias, valueBias},
+	)
+	if !ok {
+		qkv = [][]float32{
+			denseHF(hiddenStates.F32, rows, hidden, queryWeight, queryBias),
+			denseHF(hiddenStates.F32, rows, hidden, keyWeight, keyBias),
+			denseHF(hiddenStates.F32, rows, hidden, valueWeight, valueBias),
+		}
+	}
+	q, k, v := qkv[0], qkv[1], qkv[2]
 	context := bertSelfAttentionContext(q, k, v, attentionMask.I32, batch, tokens, hidden, numAttentionHeads, headDim)
 
-	attentionProjected := denseHF(context, rows, hidden, attentionOutputWeight, attentionOutputBias)
+	attentionProjected := denseHFWithProjector(projector, context, rows, hidden, attentionOutputWeight, attentionOutputBias)
 	attentionNormInput := make([]float32, rows*hidden)
 	for i := range attentionNormInput {
 		attentionNormInput[i] = attentionProjected[i] + hiddenStates.F32[i]
 	}
 	attentionLayer := layerNormAffine(attentionNormInput, rows, hidden, attentionLayerNormWeight, attentionLayerNormBias, epsilon)
 
-	intermediateValues := denseHF(attentionLayer, rows, hidden, intermediateWeight, intermediateBias)
+	intermediateValues := denseHFWithProjector(projector, attentionLayer, rows, hidden, intermediateWeight, intermediateBias)
 	for i, value := range intermediateValues {
 		intermediateValues[i] = exactGELU(value)
 	}
-	outputProjected := denseHF(intermediateValues, rows, intermediate, outputWeight, outputBias)
+	outputProjected := denseHFWithProjector(projector, intermediateValues, rows, intermediate, outputWeight, outputBias)
 	outputNormInput := make([]float32, rows*hidden)
 	for i := range outputNormInput {
 		outputNormInput[i] = outputProjected[i] + attentionLayer[i]
 	}
 	out := NewTensorF32(hiddenStates.Shape, layerNormAffine(outputNormInput, rows, hidden, outputLayerNormWeight, outputLayerNormBias, epsilon))
 	return out, nil
+}
+
+func denseHFWithProjector(projector bertDenseProjector, input []float32, rows, in int, weight, bias *Tensor) []float32 {
+	if projector != nil {
+		if out, ok := projector.DenseHF(input, rows, in, weight, bias); ok {
+			return out
+		}
+	}
+	return denseHF(input, rows, in, weight, bias)
+}
+
+func denseHFManyWithProjector(projector bertDenseProjector, input []float32, rows, in int, weights, biases []*Tensor) ([][]float32, bool) {
+	if projector == nil {
+		return nil, false
+	}
+	return projector.DenseHFMany(input, rows, in, weights, biases)
 }
 
 func bertSelfAttentionContext(q, k, v []float32, attentionMask []int32, batch, tokens, hidden, heads, headDim int) []float32 {
@@ -402,6 +458,260 @@ func denseHFRange(input, result []float32, rowStart, rowEnd, in, out int, weight
 			}
 			result[r*out+o] = float32(sum)
 		}
+	}
+}
+
+type acceleratedBERTDenseProjector struct {
+	accel   MatMulAccelerator
+	backend eosartifact.BackendKind
+	prefix  string
+	nextID  atomic.Int64
+	clock   uint64
+	max     int
+
+	mu    sync.Mutex
+	runMu sync.Mutex
+	bound map[*Tensor]bertDenseBinding
+}
+
+var (
+	defaultBERTDenseProjectorOnce sync.Once
+	defaultBERTDenseProjectorInst bertDenseProjector
+)
+
+const defaultBERTDenseMaxResidentBindings = 256
+
+type bertDenseBinding struct {
+	name     string
+	fp       bertTensorFingerprint
+	lastUsed uint64
+}
+
+type bertTensorFingerprint struct {
+	dtype    string
+	shape    [2]int
+	elements int
+	hash     uint64
+}
+
+func defaultBERTDenseProjector() bertDenseProjector {
+	defaultBERTDenseProjectorOnce.Do(func() {
+		if bertDenseAccelerationEnabled() {
+			defaultBERTDenseProjectorInst = newAcceleratedBERTDenseProjector()
+		}
+	})
+	return defaultBERTDenseProjectorInst
+}
+
+func bertDenseAccelerationEnabled() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("EOS_BERT_DENSE_ACCEL")))
+	return value != "0" && value != "false" && value != "off" && value != "disabled"
+}
+
+func newAcceleratedBERTDenseProjector() bertDenseProjector {
+	accel, kind, err := NewPreferredMatMulAccelerator(eosartifact.BackendCUDA)
+	if err != nil || accel == nil {
+		return nil
+	}
+	return &acceleratedBERTDenseProjector{
+		accel:   accel,
+		backend: kind,
+		prefix:  fmt.Sprintf("bert_dense_%s", kind),
+		max:     defaultBERTDenseMaxResidentBindings,
+		bound:   map[*Tensor]bertDenseBinding{},
+	}
+}
+
+func (p *acceleratedBERTDenseProjector) DenseHF(input []float32, rows, in int, weight, bias *Tensor) ([]float32, bool) {
+	outputs, ok := p.DenseHFMany(input, rows, in, []*Tensor{weight}, []*Tensor{bias})
+	if !ok || len(outputs) != 1 {
+		return nil, false
+	}
+	return outputs[0], true
+}
+
+func (p *acceleratedBERTDenseProjector) DenseHFMany(input []float32, rows, in int, weights, biases []*Tensor) ([][]float32, bool) {
+	if p == nil || p.accel == nil || len(weights) == 0 || len(weights) != len(biases) {
+		return nil, false
+	}
+	lhs := NewTensorF32([]int{rows, in}, input)
+	outShapes := make([][]string, len(weights))
+	names := make([]string, len(weights))
+	newlyBound := make([]string, 0, len(weights))
+	p.runMu.Lock()
+	defer p.runMu.Unlock()
+	succeeded := false
+	defer func() {
+		if !succeeded && len(newlyBound) > 0 {
+			p.unbindNames(newlyBound)
+		}
+	}()
+	for i := range weights {
+		weight, bias := weights[i], biases[i]
+		if !canAccelerateBERTDense(rows, in, input, weight, bias) {
+			return nil, false
+		}
+		outShapes[i] = []string{strconv.Itoa(rows), strconv.Itoa(weight.Shape[0])}
+		name, bound, ok := p.boundName(weight)
+		if !ok {
+			return nil, false
+		}
+		if bound {
+			newlyBound = append(newlyBound, name)
+		}
+		names[i] = name
+	}
+	outType := eosartifact.ValueType{Tensor: &eosartifact.TensorType{DType: "f32", Shape: outShapes[0]}}
+	var results []StepDispatchResult
+	if len(names) > 1 {
+		multi, ok := p.accel.(MultiBoundRightMatMulAccelerator)
+		if !ok {
+			return nil, false
+		}
+		got, err := multi.RunMatMulWithBoundRights(lhs, names, outType, false, true)
+		if err != nil {
+			return nil, false
+		}
+		results = got
+	} else {
+		result, err := p.accel.RunMatMulWithBoundRight(lhs, names[0], outType, false, true)
+		if err != nil {
+			return nil, false
+		}
+		results = []StepDispatchResult{result}
+	}
+	if len(results) != len(weights) {
+		return nil, false
+	}
+	out := make([][]float32, len(results))
+	for i, result := range results {
+		if len(result.Outputs) != 1 || result.Outputs[0] == nil {
+			return nil, false
+		}
+		values := append([]float32(nil), result.Outputs[0].F32...)
+		addDenseBias(values, biases[i].F32, weights[i].Shape[0])
+		out[i] = values
+	}
+	succeeded = true
+	return out, true
+}
+
+func (p *acceleratedBERTDenseProjector) boundName(weight *Tensor) (string, bool, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	fp := bertDenseWeightFingerprint(weight)
+	p.clock++
+	now := p.clock
+	if binding, ok := p.bound[weight]; ok {
+		if binding.fp == fp {
+			binding.lastUsed = now
+			p.bound[weight] = binding
+			return binding.name, false, true
+		}
+		_ = p.accel.UnbindMatrix(binding.name)
+		delete(p.bound, weight)
+	}
+	name := fmt.Sprintf("%s_%d", p.prefix, p.nextID.Add(1))
+	if err := p.accel.BindMatrix(name, weight); err != nil {
+		return "", false, false
+	}
+	p.bound[weight] = bertDenseBinding{name: name, fp: fp, lastUsed: now}
+	p.evictLocked()
+	return name, true, true
+}
+
+func (p *acceleratedBERTDenseProjector) unbindNames(names []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	remove := map[string]bool{}
+	for _, name := range names {
+		remove[name] = true
+		_ = p.accel.UnbindMatrix(name)
+	}
+	for tensor, binding := range p.bound {
+		if remove[binding.name] {
+			delete(p.bound, tensor)
+		}
+	}
+}
+
+func (p *acceleratedBERTDenseProjector) evictLocked() {
+	max := p.max
+	if max <= 0 {
+		max = defaultBERTDenseMaxResidentBindings
+	}
+	for len(p.bound) > max {
+		var (
+			victimTensor *Tensor
+			victim       bertDenseBinding
+			haveVictim   bool
+		)
+		for tensor, binding := range p.bound {
+			if !haveVictim || binding.lastUsed < victim.lastUsed {
+				victimTensor = tensor
+				victim = binding
+				haveVictim = true
+			}
+		}
+		if !haveVictim {
+			return
+		}
+		_ = p.accel.UnbindMatrix(victim.name)
+		delete(p.bound, victimTensor)
+	}
+}
+
+func bertDenseWeightFingerprint(weight *Tensor) bertTensorFingerprint {
+	fp := bertTensorFingerprint{dtype: weight.DType, elements: len(weight.F32)}
+	if len(weight.Shape) > 0 {
+		fp.shape[0] = weight.Shape[0]
+	}
+	if len(weight.Shape) > 1 {
+		fp.shape[1] = weight.Shape[1]
+	}
+	const offset64 = 1469598103934665603
+	const prime64 = 1099511628211
+	hash := uint64(offset64)
+	mix := func(v uint64) {
+		for i := 0; i < 8; i++ {
+			hash ^= uint64(byte(v))
+			hash *= prime64
+			v >>= 8
+		}
+	}
+	mix(uint64(len(weight.Shape)))
+	for _, dim := range weight.Shape {
+		mix(uint64(dim))
+	}
+	for _, value := range weight.F32 {
+		mix(uint64(math.Float32bits(value)))
+	}
+	fp.hash = bits.RotateLeft64(hash, int(uint(fp.shape[0]+fp.shape[1]+fp.elements)&63))
+	return fp
+}
+
+func canAccelerateBERTDense(rows, in int, input []float32, weight, bias *Tensor) bool {
+	return rows > 0 &&
+		in > 0 &&
+		len(input) == rows*in &&
+		weight != nil &&
+		bias != nil &&
+		weight.DType == "f32" &&
+		bias.DType == "f32" &&
+		len(weight.Shape) == 2 &&
+		weight.Shape[1] == in &&
+		weight.Elements() == len(weight.F32) &&
+		len(bias.Shape) == 1 &&
+		bias.Shape[0] == weight.Shape[0] &&
+		bias.Elements() == len(bias.F32)
+}
+
+func addDenseBias(values, bias []float32, out int) {
+	if out <= 0 {
+		return
+	}
+	for i := range values {
+		values[i] += bias[i%out]
 	}
 }
 

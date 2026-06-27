@@ -1,10 +1,13 @@
 package backend
 
 import (
+	"fmt"
 	"math"
 	"runtime"
 	"strings"
 	"testing"
+
+	eosartifact "m31labs.dev/eos/artifact/eos"
 )
 
 func TestBERTEncoderLayerReferenceTinyDeterministic(t *testing.T) {
@@ -55,6 +58,186 @@ func TestBERTEncoderLayerReferenceMaskAllKeysProducesZeroContext(t *testing.T) {
 	}
 }
 
+func TestBERTEncoderLayerProjectorMatchesHostDense(t *testing.T) {
+	fixture := bertEncoderLayerFixture()
+	want, err := bertEncoderLayerReferenceWithProjector(
+		fixture.hiddenStates, fixture.attentionMask,
+		fixture.queryWeight, fixture.queryBias,
+		fixture.keyWeight, fixture.keyBias,
+		fixture.valueWeight, fixture.valueBias,
+		fixture.attentionOutputWeight, fixture.attentionOutputBias,
+		fixture.attentionLayerNormWeight, fixture.attentionLayerNormBias,
+		fixture.intermediateWeight, fixture.intermediateBias,
+		fixture.outputWeight, fixture.outputBias,
+		fixture.outputLayerNormWeight, fixture.outputLayerNormBias,
+		1, 0.25, "gelu", nil,
+	)
+	if err != nil {
+		t.Fatalf("host bert encoder layer: %v", err)
+	}
+	projector := &recordingBERTDenseProjector{}
+	got, err := bertEncoderLayerReferenceWithProjector(
+		fixture.hiddenStates, fixture.attentionMask,
+		fixture.queryWeight, fixture.queryBias,
+		fixture.keyWeight, fixture.keyBias,
+		fixture.valueWeight, fixture.valueBias,
+		fixture.attentionOutputWeight, fixture.attentionOutputBias,
+		fixture.attentionLayerNormWeight, fixture.attentionLayerNormBias,
+		fixture.intermediateWeight, fixture.intermediateBias,
+		fixture.outputWeight, fixture.outputBias,
+		fixture.outputLayerNormWeight, fixture.outputLayerNormBias,
+		1, 0.25, "gelu", projector,
+	)
+	if err != nil {
+		t.Fatalf("projected bert encoder layer: %v", err)
+	}
+	assertTensorClose(t, got, want.Shape, want.F32)
+	if projector.manyCalls != 1 {
+		t.Fatalf("DenseHFMany calls = %d, want 1", projector.manyCalls)
+	}
+	if projector.singleCalls != 3 {
+		t.Fatalf("DenseHF single calls = %d, want 3", projector.singleCalls)
+	}
+}
+
+func TestAcceleratedBERTDenseProjectorRebindsMutatedWeight(t *testing.T) {
+	accel := newFakeBERTMatMulAccelerator()
+	projector := &acceleratedBERTDenseProjector{
+		accel:  accel,
+		prefix: "test_bert_dense",
+		max:    8,
+		bound:  map[*Tensor]bertDenseBinding{},
+	}
+	input := []float32{2, 3}
+	weight := NewTensorF32([]int{1, 2}, []float32{1, 1})
+	bias := NewTensorF32([]int{1}, []float32{0})
+
+	first, ok := projector.DenseHF(input, 1, 2, weight, bias)
+	if !ok {
+		t.Fatal("first accelerated dense did not run")
+	}
+	if len(first) != 1 || first[0] != 5 {
+		t.Fatalf("first output = %v, want [5]", first)
+	}
+
+	weight.F32[1] = 10
+	second, ok := projector.DenseHF(input, 1, 2, weight, bias)
+	if !ok {
+		t.Fatal("second accelerated dense did not run")
+	}
+	if len(second) != 1 || second[0] != 32 {
+		t.Fatalf("second output = %v, want [32] after rebinding mutated weight", second)
+	}
+	if accel.bindCalls != 2 {
+		t.Fatalf("bind calls = %d, want 2", accel.bindCalls)
+	}
+	if accel.unbindCalls != 1 {
+		t.Fatalf("unbind calls = %d, want 1 stale binding cleanup", accel.unbindCalls)
+	}
+}
+
+func TestAcceleratedBERTDenseProjectorCleansUpNewBindingsOnFallback(t *testing.T) {
+	accel := newFakeBERTMatMulAccelerator()
+	projector := &acceleratedBERTDenseProjector{
+		accel:  accel,
+		prefix: "test_bert_dense",
+		max:    8,
+		bound:  map[*Tensor]bertDenseBinding{},
+	}
+	input := []float32{1, 2}
+	weights := []*Tensor{
+		NewTensorF32([]int{1, 2}, []float32{1, 0}),
+		NewTensorF32([]int{1, 2}, []float32{0, 1}),
+	}
+	biases := []*Tensor{
+		NewTensorF32([]int{1}, []float32{0}),
+		NewTensorF32([]int{1}, []float32{0}),
+	}
+
+	if _, ok := projector.DenseHFMany(input, 1, 2, weights, biases); ok {
+		t.Fatal("DenseHFMany unexpectedly accelerated without multi-bound support")
+	}
+	if accel.bindCalls != 2 {
+		t.Fatalf("bind calls = %d, want 2 before fallback", accel.bindCalls)
+	}
+	if accel.unbindCalls != 2 {
+		t.Fatalf("unbind calls = %d, want cleanup of both newly-bound matrices", accel.unbindCalls)
+	}
+	if len(accel.bound) != 0 {
+		t.Fatalf("fake accelerator resident bindings = %d, want 0", len(accel.bound))
+	}
+	if len(projector.bound) != 0 {
+		t.Fatalf("projector bindings = %d, want 0", len(projector.bound))
+	}
+}
+
+func TestAcceleratedBERTDenseProjectorCleansUpPartialBindFailure(t *testing.T) {
+	accel := newFakeBERTMatMulAccelerator()
+	accel.failBindAt = 2
+	projector := &acceleratedBERTDenseProjector{
+		accel:  accel,
+		prefix: "test_bert_dense",
+		max:    8,
+		bound:  map[*Tensor]bertDenseBinding{},
+	}
+	input := []float32{1, 2}
+	weights := []*Tensor{
+		NewTensorF32([]int{1, 2}, []float32{1, 0}),
+		NewTensorF32([]int{1, 2}, []float32{0, 1}),
+	}
+	biases := []*Tensor{
+		NewTensorF32([]int{1}, []float32{0}),
+		NewTensorF32([]int{1}, []float32{0}),
+	}
+
+	if _, ok := projector.DenseHFMany(input, 1, 2, weights, biases); ok {
+		t.Fatal("DenseHFMany unexpectedly accelerated after bind failure")
+	}
+	if accel.bindCalls != 2 {
+		t.Fatalf("bind calls = %d, want failed second bind attempt", accel.bindCalls)
+	}
+	if accel.unbindCalls != 1 {
+		t.Fatalf("unbind calls = %d, want cleanup of first newly-bound matrix", accel.unbindCalls)
+	}
+	if len(accel.bound) != 0 {
+		t.Fatalf("fake accelerator resident bindings = %d, want 0", len(accel.bound))
+	}
+	if len(projector.bound) != 0 {
+		t.Fatalf("projector bindings = %d, want 0", len(projector.bound))
+	}
+}
+
+func TestAcceleratedBERTDenseProjectorEvictsOldestBinding(t *testing.T) {
+	accel := newFakeBERTMatMulAccelerator()
+	projector := &acceleratedBERTDenseProjector{
+		accel:  accel,
+		prefix: "test_bert_dense",
+		max:    2,
+		bound:  map[*Tensor]bertDenseBinding{},
+	}
+	input := []float32{1, 2}
+	bias := NewTensorF32([]int{1}, []float32{0})
+	weights := []*Tensor{
+		NewTensorF32([]int{1, 2}, []float32{1, 0}),
+		NewTensorF32([]int{1, 2}, []float32{0, 1}),
+		NewTensorF32([]int{1, 2}, []float32{1, 1}),
+	}
+	for _, weight := range weights {
+		if _, ok := projector.DenseHF(input, 1, 2, weight, bias); !ok {
+			t.Fatal("accelerated dense did not run")
+		}
+	}
+	if len(projector.bound) != 2 {
+		t.Fatalf("projector bindings = %d, want 2", len(projector.bound))
+	}
+	if len(accel.bound) != 2 {
+		t.Fatalf("fake accelerator resident bindings = %d, want 2", len(accel.bound))
+	}
+	if accel.unbindCalls != 1 {
+		t.Fatalf("unbind calls = %d, want one eviction", accel.unbindCalls)
+	}
+}
+
 func TestBERTSelfAttentionContextParallelMatchesSerial(t *testing.T) {
 	const (
 		batch  = 2
@@ -98,6 +281,90 @@ func TestBERTSelfAttentionContextParallelMatchesSerial(t *testing.T) {
 			t.Fatalf("context[%d] = %.9g, want %.9g", i, got[i], want[i])
 		}
 	}
+}
+
+type fakeBERTMatMulAccelerator struct {
+	bound       map[string]*Tensor
+	bindCalls   int
+	unbindCalls int
+	runCalls    int
+	failBindAt  int
+}
+
+func newFakeBERTMatMulAccelerator() *fakeBERTMatMulAccelerator {
+	return &fakeBERTMatMulAccelerator{bound: map[string]*Tensor{}}
+}
+
+func (a *fakeBERTMatMulAccelerator) Backend() eosartifact.BackendKind {
+	return eosartifact.BackendCUDA
+}
+
+func (a *fakeBERTMatMulAccelerator) RunMatMul(inputs []*Tensor, outputType eosartifact.ValueType) (StepDispatchResult, error) {
+	return StepDispatchResult{}, fmt.Errorf("RunMatMul is not implemented")
+}
+
+func (a *fakeBERTMatMulAccelerator) RunMatMulWithTranspose(inputs []*Tensor, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) (StepDispatchResult, error) {
+	return StepDispatchResult{}, fmt.Errorf("RunMatMulWithTranspose is not implemented")
+}
+
+func (a *fakeBERTMatMulAccelerator) BindMatrix(name string, tensor *Tensor) error {
+	a.bindCalls++
+	if a.failBindAt > 0 && a.bindCalls == a.failBindAt {
+		return fmt.Errorf("forced bind failure")
+	}
+	a.bound[name] = NewTensorF32(tensor.Shape, tensor.F32)
+	return nil
+}
+
+func (a *fakeBERTMatMulAccelerator) UnbindMatrix(name string) error {
+	a.unbindCalls++
+	delete(a.bound, name)
+	return nil
+}
+
+func (a *fakeBERTMatMulAccelerator) RunMatMulWithBoundLeft(leftName string, rhs *Tensor, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) (StepDispatchResult, error) {
+	return StepDispatchResult{}, fmt.Errorf("RunMatMulWithBoundLeft is not implemented")
+}
+
+func (a *fakeBERTMatMulAccelerator) RunMatMulWithBoundRight(lhs *Tensor, rightName string, outputType eosartifact.ValueType, transposeLeft, transposeRight bool) (StepDispatchResult, error) {
+	a.runCalls++
+	weight, ok := a.bound[rightName]
+	if !ok {
+		return StepDispatchResult{}, fmt.Errorf("missing binding %q", rightName)
+	}
+	if !transposeRight {
+		return StepDispatchResult{}, fmt.Errorf("fake accelerator expects transposeRight")
+	}
+	rows, in := lhs.Shape[0], lhs.Shape[1]
+	out := weight.Shape[0]
+	values := make([]float32, rows*out)
+	denseHFRange(lhs.F32, values, 0, rows, in, out, weight.F32, make([]float32, out))
+	return StepDispatchResult{Outputs: []*Tensor{NewTensorF32([]int{rows, out}, values)}}, nil
+}
+
+func (a *fakeBERTMatMulAccelerator) Stats() MatMulAcceleratorStats {
+	return MatMulAcceleratorStats{BindCalls: int64(a.bindCalls), BoundMatrices: int64(len(a.bound)), RunCalls: int64(a.runCalls)}
+}
+
+func (a *fakeBERTMatMulAccelerator) Close() {}
+
+type recordingBERTDenseProjector struct {
+	singleCalls int
+	manyCalls   int
+}
+
+func (p *recordingBERTDenseProjector) DenseHF(input []float32, rows, in int, weight, bias *Tensor) ([]float32, bool) {
+	p.singleCalls++
+	return denseHF(input, rows, in, weight, bias), true
+}
+
+func (p *recordingBERTDenseProjector) DenseHFMany(input []float32, rows, in int, weights, biases []*Tensor) ([][]float32, bool) {
+	p.manyCalls++
+	out := make([][]float32, len(weights))
+	for i := range weights {
+		out[i] = denseHF(input, rows, in, weights[i], biases[i])
+	}
+	return out, true
 }
 
 func TestBERTEncoderLayerReferenceValidationFailures(t *testing.T) {

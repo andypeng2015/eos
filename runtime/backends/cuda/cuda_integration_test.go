@@ -377,6 +377,86 @@ func TestCUDAMultiBoundRightMatMulUploadsLHSOnce(t *testing.T) {
 	}
 }
 
+func TestCUDABoundRightTransposeMatchesHFDenseLayout(t *testing.T) {
+	accelAny, err := NewMatMulAccelerator()
+	if err != nil {
+		t.Fatalf("new matmul accelerator: %v", err)
+	}
+	if accelAny == nil {
+		t.Skip("no cuda matmul accelerator available")
+	}
+	defer accelAny.Close()
+
+	lhs := backend.NewTensorF32([]int{2, 3}, []float32{
+		1, -2, 0.5,
+		0.25, 3, -1,
+	})
+	// BERT imported dense weights use HF [out,in] layout and compute x @ W^T.
+	weight := backend.NewTensorF32([]int{2, 3}, []float32{
+		2, -1, 0.25,
+		-0.5, 1.5, 3,
+	})
+	if err := accelAny.BindMatrix("hf_weight", weight); err != nil {
+		t.Fatalf("bind hf weight: %v", err)
+	}
+	result, err := accelAny.RunMatMulWithBoundRight(lhs, "hf_weight", eosartifact.ValueType{
+		Kind: eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{
+			DType: "f32",
+		},
+	}, false, true)
+	if err != nil {
+		t.Fatalf("run bound-right transpose matmul: %v", err)
+	}
+	assertTensorClose(t, result.Outputs[0], []int{2, 2}, []float32{
+		4.125, -2,
+		-2.75, 1.375,
+	})
+	if result.Metadata["rhs_residency"] != "device_resident" {
+		t.Fatalf("rhs_residency = %v, want device_resident", result.Metadata["rhs_residency"])
+	}
+}
+
+func TestCUDABERTEncoderLayerDenseProjectorMatchesHostReference(t *testing.T) {
+	accelAny, err := NewMatMulAccelerator()
+	if err != nil {
+		t.Fatalf("new matmul accelerator: %v", err)
+	}
+	if accelAny == nil {
+		t.Skip("no cuda matmul accelerator available")
+	}
+	accelAny.Close()
+
+	out, err := backend.BERTEncoderLayerReference(
+		backend.NewTensorF32([]int{1, 2, 2}, []float32{2, -1, 1, 3}),
+		backend.NewTensorI32([]int{1, 2}, []int32{1, 0}),
+		backend.NewTensorF32([]int{2, 2}, []float32{2, -1, 0.5, 3}),
+		backend.NewTensorF32([]int{2}, []float32{0.25, -0.5}),
+		backend.NewTensorF32([]int{2, 2}, []float32{1, 4, -2, 0.5}),
+		backend.NewTensorF32([]int{2}, []float32{-0.25, 0.75}),
+		backend.NewTensorF32([]int{2, 2}, []float32{1.5, -0.25, 0.75, 2}),
+		backend.NewTensorF32([]int{2}, []float32{0.1, -0.2}),
+		backend.NewTensorF32([]int{2, 2}, []float32{0.5, -1.25, 1.5, 0.25}),
+		backend.NewTensorF32([]int{2}, []float32{0.3, -0.4}),
+		backend.NewTensorF32([]int{2}, []float32{1.2, -0.7}),
+		backend.NewTensorF32([]int{2}, []float32{0.05, 0.15}),
+		backend.NewTensorF32([]int{3, 2}, []float32{0.25, -0.5, 1.25, 0.75, -1.5, 0.5}),
+		backend.NewTensorF32([]int{3}, []float32{0.1, -0.2, 0.3}),
+		backend.NewTensorF32([]int{2, 3}, []float32{0.4, -0.8, 1.2, -1.1, 0.6, 0.2}),
+		backend.NewTensorF32([]int{2}, []float32{-0.05, 0.25}),
+		backend.NewTensorF32([]int{2}, []float32{0.9, 1.4}),
+		backend.NewTensorF32([]int{2}, []float32{-0.2, 0.4}),
+		1, 0.25, "gelu",
+	)
+	if err != nil {
+		t.Fatalf("cuda bert encoder layer: %v", err)
+	}
+	assertTensorClose(t, out, []int{1, 2, 2}, []float32{
+		-1.0262285, 1.6852444,
+		0.39245564, -0.5215976,
+	})
+}
+
 func TestCUDAAccumulatedBoundRightMatMulDownloadsOnce(t *testing.T) {
 	accelAny, err := NewMatMulAccelerator()
 	if err != nil {
