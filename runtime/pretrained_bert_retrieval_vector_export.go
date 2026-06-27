@@ -55,30 +55,33 @@ type PretrainedBERTRetrievalVectorExportConfig struct {
 }
 
 type PretrainedBERTRetrievalVectorExportSummary struct {
-	Schema          string    `json:"schema"`
-	Dataset         string    `json:"dataset"`
-	SourceDir       string    `json:"source_dir"`
-	ModulePath      string    `json:"module_path"`
-	WeightsPath     string    `json:"weights_path"`
-	ExecutionMode   string    `json:"execution_mode"`
-	QualityClaim    bool      `json:"quality_claim"`
-	Documents       int       `json:"documents"`
-	Queries         int       `json:"queries"`
-	NativeDim       int       `json:"native_dim"`
-	OutputDim       int       `json:"output_dim"`
-	DocVectorPath   string    `json:"doc_vector_path"`
-	QueryVectorPath string    `json:"query_vector_path"`
-	QueryPrefix     string    `json:"query_prefix"`
-	DocumentPrefix  string    `json:"doc_prefix"`
-	MaxLength       int       `json:"max_length"`
-	BatchSize       int       `json:"batch_size"`
-	MaxDocs         int       `json:"max_docs,omitempty"`
-	MaxQueries      int       `json:"max_queries,omitempty"`
-	CorpusPath      string    `json:"corpus_path,omitempty"`
-	QueriesPath     string    `json:"queries_path,omitempty"`
-	QrelsPath       string    `json:"qrels_path,omitempty"`
-	ElapsedSeconds  float64   `json:"elapsed_seconds"`
-	CreatedAt       time.Time `json:"created_at"`
+	Schema              string    `json:"schema"`
+	Dataset             string    `json:"dataset"`
+	SourceDir           string    `json:"source_dir"`
+	ModulePath          string    `json:"module_path"`
+	WeightsPath         string    `json:"weights_path"`
+	ExecutionMode       string    `json:"execution_mode"`
+	QualityClaim        bool      `json:"quality_claim"`
+	Documents           int       `json:"documents"`
+	Queries             int       `json:"queries"`
+	NativeDim           int       `json:"native_dim"`
+	OutputDim           int       `json:"output_dim"`
+	DocVectorPath       string    `json:"doc_vector_path"`
+	QueryVectorPath     string    `json:"query_vector_path"`
+	QueryPrefix         string    `json:"query_prefix"`
+	DocumentPrefix      string    `json:"document_prefix"`
+	LegacyDocPrefix     string    `json:"doc_prefix"`
+	DocumentRoleApplied bool      `json:"document_role_applied"`
+	QueryRoleApplied    bool      `json:"query_role_applied"`
+	MaxLength           int       `json:"max_length"`
+	BatchSize           int       `json:"batch_size"`
+	MaxDocs             int       `json:"max_docs,omitempty"`
+	MaxQueries          int       `json:"max_queries,omitempty"`
+	CorpusPath          string    `json:"corpus_path,omitempty"`
+	QueriesPath         string    `json:"queries_path,omitempty"`
+	QrelsPath           string    `json:"qrels_path,omitempty"`
+	ElapsedSeconds      float64   `json:"elapsed_seconds"`
+	CreatedAt           time.Time `json:"created_at"`
 }
 
 func LoadPretrainedBERTTextEmbedder(ctx context.Context, cfg PretrainedBERTTextEmbedderConfig) (*PretrainedBERTTextEmbedder, error) {
@@ -255,30 +258,33 @@ func ExportPretrainedBERTRetrievalVectors(ctx context.Context, cfg PretrainedBER
 		return PretrainedBERTRetrievalVectorExportSummary{}, fmt.Errorf("document vectors have dimension %d but query vectors have dimension %d", docDim, queryDim)
 	}
 	summary := PretrainedBERTRetrievalVectorExportSummary{
-		Schema:          PretrainedBERTRetrievalVectorExportManifestSchema,
-		Dataset:         cfg.DatasetName,
-		SourceDir:       cfg.SourceDir,
-		ModulePath:      cfg.ModulePath,
-		WeightsPath:     cfg.WeightsPath,
-		ExecutionMode:   "pretrained_bert_host_reference",
-		QualityClaim:    false,
-		Documents:       len(corpus),
-		Queries:         len(queries),
-		NativeDim:       docDim,
-		OutputDim:       docDim,
-		DocVectorPath:   docVectorPath,
-		QueryVectorPath: queryVectorPath,
-		QueryPrefix:     cfg.QueryPrefix,
-		DocumentPrefix:  cfg.DocumentPrefix,
-		MaxLength:       embedder.MaxLength(),
-		BatchSize:       cfg.BatchSize,
-		MaxDocs:         cfg.MaxDocs,
-		MaxQueries:      cfg.MaxQueries,
-		CorpusPath:      cfg.CorpusPath,
-		QueriesPath:     cfg.QueriesPath,
-		QrelsPath:       cfg.QrelsPath,
-		ElapsedSeconds:  time.Since(start).Seconds(),
-		CreatedAt:       time.Now().UTC(),
+		Schema:              PretrainedBERTRetrievalVectorExportManifestSchema,
+		Dataset:             cfg.DatasetName,
+		SourceDir:           cfg.SourceDir,
+		ModulePath:          cfg.ModulePath,
+		WeightsPath:         cfg.WeightsPath,
+		ExecutionMode:       "pretrained_bert_host_reference",
+		QualityClaim:        false,
+		Documents:           len(corpus),
+		Queries:             len(queries),
+		NativeDim:           docDim,
+		OutputDim:           docDim,
+		DocVectorPath:       docVectorPath,
+		QueryVectorPath:     queryVectorPath,
+		QueryPrefix:         cfg.QueryPrefix,
+		DocumentPrefix:      cfg.DocumentPrefix,
+		LegacyDocPrefix:     cfg.DocumentPrefix,
+		DocumentRoleApplied: cfg.DocumentPrefix != "",
+		QueryRoleApplied:    cfg.QueryPrefix != "",
+		MaxLength:           embedder.MaxLength(),
+		BatchSize:           cfg.BatchSize,
+		MaxDocs:             cfg.MaxDocs,
+		MaxQueries:          cfg.MaxQueries,
+		CorpusPath:          cfg.CorpusPath,
+		QueriesPath:         cfg.QueriesPath,
+		QrelsPath:           cfg.QrelsPath,
+		ElapsedSeconds:      time.Since(start).Seconds(),
+		CreatedAt:           time.Now().UTC(),
 	}
 	if err := WritePretrainedBERTRetrievalVectorExportSummaryFile(cfg.ManifestJSONPath, summary); err != nil {
 		return PretrainedBERTRetrievalVectorExportSummary{}, err

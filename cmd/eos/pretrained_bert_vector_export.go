@@ -24,13 +24,18 @@ func runExportPretrainedBERTRetrievalVectors(args []string) error {
 	split := fs.String("split", "test", "qrels split under <beir-dataset-dir>/qrels")
 	qrelsPath := fs.String("qrels", "", "explicit qrels TSV path; when present, export keeps qrels-relevant docs/queries under caps")
 	queryPrefix := fs.String("query-prefix", "", "prefix prepended to query text before WordPiece tokenization")
-	docPrefix := fs.String("doc-prefix", "", "prefix prepended to document text before WordPiece tokenization")
+	documentPrefix := fs.String("document-prefix", "", "prefix prepended to document text before WordPiece tokenization")
+	docPrefix := fs.String("doc-prefix", "", "compatibility alias for --document-prefix")
 	batchSize := fs.Int("batch-size", 64, "embedding batch size")
 	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke exports")
 	maxQueries := fs.Int("max-queries", 0, "limit queries for smoke exports")
 	maxLength := fs.Int("max-length", 0, "WordPiece max sequence length; default uses config max_position_embeddings")
 	manifestPath := fs.String("manifest-json", "", "write export summary JSON manifest; default is <output-dir>/manifest.json")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	resolvedDocumentPrefix, err := resolvePretrainedBERTDocumentPrefix(fs, *documentPrefix, *docPrefix)
+	if err != nil {
 		return err
 	}
 	if fs.NArg() != 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
@@ -58,7 +63,7 @@ func runExportPretrainedBERTRetrievalVectors(args []string) error {
 		ModulePath:       *modulePath,
 		WeightsPath:      *weightsPath,
 		QueryPrefix:      *queryPrefix,
-		DocumentPrefix:   *docPrefix,
+		DocumentPrefix:   resolvedDocumentPrefix,
 		BatchSize:        *batchSize,
 		MaxDocs:          *maxDocs,
 		MaxQueries:       *maxQueries,
@@ -79,4 +84,16 @@ func runExportPretrainedBERTRetrievalVectors(args []string) error {
 		fmt.Printf("manifest: %s\n", filepath.Join(outputDir, "manifest.json"))
 	}
 	return nil
+}
+
+func resolvePretrainedBERTDocumentPrefix(fs *flag.FlagSet, documentPrefix, docPrefix string) (string, error) {
+	documentPrefixSet := flagWasProvided(fs, "document-prefix")
+	docPrefixSet := flagWasProvided(fs, "doc-prefix")
+	if documentPrefixSet && docPrefixSet && documentPrefix != docPrefix {
+		return "", fmt.Errorf("--document-prefix and --doc-prefix differ")
+	}
+	if documentPrefixSet {
+		return documentPrefix, nil
+	}
+	return docPrefix, nil
 }

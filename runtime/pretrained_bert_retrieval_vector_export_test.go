@@ -43,8 +43,11 @@ func TestPretrainedBERTRetrievalVectorExportWritesEvaluatorCompatibleCaches(t *t
 	if summary.ExecutionMode != "pretrained_bert_host_reference" || summary.QualityClaim {
 		t.Fatalf("summary mode/quality = %+v", summary)
 	}
-	if summary.QueryPrefix != "query " || summary.DocumentPrefix != "doc " || summary.MaxLength != 4 || summary.BatchSize != 1 {
+	if summary.QueryPrefix != "query " || summary.DocumentPrefix != "doc " || summary.LegacyDocPrefix != "doc " || summary.MaxLength != 4 || summary.BatchSize != 1 {
 		t.Fatalf("summary config = %+v", summary)
+	}
+	if !summary.DocumentRoleApplied || !summary.QueryRoleApplied {
+		t.Fatalf("summary role flags = doc:%v query:%v, want true/true", summary.DocumentRoleApplied, summary.QueryRoleApplied)
 	}
 	if summary.DocVectorPath != filepath.Join(outputDir, "doc-vectors.jsonl") ||
 		summary.QueryVectorPath != filepath.Join(outputDir, "query-vectors.jsonl") {
@@ -73,6 +76,22 @@ func TestPretrainedBERTRetrievalVectorExportWritesEvaluatorCompatibleCaches(t *t
 	if manifest.Schema != PretrainedBERTRetrievalVectorExportManifestSchema || manifest.SourceDir != sourceDir ||
 		manifest.ModulePath != modulePath || manifest.WeightsPath != weightsPath {
 		t.Fatalf("manifest = %+v", manifest)
+	}
+	if manifest.DocumentPrefix != "doc " || manifest.LegacyDocPrefix != "doc " || manifest.QueryPrefix != "query " {
+		t.Fatalf("manifest prefixes = canonical:%q legacy:%q query:%q", manifest.DocumentPrefix, manifest.LegacyDocPrefix, manifest.QueryPrefix)
+	}
+	if !manifest.DocumentRoleApplied || !manifest.QueryRoleApplied {
+		t.Fatalf("manifest role flags = doc:%v query:%v, want true/true", manifest.DocumentRoleApplied, manifest.QueryRoleApplied)
+	}
+	var manifestJSON map[string]any
+	if err := json.Unmarshal(manifestData, &manifestJSON); err != nil {
+		t.Fatalf("parse manifest json object: %v", err)
+	}
+	if manifestJSON["document_prefix"] != "doc " || manifestJSON["doc_prefix"] != "doc " {
+		t.Fatalf("manifest json prefixes = document_prefix:%v doc_prefix:%v", manifestJSON["document_prefix"], manifestJSON["doc_prefix"])
+	}
+	if manifestJSON["document_role_applied"] != true || manifestJSON["query_role_applied"] != true {
+		t.Fatalf("manifest json role flags = doc:%v query:%v", manifestJSON["document_role_applied"], manifestJSON["query_role_applied"])
 	}
 
 	_, _, qrelsPath := BEIRRetrievalPaths(datasetDir, "test")

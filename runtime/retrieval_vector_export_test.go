@@ -37,6 +37,8 @@ func TestRetrievalVectorExportWritesChildCachesAndManifest(t *testing.T) {
 		DocumentChunkWords:    4,
 		DocumentChunkOverlap:  1,
 		DocumentChunkMinWords: 2,
+		DocumentPrefix:        "document: ",
+		QueryPrefix:           "query: ",
 		ManifestJSONPath:      manifestPath,
 	})
 	if err != nil {
@@ -47,6 +49,9 @@ func TestRetrievalVectorExportWritesChildCachesAndManifest(t *testing.T) {
 	}
 	if summary.ChildDocVectorPath != filepath.Join(outputDir, "child-doc-vectors.jsonl") || summary.QueryVectorPath != filepath.Join(outputDir, "query-vectors.jsonl") {
 		t.Fatalf("summary paths = %+v", summary)
+	}
+	if !summary.DocumentRoleApplied || !summary.QueryRoleApplied {
+		t.Fatalf("summary role flags = doc:%v query:%v, want true/true", summary.DocumentRoleApplied, summary.QueryRoleApplied)
 	}
 
 	childRows := readJSONLRows(t, summary.ChildDocVectorPath)
@@ -64,6 +69,9 @@ func TestRetrievalVectorExportWritesChildCachesAndManifest(t *testing.T) {
 		if got := len(row["embedding"].([]any)); got != 2 {
 			t.Fatalf("child row %d embedding dim = %d, want 2", i, got)
 		}
+		if _, ok := row["document_role_applied"]; ok {
+			t.Fatalf("child row %d has manifest-only role field: %+v", i, row)
+		}
 	}
 	if childRows[0]["parent_id"] != "d1" || childRows[3]["parent_id"] != "d2" {
 		t.Fatalf("parent ids = %v / %v", childRows[0]["parent_id"], childRows[3]["parent_id"])
@@ -72,6 +80,9 @@ func TestRetrievalVectorExportWritesChildCachesAndManifest(t *testing.T) {
 	queryRows := readJSONLRows(t, summary.QueryVectorPath)
 	if len(queryRows) != 1 || queryRows[0]["id"] != "q1" {
 		t.Fatalf("query rows = %+v", queryRows)
+	}
+	if _, ok := queryRows[0]["query_role_applied"]; ok {
+		t.Fatalf("query row has manifest-only role field: %+v", queryRows[0])
 	}
 	queryEmbedding := queryRows[0]["embedding"].([]any)
 	if len(queryEmbedding) != 2 {
@@ -96,6 +107,20 @@ func TestRetrievalVectorExportWritesChildCachesAndManifest(t *testing.T) {
 	}
 	if manifest.ChildVectors != summary.ChildVectors || manifest.Dimension != summary.Dimension || manifest.ModelDimension != 2 || manifest.OutputDimension != 2 {
 		t.Fatalf("manifest = %+v, summary = %+v", manifest, summary)
+	}
+	if !manifest.DocumentRoleApplied || !manifest.QueryRoleApplied {
+		t.Fatalf("manifest role flags = doc:%v query:%v, want true/true", manifest.DocumentRoleApplied, manifest.QueryRoleApplied)
+	}
+	emptyRoleData, err := json.Marshal(RetrievalVectorExportSummary{})
+	if err != nil {
+		t.Fatalf("marshal empty role summary: %v", err)
+	}
+	var emptyRoleManifest RetrievalVectorExportSummary
+	if err := json.Unmarshal(emptyRoleData, &emptyRoleManifest); err != nil {
+		t.Fatalf("decode empty role summary: %v", err)
+	}
+	if emptyRoleManifest.DocumentRoleApplied || emptyRoleManifest.QueryRoleApplied {
+		t.Fatalf("empty role flags = doc:%v query:%v, want false/false", emptyRoleManifest.DocumentRoleApplied, emptyRoleManifest.QueryRoleApplied)
 	}
 }
 

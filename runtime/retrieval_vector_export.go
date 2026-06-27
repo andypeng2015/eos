@@ -49,6 +49,8 @@ type RetrievalVectorExportSummary struct {
 	DocVectorPath         string    `json:"doc_vector_path,omitempty"`
 	ChildDocVectorPath    string    `json:"child_doc_vector_path,omitempty"`
 	QueryVectorPath       string    `json:"query_vector_path"`
+	DocumentRoleApplied   bool      `json:"document_role_applied"`
+	QueryRoleApplied      bool      `json:"query_role_applied"`
 	DocumentChunkWords    int       `json:"document_chunk_words,omitempty"`
 	DocumentChunkOverlap  int       `json:"document_chunk_overlap,omitempty"`
 	DocumentChunkMinWords int       `json:"document_chunk_min_words,omitempty"`
@@ -163,6 +165,8 @@ func ExportEmbeddingRetrievalVectors(ctx context.Context, model *EmbeddingModel,
 		DocVectorPath:         docVectorPath,
 		ChildDocVectorPath:    childDocVectorPath,
 		QueryVectorPath:       queryVectorPath,
+		DocumentRoleApplied:   cfg.DocumentPrefix != "",
+		QueryRoleApplied:      cfg.QueryPrefix != "",
 		DocumentChunkWords:    cfg.DocumentChunkWords,
 		DocumentChunkOverlap:  cfg.DocumentChunkOverlap,
 		DocumentChunkMinWords: cfg.DocumentChunkMinWords,
