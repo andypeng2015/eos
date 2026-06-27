@@ -58,6 +58,15 @@ func TestInitDefaultEmbeddingPackageCreatesTrainablePackage(t *testing.T) {
 	if manifest.PositionEncoding != eosruntime.EmbeddingPositionEncodingRoPE {
 		t.Fatalf("position encoding = %q, want %q", manifest.PositionEncoding, eosruntime.EmbeddingPositionEncodingRoPE)
 	}
+	if manifest.ArchitectureVersion != eosruntime.EmbeddingArchitectureLegacyV1 ||
+		manifest.ModelDim != 4 ||
+		manifest.OutputDim != 4 ||
+		manifest.AttentionHeads != 1 ||
+		manifest.HeadDim != 4 ||
+		manifest.FFNDim != 8 ||
+		manifest.ParameterTying != eosruntime.EmbeddingParameterTyingLegacyTied {
+		t.Fatalf("unexpected architecture metadata: %+v", manifest)
+	}
 	if manifest.Tokenizer.VocabSize != 16 || manifest.Tokenizer.MaxSequence != 8 {
 		t.Fatalf("unexpected tokenizer contract: %+v", manifest.Tokenizer)
 	}
@@ -96,10 +105,23 @@ func TestInitDefaultEmbeddingPackageQ4DeclaresQ4Params(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read artifact: %v", err)
 	}
-	if got := len(mod.Params); got != 7 {
-		t.Fatalf("param count = %d, want 7", got)
+	wantParams := map[string]bool{
+		"token_embedding": true,
+		"role_embedding":  true,
+		"attn_q":          true,
+		"attn_k":          true,
+		"attn_v":          true,
+		"attn_o":          true,
+		"ffn_up":          true,
+		"projection":      true,
+	}
+	if got := len(mod.Params); got != len(wantParams) {
+		t.Fatalf("param count = %d, want %d", got, len(wantParams))
 	}
 	for _, param := range mod.Params {
+		if !wantParams[param.Name] {
+			t.Fatalf("unexpected param %q", param.Name)
+		}
 		if param.Type.Tensor == nil || param.Type.Tensor.DType != "q4" {
 			t.Fatalf("param %q dtype = %+v, want q4 tensor", param.Name, param.Type)
 		}
@@ -364,8 +386,8 @@ func TestExportDefaultEmbeddingPackageQ4SealsPackedTensors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadTnsrSection: %v", err)
 	}
-	if got := len(tnsrSection.Tensors); got != 7 {
-		t.Fatalf("tensor count = %d, want 7", got)
+	if got := len(tnsrSection.Tensors); got != 8 {
+		t.Fatalf("tensor count = %d, want 8", got)
 	}
 
 	// q4 tensors are sealed as real packed payloads: storage dtype Q4, two
@@ -385,8 +407,16 @@ func TestExportDefaultEmbeddingPackageQ4SealsPackedTensors(t *testing.T) {
 		if want := (elements + 1) / 2; uint64(len(entry.Data)) != want {
 			t.Fatalf("tensor %q packed bytes = %d, want %d", name, len(entry.Data), want)
 		}
-		if scale, ok := meta.TensorScales[name]; !ok || scale <= 0 {
+		scale, ok := meta.TensorScales[name]
+		if !ok {
 			t.Fatalf("tensor %q missing packed scale (scales=%v)", name, meta.TensorScales)
+		}
+		if name == "role_embedding" {
+			if scale != 0 {
+				t.Fatalf("tensor %q scale = %g, want zero for zero-initialized role embeddings", name, scale)
+			}
+		} else if scale <= 0 {
+			t.Fatalf("tensor %q scale = %g, want positive", name, scale)
 		}
 	}
 }

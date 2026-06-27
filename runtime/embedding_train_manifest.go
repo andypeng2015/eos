@@ -79,6 +79,7 @@ func (m EmbeddingTrainManifest) normalized() EmbeddingTrainManifest {
 // ValidateModule checks that a module satisfies the training contract.
 func (m EmbeddingTrainManifest) ValidateModule(mod *eosartifact.Module) error {
 	m = m.normalized()
+	m.Embedding = m.Embedding.normalizedForModule(mod)
 	if mod == nil {
 		return fmt.Errorf("nil module")
 	}

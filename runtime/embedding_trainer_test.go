@@ -992,6 +992,52 @@ pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16
 	assertTensorClose(t, exportA["projection"], exportB["projection"].Shape, exportB["projection"].F32)
 }
 
+func TestEmbeddingTrainCheckpointRetainsUnknownTensorsAndMoments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "generic.embed-train.mll")
+	checkpoint := EmbeddingTrainCheckpoint{
+		Version:        EmbeddingTrainCheckpointVersion,
+		Manifest:       tinyEmbeddingManifest(),
+		Config:         EmbeddingTrainConfig{Optimizer: "adamw"},
+		Step:           12,
+		TokenEmbedding: backend.NewTensorF32([]int{3, 2}, []float32{1, 0, 0, 1, 1, 1}),
+		Projection:     backend.NewTensorF32([]int{2, 2}, []float32{1, 0, 0, 1}),
+		TokenMoment1:   backend.NewTensorF32([]int{3, 2}, []float32{0.1, 0.2, 0.3, 0.4, 0.5, 0.6}),
+		TokenMoment2:   backend.NewTensorF32([]int{3, 2}, []float32{0.6, 0.5, 0.4, 0.3, 0.2, 0.1}),
+		ProjMoment1:    backend.NewTensorF32([]int{2, 2}, []float32{0.1, 0.2, 0.3, 0.4}),
+		ProjMoment2:    backend.NewTensorF32([]int{2, 2}, []float32{0.4, 0.3, 0.2, 0.1}),
+		Tensors: map[string]*backend.Tensor{
+			"layers.0.attn_q": backend.NewTensorF32([]int{2, 2}, []float32{0.7, 0.8, 0.9, 1.0}),
+		},
+		MomentTensors: map[string]*backend.Tensor{
+			"layers.0.attn_q_moment_1": backend.NewTensorF32([]int{2, 2}, []float32{0.01, 0.02, 0.03, 0.04}),
+		},
+	}
+	if err := checkpoint.WriteFile(path); err != nil {
+		t.Fatalf("write checkpoint: %v", err)
+	}
+	loaded, err := ReadEmbeddingTrainCheckpointFile(path)
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if loaded.Step != checkpoint.Step {
+		t.Fatalf("step = %d, want %d", loaded.Step, checkpoint.Step)
+	}
+	assertTensorClose(t, loaded.TokenEmbedding, checkpoint.TokenEmbedding.Shape, checkpoint.TokenEmbedding.F32)
+	assertTensorClose(t, loaded.Projection, checkpoint.Projection.Shape, checkpoint.Projection.F32)
+	assertTensorClose(t, loaded.TokenMoment1, checkpoint.TokenMoment1.Shape, checkpoint.TokenMoment1.F32)
+	assertTensorClose(t, loaded.ProjMoment2, checkpoint.ProjMoment2.Shape, checkpoint.ProjMoment2.F32)
+	gotTensor := loaded.Tensors["layers.0.attn_q"]
+	if gotTensor == nil {
+		t.Fatalf("missing retained generic tensor: %+v", loaded.Tensors)
+	}
+	assertTensorClose(t, gotTensor, []int{2, 2}, []float32{0.7, 0.8, 0.9, 1.0})
+	gotMoment := loaded.MomentTensors["layers.0.attn_q_moment_1"]
+	if gotMoment == nil {
+		t.Fatalf("missing retained generic moment tensor: %+v", loaded.MomentTensors)
+	}
+	assertTensorClose(t, gotMoment, []int{2, 2}, []float32{0.01, 0.02, 0.03, 0.04})
+}
+
 func TestEmbeddingTrainerFFNCheckpointRoundTrip(t *testing.T) {
 	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
 	batch := tinyEmbeddingPairDataset()

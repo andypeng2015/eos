@@ -69,6 +69,13 @@ func TestEmbeddingTrainManifestRoundTrip(t *testing.T) {
 			},
 		},
 	}
+	want.Embedding.ArchitectureVersion = EmbeddingArchitectureLegacyV1
+	want.Embedding.ModelDim = 8
+	want.Embedding.OutputDim = 4
+	want.Embedding.AttentionHeads = 2
+	want.Embedding.HeadDim = 4
+	want.Embedding.FFNDim = 32
+	want.Embedding.ParameterTying = EmbeddingParameterTyingUntied
 	if err := want.WriteFile(path); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
@@ -78,6 +85,15 @@ func TestEmbeddingTrainManifestRoundTrip(t *testing.T) {
 	}
 	if got.Name != want.Name || got.Embedding.Name != want.Embedding.Name || got.Config.Optimizer != want.Config.Optimizer || got.Config.ContrastiveLoss != want.Config.ContrastiveLoss || got.Config.Temperature != want.Config.Temperature {
 		t.Fatalf("manifest mismatch:\nwant: %+v\ngot:  %+v", want, got)
+	}
+	if got.Embedding.ArchitectureVersion != want.Embedding.ArchitectureVersion ||
+		got.Embedding.ModelDim != want.Embedding.ModelDim ||
+		got.Embedding.OutputDim != want.Embedding.OutputDim ||
+		got.Embedding.AttentionHeads != want.Embedding.AttentionHeads ||
+		got.Embedding.HeadDim != want.Embedding.HeadDim ||
+		got.Embedding.FFNDim != want.Embedding.FFNDim ||
+		got.Embedding.ParameterTying != want.Embedding.ParameterTying {
+		t.Fatalf("embedding architecture metadata mismatch:\nwant: %+v\ngot:  %+v", want.Embedding, got.Embedding)
 	}
 	if len(got.Config.TurboQuantPrefixBits) != 2 || got.Config.TurboQuantPrefixBits[0] != 2 || got.Config.TurboQuantPrefixBits[1] != 4 {
 		t.Fatalf("turboquant prefix bits = %v, want [2 4]", got.Config.TurboQuantPrefixBits)

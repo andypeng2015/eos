@@ -20,6 +20,9 @@ const (
 	EmbeddingPositionEncodingRoPE         = "rope"
 	EmbeddingAttentionScoreScaleNone      = "none"
 	EmbeddingAttentionScoreScaleKeyDimRSQ = "key_dim_rsqrt"
+	EmbeddingArchitectureLegacyV1         = "legacy_tied_v1"
+	EmbeddingParameterTyingLegacyTied     = "legacy_tied"
+	EmbeddingParameterTyingUntied         = "untied"
 	EmbeddingRoleConditioningNone         = "none"
 	EmbeddingRoleConditioningAdditiveV1   = "additive_token_embedding_v1"
 	EmbeddingRoleRaw                      = "raw"
@@ -47,6 +50,13 @@ type EmbeddingManifest struct {
 	MaskInput             string            `json:"mask_input,omitempty"`
 	OutputName            string            `json:"output_name,omitempty"`
 	OutputDType           string            `json:"output_dtype,omitempty"`
+	ArchitectureVersion   string            `json:"architecture_version,omitempty"`
+	ModelDim              int               `json:"model_dim,omitempty"`
+	OutputDim             int               `json:"output_dim,omitempty"`
+	AttentionHeads        int               `json:"attention_heads,omitempty"`
+	HeadDim               int               `json:"head_dim,omitempty"`
+	FFNDim                int               `json:"ffn_dim,omitempty"`
+	ParameterTying        string            `json:"parameter_tying,omitempty"`
 	TokenEmbeddingParam   string            `json:"token_embedding_param,omitempty"`
 	RoleConditioning      string            `json:"role_conditioning,omitempty"`
 	RoleEmbeddingParam    string            `json:"role_embedding_param,omitempty"`
@@ -105,7 +115,7 @@ func (m EmbeddingManifest) WriteFile(path string) error {
 
 // LoadEmbedding loads an embedding module with a validated serving manifest.
 func (rt *Runtime) LoadEmbedding(ctx context.Context, mod *eosartifact.Module, manifest EmbeddingManifest, opts ...LoadOption) (*EmbeddingModel, error) {
-	manifest = manifest.normalized()
+	manifest = manifest.normalizedForModule(mod)
 	if err := manifest.ValidateModule(mod); err != nil {
 		return nil, err
 	}
@@ -156,6 +166,13 @@ func (m EmbeddingManifest) mllValues() map[string]authoredManifestValue {
 		"mask_input":              authoredString(m.MaskInput),
 		"output_name":             authoredString(m.OutputName),
 		"output_dtype":            authoredString(m.OutputDType),
+		"architecture_version":    authoredString(m.ArchitectureVersion),
+		"model_dim":               authoredInt(int64(m.ModelDim)),
+		"output_dim":              authoredInt(int64(m.OutputDim)),
+		"attention_heads":         authoredInt(int64(m.AttentionHeads)),
+		"head_dim":                authoredInt(int64(m.HeadDim)),
+		"ffn_dim":                 authoredInt(int64(m.FFNDim)),
+		"parameter_tying":         authoredString(m.ParameterTying),
 		"token_embedding_param":   authoredString(m.TokenEmbeddingParam),
 		"role_conditioning":       authoredString(m.RoleConditioning),
 		"role_embedding_param":    authoredString(m.RoleEmbeddingParam),
@@ -227,6 +244,41 @@ func embeddingManifestFromDoc(doc authoredManifestDoc) (EmbeddingManifest, error
 		return EmbeddingManifest{}, err
 	} else {
 		manifest.OutputDType = value
+	}
+	if value, _, err := doc.string("architecture_version"); err != nil {
+		return EmbeddingManifest{}, err
+	} else {
+		manifest.ArchitectureVersion = value
+	}
+	if value, _, err := doc.int("model_dim"); err != nil {
+		return EmbeddingManifest{}, err
+	} else {
+		manifest.ModelDim = int(value)
+	}
+	if value, _, err := doc.int("output_dim"); err != nil {
+		return EmbeddingManifest{}, err
+	} else {
+		manifest.OutputDim = int(value)
+	}
+	if value, _, err := doc.int("attention_heads"); err != nil {
+		return EmbeddingManifest{}, err
+	} else {
+		manifest.AttentionHeads = int(value)
+	}
+	if value, _, err := doc.int("head_dim"); err != nil {
+		return EmbeddingManifest{}, err
+	} else {
+		manifest.HeadDim = int(value)
+	}
+	if value, _, err := doc.int("ffn_dim"); err != nil {
+		return EmbeddingManifest{}, err
+	} else {
+		manifest.FFNDim = int(value)
+	}
+	if value, _, err := doc.string("parameter_tying"); err != nil {
+		return EmbeddingManifest{}, err
+	} else {
+		manifest.ParameterTying = value
 	}
 	if value, _, err := doc.string("token_embedding_param"); err != nil {
 		return EmbeddingManifest{}, err
@@ -852,7 +904,63 @@ func (m EmbeddingManifest) normalized() EmbeddingManifest {
 	if m.PositionEncoding == "" {
 		m.PositionEncoding = EmbeddingPositionEncodingNone
 	}
+	if m.ArchitectureVersion == "" && m.hasArchitectureMetadata() {
+		m.ArchitectureVersion = EmbeddingArchitectureLegacyV1
+	}
+	if m.ParameterTying == "" && m.hasArchitectureMetadata() {
+		m.ParameterTying = EmbeddingParameterTyingLegacyTied
+	}
+	if m.AttentionHeads == 0 && m.hasArchitectureMetadata() {
+		m.AttentionHeads = 1
+	}
+	if m.HeadDim == 0 && m.ModelDim > 0 && m.AttentionHeads > 0 && m.ModelDim%m.AttentionHeads == 0 {
+		m.HeadDim = m.ModelDim / m.AttentionHeads
+	}
 	return m
+}
+
+func (m EmbeddingManifest) normalizedForModule(mod *eosartifact.Module) EmbeddingManifest {
+	m = m.normalized()
+	if m.ModelDim == 0 {
+		if dim, ok := moduleParamDim(mod, m.TokenEmbeddingParam, 1); ok {
+			m.ModelDim = dim
+		}
+	}
+	if m.OutputDim == 0 {
+		if dim, ok := moduleParamDim(mod, m.ProjectionParam, 1); ok {
+			m.OutputDim = dim
+		} else if m.ModelDim > 0 {
+			m.OutputDim = m.ModelDim
+		}
+	}
+	if m.FFNDim == 0 {
+		if dim, ok := moduleParamDim(mod, m.HiddenProjectionParam, 1); ok {
+			m.FFNDim = dim
+		}
+	}
+	if m.AttentionHeads == 0 && (m.ModelDim > 0 || m.OutputDim > 0 || m.FFNDim > 0) {
+		m.AttentionHeads = 1
+	}
+	if m.HeadDim == 0 && m.ModelDim > 0 && m.AttentionHeads > 0 && m.ModelDim%m.AttentionHeads == 0 {
+		m.HeadDim = m.ModelDim / m.AttentionHeads
+	}
+	if m.ArchitectureVersion == "" && (m.ModelDim > 0 || m.OutputDim > 0 || m.FFNDim > 0 || m.AttentionHeads > 0) {
+		m.ArchitectureVersion = EmbeddingArchitectureLegacyV1
+	}
+	if m.ParameterTying == "" && (m.ModelDim > 0 || m.OutputDim > 0 || m.FFNDim > 0 || m.AttentionHeads > 0) {
+		m.ParameterTying = EmbeddingParameterTyingLegacyTied
+	}
+	return m
+}
+
+func (m EmbeddingManifest) hasArchitectureMetadata() bool {
+	return m.ArchitectureVersion != "" ||
+		m.ModelDim != 0 ||
+		m.OutputDim != 0 ||
+		m.AttentionHeads != 0 ||
+		m.HeadDim != 0 ||
+		m.FFNDim != 0 ||
+		m.ParameterTying != ""
 }
 
 func (m EmbeddingManifest) roleConditioned() bool {
@@ -886,6 +994,10 @@ func (m EmbeddingManifest) roleIndex(role string) (int32, error) {
 func (m EmbeddingManifest) ValidateModule(mod *eosartifact.Module) error {
 	if mod == nil {
 		return fmt.Errorf("nil module")
+	}
+	m = m.normalizedForModule(mod)
+	if err := m.validateArchitectureMetadata(); err != nil {
+		return err
 	}
 	if (m.AttentionResidual || m.AttentionLayerNorm) && m.AttentionQueryParam == "" {
 		return fmt.Errorf("attention residual/layernorm requires attention params")
@@ -959,6 +1071,39 @@ func (m EmbeddingManifest) ValidateModule(mod *eosartifact.Module) error {
 	}
 	if err := validateEmbeddingParam(mod, m.ProjectionParam); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (m EmbeddingManifest) validateArchitectureMetadata() error {
+	if !m.hasArchitectureMetadata() {
+		return nil
+	}
+	if m.ModelDim <= 0 {
+		return fmt.Errorf("model_dim must be positive when architecture metadata is declared")
+	}
+	if m.OutputDim <= 0 {
+		return fmt.Errorf("output_dim must be positive when architecture metadata is declared")
+	}
+	if m.AttentionHeads <= 0 {
+		return fmt.Errorf("attention_heads must be positive when architecture metadata is declared")
+	}
+	if m.ModelDim%m.AttentionHeads != 0 {
+		return fmt.Errorf("model_dim %d must be divisible by attention_heads %d", m.ModelDim, m.AttentionHeads)
+	}
+	if m.HeadDim <= 0 {
+		return fmt.Errorf("head_dim must be positive when architecture metadata is declared")
+	}
+	if want := m.ModelDim / m.AttentionHeads; m.HeadDim != want {
+		return fmt.Errorf("head_dim = %d, want model_dim/attention_heads = %d", m.HeadDim, want)
+	}
+	if m.FFNDim < 0 {
+		return fmt.Errorf("ffn_dim must be non-negative")
+	}
+	switch m.ParameterTying {
+	case "", EmbeddingParameterTyingLegacyTied, EmbeddingParameterTyingUntied:
+	default:
+		return fmt.Errorf("unsupported parameter_tying %q", m.ParameterTying)
 	}
 	return nil
 }
@@ -1133,6 +1278,26 @@ func validateEmbeddingParam(mod *eosartifact.Module, name string) error {
 		}
 	}
 	return fmt.Errorf("missing param %q", name)
+}
+
+func moduleParamDim(mod *eosartifact.Module, name string, axis int) (int, bool) {
+	if mod == nil || name == "" || axis < 0 {
+		return 0, false
+	}
+	for _, param := range mod.Params {
+		if param.Name != name || param.Type.Kind != eosartifact.ValueTensor || param.Type.Tensor == nil {
+			continue
+		}
+		if axis >= len(param.Type.Tensor.Shape) {
+			return 0, false
+		}
+		dim, err := strconv.Atoi(param.Type.Tensor.Shape[axis])
+		if err != nil || dim <= 0 {
+			return 0, false
+		}
+		return dim, true
+	}
+	return 0, false
 }
 
 func validateAttentionParams(mod *eosartifact.Module, manifest EmbeddingManifest) error {

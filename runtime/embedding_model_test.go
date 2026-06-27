@@ -2,6 +2,7 @@ package eosruntime
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -26,6 +27,66 @@ func TestEmbeddingManifestRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("manifest mismatch:\nwant: %+v\ngot:  %+v", want, got)
+	}
+}
+
+func TestEmbeddingManifestArchitectureMetadataRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "embed_arch.embedding.mll")
+	want := tinyEmbeddingManifest()
+	want.ArchitectureVersion = EmbeddingArchitectureLegacyV1
+	want.ModelDim = 8
+	want.OutputDim = 4
+	want.AttentionHeads = 2
+	want.HeadDim = 4
+	want.FFNDim = 32
+	want.ParameterTying = EmbeddingParameterTyingUntied
+	if err := want.WriteFile(path); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	got, err := ReadEmbeddingManifestFile(path)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if got.ArchitectureVersion != want.ArchitectureVersion ||
+		got.ModelDim != want.ModelDim ||
+		got.OutputDim != want.OutputDim ||
+		got.AttentionHeads != want.AttentionHeads ||
+		got.HeadDim != want.HeadDim ||
+		got.FFNDim != want.FFNDim ||
+		got.ParameterTying != want.ParameterTying {
+		t.Fatalf("architecture metadata mismatch:\nwant: %+v\ngot:  %+v", want, got)
+	}
+	data, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal json: %v", err)
+	}
+	var decoded EmbeddingManifest
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal json: %v", err)
+	}
+	if decoded.ArchitectureVersion != want.ArchitectureVersion ||
+		decoded.ModelDim != want.ModelDim ||
+		decoded.OutputDim != want.OutputDim ||
+		decoded.AttentionHeads != want.AttentionHeads ||
+		decoded.HeadDim != want.HeadDim ||
+		decoded.FFNDim != want.FFNDim ||
+		decoded.ParameterTying != want.ParameterTying {
+		t.Fatalf("json architecture metadata mismatch:\nwant: %+v\ngot:  %+v", want, decoded)
+	}
+}
+
+func TestEmbeddingManifestRejectsInvalidArchitectureMetadata(t *testing.T) {
+	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_embed_pooled", Preset: compiler.PresetTinyEmbedPooled})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	manifest := tinyEmbeddingManifest()
+	manifest.ModelDim = 7
+	manifest.OutputDim = 2
+	manifest.AttentionHeads = 2
+	manifest.HeadDim = 3
+	if err := manifest.ValidateModule(bundle.Artifact); err == nil || !strings.Contains(err.Error(), "must be divisible") {
+		t.Fatalf("ValidateModule error = %v, want divisibility error", err)
 	}
 }
 

@@ -18,34 +18,36 @@ var tagXCHK = [4]byte{'X', 'C', 'H', 'K'}
 
 // EmbeddingTrainCheckpoint is a resumable state snapshot for the narrow embedder trainer.
 type EmbeddingTrainCheckpoint struct {
-	Version           string               `json:"version"`
-	Manifest          EmbeddingManifest    `json:"manifest"`
-	Config            EmbeddingTrainConfig `json:"config"`
-	Step              int                  `json:"step"`
-	TokenEmbedding    *backend.Tensor      `json:"token_embedding"`
-	RoleEmbedding     *backend.Tensor      `json:"role_embedding,omitempty"`
-	AttentionQuery    *backend.Tensor      `json:"attention_query,omitempty"`
-	AttentionKey      *backend.Tensor      `json:"attention_key,omitempty"`
-	AttentionValue    *backend.Tensor      `json:"attention_value,omitempty"`
-	AttentionOutput   *backend.Tensor      `json:"attention_output,omitempty"`
-	HiddenProjection  *backend.Tensor      `json:"hidden_projection,omitempty"`
-	Projection        *backend.Tensor      `json:"projection"`
-	TokenMoment1      *backend.Tensor      `json:"token_moment_1,omitempty"`
-	TokenMoment2      *backend.Tensor      `json:"token_moment_2,omitempty"`
-	RoleMoment1       *backend.Tensor      `json:"role_moment_1,omitempty"`
-	RoleMoment2       *backend.Tensor      `json:"role_moment_2,omitempty"`
-	AttentionQMoment1 *backend.Tensor      `json:"attention_query_moment_1,omitempty"`
-	AttentionQMoment2 *backend.Tensor      `json:"attention_query_moment_2,omitempty"`
-	AttentionKMoment1 *backend.Tensor      `json:"attention_key_moment_1,omitempty"`
-	AttentionKMoment2 *backend.Tensor      `json:"attention_key_moment_2,omitempty"`
-	AttentionVMoment1 *backend.Tensor      `json:"attention_value_moment_1,omitempty"`
-	AttentionVMoment2 *backend.Tensor      `json:"attention_value_moment_2,omitempty"`
-	AttentionOMoment1 *backend.Tensor      `json:"attention_output_moment_1,omitempty"`
-	AttentionOMoment2 *backend.Tensor      `json:"attention_output_moment_2,omitempty"`
-	HiddenMoment1     *backend.Tensor      `json:"hidden_projection_moment_1,omitempty"`
-	HiddenMoment2     *backend.Tensor      `json:"hidden_projection_moment_2,omitempty"`
-	ProjMoment1       *backend.Tensor      `json:"projection_moment_1,omitempty"`
-	ProjMoment2       *backend.Tensor      `json:"projection_moment_2,omitempty"`
+	Version           string                     `json:"version"`
+	Manifest          EmbeddingManifest          `json:"manifest"`
+	Config            EmbeddingTrainConfig       `json:"config"`
+	Step              int                        `json:"step"`
+	TokenEmbedding    *backend.Tensor            `json:"token_embedding"`
+	RoleEmbedding     *backend.Tensor            `json:"role_embedding,omitempty"`
+	AttentionQuery    *backend.Tensor            `json:"attention_query,omitempty"`
+	AttentionKey      *backend.Tensor            `json:"attention_key,omitempty"`
+	AttentionValue    *backend.Tensor            `json:"attention_value,omitempty"`
+	AttentionOutput   *backend.Tensor            `json:"attention_output,omitempty"`
+	HiddenProjection  *backend.Tensor            `json:"hidden_projection,omitempty"`
+	Projection        *backend.Tensor            `json:"projection"`
+	TokenMoment1      *backend.Tensor            `json:"token_moment_1,omitempty"`
+	TokenMoment2      *backend.Tensor            `json:"token_moment_2,omitempty"`
+	RoleMoment1       *backend.Tensor            `json:"role_moment_1,omitempty"`
+	RoleMoment2       *backend.Tensor            `json:"role_moment_2,omitempty"`
+	AttentionQMoment1 *backend.Tensor            `json:"attention_query_moment_1,omitempty"`
+	AttentionQMoment2 *backend.Tensor            `json:"attention_query_moment_2,omitempty"`
+	AttentionKMoment1 *backend.Tensor            `json:"attention_key_moment_1,omitempty"`
+	AttentionKMoment2 *backend.Tensor            `json:"attention_key_moment_2,omitempty"`
+	AttentionVMoment1 *backend.Tensor            `json:"attention_value_moment_1,omitempty"`
+	AttentionVMoment2 *backend.Tensor            `json:"attention_value_moment_2,omitempty"`
+	AttentionOMoment1 *backend.Tensor            `json:"attention_output_moment_1,omitempty"`
+	AttentionOMoment2 *backend.Tensor            `json:"attention_output_moment_2,omitempty"`
+	HiddenMoment1     *backend.Tensor            `json:"hidden_projection_moment_1,omitempty"`
+	HiddenMoment2     *backend.Tensor            `json:"hidden_projection_moment_2,omitempty"`
+	ProjMoment1       *backend.Tensor            `json:"projection_moment_1,omitempty"`
+	ProjMoment2       *backend.Tensor            `json:"projection_moment_2,omitempty"`
+	Tensors           map[string]*backend.Tensor `json:"tensors,omitempty"`
+	MomentTensors     map[string]*backend.Tensor `json:"moment_tensors,omitempty"`
 }
 
 type checkpointMLLMetadata struct {
@@ -324,7 +326,8 @@ func decodeEmbeddingCheckpointMLL(data []byte) (EmbeddingTrainCheckpoint, error)
 		return EmbeddingTrainCheckpoint{}, err
 	}
 	tensors := make(map[string]*backend.Tensor, len(tnsr.Tensors))
-	for _, entry := range tnsr.Tensors {
+	indexNames := make(map[uint32]string, len(tnsr.Tensors))
+	for i, entry := range tnsr.Tensors {
 		name := strg.At(entry.NameIdx)
 		if name == "" {
 			return EmbeddingTrainCheckpoint{}, fmt.Errorf("checkpoint tensor missing name for index %d", entry.NameIdx)
@@ -334,6 +337,16 @@ func decodeEmbeddingCheckpointMLL(data []byte) (EmbeddingTrainCheckpoint, error)
 			return EmbeddingTrainCheckpoint{}, fmt.Errorf("decode checkpoint tensor %q: %w", name, err)
 		}
 		tensors[name] = tensor
+		indexNames[uint32(i)] = name
+	}
+	momentNames := map[string]bool{}
+	for _, ref := range optm.MomentTensors {
+		if ref.Tag != mll.TagTNSR {
+			continue
+		}
+		if name, ok := indexNames[ref.Index]; ok {
+			momentNames[name] = true
+		}
 	}
 	checkpoint := EmbeddingTrainCheckpoint{
 		Version:           meta.Version,
@@ -365,6 +378,7 @@ func decodeEmbeddingCheckpointMLL(data []byte) (EmbeddingTrainCheckpoint, error)
 		ProjMoment1:       cloneTensorOrNil(tensors["projection_moment_1"]),
 		ProjMoment2:       cloneTensorOrNil(tensors["projection_moment_2"]),
 	}
+	checkpoint.Tensors, checkpoint.MomentTensors = genericCheckpointTensorMaps(tensors, momentNames)
 	if err := checkpoint.Validate(); err != nil {
 		return EmbeddingTrainCheckpoint{}, err
 	}
@@ -372,7 +386,7 @@ func decodeEmbeddingCheckpointMLL(data []byte) (EmbeddingTrainCheckpoint, error)
 }
 
 func checkpointTensorMap(c EmbeddingTrainCheckpoint) map[string]*backend.Tensor {
-	return map[string]*backend.Tensor{
+	tensors := map[string]*backend.Tensor{
 		"token_embedding":            c.TokenEmbedding,
 		"role_embedding":             c.RoleEmbedding,
 		"attention_query":            c.AttentionQuery,
@@ -398,6 +412,19 @@ func checkpointTensorMap(c EmbeddingTrainCheckpoint) map[string]*backend.Tensor 
 		"projection_moment_1":        c.ProjMoment1,
 		"projection_moment_2":        c.ProjMoment2,
 	}
+	for name, tensor := range c.Tensors {
+		if _, legacy := tensors[name]; legacy {
+			continue
+		}
+		tensors[name] = tensor
+	}
+	for name, tensor := range c.MomentTensors {
+		if _, legacy := tensors[name]; legacy {
+			continue
+		}
+		tensors[name] = tensor
+	}
+	return tensors
 }
 
 func checkpointMomentNames(c EmbeddingTrainCheckpoint) []string {
@@ -424,8 +451,67 @@ func checkpointMomentNames(c EmbeddingTrainCheckpoint) []string {
 			names = append(names, name)
 		}
 	}
+	for name, tensor := range c.MomentTensors {
+		if tensor != nil && !isLegacyCheckpointTensorName(name) {
+			names = append(names, name)
+		}
+	}
 	sort.Strings(names)
 	return names
+}
+
+func genericCheckpointTensorMaps(tensors map[string]*backend.Tensor, momentNames map[string]bool) (map[string]*backend.Tensor, map[string]*backend.Tensor) {
+	generic := map[string]*backend.Tensor{}
+	moments := map[string]*backend.Tensor{}
+	for name, tensor := range tensors {
+		if tensor == nil || isLegacyCheckpointTensorName(name) {
+			continue
+		}
+		if momentNames[name] {
+			moments[name] = tensor.Clone()
+		} else {
+			generic[name] = tensor.Clone()
+		}
+	}
+	if len(generic) == 0 {
+		generic = nil
+	}
+	if len(moments) == 0 {
+		moments = nil
+	}
+	return generic, moments
+}
+
+func isLegacyCheckpointTensorName(name string) bool {
+	switch name {
+	case "token_embedding",
+		"role_embedding",
+		"attention_query",
+		"attention_key",
+		"attention_value",
+		"attention_output",
+		"hidden_projection",
+		"projection",
+		"token_moment_1",
+		"token_moment_2",
+		"role_moment_1",
+		"role_moment_2",
+		"attention_query_moment_1",
+		"attention_query_moment_2",
+		"attention_key_moment_1",
+		"attention_key_moment_2",
+		"attention_value_moment_1",
+		"attention_value_moment_2",
+		"attention_output_moment_1",
+		"attention_output_moment_2",
+		"hidden_projection_moment_1",
+		"hidden_projection_moment_2",
+		"projection_moment_1",
+		"projection_moment_2":
+		return true
+	default:
+		return false
+	}
 }
 
 func optimizerKindToMLL(name string) uint8 {
