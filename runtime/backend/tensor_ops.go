@@ -72,6 +72,33 @@ func executeStep(ctx context.Context, mod *eosartifact.Module, entry eosartifact
 			return nil, "", err
 		}
 		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", hostReferenceMetadata("bert_embeddings"))}, "", nil
+	case eosartifact.StepBERTEncoderLayer:
+		if len(step.Inputs) != 18 || len(step.Outputs) != 1 {
+			return nil, "", fmt.Errorf("bert_encoder_layer step %q expects 18 inputs and 1 output", step.Name)
+		}
+		inputs := make([]*Tensor, 0, len(step.Inputs))
+		for _, name := range step.Inputs {
+			t, err := requireTensor(env[name], name)
+			if err != nil {
+				return nil, "", err
+			}
+			inputs = append(inputs, t)
+		}
+		outputType := resolveStepOutputType(mod, entry, step, 0, env)
+		if dispatchStep != nil {
+			result, handled, err := dispatchStep(ctx, step, outputType, inputs)
+			if err != nil {
+				return nil, "", err
+			}
+			if handled {
+				return tensorValuesFromDispatch(mod, entry, step, result, bindings, kind), result.VariantEntry, nil
+			}
+		}
+		out, err := bertEncoderLayerTensor(inputs, outputType, step.Attributes)
+		if err != nil {
+			return nil, "", err
+		}
+		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", hostReferenceMetadata("bert_encoder_layer"))}, "", nil
 	case eosartifact.StepTranspose:
 		if len(step.Inputs) != 1 || len(step.Outputs) != 1 {
 			return nil, "", fmt.Errorf("transpose step %q expects 1 input and 1 output", step.Name)

@@ -549,6 +549,144 @@ func BuildPretrainedBERTEmbeddingStageModule(plan PretrainedBERTImportPlan) (*eo
 	return mod, nil
 }
 
+// BuildPretrainedBERTSingleLayerModule builds one executable host-reference
+// BERT encoder layer backed by role-named imported weights.
+func BuildPretrainedBERTSingleLayerModule(plan PretrainedBERTImportPlan, layer int) (*eosartifact.Module, error) {
+	if err := plan.Config.Validate(); err != nil {
+		return nil, err
+	}
+	if layer < 0 || layer >= plan.Config.NumHiddenLayers {
+		return nil, fmt.Errorf("pretrained BERT encoder layer %d out of range [0,%d)", layer, plan.Config.NumHiddenLayers)
+	}
+	hiddenAct := plan.Config.HiddenAct
+	if hiddenAct == "" {
+		hiddenAct = "gelu"
+	}
+	if hiddenAct != "gelu" {
+		return nil, fmt.Errorf("pretrained BERT encoder layer unsupported hidden_act %q; only gelu is supported", hiddenAct)
+	}
+	hidden := plan.Config.HiddenSize
+	intermediate := plan.Config.IntermediateSize
+	rolePrefix := fmt.Sprintf("encoder_layer_%d_", layer)
+	requiredRoles := map[string][]int{
+		rolePrefix + "attention_query_weight":     {hidden, hidden},
+		rolePrefix + "attention_query_bias":       {hidden},
+		rolePrefix + "attention_key_weight":       {hidden, hidden},
+		rolePrefix + "attention_key_bias":         {hidden},
+		rolePrefix + "attention_value_weight":     {hidden, hidden},
+		rolePrefix + "attention_value_bias":       {hidden},
+		rolePrefix + "attention_output_weight":    {hidden, hidden},
+		rolePrefix + "attention_output_bias":      {hidden},
+		rolePrefix + "attention_layernorm_weight": {hidden},
+		rolePrefix + "attention_layernorm_bias":   {hidden},
+		rolePrefix + "intermediate_weight":        {intermediate, hidden},
+		rolePrefix + "intermediate_bias":          {intermediate},
+		rolePrefix + "output_weight":              {hidden, intermediate},
+		rolePrefix + "output_bias":                {hidden},
+		rolePrefix + "output_layernorm_weight":    {hidden},
+		rolePrefix + "output_layernorm_bias":      {hidden},
+	}
+	plannedRoles := map[string]PretrainedBERTTensorPlan{}
+	for _, tensor := range plan.Tensors {
+		plannedRoles[tensor.Role] = tensor
+	}
+	for role, shape := range requiredRoles {
+		tensor, ok := plannedRoles[role]
+		if !ok {
+			return nil, fmt.Errorf("pretrained BERT encoder layer module missing planned role %q", role)
+		}
+		if !slices.Equal(tensor.Shape, shape) {
+			return nil, fmt.Errorf("pretrained BERT encoder layer module role %q shape %v does not match config shape %v", role, tensor.Shape, shape)
+		}
+	}
+
+	mod := eosartifact.NewModule("pretrained_bert_encoder_layer")
+	mod.Requirements.Capabilities = []string{eosartifact.CapabilityHostFallback}
+	mod.Metadata = map[string]any{
+		"source":           "pretrained_bert_import_plan",
+		"model_name":       plan.ModelName,
+		"architecture":     plan.Architecture,
+		"layer":            layer,
+		"execution_status": "single_encoder_layer_only: host reference; no tokenizer, pooling, full encoder stack, package export, quantized execution, or device execution claim",
+	}
+	hiddenStr := strconv.Itoa(hidden)
+	intermediateStr := strconv.Itoa(intermediate)
+	paramRoles := []struct {
+		role  string
+		shape []string
+	}{
+		{rolePrefix + "attention_query_weight", []string{hiddenStr, hiddenStr}},
+		{rolePrefix + "attention_query_bias", []string{hiddenStr}},
+		{rolePrefix + "attention_key_weight", []string{hiddenStr, hiddenStr}},
+		{rolePrefix + "attention_key_bias", []string{hiddenStr}},
+		{rolePrefix + "attention_value_weight", []string{hiddenStr, hiddenStr}},
+		{rolePrefix + "attention_value_bias", []string{hiddenStr}},
+		{rolePrefix + "attention_output_weight", []string{hiddenStr, hiddenStr}},
+		{rolePrefix + "attention_output_bias", []string{hiddenStr}},
+		{rolePrefix + "attention_layernorm_weight", []string{hiddenStr}},
+		{rolePrefix + "attention_layernorm_bias", []string{hiddenStr}},
+		{rolePrefix + "intermediate_weight", []string{intermediateStr, hiddenStr}},
+		{rolePrefix + "intermediate_bias", []string{intermediateStr}},
+		{rolePrefix + "output_weight", []string{hiddenStr, intermediateStr}},
+		{rolePrefix + "output_bias", []string{hiddenStr}},
+		{rolePrefix + "output_layernorm_weight", []string{hiddenStr}},
+		{rolePrefix + "output_layernorm_bias", []string{hiddenStr}},
+	}
+	mod.Params = make([]eosartifact.Param, 0, len(paramRoles))
+	stepInputs := []string{"hidden_states", "attention_mask"}
+	for _, param := range paramRoles {
+		mod.Params = append(mod.Params, bertEmbeddingParam(param.role, param.shape...))
+		stepInputs = append(stepInputs, param.role)
+	}
+	hiddenType := bertTensorType("f32", "B", "T", hiddenStr)
+	maskType := bertTensorType("i32", "B", "T")
+	mod.EntryPoints = []eosartifact.EntryPoint{{
+		Name: "bert_encoder_layer",
+		Kind: eosartifact.EntryPointPipeline,
+		Inputs: []eosartifact.ValueBinding{
+			{Name: "hidden_states", Type: hiddenType},
+			{Name: "attention_mask", Type: maskType},
+		},
+		Outputs: []eosartifact.ValueBinding{
+			{Name: "hidden_states_out", Type: hiddenType},
+		},
+	}}
+	mod.Buffers = []eosartifact.Buffer{{
+		Name:  "hidden_states_out",
+		DType: "f32",
+		Shape: []string{"B", "T", hiddenStr},
+	}}
+	epsilon := plan.Config.LayerNormEps
+	if epsilon == 0 {
+		epsilon = 1e-12
+	}
+	mod.Steps = []eosartifact.Step{
+		{
+			Entry:   "bert_encoder_layer",
+			Kind:    eosartifact.StepBERTEncoderLayer,
+			Name:    fmt.Sprintf("encoder_layer_%d_reference", layer),
+			Inputs:  stepInputs,
+			Outputs: []string{"hidden_states_out"},
+			Attributes: map[string]string{
+				"epsilon":             strconv.FormatFloat(epsilon, 'g', -1, 64),
+				"hidden_act":          hiddenAct,
+				"num_attention_heads": strconv.Itoa(plan.Config.NumAttentionHeads),
+				"layer":               strconv.Itoa(layer),
+			},
+		},
+		{
+			Entry:   "bert_encoder_layer",
+			Kind:    eosartifact.StepReturn,
+			Name:    "return_hidden_states_out",
+			Outputs: []string{"hidden_states_out"},
+		},
+	}
+	if err := mod.Validate(); err != nil {
+		return nil, err
+	}
+	return mod, nil
+}
+
 func bertEmbeddingParam(name string, shape ...string) eosartifact.Param {
 	return eosartifact.Param{
 		Name:    name,

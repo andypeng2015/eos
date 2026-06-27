@@ -163,6 +163,129 @@ func TestBuildPretrainedBERTEmbeddingStageModuleExecutesWeightFile(t *testing.T)
 	}
 }
 
+func TestBuildPretrainedBERTSingleLayerModuleExecutesWeightFile(t *testing.T) {
+	cfg := PretrainedBERTConfig{
+		ModelType:             "bert",
+		VocabSize:             2,
+		HiddenSize:            2,
+		NumHiddenLayers:       1,
+		NumAttentionHeads:     1,
+		IntermediateSize:      3,
+		HiddenAct:             "gelu",
+		MaxPositionEmbeddings: 2,
+		TypeVocabSize:         2,
+		LayerNormEps:          0.25,
+	}
+	plan, err := PlanPretrainedBERTImport(cfg, "fixture")
+	if err != nil {
+		t.Fatalf("plan import: %v", err)
+	}
+	mod, err := BuildPretrainedBERTSingleLayerModule(plan, 0)
+	if err != nil {
+		t.Fatalf("build single-layer module: %v", err)
+	}
+	if got, want := mod.EntryPoints[0].Name, "bert_encoder_layer"; got != want {
+		t.Fatalf("entrypoint = %q, want %q", got, want)
+	}
+	if len(mod.Steps) == 0 || mod.Steps[0].Kind != eosartifact.StepBERTEncoderLayer {
+		t.Fatalf("first step = %+v, want bert_encoder_layer", mod.Steps)
+	}
+	if mod.Steps[0].Attributes["num_attention_heads"] != "1" || mod.Steps[0].Attributes["epsilon"] != "0.25" {
+		t.Fatalf("step attrs = %+v", mod.Steps[0].Attributes)
+	}
+
+	decoded := pretrainedBERTSingleLayerDecodedWeights()
+	weights, _, err := BuildPretrainedBERTWeightFileFromDecoded(PretrainedBERTDecodedWeightSet{Tensors: decoded})
+	if err != nil {
+		t.Fatalf("build weight file: %v", err)
+	}
+	rt := New(bertEmbeddingHostBackend{})
+	prog, err := rt.Load(context.Background(), mod, weights.LoadOptions()...)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	hiddenStates := backend.NewTensorF32([]int{1, 2, 2}, []float32{2, -1, 1, 3})
+	attentionMask := backend.NewTensorI32([]int{1, 2}, []int32{1, 0})
+	result, err := prog.Run(context.Background(), backend.Request{
+		Entry: "bert_encoder_layer",
+		Inputs: map[string]any{
+			"hidden_states":  hiddenStates,
+			"attention_mask": attentionMask,
+		},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	value, ok := result.Outputs["hidden_states_out"]
+	if !ok {
+		t.Fatalf("missing hidden_states_out output: %+v", result.Outputs)
+	}
+	tensor, ok := value.Data.(*backend.Tensor)
+	if !ok {
+		t.Fatalf("output data type = %T, want *backend.Tensor", value.Data)
+	}
+	expectedWeights := weights.Weights
+	want, err := backend.BERTEncoderLayerReference(
+		hiddenStates, attentionMask,
+		expectedWeights["encoder_layer_0_attention_query_weight"], expectedWeights["encoder_layer_0_attention_query_bias"],
+		expectedWeights["encoder_layer_0_attention_key_weight"], expectedWeights["encoder_layer_0_attention_key_bias"],
+		expectedWeights["encoder_layer_0_attention_value_weight"], expectedWeights["encoder_layer_0_attention_value_bias"],
+		expectedWeights["encoder_layer_0_attention_output_weight"], expectedWeights["encoder_layer_0_attention_output_bias"],
+		expectedWeights["encoder_layer_0_attention_layernorm_weight"], expectedWeights["encoder_layer_0_attention_layernorm_bias"],
+		expectedWeights["encoder_layer_0_intermediate_weight"], expectedWeights["encoder_layer_0_intermediate_bias"],
+		expectedWeights["encoder_layer_0_output_weight"], expectedWeights["encoder_layer_0_output_bias"],
+		expectedWeights["encoder_layer_0_output_layernorm_weight"], expectedWeights["encoder_layer_0_output_layernorm_bias"],
+		1, 0.25, "gelu",
+	)
+	if err != nil {
+		t.Fatalf("expected reference: %v", err)
+	}
+	assertTensorClose(t, tensor, want.Shape, want.F32)
+	if value.Metadata["dispatch_mode"] != "host_reference" {
+		t.Fatalf("dispatch_mode = %v, want host_reference", value.Metadata["dispatch_mode"])
+	}
+}
+
+func TestBuildPretrainedBERTSingleLayerModuleValidation(t *testing.T) {
+	cfg := PretrainedBERTConfig{
+		ModelType:             "bert",
+		VocabSize:             2,
+		HiddenSize:            2,
+		NumHiddenLayers:       1,
+		NumAttentionHeads:     1,
+		IntermediateSize:      3,
+		HiddenAct:             "gelu",
+		MaxPositionEmbeddings: 2,
+		TypeVocabSize:         2,
+	}
+	plan, err := PlanPretrainedBERTImport(cfg, "fixture")
+	if err != nil {
+		t.Fatalf("plan import: %v", err)
+	}
+	_, err = BuildPretrainedBERTSingleLayerModule(plan, 1)
+	if err == nil || !strings.Contains(err.Error(), "out of range") {
+		t.Fatalf("expected out-of-range layer error, got %v", err)
+	}
+	missing := plan
+	missing.Tensors = nil
+	for _, tensor := range plan.Tensors {
+		if tensor.Role == "encoder_layer_0_output_layernorm_bias" {
+			continue
+		}
+		missing.Tensors = append(missing.Tensors, tensor)
+	}
+	_, err = BuildPretrainedBERTSingleLayerModule(missing, 0)
+	if err == nil || !strings.Contains(err.Error(), "missing planned role") {
+		t.Fatalf("expected missing role error, got %v", err)
+	}
+	unsupported := plan
+	unsupported.Config.HiddenAct = "relu"
+	_, err = BuildPretrainedBERTSingleLayerModule(unsupported, 0)
+	if err == nil || !strings.Contains(err.Error(), "unsupported hidden_act") {
+		t.Fatalf("expected unsupported activation error, got %v", err)
+	}
+}
+
 func TestPlanPretrainedBERTImportRejectsUnsupportedArchitecture(t *testing.T) {
 	cfg := PretrainedBERTConfig{
 		Architectures:         []string{"RobertaModel"},
@@ -545,6 +668,27 @@ func paramNames(params []eosartifact.Param) []string {
 		names = append(names, param.Name)
 	}
 	return names
+}
+
+func pretrainedBERTSingleLayerDecodedWeights() []PretrainedBERTDecodedWeightTensor {
+	return []PretrainedBERTDecodedWeightTensor{
+		{Name: "encoder.layer.0.attention.self.query.weight", Role: "encoder_layer_0_attention_query_weight", SourceDType: "F32", Shape: []int64{2, 2}, Values: []float32{2, -1, 0.5, 3}},
+		{Name: "encoder.layer.0.attention.self.query.bias", Role: "encoder_layer_0_attention_query_bias", SourceDType: "F32", Shape: []int64{2}, Values: []float32{0.25, -0.5}},
+		{Name: "encoder.layer.0.attention.self.key.weight", Role: "encoder_layer_0_attention_key_weight", SourceDType: "F32", Shape: []int64{2, 2}, Values: []float32{1, 4, -2, 0.5}},
+		{Name: "encoder.layer.0.attention.self.key.bias", Role: "encoder_layer_0_attention_key_bias", SourceDType: "F32", Shape: []int64{2}, Values: []float32{-0.25, 0.75}},
+		{Name: "encoder.layer.0.attention.self.value.weight", Role: "encoder_layer_0_attention_value_weight", SourceDType: "F32", Shape: []int64{2, 2}, Values: []float32{1.5, -0.25, 0.75, 2}},
+		{Name: "encoder.layer.0.attention.self.value.bias", Role: "encoder_layer_0_attention_value_bias", SourceDType: "F32", Shape: []int64{2}, Values: []float32{0.1, -0.2}},
+		{Name: "encoder.layer.0.attention.output.dense.weight", Role: "encoder_layer_0_attention_output_weight", SourceDType: "F32", Shape: []int64{2, 2}, Values: []float32{0.5, -1.25, 1.5, 0.25}},
+		{Name: "encoder.layer.0.attention.output.dense.bias", Role: "encoder_layer_0_attention_output_bias", SourceDType: "F32", Shape: []int64{2}, Values: []float32{0.3, -0.4}},
+		{Name: "encoder.layer.0.attention.output.LayerNorm.weight", Role: "encoder_layer_0_attention_layernorm_weight", SourceDType: "F32", Shape: []int64{2}, Values: []float32{1.2, -0.7}},
+		{Name: "encoder.layer.0.attention.output.LayerNorm.bias", Role: "encoder_layer_0_attention_layernorm_bias", SourceDType: "F32", Shape: []int64{2}, Values: []float32{0.05, 0.15}},
+		{Name: "encoder.layer.0.intermediate.dense.weight", Role: "encoder_layer_0_intermediate_weight", SourceDType: "F32", Shape: []int64{3, 2}, Values: []float32{0.25, -0.5, 1.25, 0.75, -1.5, 0.5}},
+		{Name: "encoder.layer.0.intermediate.dense.bias", Role: "encoder_layer_0_intermediate_bias", SourceDType: "F32", Shape: []int64{3}, Values: []float32{0.1, -0.2, 0.3}},
+		{Name: "encoder.layer.0.output.dense.weight", Role: "encoder_layer_0_output_weight", SourceDType: "F32", Shape: []int64{2, 3}, Values: []float32{0.4, -0.8, 1.2, -1.1, 0.6, 0.2}},
+		{Name: "encoder.layer.0.output.dense.bias", Role: "encoder_layer_0_output_bias", SourceDType: "F32", Shape: []int64{2}, Values: []float32{-0.05, 0.25}},
+		{Name: "encoder.layer.0.output.LayerNorm.weight", Role: "encoder_layer_0_output_layernorm_weight", SourceDType: "F32", Shape: []int64{2}, Values: []float32{0.9, 1.4}},
+		{Name: "encoder.layer.0.output.LayerNorm.bias", Role: "encoder_layer_0_output_layernorm_bias", SourceDType: "F32", Shape: []int64{2}, Values: []float32{-0.2, 0.4}},
+	}
 }
 
 type bertEmbeddingHostBackend struct{}

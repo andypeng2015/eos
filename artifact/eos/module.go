@@ -72,6 +72,7 @@ const (
 	StepScalarAdd            StepKind = "scalar_add"
 	StepRDLoss               StepKind = "rate_distortion_loss"
 	StepBERTEmbeddings       StepKind = "bert_embeddings"
+	StepBERTEncoderLayer     StepKind = "bert_encoder_layer"
 )
 
 // ValueKind classifies the values used by params and entrypoints.
