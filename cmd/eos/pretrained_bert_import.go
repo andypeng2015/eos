@@ -20,11 +20,12 @@ func runImportPretrainedBERT(args []string) error {
 	loadWeightsSmoke := fs.Bool("load-weights-smoke", false, "load planned BERT safetensors bytes into an intermediate in-memory weight set and report byte-ingest stats")
 	decodeWeightsSmoke := fs.Bool("decode-weights-smoke", false, "decode planned BERT safetensors F32/F16/BF16 bytes into float32 values and report decode stats")
 	weightsOut := fs.String("weights-out", "", "write decoded planned BERT weights to an Eos MLL weights-only file; this is not an executable BERT artifact")
+	moduleOut := fs.String("module-out", "", "write the host-reference executable BERT embedder module to an Eos MLL artifact")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *source == "" {
-		return fmt.Errorf("usage: eos import-pretrained-bert --source <hf-snapshot-dir> [--model-name name] [--plan-json plan.json] [--tokenizer-smoke text] [--verify-weights] [--load-weights-smoke] [--decode-weights-smoke] [--weights-out weights.mll]")
+		return fmt.Errorf("usage: eos import-pretrained-bert --source <hf-snapshot-dir> [--model-name name] [--plan-json plan.json] [--tokenizer-smoke text] [--verify-weights] [--load-weights-smoke] [--decode-weights-smoke] [--weights-out weights.mll] [--module-out artifact.mll]")
 	}
 	plan, err := eosruntime.PlanPretrainedBERTImportFromDir(*source, *modelName)
 	if err != nil {
@@ -57,6 +58,13 @@ func runImportPretrainedBERT(args []string) error {
 			return fmt.Errorf("export weights-only file: %w", err)
 		}
 		plan.WeightFileExport = &report
+	}
+	if *moduleOut != "" {
+		report, err := eosruntime.ExportPretrainedBERTEmbedderModuleFromPlan(plan, *moduleOut)
+		if err != nil {
+			return fmt.Errorf("export embedder module: %w", err)
+		}
+		plan.ModuleExport = &report
 	}
 	if *tokenizerSmoke != "" {
 		tokenizer, err := eosruntime.LoadHFWordPieceTokenizerFromDir(*source)

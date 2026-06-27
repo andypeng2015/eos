@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	eosartifact "m31labs.dev/eos/artifact/eos"
 	eosruntime "m31labs.dev/eos/runtime"
 )
 
@@ -214,10 +215,12 @@ func TestRunImportPretrainedBERTWeightsOutWritesReadableWeightFile(t *testing.T)
 	}
 	planPath := filepath.Join(dir, "plan.json")
 	weightsPath := filepath.Join(dir, "bert.weights.mll")
+	modulePath := filepath.Join(dir, "bert.module.mll")
 	if err := runImportPretrainedBERT([]string{
 		"--source", snapshot,
 		"--plan-json", planPath,
 		"--weights-out", weightsPath,
+		"--module-out", modulePath,
 	}); err != nil {
 		t.Fatalf("run import-pretrained-bert: %v", err)
 	}
@@ -241,6 +244,18 @@ func TestRunImportPretrainedBERTWeightsOutWritesReadableWeightFile(t *testing.T)
 	if loaded.WeightFileExport.SourceDTypes["BF16"] != 1 {
 		t.Fatalf("source dtype counts = %+v", loaded.WeightFileExport.SourceDTypes)
 	}
+	if loaded.ModuleExport == nil {
+		t.Fatal("expected module export report")
+	}
+	if loaded.ModuleExport.OutputPath != modulePath || loaded.ModuleExport.Entrypoint != "bert_embed" {
+		t.Fatalf("module export = %+v", loaded.ModuleExport)
+	}
+	if loaded.ModuleExport.Pooling != "masked_mean" || loaded.ModuleExport.Normalization != "l2" {
+		t.Fatalf("module export pooling/normalization = %+v", loaded.ModuleExport)
+	}
+	if loaded.ModuleExport.Layers != 1 || loaded.ModuleExport.HiddenSize != 2 || !strings.Contains(loaded.ModuleExport.ExecutionStatus, "host_reference_full_stack") {
+		t.Fatalf("module export execution/config = %+v", loaded.ModuleExport)
+	}
 
 	weightFile, err := eosruntime.ReadWeightFile(weightsPath)
 	if err != nil {
@@ -262,6 +277,20 @@ func TestRunImportPretrainedBERTWeightsOutWritesReadableWeightFile(t *testing.T)
 		t.Fatalf("token_type_embeddings = %+v", tokenTypes)
 	}
 	assertCommandFloat32Values(t, tokenTypes.F32, []float32{1, -2, 2.5, 0})
+
+	mod, err := eosartifact.ReadFile(modulePath)
+	if err != nil {
+		t.Fatalf("read exported module: %v", err)
+	}
+	if mod.Name != "pretrained_bert_embedder" {
+		t.Fatalf("module name = %q", mod.Name)
+	}
+	if len(mod.EntryPoints) == 0 || mod.EntryPoints[0].Name != "bert_embed" {
+		t.Fatalf("entrypoints = %+v", mod.EntryPoints)
+	}
+	if len(mod.Steps) == 0 || mod.Steps[0].Kind != eosartifact.StepBERTEmbedder {
+		t.Fatalf("first module step = %+v", mod.Steps)
+	}
 }
 
 func writeCommandSafeTensorsFixture(path string, header map[string]any, payload []byte) error {

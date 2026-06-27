@@ -51,6 +51,7 @@ type PretrainedBERTImportPlan struct {
 	WeightLoadSmoke        *PretrainedBERTWeightLoadReport   `json:"weight_load_smoke,omitempty"`
 	WeightDecodeSmoke      *PretrainedBERTWeightDecodeReport `json:"weight_decode_smoke,omitempty"`
 	WeightFileExport       *PretrainedBERTWeightFileReport   `json:"weight_file_export,omitempty"`
+	ModuleExport           *PretrainedBERTModuleExportReport `json:"module_export,omitempty"`
 	PoolingPolicy          string                            `json:"pooling_policy"`
 	OutputProjectionPolicy string                            `json:"output_projection_policy"`
 	ExecutionStatus        string                            `json:"execution_status"`
@@ -145,6 +146,17 @@ type PretrainedBERTWeightFileTensorReport struct {
 	Shape        []int64 `json:"shape"`
 	SourceDType  string  `json:"source_dtype"`
 	StorageDType string  `json:"storage_dtype"`
+}
+
+type PretrainedBERTModuleExportReport struct {
+	Status          string `json:"status"`
+	OutputPath      string `json:"output_path,omitempty"`
+	Entrypoint      string `json:"entrypoint"`
+	Pooling         string `json:"pooling"`
+	Normalization   string `json:"normalization"`
+	ExecutionStatus string `json:"execution_status"`
+	Layers          int    `json:"layers"`
+	HiddenSize      int    `json:"hidden_size"`
 }
 
 func LoadPretrainedBERTConfig(path string) (PretrainedBERTConfig, error) {
@@ -448,6 +460,41 @@ func ExportPretrainedBERTWeightFileFromDir(dir string, plan PretrainedBERTImport
 	report.SkippedExtra = append([]string(nil), decodeReport.SkippedExtra...)
 	if err := weightFile.WriteFile(outPath); err != nil {
 		return PretrainedBERTWeightFileReport{}, err
+	}
+	return report, nil
+}
+
+func ExportPretrainedBERTEmbedderModuleFromPlan(plan PretrainedBERTImportPlan, outPath string) (PretrainedBERTModuleExportReport, error) {
+	if outPath == "" {
+		return PretrainedBERTModuleExportReport{}, fmt.Errorf("module output path is required")
+	}
+	mod, err := BuildPretrainedBERTEmbedderModule(plan)
+	if err != nil {
+		return PretrainedBERTModuleExportReport{}, err
+	}
+	if err := eosartifact.WriteFile(outPath, mod); err != nil {
+		return PretrainedBERTModuleExportReport{}, err
+	}
+	report := PretrainedBERTModuleExportReport{
+		Status:        "ok",
+		OutputPath:    outPath,
+		Layers:        plan.Config.NumHiddenLayers,
+		HiddenSize:    plan.Config.HiddenSize,
+		Entrypoint:    "bert_embed",
+		Pooling:       "masked_mean",
+		Normalization: "l2",
+	}
+	if len(mod.EntryPoints) > 0 {
+		report.Entrypoint = mod.EntryPoints[0].Name
+	}
+	if value, ok := mod.Metadata["pooling"].(string); ok {
+		report.Pooling = value
+	}
+	if value, ok := mod.Metadata["normalization"].(string); ok {
+		report.Normalization = value
+	}
+	if value, ok := mod.Metadata["execution_status"].(string); ok {
+		report.ExecutionStatus = value
 	}
 	return report, nil
 }

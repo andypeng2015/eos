@@ -378,6 +378,54 @@ func TestBuildPretrainedBERTEmbedderModuleExecutesWeightFile(t *testing.T) {
 	}
 }
 
+func TestExportPretrainedBERTEmbedderModuleFromPlanWritesReadableArtifact(t *testing.T) {
+	cfg := PretrainedBERTConfig{
+		ModelType:             "bert",
+		VocabSize:             2,
+		HiddenSize:            2,
+		NumHiddenLayers:       1,
+		NumAttentionHeads:     1,
+		IntermediateSize:      3,
+		HiddenAct:             "gelu",
+		MaxPositionEmbeddings: 2,
+		TypeVocabSize:         2,
+	}
+	plan, err := PlanPretrainedBERTImport(cfg, "fixture")
+	if err != nil {
+		t.Fatalf("plan import: %v", err)
+	}
+	outPath := filepath.Join(t.TempDir(), "bert.module.mll")
+	report, err := ExportPretrainedBERTEmbedderModuleFromPlan(plan, outPath)
+	if err != nil {
+		t.Fatalf("export embedder module: %v", err)
+	}
+	if report.Status != "ok" || report.OutputPath != outPath || report.Entrypoint != "bert_embed" {
+		t.Fatalf("module export report = %+v", report)
+	}
+	if report.Pooling != "masked_mean" || report.Normalization != "l2" {
+		t.Fatalf("module export pooling/normalization = %+v", report)
+	}
+	if !strings.Contains(report.ExecutionStatus, "host_reference_full_stack") || report.Layers != 1 || report.HiddenSize != 2 {
+		t.Fatalf("module export execution/config report = %+v", report)
+	}
+	mod, err := eosartifact.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read exported module: %v", err)
+	}
+	if mod.Name != "pretrained_bert_embedder" {
+		t.Fatalf("module name = %q", mod.Name)
+	}
+	if len(mod.EntryPoints) == 0 || mod.EntryPoints[0].Name != "bert_embed" {
+		t.Fatalf("entrypoints = %+v", mod.EntryPoints)
+	}
+	if len(mod.Steps) == 0 || mod.Steps[0].Kind != eosartifact.StepBERTEmbedder {
+		t.Fatalf("first step = %+v, want bert_embedder", mod.Steps)
+	}
+	if mod.Metadata["pooling"] != "masked_mean" || mod.Metadata["normalization"] != "l2" {
+		t.Fatalf("metadata = %+v", mod.Metadata)
+	}
+}
+
 func TestBuildPretrainedBERTEmbedderModuleValidation(t *testing.T) {
 	cfg := PretrainedBERTConfig{
 		ModelType:             "bert",
