@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -55,6 +56,16 @@ type SafeTensorData struct {
 	ByteOffset int64   `json:"byte_offset"`
 	ByteLength int64   `json:"byte_length"`
 	Bytes      []byte  `json:"-"`
+}
+
+type SafeTensorFloat32Data struct {
+	Name        string    `json:"name"`
+	SourceDType string    `json:"source_dtype"`
+	Shape       []int64   `json:"shape"`
+	SourceFile  string    `json:"source_file"`
+	ByteOffset  int64     `json:"byte_offset"`
+	ByteLength  int64     `json:"byte_length"`
+	Values      []float32 `json:"-"`
 }
 
 type safeTensorInfoJSON struct {
@@ -295,6 +306,86 @@ func LoadSafeTensorData(collection SafeTensorsCollection, dir string, names []st
 	return result, nil
 }
 
+func LoadSafeTensorFloat32DataFromDir(dir string, names []string) (map[string]SafeTensorFloat32Data, SafeTensorsCollection, error) {
+	collection, err := ReadSafeTensorsCollectionFromDir(dir)
+	if err != nil {
+		return nil, SafeTensorsCollection{}, err
+	}
+	data, err := LoadSafeTensorFloat32Data(collection, filepath.Dir(collection.Path), names)
+	if err != nil {
+		return nil, SafeTensorsCollection{}, err
+	}
+	return data, collection, nil
+}
+
+func LoadSafeTensorFloat32Data(collection SafeTensorsCollection, dir string, names []string) (map[string]SafeTensorFloat32Data, error) {
+	raw, err := LoadSafeTensorData(collection, dir, names)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]SafeTensorFloat32Data, len(raw))
+	for _, name := range names {
+		tensor, ok := raw[name]
+		if !ok {
+			continue
+		}
+		values, err := decodeSafeTensorFloat32Values(tensor)
+		if err != nil {
+			return nil, err
+		}
+		result[name] = SafeTensorFloat32Data{
+			Name:        tensor.Name,
+			SourceDType: tensor.DType,
+			Shape:       append([]int64(nil), tensor.Shape...),
+			SourceFile:  tensor.SourceFile,
+			ByteOffset:  tensor.ByteOffset,
+			ByteLength:  tensor.ByteLength,
+			Values:      values,
+		}
+	}
+	return result, nil
+}
+
+func decodeSafeTensorFloat32Values(tensor SafeTensorData) ([]float32, error) {
+	elements, err := safeTensorNumElementsForInt(tensor.Name, tensor.Shape)
+	if err != nil {
+		return nil, err
+	}
+	var dtypeSize int64
+	switch tensor.DType {
+	case "F32":
+		dtypeSize = 4
+	case "F16", "BF16":
+		dtypeSize = 2
+	default:
+		return nil, fmt.Errorf("safetensors tensor %q has unsupported dtype %q for float32 decode", tensor.Name, tensor.DType)
+	}
+	if elements != 0 && dtypeSize > int64(^uint64(0)>>1)/int64(elements) {
+		return nil, fmt.Errorf("safetensors tensor %q byte count overflows int64", tensor.Name)
+	}
+	expected := int64(elements) * dtypeSize
+	if int64(len(tensor.Bytes)) != expected {
+		return nil, fmt.Errorf("safetensors tensor %q byte length %d does not match shape elements %d * dtype size %d = %d", tensor.Name, len(tensor.Bytes), elements, dtypeSize, expected)
+	}
+	values := make([]float32, elements)
+	switch tensor.DType {
+	case "F32":
+		for i := range values {
+			values[i] = math.Float32frombits(binary.LittleEndian.Uint32(tensor.Bytes[i*4:]))
+		}
+	case "F16":
+		for i := range values {
+			values[i] = halfToFloat32(binary.LittleEndian.Uint16(tensor.Bytes[i*2:]))
+		}
+	case "BF16":
+		for i := range values {
+			bits := binary.LittleEndian.Uint16(tensor.Bytes[i*2:])
+			values[i] = math.Float32frombits(uint32(bits) << 16)
+		}
+	}
+	return values, nil
+}
+
 func parseSafeTensorsHeader(path string, header []byte, fileSize int64, headerLength uint64) (SafeTensorsMetadata, error) {
 	if !json.Valid(header) {
 		return SafeTensorsMetadata{}, fmt.Errorf("%s: invalid safetensors JSON header", path)
@@ -435,6 +526,18 @@ func safeTensorNumElements(name string, shape []int64) (int64, error) {
 		elements *= dim
 	}
 	return elements, nil
+}
+
+func safeTensorNumElementsForInt(name string, shape []int64) (int, error) {
+	elements, err := safeTensorNumElements(name, shape)
+	if err != nil {
+		return 0, err
+	}
+	maxInt := int64(^uint(0) >> 1)
+	if elements > maxInt {
+		return 0, fmt.Errorf("safetensors tensor %q element count %d exceeds int capacity", name, elements)
+	}
+	return int(elements), nil
 }
 
 func duplicateObjectKeys(data []byte, objectKey string) ([]string, error) {

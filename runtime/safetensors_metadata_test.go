@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -269,6 +270,65 @@ func TestLoadSafeTensorDataCopiesExactBytes(t *testing.T) {
 	}
 }
 
+func TestLoadSafeTensorFloat32DataDecodesF32F16AndBF16(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "model.safetensors")
+	payload := make([]byte, 16)
+	binary.LittleEndian.PutUint32(payload[0:], math.Float32bits(-1.25))
+	binary.LittleEndian.PutUint32(payload[4:], math.Float32bits(3.5))
+	binary.LittleEndian.PutUint16(payload[8:], 0xc000)
+	binary.LittleEndian.PutUint16(payload[10:], 0x3e00)
+	binary.LittleEndian.PutUint16(payload[12:], 0xc020)
+	binary.LittleEndian.PutUint16(payload[14:], 0x4050)
+	header := map[string]any{
+		"f32":  map[string]any{"dtype": "F32", "shape": []int64{2}, "data_offsets": []int64{0, 8}},
+		"f16":  map[string]any{"dtype": "F16", "shape": []int64{2}, "data_offsets": []int64{8, 12}},
+		"bf16": map[string]any{"dtype": "BF16", "shape": []int64{2}, "data_offsets": []int64{12, 16}},
+	}
+	if err := writeSafeTensorsFixture(path, header, payload); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	data, _, err := LoadSafeTensorFloat32DataFromDir(dir, []string{"f32", "f16", "bf16"})
+	if err != nil {
+		t.Fatalf("decode tensors: %v", err)
+	}
+	assertFloat32Values(t, data["f32"].Values, []float32{-1.25, 3.5})
+	assertFloat32Values(t, data["f16"].Values, []float32{-2, 1.5})
+	assertFloat32Values(t, data["bf16"].Values, []float32{-2.5, 3.25})
+	if data["bf16"].SourceDType != "BF16" {
+		t.Fatalf("source dtype = %q", data["bf16"].SourceDType)
+	}
+}
+
+func TestLoadSafeTensorFloat32DataRejectsUnsupportedDType(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "model.safetensors")
+	header := map[string]any{
+		"i32": map[string]any{"dtype": "I32", "shape": []int64{1}, "data_offsets": []int64{0, 4}},
+	}
+	if err := writeSafeTensorsFixture(path, header, []byte{1, 2, 3, 4}); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	_, _, err := LoadSafeTensorFloat32DataFromDir(dir, []string{"i32"})
+	if err == nil || !strings.Contains(err.Error(), "unsupported dtype") {
+		t.Fatalf("expected unsupported dtype error, got %v", err)
+	}
+}
+
+func TestLoadSafeTensorFloat32DataRejectsMalformedByteLength(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad.safetensors")
+	header := map[string]any{
+		"f16": map[string]any{"dtype": "F16", "shape": []int64{2}, "data_offsets": []int64{0, 3}},
+	}
+	if err := writeSafeTensorsFixture(path, header, []byte{1, 2, 3}); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	_, err := ReadSafeTensorsMetadata(path)
+	if err == nil || !strings.Contains(err.Error(), "does not match shape elements") {
+		t.Fatalf("expected byte-count mismatch error, got %v", err)
+	}
+}
+
 func writeSafeTensorsFixture(path string, header map[string]any, payload []byte) error {
 	data, err := json.Marshal(header)
 	if err != nil {
@@ -281,6 +341,18 @@ func writeSafeTensorsFixture(path string, header map[string]any, payload []byte)
 	buf.Write(data)
 	buf.Write(payload)
 	return os.WriteFile(path, buf.Bytes(), 0o644)
+}
+
+func assertFloat32Values(t *testing.T, got, want []float32) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("values len = %d, want %d: %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("values[%d] = %v, want %v (all values %v)", i, got[i], want[i], got)
+		}
+	}
 }
 
 func writeJSON(path string, value any) error {

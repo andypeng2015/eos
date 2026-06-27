@@ -18,11 +18,12 @@ func runImportPretrainedBERT(args []string) error {
 	tokenizerSmoke := fs.String("tokenizer-smoke", "", "optional text to tokenize with vocab.txt as a local smoke check")
 	verifyWeights := fs.Bool("verify-weights", false, "metadata-only verification of single-file or sharded safetensors tensor names, shapes, and dtypes")
 	loadWeightsSmoke := fs.Bool("load-weights-smoke", false, "load planned BERT safetensors bytes into an intermediate in-memory weight set and report byte-ingest stats")
+	decodeWeightsSmoke := fs.Bool("decode-weights-smoke", false, "decode planned BERT safetensors F32/F16/BF16 bytes into float32 values and report decode stats")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *source == "" {
-		return fmt.Errorf("usage: eos import-pretrained-bert --source <hf-snapshot-dir> [--model-name name] [--plan-json plan.json] [--tokenizer-smoke text] [--verify-weights] [--load-weights-smoke]")
+		return fmt.Errorf("usage: eos import-pretrained-bert --source <hf-snapshot-dir> [--model-name name] [--plan-json plan.json] [--tokenizer-smoke text] [--verify-weights] [--load-weights-smoke] [--decode-weights-smoke]")
 	}
 	plan, err := eosruntime.PlanPretrainedBERTImportFromDir(*source, *modelName)
 	if err != nil {
@@ -41,6 +42,13 @@ func runImportPretrainedBERT(args []string) error {
 			return fmt.Errorf("load weights smoke: %w", err)
 		}
 		plan.WeightLoadSmoke = &report
+	}
+	if *decodeWeightsSmoke {
+		_, report, err := eosruntime.LoadPretrainedBERTDecodedWeightsFromDir(*source, plan)
+		if err != nil {
+			return fmt.Errorf("decode weights smoke: %w", err)
+		}
+		plan.WeightDecodeSmoke = &report
 	}
 	if *tokenizerSmoke != "" {
 		tokenizer, err := eosruntime.LoadHFWordPieceTokenizerFromDir(*source)

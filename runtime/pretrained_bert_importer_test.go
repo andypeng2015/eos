@@ -2,6 +2,8 @@ package eosruntime
 
 import (
 	"bytes"
+	"encoding/binary"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -276,6 +278,76 @@ func TestLoadPretrainedBERTWeightsLoadsPlannedAndPresentPoolerOnly(t *testing.T)
 	t.Fatalf("word embedding tensor not loaded")
 }
 
+func TestLoadPretrainedBERTDecodedWeightsPreservesPlanOrderRolesDTypesAndValues(t *testing.T) {
+	dir := t.TempDir()
+	cfg := PretrainedBERTConfig{
+		ModelType:             "bert",
+		VocabSize:             3,
+		HiddenSize:            2,
+		NumHiddenLayers:       1,
+		NumAttentionHeads:     1,
+		IntermediateSize:      4,
+		MaxPositionEmbeddings: 4,
+		TypeVocabSize:         2,
+	}
+	plan, err := PlanPretrainedBERTImport(cfg, "fixture")
+	if err != nil {
+		t.Fatalf("plan import: %v", err)
+	}
+	header := safeTensorsHeaderForBERTPlan(plan)
+	header["embeddings.position_embeddings.weight"].(map[string]any)["dtype"] = "F16"
+	header["embeddings.token_type_embeddings.weight"].(map[string]any)["dtype"] = "BF16"
+	header["pooler.dense.weight"] = map[string]any{"dtype": "F32", "shape": []int64{2, 2}, "data_offsets": []int64{0, 16}}
+	header["pooler.dense.bias"] = map[string]any{"dtype": "F32", "shape": []int64{2}, "data_offsets": []int64{0, 8}}
+	header["cls.predictions.decoder.weight"] = map[string]any{"dtype": "F32", "shape": []int64{3, 2}, "data_offsets": []int64{0, 24}}
+	payloadSize := renumberSafeTensorFixtureOffsets(header)
+	payload := make([]byte, payloadSize)
+	putF32Payload(t, header, payload, "embeddings.word_embeddings.weight", []float32{-1.25, 3.5, 0.5, -0.75, 2, -4})
+	putU16Payload(t, header, payload, "embeddings.position_embeddings.weight", []uint16{0xc000, 0x3e00})
+	putU16Payload(t, header, payload, "embeddings.token_type_embeddings.weight", []uint16{0xc020, 0x4050})
+	putF32Payload(t, header, payload, "pooler.dense.bias", []float32{7, -8})
+	if err := writeSafeTensorsFixture(filepath.Join(dir, "model.safetensors"), header, payload); err != nil {
+		t.Fatalf("write safetensors: %v", err)
+	}
+	set, report, err := LoadPretrainedBERTDecodedWeightsFromDir(dir, plan)
+	if err != nil {
+		t.Fatalf("load decoded weights: %v", err)
+	}
+	if report.Status != "ok" {
+		t.Fatalf("status = %q", report.Status)
+	}
+	if report.TensorCount != len(plan.Tensors) || len(set.Tensors) != len(plan.Tensors) {
+		t.Fatalf("decoded tensor count report=%d set=%d plan=%d", report.TensorCount, len(set.Tensors), len(plan.Tensors))
+	}
+	if report.TotalElements == 0 {
+		t.Fatalf("total elements = %d", report.TotalElements)
+	}
+	if report.SourceDTypes["F32"] == 0 || report.SourceDTypes["F16"] != 1 || report.SourceDTypes["BF16"] != 1 {
+		t.Fatalf("source dtype counts = %+v", report.SourceDTypes)
+	}
+	if !slices.Contains(report.Loaded, "pooler.dense.weight") || !slices.Contains(report.Loaded, "pooler.dense.bias") {
+		t.Fatalf("expected pooler loaded, got %v", report.Loaded)
+	}
+	if !slices.Contains(report.SkippedExtra, "cls.predictions.decoder.weight") {
+		t.Fatalf("expected classifier skipped, got %v", report.SkippedExtra)
+	}
+	if set.Tensors[0].Name != plan.Tensors[0].Name || set.Tensors[1].Name != plan.Tensors[1].Name {
+		t.Fatalf("decoded order = %s, %s; want %s, %s", set.Tensors[0].Name, set.Tensors[1].Name, plan.Tensors[0].Name, plan.Tensors[1].Name)
+	}
+	if set.Tensors[0].Role != "token_embeddings" || set.Tensors[0].SourceDType != "F32" {
+		t.Fatalf("word embedding decoded tensor = %+v", set.Tensors[0])
+	}
+	assertFloat32Values(t, set.Tensors[0].Values[:3], []float32{-1.25, 3.5, 0.5})
+	if set.Tensors[1].SourceDType != "F16" {
+		t.Fatalf("position source dtype = %q", set.Tensors[1].SourceDType)
+	}
+	assertFloat32Values(t, set.Tensors[1].Values[:2], []float32{-2, 1.5})
+	if set.Tensors[2].SourceDType != "BF16" {
+		t.Fatalf("token type source dtype = %q", set.Tensors[2].SourceDType)
+	}
+	assertFloat32Values(t, set.Tensors[2].Values[:2], []float32{-2.5, 3.25})
+}
+
 func assertBERTTensorPlan(t *testing.T, plan PretrainedBERTImportPlan, name string, shape []int, required bool) {
 	t.Helper()
 	for _, tensor := range plan.Tensors {
@@ -347,6 +419,34 @@ func safeTensorFixtureSpan(tensor map[string]any) int64 {
 		elements *= dim
 	}
 	return elements * dtypeSize
+}
+
+func putF32Payload(t *testing.T, header map[string]any, payload []byte, name string, values []float32) {
+	t.Helper()
+	tensor := header[name].(map[string]any)
+	offsets := tensor["data_offsets"].([]int64)
+	span := int(offsets[1] - offsets[0])
+	if len(values)*4 > span {
+		t.Fatalf("%s values need %d bytes, span is %d", name, len(values)*4, span)
+	}
+	start := int(offsets[0])
+	for i, value := range values {
+		binary.LittleEndian.PutUint32(payload[start+i*4:], math.Float32bits(value))
+	}
+}
+
+func putU16Payload(t *testing.T, header map[string]any, payload []byte, name string, values []uint16) {
+	t.Helper()
+	tensor := header[name].(map[string]any)
+	offsets := tensor["data_offsets"].([]int64)
+	span := int(offsets[1] - offsets[0])
+	if len(values)*2 > span {
+		t.Fatalf("%s values need %d bytes, span is %d", name, len(values)*2, span)
+	}
+	start := int(offsets[0])
+	for i, value := range values {
+		binary.LittleEndian.PutUint16(payload[start+i*2:], value)
+	}
 }
 
 func assertBERTShapeMismatch(t *testing.T, report PretrainedBERTWeightVerification, name string, expected []int, actual []int64) {

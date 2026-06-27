@@ -142,6 +142,7 @@ func TestRunImportPretrainedBERTLoadWeightsSmoke(t *testing.T) {
 		"--plan-json", planPath,
 		"--verify-weights",
 		"--load-weights-smoke",
+		"--decode-weights-smoke",
 	}); err != nil {
 		t.Fatalf("run import-pretrained-bert: %v", err)
 	}
@@ -161,6 +162,18 @@ func TestRunImportPretrainedBERTLoadWeightsSmoke(t *testing.T) {
 	}
 	if !slices.Contains(loaded.WeightLoadSmoke.SkippedExtra, "cls.predictions.decoder.weight") {
 		t.Fatalf("expected classifier skipped, got %+v", loaded.WeightLoadSmoke.SkippedExtra)
+	}
+	if loaded.WeightDecodeSmoke == nil {
+		t.Fatal("expected decode smoke report")
+	}
+	if loaded.WeightDecodeSmoke.Status != "ok" || loaded.WeightDecodeSmoke.TotalElements == 0 {
+		t.Fatalf("decode smoke = %+v", loaded.WeightDecodeSmoke)
+	}
+	if loaded.WeightDecodeSmoke.SourceDTypes["F32"] == 0 {
+		t.Fatalf("expected F32 source dtype count, got %+v", loaded.WeightDecodeSmoke.SourceDTypes)
+	}
+	if !slices.Contains(loaded.WeightDecodeSmoke.SkippedExtra, "cls.predictions.decoder.weight") {
+		t.Fatalf("expected classifier skipped by decode, got %+v", loaded.WeightDecodeSmoke.SkippedExtra)
 	}
 }
 
