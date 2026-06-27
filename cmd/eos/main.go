@@ -111,6 +111,8 @@ func run(args []string) error {
 		return runDefaultEmbedder(args[1:])
 	case "export-retrieval-vectors":
 		return runExportRetrievalVectors(args[1:])
+	case "export-pretrained-bert-retrieval-vectors":
+		return runExportPretrainedBERTRetrievalVectors(args[1:])
 	case "export-sparse-token-pool-vectors":
 		return runExportSparseTokenPoolVectors(args[1:])
 	case "export-sparse-encoder-vectors":
@@ -8113,6 +8115,7 @@ func printUsage() {
 	fmt.Println("  eos gate-train-metrics [flags] <metrics.json>")
 	fmt.Println("  eos gate-retrieval-metrics [flags] <retrieval.metrics.json>")
 	fmt.Println("  eos gate-scoreboard [flags] --datasets dataset[,dataset...] <current.scoreboard.json> <anchor.scoreboard.json>")
+	fmt.Println("  eos export-pretrained-bert-retrieval-vectors [flags] <beir-dataset-dir> <output-dir>")
 	fmt.Println("  eos run <artifact.mll> [entry]")
 	fmt.Println("  eos demo [module-name]")
 	fmt.Println()
@@ -8125,6 +8128,7 @@ func printUsage() {
 	fmt.Println("import-pretrained-bert writes a BERT-family HF config/tensor plan and optional WordPiece tokenizer smoke check; --verify-weights validates safetensors headers, --weights-out writes role-named decoded weights, and --module-out writes the host-reference executable BERT embedder module artifact.")
 	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
 	fmt.Println("export-retrieval-vectors writes BEIR document/query vector caches from a packaged or sealed Eos embedding .mll, optionally as parent-child document chunks.")
+	fmt.Println("export-pretrained-bert-retrieval-vectors writes BEIR document/query vector caches from an imported BERT embedder module, role-named weights, and a Hugging Face WordPiece tokenizer snapshot; quality_claim=false.")
 	fmt.Println("export-sparse-token-pool-vectors writes experimental_sparse_token_pool BEIR vector caches from tokenizer ids, token_embedding rows, and host-reference attention (--attention-mode turboquant_sparse|dense); --token-span-tokens emits child vectors from one encoded document pass; quality_claim=false; --min-observed-doc-tokens can fail runs that never consume the requested document token length.")
 	fmt.Println("export-sparse-encoder-vectors writes parent doc/query vector caches as experimental_sparse_encoder_host_reference; it requires full manifest encoder weights, records retrieval_cache_host_reference_sparse_encoder evidence, and keeps quality_claim=false.")
 	fmt.Println("export-sparse-lexical-labels writes deterministic BM25 sparse lexical document/query labels plus an oracle manifest; it is non-training and does not modify embedding assets.")
