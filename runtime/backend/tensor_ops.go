@@ -45,6 +45,33 @@ func executeStep(ctx context.Context, mod *eosartifact.Module, entry eosartifact
 			return nil, "", err
 		}
 		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", nil)}, "", nil
+	case eosartifact.StepBERTEmbeddings:
+		if len(step.Inputs) != 8 || len(step.Outputs) != 1 {
+			return nil, "", fmt.Errorf("bert_embeddings step %q expects 8 inputs and 1 output", step.Name)
+		}
+		inputs := make([]*Tensor, 0, len(step.Inputs))
+		for _, name := range step.Inputs {
+			t, err := requireTensor(env[name], name)
+			if err != nil {
+				return nil, "", err
+			}
+			inputs = append(inputs, t)
+		}
+		outputType := resolveStepOutputType(mod, entry, step, 0, env)
+		if dispatchStep != nil {
+			result, handled, err := dispatchStep(ctx, step, outputType, inputs)
+			if err != nil {
+				return nil, "", err
+			}
+			if handled {
+				return tensorValuesFromDispatch(mod, entry, step, result, bindings, kind), result.VariantEntry, nil
+			}
+		}
+		out, err := bertEmbeddingsTensor(inputs, outputType, step.Attributes)
+		if err != nil {
+			return nil, "", err
+		}
+		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", hostReferenceMetadata("bert_embeddings"))}, "", nil
 	case eosartifact.StepTranspose:
 		if len(step.Inputs) != 1 || len(step.Outputs) != 1 {
 			return nil, "", fmt.Errorf("transpose step %q expects 1 input and 1 output", step.Name)
@@ -1311,6 +1338,187 @@ func layerNormRows(in *Tensor) *Tensor {
 		}
 	}
 	return out
+}
+
+func bertEmbeddingsTensor(inputs []*Tensor, outputType eosartifact.ValueType, attrs map[string]string) (*Tensor, error) {
+	if len(inputs) != 8 {
+		return nil, fmt.Errorf("bert_embeddings expects 8 tensors")
+	}
+	epsilon, err := bertEmbeddingEpsilon(attrs)
+	if err != nil {
+		return nil, err
+	}
+	return BERTEmbeddingsReference(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5], inputs[6], inputs[7], epsilon, outputType)
+}
+
+func bertEmbeddingEpsilon(attrs map[string]string) (float64, error) {
+	const fallback = 1e-12
+	if attrs == nil || attrs["epsilon"] == "" {
+		return fallback, nil
+	}
+	epsilon, err := strconv.ParseFloat(attrs["epsilon"], 64)
+	if err != nil {
+		return 0, fmt.Errorf("bert_embeddings epsilon %q is invalid: %w", attrs["epsilon"], err)
+	}
+	if epsilon < 0 {
+		return 0, fmt.Errorf("bert_embeddings epsilon must be non-negative, got %g", epsilon)
+	}
+	return epsilon, nil
+}
+
+// BERTEmbeddingsReference computes word + position + token-type embeddings
+// followed by affine LayerNorm over the hidden dimension.
+func BERTEmbeddingsReference(tokenEmbeddings, positionEmbeddings, tokenTypeEmbeddings, gamma, beta, inputIDs, positionIDs, tokenTypeIDs *Tensor, epsilon float64, outTypes ...eosartifact.ValueType) (*Tensor, error) {
+	if tokenEmbeddings == nil || positionEmbeddings == nil || tokenTypeEmbeddings == nil || gamma == nil || beta == nil || inputIDs == nil || positionIDs == nil || tokenTypeIDs == nil {
+		return nil, fmt.Errorf("bert_embeddings expects non-nil tensors")
+	}
+	dim, err := validateBERTEmbeddingTables(tokenEmbeddings, positionEmbeddings, tokenTypeEmbeddings)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateBERTLayerNormParam("embedding_layernorm_weight", gamma, dim); err != nil {
+		return nil, err
+	}
+	if err := validateBERTLayerNormParam("embedding_layernorm_bias", beta, dim); err != nil {
+		return nil, err
+	}
+	if err := validateBERTEmbeddingIDs(inputIDs, positionIDs, tokenTypeIDs); err != nil {
+		return nil, err
+	}
+	outShape := append([]int(nil), inputIDs.Shape...)
+	outShape = append(outShape, dim)
+	if err := validateBERTEmbeddingsOutputType(outShape, outTypes...); err != nil {
+		return nil, err
+	}
+	rows := inputIDs.Elements()
+	out := NewTensorF32(outShape, make([]float32, rows*dim))
+	for row := 0; row < rows; row++ {
+		tokenID := int(inputIDs.I32[row])
+		positionID := int(positionIDs.I32[row])
+		tokenTypeID := int(tokenTypeIDs.I32[row])
+		if tokenID < 0 || tokenID >= tokenEmbeddings.Shape[0] {
+			return nil, fmt.Errorf("bert_embeddings input_ids value %d out of range [0,%d)", tokenID, tokenEmbeddings.Shape[0])
+		}
+		if positionID < 0 || positionID >= positionEmbeddings.Shape[0] {
+			return nil, fmt.Errorf("bert_embeddings position_ids value %d out of range [0,%d)", positionID, positionEmbeddings.Shape[0])
+		}
+		if tokenTypeID < 0 || tokenTypeID >= tokenTypeEmbeddings.Shape[0] {
+			return nil, fmt.Errorf("bert_embeddings token_type_ids value %d out of range [0,%d)", tokenTypeID, tokenTypeEmbeddings.Shape[0])
+		}
+		base := row * dim
+		tokenBase := tokenID * dim
+		positionBase := positionID * dim
+		tokenTypeBase := tokenTypeID * dim
+		mean := float64(0)
+		for d := 0; d < dim; d++ {
+			sum := tokenEmbeddings.F32[tokenBase+d] + positionEmbeddings.F32[positionBase+d] + tokenTypeEmbeddings.F32[tokenTypeBase+d]
+			out.F32[base+d] = sum
+			mean += float64(sum)
+		}
+		mean /= float64(dim)
+		variance := float64(0)
+		for d := 0; d < dim; d++ {
+			centered := float64(out.F32[base+d]) - mean
+			variance += centered * centered
+		}
+		variance /= float64(dim)
+		invStd := 1 / math.Sqrt(variance+epsilon)
+		for d := 0; d < dim; d++ {
+			normalized := (float64(out.F32[base+d]) - mean) * invStd
+			out.F32[base+d] = float32(normalized*float64(gamma.F32[d]) + float64(beta.F32[d]))
+		}
+	}
+	return out, nil
+}
+
+func validateBERTEmbeddingTables(tokenEmbeddings, positionEmbeddings, tokenTypeEmbeddings *Tensor) (int, error) {
+	tables := []struct {
+		name  string
+		table *Tensor
+	}{
+		{"token_embeddings", tokenEmbeddings},
+		{"position_embeddings", positionEmbeddings},
+		{"token_type_embeddings", tokenTypeEmbeddings},
+	}
+	dim := 0
+	for _, item := range tables {
+		if item.table.DType != "f32" && item.table.DType != "f16" {
+			return 0, fmt.Errorf("bert_embeddings %s dtype %q is not f32-compatible", item.name, item.table.DType)
+		}
+		if len(item.table.Shape) != 2 {
+			return 0, fmt.Errorf("bert_embeddings %s must be rank-2, got shape %v", item.name, item.table.Shape)
+		}
+		if item.table.Shape[0] <= 0 || item.table.Shape[1] <= 0 {
+			return 0, fmt.Errorf("bert_embeddings %s shape must be positive, got %v", item.name, item.table.Shape)
+		}
+		if item.table.Elements() != len(item.table.F32) {
+			return 0, fmt.Errorf("bert_embeddings %s element count %d does not match backing data", item.name, item.table.Elements())
+		}
+		if dim == 0 {
+			dim = item.table.Shape[1]
+			continue
+		}
+		if item.table.Shape[1] != dim {
+			return 0, fmt.Errorf("bert_embeddings %s hidden size %d does not match token_embeddings hidden size %d", item.name, item.table.Shape[1], dim)
+		}
+	}
+	return dim, nil
+}
+
+func validateBERTLayerNormParam(name string, tensor *Tensor, dim int) error {
+	if tensor.DType != "f32" && tensor.DType != "f16" {
+		return fmt.Errorf("bert_embeddings %s dtype %q is not f32-compatible", name, tensor.DType)
+	}
+	if len(tensor.Shape) != 1 || tensor.Shape[0] != dim {
+		return fmt.Errorf("bert_embeddings %s shape %v does not match hidden size [%d]", name, tensor.Shape, dim)
+	}
+	if tensor.Elements() != len(tensor.F32) {
+		return fmt.Errorf("bert_embeddings %s element count %d does not match backing data", name, tensor.Elements())
+	}
+	return nil
+}
+
+func validateBERTEmbeddingIDs(inputIDs, positionIDs, tokenTypeIDs *Tensor) error {
+	ids := []struct {
+		name string
+		t    *Tensor
+	}{
+		{"input_ids", inputIDs},
+		{"position_ids", positionIDs},
+		{"token_type_ids", tokenTypeIDs},
+	}
+	for _, item := range ids {
+		if item.t.DType != "i32" {
+			return fmt.Errorf("bert_embeddings %s dtype %q is not i32", item.name, item.t.DType)
+		}
+		if len(item.t.Shape) != 1 && len(item.t.Shape) != 2 {
+			return fmt.Errorf("bert_embeddings %s rank must be 1 or 2, got shape %v", item.name, item.t.Shape)
+		}
+		if item.t.Elements() != len(item.t.I32) {
+			return fmt.Errorf("bert_embeddings %s element count %d does not match backing data", item.name, item.t.Elements())
+		}
+	}
+	if !inputIDs.EqualShape(positionIDs) {
+		return fmt.Errorf("bert_embeddings position_ids shape %v does not match input_ids shape %v", positionIDs.Shape, inputIDs.Shape)
+	}
+	if !inputIDs.EqualShape(tokenTypeIDs) {
+		return fmt.Errorf("bert_embeddings token_type_ids shape %v does not match input_ids shape %v", tokenTypeIDs.Shape, inputIDs.Shape)
+	}
+	return nil
+}
+
+func validateBERTEmbeddingsOutputType(shape []int, outTypes ...eosartifact.ValueType) error {
+	if len(outTypes) == 0 || outTypes[0].Tensor == nil {
+		return nil
+	}
+	tensorType := outTypes[0].Tensor
+	if tensorType.DType != "" && tensorType.DType != "f32" && tensorType.DType != "f16" {
+		return fmt.Errorf("bert_embeddings output dtype %q is not f32-compatible", tensorType.DType)
+	}
+	if len(tensorType.Shape) > 0 && len(tensorType.Shape) != len(shape) {
+		return fmt.Errorf("bert_embeddings output rank %d does not match computed rank %d", len(tensorType.Shape), len(shape))
+	}
+	return nil
 }
 
 func meanPoolTensor(in *Tensor) (*Tensor, error) {

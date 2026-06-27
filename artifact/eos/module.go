@@ -71,6 +71,7 @@ const (
 	StepMSSSIMLoss           StepKind = "ms_ssim_loss"
 	StepScalarAdd            StepKind = "scalar_add"
 	StepRDLoss               StepKind = "rate_distortion_loss"
+	StepBERTEmbeddings       StepKind = "bert_embeddings"
 )
 
 // ValueKind classifies the values used by params and entrypoints.

@@ -2,6 +2,7 @@ package eosruntime
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"math"
 	"os"
@@ -9,6 +10,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 )
 
 func TestPlanPretrainedBERTImportFromConfig(t *testing.T) {
@@ -71,6 +75,92 @@ func TestPlanPretrainedBERTImportFromDir(t *testing.T) {
 		t.Fatalf("tensor count = %d, want 23", len(plan.Tensors))
 	}
 	assertBERTTensorPlan(t, plan, "encoder.layer.0.attention.self.value.bias", []int{32}, true)
+}
+
+func TestBuildPretrainedBERTEmbeddingStageModuleExecutesWeightFile(t *testing.T) {
+	cfg := PretrainedBERTConfig{
+		ModelType:             "bert",
+		VocabSize:             2,
+		HiddenSize:            2,
+		NumHiddenLayers:       1,
+		NumAttentionHeads:     1,
+		IntermediateSize:      4,
+		MaxPositionEmbeddings: 2,
+		TypeVocabSize:         2,
+		LayerNormEps:          3,
+	}
+	plan, err := PlanPretrainedBERTImport(cfg, "fixture")
+	if err != nil {
+		t.Fatalf("plan import: %v", err)
+	}
+	mod, err := BuildPretrainedBERTEmbeddingStageModule(plan)
+	if err != nil {
+		t.Fatalf("build embedding stage module: %v", err)
+	}
+	wantParamNames := []string{
+		"token_embeddings",
+		"position_embeddings",
+		"token_type_embeddings",
+		"embedding_layernorm_weight",
+		"embedding_layernorm_bias",
+	}
+	if got := paramNames(mod.Params); !slices.Equal(got, wantParamNames) {
+		t.Fatalf("params = %v, want %v", got, wantParamNames)
+	}
+	if len(mod.Steps) == 0 || mod.Steps[0].Kind != eosartifact.StepBERTEmbeddings {
+		t.Fatalf("first step = %+v, want bert_embeddings", mod.Steps)
+	}
+	if mod.Steps[0].Attributes["epsilon"] != "3" {
+		t.Fatalf("epsilon attr = %q, want 3", mod.Steps[0].Attributes["epsilon"])
+	}
+
+	weights, _, err := BuildPretrainedBERTWeightFileFromDecoded(PretrainedBERTDecodedWeightSet{Tensors: []PretrainedBERTDecodedWeightTensor{
+		{Name: "embeddings.word_embeddings.weight", Role: "token_embeddings", SourceDType: "F32", Shape: []int64{2, 2}, Values: []float32{1, 2, 10, 20}},
+		{Name: "embeddings.position_embeddings.weight", Role: "position_embeddings", SourceDType: "F32", Shape: []int64{2, 2}, Values: []float32{0, 1, 1, 0}},
+		{Name: "embeddings.token_type_embeddings.weight", Role: "token_type_embeddings", SourceDType: "F32", Shape: []int64{2, 2}, Values: []float32{0, 0, 2, -2}},
+		{Name: "embeddings.LayerNorm.weight", Role: "embedding_layernorm_weight", SourceDType: "F32", Shape: []int64{2}, Values: []float32{2, 3}},
+		{Name: "embeddings.LayerNorm.bias", Role: "embedding_layernorm_bias", SourceDType: "F32", Shape: []int64{2}, Values: []float32{0.5, -0.5}},
+	}})
+	if err != nil {
+		t.Fatalf("build weight file: %v", err)
+	}
+
+	rt := New(bertEmbeddingHostBackend{})
+	prog, err := rt.Load(context.Background(), mod, weights.LoadOptions()...)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	result, err := prog.Run(context.Background(), backend.Request{
+		Entry: "bert_embeddings",
+		Inputs: map[string]any{
+			"input_ids":      backend.NewTensorI32([]int{2, 2}, []int32{0, 1, 0, 1}),
+			"position_ids":   backend.NewTensorI32([]int{2, 2}, []int32{0, 1, 1, 0}),
+			"token_type_ids": backend.NewTensorI32([]int{2, 2}, []int32{1, 0, 0, 1}),
+		},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	value, ok := result.Outputs["embeddings"]
+	if !ok {
+		t.Fatalf("missing embeddings output: %+v", result.Outputs)
+	}
+	tensor, ok := value.Data.(*backend.Tensor)
+	if !ok {
+		t.Fatalf("output data type = %T, want *backend.Tensor", value.Data)
+	}
+	want := []float32{
+		1.5, -2,
+		float32(-9.0/math.Sqrt(23.25) + 0.5),
+		float32(13.5/math.Sqrt(23.25) - 0.5),
+		0.5, -0.5,
+		float32(-7.0/math.Sqrt(15.25) + 0.5),
+		float32(10.5/math.Sqrt(15.25) - 0.5),
+	}
+	assertTensorClose(t, tensor, []int{2, 2, 2}, want)
+	if value.Metadata["dispatch_mode"] != "host_reference" {
+		t.Fatalf("dispatch_mode = %v, want host_reference", value.Metadata["dispatch_mode"])
+	}
 }
 
 func TestPlanPretrainedBERTImportRejectsUnsupportedArchitecture(t *testing.T) {
@@ -447,6 +537,45 @@ func assertBERTTensorPlan(t *testing.T, plan PretrainedBERTImportPlan, name stri
 		return
 	}
 	t.Fatalf("tensor %q not found in plan", name)
+}
+
+func paramNames(params []eosartifact.Param) []string {
+	names := make([]string, 0, len(params))
+	for _, param := range params {
+		names = append(names, param.Name)
+	}
+	return names
+}
+
+type bertEmbeddingHostBackend struct{}
+
+func (bertEmbeddingHostBackend) Kind() eosartifact.BackendKind {
+	return eosartifact.BackendCUDA
+}
+
+func (bertEmbeddingHostBackend) Capabilities() []string {
+	return []string{eosartifact.CapabilityHostFallback}
+}
+
+func (bertEmbeddingHostBackend) CanLoad(mod *eosartifact.Module) bool {
+	return mod != nil && mod.SupportsBackend(eosartifact.BackendCUDA)
+}
+
+func (bertEmbeddingHostBackend) Load(_ context.Context, mod *eosartifact.Module, weights map[string]backend.WeightBinding) (backend.Executor, error) {
+	return bertEmbeddingHostExecutor{mod: mod, weights: weights}, nil
+}
+
+type bertEmbeddingHostExecutor struct {
+	mod     *eosartifact.Module
+	weights map[string]backend.WeightBinding
+}
+
+func (e bertEmbeddingHostExecutor) Backend() eosartifact.BackendKind {
+	return eosartifact.BackendCUDA
+}
+
+func (e bertEmbeddingHostExecutor) Run(ctx context.Context, req backend.Request) (backend.Result, error) {
+	return backend.ExecuteSymbolic(ctx, e.mod, e.weights, nil, nil, nil, eosartifact.BackendCUDA, req)
 }
 
 func safeTensorsHeaderForBERTPlan(plan PretrainedBERTImportPlan) map[string]any {

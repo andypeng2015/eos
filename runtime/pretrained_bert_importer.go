@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
+	eosartifact "m31labs.dev/eos/artifact/eos"
 	"m31labs.dev/eos/runtime/backend"
 )
 
@@ -448,6 +450,121 @@ func ExportPretrainedBERTWeightFileFromDir(dir string, plan PretrainedBERTImport
 		return PretrainedBERTWeightFileReport{}, err
 	}
 	return report, nil
+}
+
+// BuildPretrainedBERTEmbeddingStageModule builds the first executable BERT
+// parity slice: embedding-table lookup, embedding sum, and affine LayerNorm.
+func BuildPretrainedBERTEmbeddingStageModule(plan PretrainedBERTImportPlan) (*eosartifact.Module, error) {
+	if err := plan.Config.Validate(); err != nil {
+		return nil, err
+	}
+	requiredRoles := map[string][]int{
+		"token_embeddings":           {plan.Config.VocabSize, plan.Config.HiddenSize},
+		"position_embeddings":        {plan.Config.MaxPositionEmbeddings, plan.Config.HiddenSize},
+		"token_type_embeddings":      {plan.Config.TypeVocabSize, plan.Config.HiddenSize},
+		"embedding_layernorm_weight": {plan.Config.HiddenSize},
+		"embedding_layernorm_bias":   {plan.Config.HiddenSize},
+	}
+	plannedRoles := map[string]PretrainedBERTTensorPlan{}
+	for _, tensor := range plan.Tensors {
+		plannedRoles[tensor.Role] = tensor
+	}
+	for role, shape := range requiredRoles {
+		tensor, ok := plannedRoles[role]
+		if !ok {
+			return nil, fmt.Errorf("pretrained BERT embedding module missing planned role %q", role)
+		}
+		if !slices.Equal(tensor.Shape, shape) {
+			return nil, fmt.Errorf("pretrained BERT embedding module role %q shape %v does not match config shape %v", role, tensor.Shape, shape)
+		}
+	}
+
+	mod := eosartifact.NewModule("pretrained_bert_embedding_stage")
+	mod.Requirements.Capabilities = []string{eosartifact.CapabilityHostFallback}
+	mod.Metadata = map[string]any{
+		"source":           "pretrained_bert_import_plan",
+		"model_name":       plan.ModelName,
+		"architecture":     plan.Architecture,
+		"execution_status": "embedding_stage_only: host reference; no encoder attention, pooling, tokenizer parity, or device execution claim",
+	}
+	hidden := strconv.Itoa(plan.Config.HiddenSize)
+	mod.Params = []eosartifact.Param{
+		bertEmbeddingParam("token_embeddings", "V", hidden),
+		bertEmbeddingParam("position_embeddings", "P", hidden),
+		bertEmbeddingParam("token_type_embeddings", "TT", hidden),
+		bertEmbeddingParam("embedding_layernorm_weight", hidden),
+		bertEmbeddingParam("embedding_layernorm_bias", hidden),
+	}
+	idType := bertTensorType("i32", "B", "T")
+	embeddingType := bertTensorType("f32", "B", "T", hidden)
+	mod.EntryPoints = []eosartifact.EntryPoint{{
+		Name: "bert_embeddings",
+		Kind: eosartifact.EntryPointPipeline,
+		Inputs: []eosartifact.ValueBinding{
+			{Name: "input_ids", Type: idType},
+			{Name: "position_ids", Type: idType},
+			{Name: "token_type_ids", Type: idType},
+		},
+		Outputs: []eosartifact.ValueBinding{
+			{Name: "embeddings", Type: embeddingType},
+		},
+	}}
+	mod.Buffers = []eosartifact.Buffer{{
+		Name:  "embeddings",
+		DType: "f32",
+		Shape: []string{"B", "T", hidden},
+	}}
+	epsilon := plan.Config.LayerNormEps
+	if epsilon == 0 {
+		epsilon = 1e-12
+	}
+	mod.Steps = []eosartifact.Step{
+		{
+			Entry: "bert_embeddings",
+			Kind:  eosartifact.StepBERTEmbeddings,
+			Name:  "embedding_lookup_sum_layernorm",
+			Inputs: []string{
+				"token_embeddings",
+				"position_embeddings",
+				"token_type_embeddings",
+				"embedding_layernorm_weight",
+				"embedding_layernorm_bias",
+				"input_ids",
+				"position_ids",
+				"token_type_ids",
+			},
+			Outputs:    []string{"embeddings"},
+			Attributes: map[string]string{"epsilon": strconv.FormatFloat(epsilon, 'g', -1, 64)},
+		},
+		{
+			Entry:   "bert_embeddings",
+			Kind:    eosartifact.StepReturn,
+			Name:    "return_embeddings",
+			Outputs: []string{"embeddings"},
+		},
+	}
+	if err := mod.Validate(); err != nil {
+		return nil, err
+	}
+	return mod, nil
+}
+
+func bertEmbeddingParam(name string, shape ...string) eosartifact.Param {
+	return eosartifact.Param{
+		Name:    name,
+		Type:    bertTensorType("f32", shape...),
+		Binding: name,
+	}
+}
+
+func bertTensorType(dtype string, shape ...string) eosartifact.ValueType {
+	return eosartifact.ValueType{
+		Kind: eosartifact.ValueTensor,
+		Tensor: &eosartifact.TensorType{
+			DType: dtype,
+			Shape: append([]string(nil), shape...),
+		},
+	}
 }
 
 func backendShapeFromBERTDecodedTensor(tensor PretrainedBERTDecodedWeightTensor) ([]int, int64, error) {
