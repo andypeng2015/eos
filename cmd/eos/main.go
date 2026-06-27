@@ -113,6 +113,8 @@ func run(args []string) error {
 		return runExportRetrievalVectors(args[1:])
 	case "export-pretrained-bert-retrieval-vectors":
 		return runExportPretrainedBERTRetrievalVectors(args[1:])
+	case "fit-pretrained-bert-projection-head":
+		return runFitPretrainedBERTProjectionHead(args[1:])
 	case "export-sparse-token-pool-vectors":
 		return runExportSparseTokenPoolVectors(args[1:])
 	case "export-sparse-encoder-vectors":
@@ -8144,6 +8146,7 @@ func printUsage() {
 	fmt.Println("  eos inspect <artifact.mll>")
 	fmt.Println("  eos export-mll <artifact.mll> [output.mll]")
 	fmt.Println("  eos import-pretrained-bert --source <hf-snapshot-dir> [--model-name name] [--plan-json plan.json] [--verify-weights] [--weights-out weights.mll] [--module-out artifact.mll]")
+	fmt.Println("  eos fit-pretrained-bert-projection-head --weights-json weights.json --out head.mll [metadata flags]")
 	fmt.Println("  eos embed-text <artifact.mll> <text...>")
 	fmt.Println("  eos default-embedder [--root dir] [--path-only] [--verify] [--json]")
 	fmt.Println("  eos export-retrieval-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
@@ -8207,9 +8210,10 @@ func printUsage() {
 	fmt.Println("inspect summarizes an artifact and verifies its sibling package manifest when present.")
 	fmt.Println("export-mll seals an artifact package into a weight-carrying .mll container while preserving Eos metadata in XMTA.")
 	fmt.Println("import-pretrained-bert writes a BERT-family HF config/tensor plan and optional WordPiece tokenizer smoke check; --verify-weights validates safetensors headers, --weights-out writes role-named decoded weights, and --module-out writes the host-reference executable BERT embedder module artifact.")
+	fmt.Println("fit-pretrained-bert-projection-head packages a learned imported-BERT compact projection matrix as a validated MLL sidecar.")
 	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
 	fmt.Println("export-retrieval-vectors writes BEIR document/query vector caches from a packaged or sealed Eos embedding .mll, optionally as parent-child document chunks.")
-	fmt.Println("export-pretrained-bert-retrieval-vectors writes BEIR document/query vector caches from an imported BERT embedder module, role-named weights, and a Hugging Face WordPiece tokenizer snapshot; quality_claim=false.")
+	fmt.Println("export-pretrained-bert-retrieval-vectors writes BEIR document/query vector caches from an imported BERT embedder module, role-named weights, and a Hugging Face WordPiece tokenizer snapshot; --projection-head applies a learned compact sidecar; quality_claim=false.")
 	fmt.Println("export-sparse-token-pool-vectors writes experimental_sparse_token_pool BEIR vector caches from tokenizer ids, token_embedding rows, and host-reference attention (--attention-mode turboquant_sparse|dense); --token-span-tokens emits child vectors from one encoded document pass; quality_claim=false; --min-observed-doc-tokens can fail runs that never consume the requested document token length.")
 	fmt.Println("export-sparse-encoder-vectors writes parent doc/query vector caches as experimental_sparse_encoder_host_reference; it requires full manifest encoder weights, records retrieval_cache_host_reference_sparse_encoder evidence, and keeps quality_claim=false.")
 	fmt.Println("export-sparse-lexical-labels writes deterministic BM25 sparse lexical document/query labels plus an oracle manifest; it is non-training and does not modify embedding assets.")

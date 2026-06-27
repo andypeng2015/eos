@@ -2,8 +2,12 @@ package main
 
 import (
 	"flag"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	eosruntime "m31labs.dev/eos/runtime"
 )
 
 func TestRunExportPretrainedBERTRetrievalVectorsRequiresArtifacts(t *testing.T) {
@@ -14,7 +18,7 @@ func TestRunExportPretrainedBERTRetrievalVectorsRequiresArtifacts(t *testing.T) 
 }
 
 func TestRunExportPretrainedBERTRetrievalVectorsAcceptsResumeProgressFlags(t *testing.T) {
-	err := runExportPretrainedBERTRetrievalVectors([]string{"--resume", "--progress-every", "7"})
+	err := runExportPretrainedBERTRetrievalVectors([]string{"--resume", "--progress-every", "7", "--projection-head", "head.mll"})
 	if err == nil {
 		t.Fatal("runExportPretrainedBERTRetrievalVectors succeeded without positional args, want usage error")
 	}
@@ -23,6 +27,59 @@ func TestRunExportPretrainedBERTRetrievalVectorsAcceptsResumeProgressFlags(t *te
 	}
 	if !strings.Contains(err.Error(), "usage: eos export-pretrained-bert-retrieval-vectors") {
 		t.Fatalf("err = %v, want usage error after parsing flags", err)
+	}
+}
+
+func TestRunFitPretrainedBERTProjectionHeadWritesMLLSidecar(t *testing.T) {
+	dir := t.TempDir()
+	weightsJSON := filepath.Join(dir, "weights.json")
+	outPath := filepath.Join(dir, "head.mll")
+	data := []byte(`{"input_dim":2,"output_dim":1,"weights":[1,0],"source_model":"fixture","loss":"json_loss","provenance":{"train_qrels":"train.tsv"}}` + "\n")
+	if err := os.WriteFile(weightsJSON, data, 0o644); err != nil {
+		t.Fatalf("write weights json: %v", err)
+	}
+	if err := runFitPretrainedBERTProjectionHead([]string{
+		"--weights-json", weightsJSON,
+		"--out", outPath,
+		"--seed", "17",
+		"--data-provenance", "unit train split",
+		"--initialization", "svd",
+	}); err != nil {
+		t.Fatalf("fit projection head: %v", err)
+	}
+	head, err := eosruntime.ReadPretrainedBERTProjectionHeadFile(outPath)
+	if err != nil {
+		t.Fatalf("read projection head: %v", err)
+	}
+	if head.InputDim != 2 || head.OutputDim != 1 || head.SourceModel != "fixture" || head.Seed != 17 || head.Initialization != "svd" {
+		t.Fatalf("head = %+v", head)
+	}
+	if head.Loss != "json_loss" {
+		t.Fatalf("loss = %q, want JSON provenance loss", head.Loss)
+	}
+}
+
+func TestRunFitPretrainedBERTProjectionHeadLossFlagOverridesJSON(t *testing.T) {
+	dir := t.TempDir()
+	weightsJSON := filepath.Join(dir, "weights.json")
+	outPath := filepath.Join(dir, "head.mll")
+	data := []byte(`{"input_dim":2,"output_dim":1,"weights":[1,0],"loss":"json_loss"}` + "\n")
+	if err := os.WriteFile(weightsJSON, data, 0o644); err != nil {
+		t.Fatalf("write weights json: %v", err)
+	}
+	if err := runFitPretrainedBERTProjectionHead([]string{
+		"--weights-json", weightsJSON,
+		"--out", outPath,
+		"--loss", "flag_loss",
+	}); err != nil {
+		t.Fatalf("fit projection head: %v", err)
+	}
+	head, err := eosruntime.ReadPretrainedBERTProjectionHeadFile(outPath)
+	if err != nil {
+		t.Fatalf("read projection head: %v", err)
+	}
+	if head.Loss != "flag_loss" {
+		t.Fatalf("loss = %q, want flag override", head.Loss)
 	}
 }
 

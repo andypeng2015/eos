@@ -29,6 +29,7 @@ func runExportPretrainedBERTRetrievalVectors(args []string) error {
 	docPrefix := fs.String("doc-prefix", "", "compatibility alias for --document-prefix")
 	batchSize := fs.Int("batch-size", 64, "embedding batch size")
 	outputDim := fs.Int("output-dim", 0, "when positive, prefix-truncate embeddings to this dimension and L2-renormalize before writing")
+	projectionHeadPath := fs.String("projection-head", "", "MLL projection head sidecar to apply to native embeddings before writing")
 	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke exports")
 	maxQueries := fs.Int("max-queries", 0, "limit queries for smoke exports")
 	maxLength := fs.Int("max-length", 0, "WordPiece max sequence length; default uses config max_position_embeddings")
@@ -59,31 +60,35 @@ func runExportPretrainedBERTRetrievalVectors(args []string) error {
 	}
 	rt := eosruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
 	summary, err := eosruntime.ExportPretrainedBERTRetrievalVectors(context.Background(), eosruntime.PretrainedBERTRetrievalVectorExportConfig{
-		DatasetName:      *datasetName,
-		DatasetDir:       datasetDir,
-		QrelsPath:        *qrelsPath,
-		OutputDir:        outputDir,
-		SourceDir:        *sourceDir,
-		ModulePath:       *modulePath,
-		WeightsPath:      *weightsPath,
-		QueryPrefix:      *queryPrefix,
-		DocumentPrefix:   resolvedDocumentPrefix,
-		BatchSize:        *batchSize,
-		OutputDim:        *outputDim,
-		MaxDocs:          *maxDocs,
-		MaxQueries:       *maxQueries,
-		MaxLength:        *maxLength,
-		Split:            *split,
-		Runtime:          rt,
-		ManifestJSONPath: *manifestPath,
-		Resume:           *resume,
-		ProgressEvery:    *progressEvery,
-		Progress:         printPretrainedBERTVectorExportProgress,
+		DatasetName:        *datasetName,
+		DatasetDir:         datasetDir,
+		QrelsPath:          *qrelsPath,
+		OutputDir:          outputDir,
+		SourceDir:          *sourceDir,
+		ModulePath:         *modulePath,
+		WeightsPath:        *weightsPath,
+		QueryPrefix:        *queryPrefix,
+		DocumentPrefix:     resolvedDocumentPrefix,
+		BatchSize:          *batchSize,
+		OutputDim:          *outputDim,
+		ProjectionHeadPath: *projectionHeadPath,
+		MaxDocs:            *maxDocs,
+		MaxQueries:         *maxQueries,
+		MaxLength:          *maxLength,
+		Split:              *split,
+		Runtime:            rt,
+		ManifestJSONPath:   *manifestPath,
+		Resume:             *resume,
+		ProgressEvery:      *progressEvery,
+		Progress:           printPretrainedBERTVectorExportProgress,
 	})
 	if err != nil {
 		return err
 	}
 	fmt.Printf("exported pretrained BERT retrieval vectors: dataset=%s mode=%s docs=%d queries=%d dim=%d\n", summary.Dataset, summary.ExecutionMode, summary.Documents, summary.Queries, summary.OutputDim)
+	if summary.ProjectionHeadPath != "" {
+		fmt.Printf("projection_head: %s identity=%s sha256=%s\n", summary.ProjectionHeadPath, summary.ProjectionHeadIdentity, summary.ProjectionHeadSHA256)
+	}
 	fmt.Printf("doc_vectors: %s\n", summary.DocVectorPath)
 	fmt.Printf("query_vectors: %s\n", summary.QueryVectorPath)
 	if summary.Resume || summary.ProgressEvery > 0 {

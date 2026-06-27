@@ -44,28 +44,29 @@ type PretrainedBERTTextEmbedderConfig struct {
 }
 
 type PretrainedBERTRetrievalVectorExportConfig struct {
-	DatasetName      string
-	DatasetDir       string
-	CorpusPath       string
-	QueriesPath      string
-	QrelsPath        string
-	OutputDir        string
-	SourceDir        string
-	ModulePath       string
-	WeightsPath      string
-	QueryPrefix      string
-	DocumentPrefix   string
-	BatchSize        int
-	OutputDim        int
-	MaxDocs          int
-	MaxQueries       int
-	MaxLength        int
-	Split            string
-	Runtime          *Runtime
-	ManifestJSONPath string
-	Resume           bool
-	ProgressEvery    int
-	Progress         PretrainedBERTRetrievalVectorExportProgressFunc
+	DatasetName        string
+	DatasetDir         string
+	CorpusPath         string
+	QueriesPath        string
+	QrelsPath          string
+	OutputDir          string
+	SourceDir          string
+	ModulePath         string
+	WeightsPath        string
+	QueryPrefix        string
+	DocumentPrefix     string
+	BatchSize          int
+	OutputDim          int
+	MaxDocs            int
+	MaxQueries         int
+	MaxLength          int
+	Split              string
+	Runtime            *Runtime
+	ManifestJSONPath   string
+	ProjectionHeadPath string
+	Resume             bool
+	ProgressEvery      int
+	Progress           PretrainedBERTRetrievalVectorExportProgressFunc
 }
 
 type PretrainedBERTRetrievalVectorExportSummary struct {
@@ -77,6 +78,11 @@ type PretrainedBERTRetrievalVectorExportSummary struct {
 	ExecutionMode                     string    `json:"execution_mode"`
 	QualityClaim                      bool      `json:"quality_claim"`
 	EmbeddingSpaceID                  string    `json:"embedding_space_id,omitempty"`
+	ProjectionHeadPath                string    `json:"projection_head_path,omitempty"`
+	ProjectionHeadSHA256              string    `json:"projection_head_sha256,omitempty"`
+	ProjectionHeadIdentity            string    `json:"projection_head_identity,omitempty"`
+	ProjectionHeadSchema              string    `json:"projection_head_schema,omitempty"`
+	ProjectionHeadSourceModel         string    `json:"projection_head_source_model,omitempty"`
 	ModuleSHA256                      string    `json:"module_sha256,omitempty"`
 	WeightsSHA256                     string    `json:"weights_sha256,omitempty"`
 	ConfigSHA256                      string    `json:"config_sha256,omitempty"`
@@ -388,6 +394,21 @@ func ExportPretrainedBERTRetrievalVectors(ctx context.Context, cfg PretrainedBER
 		return PretrainedBERTRetrievalVectorExportSummary{}, err
 	}
 	nativeDim := embedder.config.HiddenSize
+	var projectionHead *PretrainedBERTProjectionHead
+	if cfg.ProjectionHeadPath != "" {
+		head, err := ReadPretrainedBERTProjectionHeadFile(cfg.ProjectionHeadPath)
+		if err != nil {
+			return PretrainedBERTRetrievalVectorExportSummary{}, err
+		}
+		if head.InputDim != nativeDim {
+			return PretrainedBERTRetrievalVectorExportSummary{}, fmt.Errorf("projection head input_dim %d does not match pretrained BERT native dimension %d", head.InputDim, nativeDim)
+		}
+		if cfg.OutputDim > 0 && cfg.OutputDim != head.OutputDim {
+			return PretrainedBERTRetrievalVectorExportSummary{}, fmt.Errorf("output-dim %d does not match projection head output_dim %d", cfg.OutputDim, head.OutputDim)
+		}
+		cfg.OutputDim = head.OutputDim
+		projectionHead = &head
+	}
 	effectiveOutputDim := cfg.OutputDim
 	if effectiveOutputDim == 0 {
 		effectiveOutputDim = nativeDim
@@ -429,25 +450,27 @@ func ExportPretrainedBERTRetrievalVectors(ctx context.Context, cfg PretrainedBER
 	docVectorPath := filepath.Join(cfg.OutputDir, "doc-vectors.jsonl")
 	queryVectorPath := filepath.Join(cfg.OutputDir, "query-vectors.jsonl")
 	docDim, docResume, err := writePretrainedBERTVectorCache(ctx, embedder, corpus, docVectorPath, cfg.BatchSize, cfg.DocumentPrefix, pretrainedBERTVectorCacheWriteOptions{
-		Kind:          "documents",
-		Resume:        cfg.Resume,
-		ProgressEvery: cfg.ProgressEvery,
-		Progress:      cfg.Progress,
-		OutputDim:     cfg.OutputDim,
-		ExpectedDim:   effectiveOutputDim,
-		NativeDim:     nativeDim,
+		Kind:           "documents",
+		Resume:         cfg.Resume,
+		ProgressEvery:  cfg.ProgressEvery,
+		Progress:       cfg.Progress,
+		OutputDim:      cfg.OutputDim,
+		ExpectedDim:    effectiveOutputDim,
+		NativeDim:      nativeDim,
+		ProjectionHead: projectionHead,
 	})
 	if err != nil {
 		return PretrainedBERTRetrievalVectorExportSummary{}, fmt.Errorf("write document vectors: %w", err)
 	}
 	queryDim, queryResume, err := writePretrainedBERTVectorCache(ctx, embedder, queries, queryVectorPath, cfg.BatchSize, cfg.QueryPrefix, pretrainedBERTVectorCacheWriteOptions{
-		Kind:          "queries",
-		Resume:        cfg.Resume,
-		ProgressEvery: cfg.ProgressEvery,
-		Progress:      cfg.Progress,
-		OutputDim:     cfg.OutputDim,
-		ExpectedDim:   effectiveOutputDim,
-		NativeDim:     nativeDim,
+		Kind:           "queries",
+		Resume:         cfg.Resume,
+		ProgressEvery:  cfg.ProgressEvery,
+		Progress:       cfg.Progress,
+		OutputDim:      cfg.OutputDim,
+		ExpectedDim:    effectiveOutputDim,
+		NativeDim:      nativeDim,
+		ProjectionHead: projectionHead,
 	})
 	if err != nil {
 		return PretrainedBERTRetrievalVectorExportSummary{}, fmt.Errorf("write query vectors: %w", err)
@@ -464,6 +487,11 @@ func ExportPretrainedBERTRetrievalVectors(ctx context.Context, cfg PretrainedBER
 		ExecutionMode:                     "pretrained_bert_host_reference",
 		QualityClaim:                      false,
 		EmbeddingSpaceID:                  identity.EmbeddingSpaceID,
+		ProjectionHeadPath:                cfg.ProjectionHeadPath,
+		ProjectionHeadSHA256:              identity.ProjectionHeadSHA256,
+		ProjectionHeadIdentity:            identity.ProjectionHeadIdentity,
+		ProjectionHeadSchema:              identity.ProjectionHeadSchema,
+		ProjectionHeadSourceModel:         identity.ProjectionHeadSourceModel,
 		ModuleSHA256:                      identity.ModuleSHA256,
 		WeightsSHA256:                     identity.WeightsSHA256,
 		ConfigSHA256:                      identity.ConfigSHA256,
@@ -548,6 +576,11 @@ type pretrainedBERTRetrievalEmbeddingSpaceIdentity struct {
 	DocumentPrefix                    string `json:"document_prefix"`
 	QueryRoleApplied                  bool   `json:"query_role_applied"`
 	DocumentRoleApplied               bool   `json:"document_role_applied"`
+	ProjectionHeadPath                string `json:"projection_head_path,omitempty"`
+	ProjectionHeadSHA256              string `json:"projection_head_sha256,omitempty"`
+	ProjectionHeadIdentity            string `json:"projection_head_identity,omitempty"`
+	ProjectionHeadSchema              string `json:"projection_head_schema,omitempty"`
+	ProjectionHeadSourceModel         string `json:"projection_head_source_model,omitempty"`
 }
 
 func buildPretrainedBERTRetrievalEmbeddingSpaceIdentity(cfg PretrainedBERTRetrievalVectorExportConfig, embedder *PretrainedBERTTextEmbedder) (pretrainedBERTRetrievalEmbeddingSpaceIdentity, error) {
@@ -565,6 +598,7 @@ func buildPretrainedBERTRetrievalEmbeddingSpaceIdentity(cfg PretrainedBERTRetrie
 		DocumentPrefix:      cfg.DocumentPrefix,
 		QueryRoleApplied:    cfg.QueryPrefix != "",
 		DocumentRoleApplied: cfg.DocumentPrefix != "",
+		ProjectionHeadPath:  cfg.ProjectionHeadPath,
 	}
 	var err error
 	if identity.ModuleSHA256, err = sha256FileHex(cfg.ModulePath); err != nil {
@@ -594,7 +628,27 @@ func buildPretrainedBERTRetrievalEmbeddingSpaceIdentity(cfg PretrainedBERTRetrie
 	if identity.SentenceTransformersConfigSHA256, err = optionalSHA256FileHex(filepath.Join(cfg.SourceDir, "sentence_bert_config.json")); err != nil {
 		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
 	}
-	data, err := json.Marshal(identity)
+	if cfg.ProjectionHeadPath != "" {
+		head, err := ReadPretrainedBERTProjectionHeadFile(cfg.ProjectionHeadPath)
+		if err != nil {
+			return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
+		}
+		if head.InputDim != embedder.config.HiddenSize {
+			return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("projection head input_dim %d does not match pretrained BERT native dimension %d", head.InputDim, embedder.config.HiddenSize)
+		}
+		identity.ProjectionHeadSchema = head.Schema
+		identity.ProjectionHeadSourceModel = head.SourceModel
+		identity.ProjectionHeadIdentity = head.IdentityHash()
+		identity.OutputDim = head.OutputDim
+		if identity.ProjectionHeadSHA256, err = sha256FileHex(cfg.ProjectionHeadPath); err != nil {
+			return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("hash projection head: %w", err)
+		}
+	}
+	canonical := identity
+	canonical.ProjectionHeadPath = ""
+	canonical.ProjectionHeadSHA256 = ""
+	canonical.ProjectionHeadSourceModel = ""
+	data, err := json.Marshal(canonical)
 	if err != nil {
 		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
 	}
@@ -616,6 +670,9 @@ func validatePretrainedBERTRetrievalVectorExportResumeManifest(cfg PretrainedBER
 	}
 	data, err := os.ReadFile(cfg.ManifestJSONPath)
 	if os.IsNotExist(err) {
+		if cfg.ProjectionHeadPath != "" {
+			return fmt.Errorf("resume with projection head requires manifest %s with matching embedding_space_id", cfg.ManifestJSONPath)
+		}
 		return nil
 	}
 	if err != nil {
@@ -626,9 +683,15 @@ func validatePretrainedBERTRetrievalVectorExportResumeManifest(cfg PretrainedBER
 		return fmt.Errorf("parse resume manifest %s: %w", cfg.ManifestJSONPath, err)
 	}
 	// Legacy manifests predate embedding_space_id. Keep compatibility for
-	// already-started partial caches and rely on row ID/dimension prefix checks.
+	// no-head partial caches and rely on row ID/dimension prefix checks.
 	if manifest.EmbeddingSpaceID == "" {
+		if cfg.ProjectionHeadPath != "" {
+			return fmt.Errorf("resume manifest %s is missing embedding_space_id required for projection head resume", cfg.ManifestJSONPath)
+		}
 		return nil
+	}
+	if cfg.ProjectionHeadPath != "" && manifest.ProjectionHeadIdentity == "" {
+		return fmt.Errorf("resume manifest %s is missing projection_head_identity required for projection head resume", cfg.ManifestJSONPath)
 	}
 	if manifest.EmbeddingSpaceID != embeddingSpaceID {
 		return fmt.Errorf("resume manifest %s embedding_space_id %q does not match current embedding space %q", cfg.ManifestJSONPath, manifest.EmbeddingSpaceID, embeddingSpaceID)
@@ -693,13 +756,14 @@ func normalizePretrainedBERTRetrievalVectorExportConfig(cfg PretrainedBERTRetrie
 }
 
 type pretrainedBERTVectorCacheWriteOptions struct {
-	Kind          string
-	Resume        bool
-	ProgressEvery int
-	Progress      PretrainedBERTRetrievalVectorExportProgressFunc
-	OutputDim     int
-	ExpectedDim   int
-	NativeDim     int
+	Kind           string
+	Resume         bool
+	ProgressEvery  int
+	Progress       PretrainedBERTRetrievalVectorExportProgressFunc
+	OutputDim      int
+	ExpectedDim    int
+	NativeDim      int
+	ProjectionHead *PretrainedBERTProjectionHead
 }
 
 type pretrainedBERTVectorCacheResumeResult struct {
@@ -758,9 +822,17 @@ func writePretrainedBERTVectorCache(ctx context.Context, embedder *PretrainedBER
 			if opts.NativeDim > 0 && len(vector) != opts.NativeDim {
 				return 0, pretrainedBERTVectorCacheResumeResult{}, fmt.Errorf("vector for %q has native dimension %d, want %d", record.ID, len(vector), opts.NativeDim)
 			}
-			embedding, err := transformRetrievalExportVector(vector, opts.OutputDim)
-			if err != nil {
-				return 0, pretrainedBERTVectorCacheResumeResult{}, fmt.Errorf("vector for %q: %w", record.ID, err)
+			var embedding []float32
+			if opts.ProjectionHead != nil {
+				embedding, err = opts.ProjectionHead.Apply(vector)
+				if err != nil {
+					return 0, pretrainedBERTVectorCacheResumeResult{}, fmt.Errorf("project vector for %q: %w", record.ID, err)
+				}
+			} else {
+				embedding, err = transformRetrievalExportVector(vector, opts.OutputDim)
+				if err != nil {
+					return 0, pretrainedBERTVectorCacheResumeResult{}, fmt.Errorf("vector for %q: %w", record.ID, err)
+				}
 			}
 			nextDim, err := validatePretrainedBERTVectorCacheRow(path, start+i+1, retrievalVectorExportRow{ID: record.ID, Embedding: embedding}, record.ID, dim, opts.ExpectedDim)
 			if err != nil {

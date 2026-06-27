@@ -163,6 +163,145 @@ func TestPretrainedBERTRetrievalVectorExportWritesCompactOutputDim(t *testing.T)
 	}
 }
 
+func TestPretrainedBERTRetrievalVectorExportAppliesProjectionHeadAndRecordsIdentity(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	datasetDir := writeTinyPretrainedBERTBEIRFixture(t)
+	outputDir := filepath.Join(t.TempDir(), "vectors")
+	headPath := writeTinyPretrainedBERTProjectionHead(t, 2, 1, []float32{1, 0})
+
+	summary, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName:        "tiny-bert",
+		DatasetDir:         datasetDir,
+		OutputDir:          outputDir,
+		SourceDir:          sourceDir,
+		ModulePath:         modulePath,
+		WeightsPath:        weightsPath,
+		BatchSize:          1,
+		ProjectionHeadPath: headPath,
+		MaxLength:          4,
+		Runtime:            New(cuda.New()),
+	})
+	if err != nil {
+		t.Fatalf("export pretrained BERT retrieval vectors with projection head: %v", err)
+	}
+	if summary.NativeDim != 2 || summary.OutputDim != 1 || summary.ProjectionHeadPath != headPath {
+		t.Fatalf("summary dims/head = %+v", summary)
+	}
+	if !isSHA256Hex(summary.ProjectionHeadSHA256) || !isSHA256Hex(summary.ProjectionHeadIdentity) || summary.ProjectionHeadSchema != PretrainedBERTProjectionHeadSchema {
+		t.Fatalf("summary projection identity = %+v", summary)
+	}
+	assertFiniteUnitishVector(t, readTinyVectorRows(t, summary.DocVectorPath)[0].Embedding, 1)
+	assertFiniteUnitishVector(t, readTinyVectorRows(t, summary.QueryVectorPath)[0].Embedding, 1)
+
+	data, err := os.ReadFile(filepath.Join(outputDir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var manifest PretrainedBERTRetrievalVectorExportSummary
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("parse manifest: %v", err)
+	}
+	if manifest.ProjectionHeadPath != headPath || manifest.ProjectionHeadIdentity != summary.ProjectionHeadIdentity || manifest.OutputDim != 1 {
+		t.Fatalf("manifest projection fields = %+v", manifest)
+	}
+
+	noHeadDir := filepath.Join(t.TempDir(), "no-head")
+	noHead, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName: "tiny-bert",
+		DatasetDir:  datasetDir,
+		OutputDir:   noHeadDir,
+		SourceDir:   sourceDir,
+		ModulePath:  modulePath,
+		WeightsPath: weightsPath,
+		BatchSize:   1,
+		OutputDim:   1,
+		MaxLength:   4,
+		Runtime:     New(cuda.New()),
+	})
+	if err != nil {
+		t.Fatalf("export pretrained BERT retrieval vectors without projection head: %v", err)
+	}
+	if noHead.EmbeddingSpaceID == summary.EmbeddingSpaceID {
+		t.Fatalf("projection head embedding space matched prefix truncation id %q", summary.EmbeddingSpaceID)
+	}
+}
+
+func TestPretrainedBERTRetrievalVectorExportProjectionHeadIdentityIgnoresPath(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	datasetDir := writeTinyPretrainedBERTBEIRFixture(t)
+	headA := writeTinyPretrainedBERTProjectionHead(t, 2, 1, []float32{1, 0})
+	headB := filepath.Join(t.TempDir(), "repackaged", "head-copy.mll")
+	if err := os.MkdirAll(filepath.Dir(headB), 0o755); err != nil {
+		t.Fatalf("mkdir repackaged head dir: %v", err)
+	}
+	repackaged, err := NewPretrainedBERTProjectionHead(2, 1, []float32{1, 0})
+	if err != nil {
+		t.Fatalf("new repackaged head: %v", err)
+	}
+	repackaged.SourceModel = "same-functional-head-at-new-location"
+	repackaged.Loss = "alternate-audit-loss-label"
+	if err := WritePretrainedBERTProjectionHeadFile(headB, repackaged); err != nil {
+		t.Fatalf("write head B: %v", err)
+	}
+
+	export := func(outputDir, headPath string) PretrainedBERTRetrievalVectorExportSummary {
+		t.Helper()
+		summary, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+			DatasetName:        "tiny-bert",
+			DatasetDir:         datasetDir,
+			OutputDir:          outputDir,
+			SourceDir:          sourceDir,
+			ModulePath:         modulePath,
+			WeightsPath:        weightsPath,
+			BatchSize:          1,
+			ProjectionHeadPath: headPath,
+			MaxLength:          4,
+			Runtime:            New(cuda.New()),
+		})
+		if err != nil {
+			t.Fatalf("export with projection head %s: %v", headPath, err)
+		}
+		return summary
+	}
+
+	first := export(filepath.Join(t.TempDir(), "vectors-a"), headA)
+	second := export(filepath.Join(t.TempDir(), "vectors-b"), headB)
+	if first.ProjectionHeadPath == second.ProjectionHeadPath {
+		t.Fatalf("test did not use different head paths")
+	}
+	if first.ProjectionHeadSHA256 == second.ProjectionHeadSHA256 {
+		t.Fatalf("test did not produce different projection head file hashes: %q", first.ProjectionHeadSHA256)
+	}
+	if first.ProjectionHeadIdentity == "" || first.ProjectionHeadIdentity != second.ProjectionHeadIdentity {
+		t.Fatalf("projection identities = %q and %q, want match", first.ProjectionHeadIdentity, second.ProjectionHeadIdentity)
+	}
+	if first.EmbeddingSpaceID == "" || first.EmbeddingSpaceID != second.EmbeddingSpaceID {
+		t.Fatalf("embedding space ids = %q and %q, want match for same functional head", first.EmbeddingSpaceID, second.EmbeddingSpaceID)
+	}
+}
+
+func TestPretrainedBERTRetrievalVectorExportRejectsProjectionHeadShapeMismatch(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	datasetDir := writeTinyPretrainedBERTBEIRFixture(t)
+	headPath := writeTinyPretrainedBERTProjectionHead(t, 3, 1, []float32{1, 0, 0})
+
+	_, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName:        "tiny-bert",
+		DatasetDir:         datasetDir,
+		OutputDir:          filepath.Join(t.TempDir(), "vectors"),
+		SourceDir:          sourceDir,
+		ModulePath:         modulePath,
+		WeightsPath:        weightsPath,
+		BatchSize:          1,
+		ProjectionHeadPath: headPath,
+		MaxLength:          4,
+		Runtime:            New(cuda.New()),
+	})
+	if err == nil || !strings.Contains(err.Error(), "projection head input_dim 3 does not match") {
+		t.Fatalf("err = %v, want projection input_dim mismatch", err)
+	}
+}
+
 func TestPretrainedBERTRetrievalVectorExportRejectsTooLargeOutputDim(t *testing.T) {
 	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
 	datasetDir := writeTinyPretrainedBERTBEIRFixture(t)
@@ -407,6 +546,130 @@ func TestPretrainedBERTRetrievalVectorExportResumeAppendsPartialCaches(t *testin
 	}
 	if !manifest.Resume || manifest.ReusedDocuments != 1 || manifest.ReusedQueries != 1 || manifest.WrittenDocuments != 2 || manifest.WrittenQueries != 2 {
 		t.Fatalf("manifest resume counters = %+v", manifest)
+	}
+}
+
+func TestPretrainedBERTRetrievalVectorExportProjectionHeadResumeRequiresManifestIdentity(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	datasetDir := writeTinyPretrainedBERTBEIRFixtureN(t, 2)
+	rt := New(cuda.New())
+	headPath := writeTinyPretrainedBERTProjectionHead(t, 2, 1, []float32{1, 0})
+	outputDir := filepath.Join(t.TempDir(), "vectors")
+	seed, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName:        "tiny-bert",
+		DatasetDir:         datasetDir,
+		OutputDir:          outputDir,
+		SourceDir:          sourceDir,
+		ModulePath:         modulePath,
+		WeightsPath:        weightsPath,
+		BatchSize:          1,
+		ProjectionHeadPath: headPath,
+		MaxLength:          4,
+		Runtime:            rt,
+	})
+	if err != nil {
+		t.Fatalf("seed export: %v", err)
+	}
+	beforeDocs := fileSize(t, seed.DocVectorPath)
+
+	manifestPath := filepath.Join(outputDir, "manifest.json")
+	if err := os.Remove(manifestPath); err != nil {
+		t.Fatalf("remove manifest: %v", err)
+	}
+	_, err = ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName:        "tiny-bert",
+		DatasetDir:         datasetDir,
+		OutputDir:          outputDir,
+		SourceDir:          sourceDir,
+		ModulePath:         modulePath,
+		WeightsPath:        weightsPath,
+		BatchSize:          1,
+		ProjectionHeadPath: headPath,
+		MaxLength:          4,
+		Runtime:            rt,
+		Resume:             true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires manifest") {
+		t.Fatalf("err = %v, want missing manifest error", err)
+	}
+	if got := fileSize(t, seed.DocVectorPath); got != beforeDocs {
+		t.Fatalf("doc vector size changed after rejected missing-manifest resume: got %d want %d", got, beforeDocs)
+	}
+
+	legacy := PretrainedBERTRetrievalVectorExportSummary{
+		Schema:    PretrainedBERTRetrievalVectorExportManifestSchema,
+		OutputDim: 1,
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy manifest: %v", err)
+	}
+	if err := os.WriteFile(manifestPath, append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("write legacy manifest: %v", err)
+	}
+	_, err = ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName:        "tiny-bert",
+		DatasetDir:         datasetDir,
+		OutputDir:          outputDir,
+		SourceDir:          sourceDir,
+		ModulePath:         modulePath,
+		WeightsPath:        weightsPath,
+		BatchSize:          1,
+		ProjectionHeadPath: headPath,
+		MaxLength:          4,
+		Runtime:            rt,
+		Resume:             true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "missing embedding_space_id") {
+		t.Fatalf("err = %v, want missing embedding_space_id error", err)
+	}
+	if got := fileSize(t, seed.DocVectorPath); got != beforeDocs {
+		t.Fatalf("doc vector size changed after rejected legacy-manifest resume: got %d want %d", got, beforeDocs)
+	}
+}
+
+func TestPretrainedBERTRetrievalVectorExportProjectionHeadResumeRejectsDifferentIdentitySameDim(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	datasetDir := writeTinyPretrainedBERTBEIRFixtureN(t, 2)
+	rt := New(cuda.New())
+	headA := writeTinyPretrainedBERTProjectionHead(t, 2, 1, []float32{1, 0})
+	headB := writeTinyPretrainedBERTProjectionHead(t, 2, 1, []float32{0, 1})
+	outputDir := filepath.Join(t.TempDir(), "vectors")
+	seed, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName:        "tiny-bert",
+		DatasetDir:         datasetDir,
+		OutputDir:          outputDir,
+		SourceDir:          sourceDir,
+		ModulePath:         modulePath,
+		WeightsPath:        weightsPath,
+		BatchSize:          1,
+		ProjectionHeadPath: headA,
+		MaxLength:          4,
+		Runtime:            rt,
+	})
+	if err != nil {
+		t.Fatalf("seed export: %v", err)
+	}
+	beforeDocs := fileSize(t, seed.DocVectorPath)
+
+	_, err = ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName:        "tiny-bert",
+		DatasetDir:         datasetDir,
+		OutputDir:          outputDir,
+		SourceDir:          sourceDir,
+		ModulePath:         modulePath,
+		WeightsPath:        weightsPath,
+		BatchSize:          1,
+		ProjectionHeadPath: headB,
+		MaxLength:          4,
+		Runtime:            rt,
+		Resume:             true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "embedding_space_id") {
+		t.Fatalf("err = %v, want embedding_space_id mismatch", err)
+	}
+	if got := fileSize(t, seed.DocVectorPath); got != beforeDocs {
+		t.Fatalf("doc vector size changed after rejected different-head resume: got %d want %d", got, beforeDocs)
 	}
 }
 
@@ -705,6 +968,23 @@ func writeTinyPretrainedBERTExportFixture(t testing.TB) (sourceDir, modulePath, 
 		t.Fatalf("write weights: %v", err)
 	}
 	return sourceDir, modulePath, weightsPath
+}
+
+func writeTinyPretrainedBERTProjectionHead(t testing.TB, inputDim, outputDim int, weights []float32) string {
+	t.Helper()
+	head, err := NewPretrainedBERTProjectionHead(inputDim, outputDim, weights)
+	if err != nil {
+		t.Fatalf("new projection head: %v", err)
+	}
+	head.SourceModel = "tiny-bert"
+	head.Initialization = "unit-test"
+	head.Loss = "listwise_kl_softmax_dot"
+	head.DataProvenance = "unit-test train split only"
+	path := filepath.Join(t.TempDir(), "projection-head.mll")
+	if err := WritePretrainedBERTProjectionHeadFile(path, head); err != nil {
+		t.Fatalf("write projection head: %v", err)
+	}
+	return path
 }
 
 func writeTinyPretrainedBERTExportFixtureWithST(t testing.TB, pooling string, maxSeqLength int) (sourceDir, modulePath, weightsPath string) {
