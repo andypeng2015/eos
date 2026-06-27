@@ -75,6 +75,21 @@ type EmbeddingTrainMetrics struct {
 	Loss         float32
 	AverageScore float32
 	BatchSize    int
+	Movement     *EmbeddingTrainMovementMetrics
+}
+
+// EmbeddingTrainStatMetrics summarizes an aggregate vector diagnostic.
+type EmbeddingTrainStatMetrics struct {
+	L2Norm       float32
+	MaxAbs       float32
+	NonzeroCount int
+	TotalCount   int
+}
+
+// EmbeddingTrainMovementMetrics summarizes optimizer-step movement diagnostics.
+type EmbeddingTrainMovementMetrics struct {
+	Gradient       EmbeddingTrainStatMetrics
+	ParameterDelta EmbeddingTrainStatMetrics
 }
 
 // EmbeddingEvalMetrics summarizes retrieval-oriented quality on pairwise eval data.
@@ -1642,6 +1657,10 @@ func (t *EmbeddingTrainer) TrainScoreSpectrumStep(batch []EmbeddingScoreSpectrum
 
 // TrainListwiseGeometryStep runs one update over row-local query/document teacher geometry batches.
 func (t *EmbeddingTrainer) TrainListwiseGeometryStep(batch []EmbeddingTokenizedListwiseGeometryBatch) (EmbeddingTrainMetrics, error) {
+	return t.TrainListwiseGeometryStepWithDiagnostics(batch, false)
+}
+
+func (t *EmbeddingTrainer) TrainListwiseGeometryStepWithDiagnostics(batch []EmbeddingTokenizedListwiseGeometryBatch, diagnostics bool) (EmbeddingTrainMetrics, error) {
 	if t == nil {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("embedding trainer is not initialized")
 	}
@@ -1724,6 +1743,14 @@ func (t *EmbeddingTrainer) TrainListwiseGeometryStep(batch []EmbeddingTokenizedL
 	}
 
 	batchScale := float32(1) / float32(queryCount)
+	var movement *EmbeddingTrainMovementMetrics
+	var beforeUpdate []embeddingTrainTensorSnapshot
+	if diagnostics {
+		movement = &EmbeddingTrainMovementMetrics{
+			Gradient: aggregateScaledGradientStats(batchScale, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj),
+		}
+		beforeUpdate = snapshotEmbeddingTrainTensors(t.tokenEmbed, t.attentionQuery, t.attentionKey, t.attentionValue, t.attentionOutput, t.hiddenProjection, t.projection)
+	}
 	t.step++
 	t.applyOptimizerUpdate(t.tokenParam.Name, t.tokenEmbed, t.tokenMom1, t.tokenMom2, gradToken, batchScale)
 	t.applyOptimizerUpdate(t.attnQParam.Name, t.attentionQuery, t.attnQMom1, t.attnQMom2, gradAttnQ, batchScale)
@@ -1732,10 +1759,14 @@ func (t *EmbeddingTrainer) TrainListwiseGeometryStep(batch []EmbeddingTokenizedL
 	t.applyOptimizerUpdate(t.attnOParam.Name, t.attentionOutput, t.attnOMom1, t.attnOMom2, gradAttnO, batchScale)
 	t.applyOptimizerUpdate(t.hiddenParam.Name, t.hiddenProjection, t.hiddenMom1, t.hiddenMom2, gradHidden, batchScale)
 	t.applyOptimizerUpdate(t.projParam.Name, t.projection, t.projMom1, t.projMom2, gradProj, batchScale)
+	if movement != nil {
+		movement.ParameterDelta = aggregateParameterDeltaStats(beforeUpdate)
+	}
 	return EmbeddingTrainMetrics{
 		Loss:         totalLoss * batchScale,
 		AverageScore: totalScore / float32(pairCount),
 		BatchSize:    pairCount,
+		Movement:     movement,
 	}, nil
 }
 
@@ -8381,6 +8412,95 @@ func (t *EmbeddingTrainer) applyOptimizerUpdate(name string, tensor, mom1, mom2 
 	if t != nil {
 		t.invalidateForwardWeights()
 	}
+}
+
+type embeddingTrainTensorSnapshot struct {
+	tensor *backend.Tensor
+	before []float32
+}
+
+func aggregateScaledGradientStats(scale float32, grads ...[]float32) EmbeddingTrainStatMetrics {
+	var stats EmbeddingTrainStatMetrics
+	sumSquares := float64(0)
+	for _, grad := range grads {
+		stats.TotalCount += len(grad)
+		for _, raw := range grad {
+			v := raw * scale
+			if v == 0 {
+				continue
+			}
+			abs := float32(math.Abs(float64(v)))
+			if abs > stats.MaxAbs {
+				stats.MaxAbs = abs
+			}
+			stats.NonzeroCount++
+			sumSquares += float64(v) * float64(v)
+		}
+	}
+	stats.L2Norm = float32(math.Sqrt(sumSquares))
+	return stats
+}
+
+func snapshotEmbeddingTrainTensors(tensors ...*backend.Tensor) []embeddingTrainTensorSnapshot {
+	snapshots := make([]embeddingTrainTensorSnapshot, 0, len(tensors))
+	for _, tensor := range tensors {
+		if tensor == nil {
+			continue
+		}
+		snapshots = append(snapshots, embeddingTrainTensorSnapshot{
+			tensor: tensor,
+			before: append([]float32(nil), tensor.F32...),
+		})
+	}
+	return snapshots
+}
+
+func aggregateParameterDeltaStats(snapshots []embeddingTrainTensorSnapshot) EmbeddingTrainStatMetrics {
+	var stats EmbeddingTrainStatMetrics
+	sumSquares := float64(0)
+	for _, snapshot := range snapshots {
+		if snapshot.tensor == nil {
+			continue
+		}
+		n := len(snapshot.before)
+		if len(snapshot.tensor.F32) < n {
+			n = len(snapshot.tensor.F32)
+		}
+		stats.TotalCount += n
+		for i := 0; i < n; i++ {
+			delta := snapshot.tensor.F32[i] - snapshot.before[i]
+			if delta == 0 {
+				continue
+			}
+			abs := float32(math.Abs(float64(delta)))
+			if abs > stats.MaxAbs {
+				stats.MaxAbs = abs
+			}
+			stats.NonzeroCount++
+			sumSquares += float64(delta) * float64(delta)
+		}
+	}
+	stats.L2Norm = float32(math.Sqrt(sumSquares))
+	return stats
+}
+
+func mergeEmbeddingTrainMovementMetrics(dst *EmbeddingTrainMovementMetrics, src *EmbeddingTrainMovementMetrics) {
+	if dst == nil || src == nil {
+		return
+	}
+	dst.Gradient = mergeEmbeddingTrainStatMetrics(dst.Gradient, src.Gradient)
+	dst.ParameterDelta = mergeEmbeddingTrainStatMetrics(dst.ParameterDelta, src.ParameterDelta)
+}
+
+func mergeEmbeddingTrainStatMetrics(a, b EmbeddingTrainStatMetrics) EmbeddingTrainStatMetrics {
+	sumSquares := float64(a.L2Norm)*float64(a.L2Norm) + float64(b.L2Norm)*float64(b.L2Norm)
+	if b.MaxAbs > a.MaxAbs {
+		a.MaxAbs = b.MaxAbs
+	}
+	a.NonzeroCount += b.NonzeroCount
+	a.TotalCount += b.TotalCount
+	a.L2Norm = float32(math.Sqrt(sumSquares))
+	return a
 }
 
 func (t *EmbeddingTrainer) tryGELUBackwardMul(gradOut, preAct []float32, rows, cols int, preActBinding string) ([]float32, bool) {

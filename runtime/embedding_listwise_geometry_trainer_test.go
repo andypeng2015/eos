@@ -61,6 +61,25 @@ func TestEmbeddingTrainerTrainListwiseGeometryStep(t *testing.T) {
 	if trainer.step != 1 {
 		t.Fatalf("step = %d, want 1", trainer.step)
 	}
+	if metrics.Movement != nil {
+		t.Fatalf("movement metrics = %+v, want nil by default", metrics.Movement)
+	}
+
+	diagnosticTrainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	diagnosticTrainer.config.Temperature = 0.05
+	diagnosticMetrics, err := diagnosticTrainer.TrainListwiseGeometryStepWithDiagnostics(tinyTokenizedListwiseGeometryBatches(false), true)
+	if err != nil {
+		t.Fatalf("train diagnostic listwise geometry step: %v", err)
+	}
+	if diagnosticMetrics.Movement == nil {
+		t.Fatalf("diagnostic movement metrics missing")
+	}
+	if diagnosticMetrics.Movement.Gradient.L2Norm <= 0 || diagnosticMetrics.Movement.Gradient.MaxAbs <= 0 || diagnosticMetrics.Movement.Gradient.NonzeroCount <= 0 || diagnosticMetrics.Movement.Gradient.TotalCount <= 0 {
+		t.Fatalf("gradient movement = %+v, want nonzero aggregate", diagnosticMetrics.Movement.Gradient)
+	}
+	if diagnosticMetrics.Movement.ParameterDelta.L2Norm <= 0 || diagnosticMetrics.Movement.ParameterDelta.MaxAbs <= 0 || diagnosticMetrics.Movement.ParameterDelta.NonzeroCount <= 0 || diagnosticMetrics.Movement.ParameterDelta.TotalCount <= 0 {
+		t.Fatalf("parameter delta movement = %+v, want nonzero aggregate", diagnosticMetrics.Movement.ParameterDelta)
+	}
 }
 
 func TestEmbeddingTrainerEvaluateListwiseGeometryMetricsAndCELowerWhenStudentMatchesTeacher(t *testing.T) {
@@ -146,6 +165,9 @@ func TestEmbeddingTrainerFitListwiseGeometryEvalOnlyRecordsMetricsAndDoesNotUpda
 	if summary.FinalEval != nil {
 		t.Fatalf("pairwise eval = %+v, want nil for listwise-only eval", summary.FinalEval)
 	}
+	if summary.FinalTrain.Movement != nil {
+		t.Fatalf("final train movement = %+v, want nil for eval-only", summary.FinalTrain.Movement)
+	}
 	if summary.Workload.EvalMode != "listwise_geometry" || summary.Workload.ActualEvalPasses != 1 || summary.Workload.ActualEvalExamples != 2 || summary.Workload.ActualEvalPairs != 4 || summary.Workload.ActualTrainPairs != 0 {
 		t.Fatalf("workload = %+v, want one listwise eval pass over 2 query rows/4 cells and no train pairs", summary.Workload)
 	}
@@ -174,6 +196,30 @@ func TestEmbeddingTrainerFitListwiseGeometrySmokeAndResearchGate(t *testing.T) {
 	}
 	if summary.StepsCompleted != 1 || summary.Workload.TrainMode != "listwise_geometry" || summary.Workload.ActualTrainPairs != 4 {
 		t.Fatalf("summary = %+v workload=%+v, want one step and 4 train pairs", summary, summary.Workload)
+	}
+	if summary.EffectiveLearningRate != 0.05 {
+		t.Fatalf("effective learning rate = %g, want 0.05", summary.EffectiveLearningRate)
+	}
+	if summary.FinalTrain.Movement != nil {
+		t.Fatalf("final train movement = %+v, want nil by default", summary.FinalTrain.Movement)
+	}
+
+	diagnosticSummary, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitListwiseGeometry(tinyTokenizedListwiseGeometryBatches(true), nil, EmbeddingTrainRunConfig{
+		Epochs:                            1,
+		BatchSize:                         1,
+		EvalEveryEpoch:                    1,
+		Temperature:                       0.05,
+		AllowResearchOnlyListwiseGeometry: true,
+		MovementDiagnostics:               true,
+	})
+	if err != nil {
+		t.Fatalf("fit diagnostic listwise geometry: %v", err)
+	}
+	if diagnosticSummary.FinalTrain.Movement == nil || diagnosticSummary.FinalTrain.Movement.Gradient.NonzeroCount <= 0 || diagnosticSummary.FinalTrain.Movement.ParameterDelta.NonzeroCount <= 0 {
+		t.Fatalf("final train movement = %+v, want nonzero gradient and parameter delta counts", diagnosticSummary.FinalTrain.Movement)
+	}
+	if !diagnosticSummary.Config.MovementDiagnostics {
+		t.Fatalf("movement diagnostics config = false, want true")
 	}
 
 	_, err = newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitListwiseGeometry(tinyTokenizedListwiseGeometryBatches(false), nil, EmbeddingTrainRunConfig{

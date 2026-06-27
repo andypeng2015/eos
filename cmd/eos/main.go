@@ -5150,6 +5150,7 @@ func runTrainEmbed(args []string) error {
 	var hardNegativeTrain bool
 	var scoreSpectrumTrain bool
 	var listwiseGeometryTrain bool
+	var movementDiagnostics bool
 	var allowResearchOnlyScoreSpectrum bool
 	var allowResearchOnlyListwiseGeometry bool
 	var scoreSpectrumEvalPath string
@@ -5209,6 +5210,7 @@ func runTrainEmbed(args []string) error {
 	fs.BoolVar(&hardNegativeTrain, "hard-negative-train", false, "group labeled pair JSONL into query-positive-hard-negative contrastive batches")
 	fs.BoolVar(&scoreSpectrumTrain, "score-spectrum-train", false, "treat the training JSONL as grouped score-spectrum examples with row-local candidates")
 	fs.BoolVar(&listwiseGeometryTrain, "listwise-geometry-train", false, "treat the training JSONL as listwise query/document teacher geometry batches")
+	fs.BoolVar(&movementDiagnostics, "movement-diagnostics", false, "record aggregate gradient and parameter-delta movement diagnostics for listwise geometry training")
 	fs.BoolVar(&allowResearchOnlyScoreSpectrum, "allow-research-only-score-spectrum", false, "allow research-only score-spectrum training rows")
 	fs.BoolVar(&allowResearchOnlyListwiseGeometry, "allow-research-only-listwise-geometry", false, "allow research-only listwise geometry training rows")
 	fs.StringVar(&scoreSpectrumEvalPath, "score-spectrum-eval", "", "path to grouped score-spectrum JSONL for native score-spectrum eval")
@@ -5508,6 +5510,7 @@ func runTrainEmbed(args []string) error {
 		HardNegativeTrain:                 hardNegativeTrain,
 		ScoreSpectrumTrain:                scoreSpectrumTrain,
 		ListwiseGeometryTrain:             listwiseGeometryTrain,
+		MovementDiagnostics:               movementDiagnostics,
 		AllowResearchOnlyScoreSpectrum:    allowResearchOnlyScoreSpectrum,
 		AllowResearchOnlyListwiseGeometry: allowResearchOnlyListwiseGeometry,
 		ScoreSpectrumEvalPath:             scoreSpectrumEvalPath,
@@ -6530,6 +6533,7 @@ type trainRunConfigJSON struct {
 	RestoreBest                       bool                                   `json:"restore_best"`
 	LengthBucketBatches               bool                                   `json:"length_bucket_batches"`
 	LearningRate                      float32                                `json:"learning_rate"`
+	EffectiveLearningRate             float32                                `json:"effective_learning_rate"`
 	ContrastiveLoss                   string                                 `json:"contrastive_loss,omitempty"`
 	Temperature                       float32                                `json:"temperature"`
 	GroupedLossWeight                 float32                                `json:"grouped_loss_weight,omitempty"`
@@ -6555,6 +6559,7 @@ type trainRunConfigJSON struct {
 	HardNegativeTrain                 bool                                   `json:"hard_negative_train"`
 	ScoreSpectrumTrain                bool                                   `json:"score_spectrum_train"`
 	ListwiseGeometryTrain             bool                                   `json:"listwise_geometry_train"`
+	MovementDiagnostics               bool                                   `json:"movement_diagnostics"`
 	AllowResearchOnlyListwiseGeometry bool                                   `json:"allow_research_only_listwise_geometry,omitempty"`
 	ScoreSpectrumEvalPath             string                                 `json:"score_spectrum_eval_path,omitempty"`
 	ScoreSpectrumLossMode             string                                 `json:"score_spectrum_loss_mode,omitempty"`
@@ -6567,9 +6572,22 @@ type trainRunConfigJSON struct {
 }
 
 type trainBatchMetricsJSON struct {
-	Loss         float32 `json:"loss"`
-	AverageScore float32 `json:"average_score"`
-	BatchSize    int     `json:"batch_size"`
+	Loss         float32                   `json:"loss"`
+	AverageScore float32                   `json:"average_score"`
+	BatchSize    int                       `json:"batch_size"`
+	Movement     *trainMovementMetricsJSON `json:"movement,omitempty"`
+}
+
+type trainMovementMetricsJSON struct {
+	Gradient       trainStatMetricsJSON `json:"gradient"`
+	ParameterDelta trainStatMetricsJSON `json:"parameter_delta"`
+}
+
+type trainStatMetricsJSON struct {
+	L2Norm       float32 `json:"l2_norm"`
+	MaxAbs       float32 `json:"max_abs"`
+	NonzeroCount int     `json:"nonzero_count"`
+	TotalCount   int     `json:"total_count"`
 }
 
 type evalMetricsJSON struct {
@@ -6709,7 +6727,7 @@ func trainMetricsPayload(command, mode, artifactPath, tokenizerPath string, summ
 		Artifact:                  artifactPath,
 		Tokenizer:                 tokenizerPath,
 		Summary:                   trainRunSummaryPayload(summary),
-		Config:                    trainRunConfigPayload(summary.Config),
+		Config:                    trainRunConfigPayload(summary.Config, summary.EffectiveLearningRate),
 		FinalTrain:                trainBatchMetricsPayload(summary.FinalTrain),
 		LastEval:                  evalMetricsPayload(summary.LastEval),
 		BestEval:                  evalMetricsPayload(summary.BestEval),
@@ -6741,7 +6759,7 @@ func trainRunSummaryPayload(summary eosruntime.EmbeddingTrainRunSummary) trainRu
 	}
 }
 
-func trainRunConfigPayload(cfg eosruntime.EmbeddingTrainRunConfig) trainRunConfigJSON {
+func trainRunConfigPayload(cfg eosruntime.EmbeddingTrainRunConfig, effectiveLearningRate float32) trainRunConfigJSON {
 	return trainRunConfigJSON{
 		Epochs:                            cfg.Epochs,
 		BatchSize:                         cfg.BatchSize,
@@ -6755,6 +6773,7 @@ func trainRunConfigPayload(cfg eosruntime.EmbeddingTrainRunConfig) trainRunConfi
 		RestoreBest:                       cfg.RestoreBest,
 		LengthBucketBatches:               cfg.LengthBucketBatches,
 		LearningRate:                      cfg.LearningRate,
+		EffectiveLearningRate:             effectiveLearningRate,
 		ContrastiveLoss:                   cfg.ContrastiveLoss,
 		Temperature:                       cfg.Temperature,
 		GroupedLossWeight:                 cfg.GroupedLossWeight,
@@ -6780,6 +6799,7 @@ func trainRunConfigPayload(cfg eosruntime.EmbeddingTrainRunConfig) trainRunConfi
 		HardNegativeTrain:                 cfg.HardNegativeTrain,
 		ScoreSpectrumTrain:                cfg.ScoreSpectrumTrain,
 		ListwiseGeometryTrain:             cfg.ListwiseGeometryTrain,
+		MovementDiagnostics:               cfg.MovementDiagnostics,
 		AllowResearchOnlyListwiseGeometry: cfg.AllowResearchOnlyListwiseGeometry,
 		ScoreSpectrumEvalPath:             cfg.ScoreSpectrumEvalPath,
 		ScoreSpectrumLossMode:             cfg.ScoreSpectrumLossMode,
@@ -6793,10 +6813,26 @@ func trainRunConfigPayload(cfg eosruntime.EmbeddingTrainRunConfig) trainRunConfi
 }
 
 func trainBatchMetricsPayload(metrics eosruntime.EmbeddingTrainMetrics) trainBatchMetricsJSON {
-	return trainBatchMetricsJSON{
+	payload := trainBatchMetricsJSON{
 		Loss:         metrics.Loss,
 		AverageScore: metrics.AverageScore,
 		BatchSize:    metrics.BatchSize,
+	}
+	if metrics.Movement != nil {
+		payload.Movement = &trainMovementMetricsJSON{
+			Gradient:       trainStatMetricsPayload(metrics.Movement.Gradient),
+			ParameterDelta: trainStatMetricsPayload(metrics.Movement.ParameterDelta),
+		}
+	}
+	return payload
+}
+
+func trainStatMetricsPayload(metrics eosruntime.EmbeddingTrainStatMetrics) trainStatMetricsJSON {
+	return trainStatMetricsJSON{
+		L2Norm:       metrics.L2Norm,
+		MaxAbs:       metrics.MaxAbs,
+		NonzeroCount: metrics.NonzeroCount,
+		TotalCount:   metrics.TotalCount,
 	}
 }
 

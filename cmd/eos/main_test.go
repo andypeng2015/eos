@@ -5192,6 +5192,52 @@ func TestRunTrainEmbedEvalOnlyWritesMetricsJSON(t *testing.T) {
 	}
 }
 
+func TestTrainMetricsPayloadIncludesEffectiveLearningRateAndMovement(t *testing.T) {
+	payload := trainMetricsPayload(
+		"train-embed",
+		"train",
+		"model.mll",
+		"",
+		eosruntime.EmbeddingTrainRunSummary{
+			Config:                eosruntime.EmbeddingTrainRunConfig{LearningRate: 0, MovementDiagnostics: true},
+			EffectiveLearningRate: 2.5e-8,
+			FinalTrain: eosruntime.EmbeddingTrainMetrics{
+				Loss:         1.25,
+				AverageScore: 0.5,
+				BatchSize:    4,
+				Movement: &eosruntime.EmbeddingTrainMovementMetrics{
+					Gradient: eosruntime.EmbeddingTrainStatMetrics{
+						L2Norm:       0.75,
+						MaxAbs:       0.25,
+						NonzeroCount: 3,
+						TotalCount:   5,
+					},
+					ParameterDelta: eosruntime.EmbeddingTrainStatMetrics{
+						L2Norm:       0.125,
+						MaxAbs:       0.05,
+						NonzeroCount: 2,
+						TotalCount:   5,
+					},
+				},
+			},
+		},
+		eosruntime.EmbeddingTrainPackagePaths{},
+		nil,
+	)
+	if payload.Config.LearningRate != 0 || payload.Config.EffectiveLearningRate != 2.5e-8 {
+		t.Fatalf("learning rates = configured:%g effective:%g, want 0 and 2.5e-8", payload.Config.LearningRate, payload.Config.EffectiveLearningRate)
+	}
+	if !payload.Config.MovementDiagnostics {
+		t.Fatalf("movement diagnostics config = false, want true")
+	}
+	if payload.FinalTrain.Movement == nil {
+		t.Fatalf("final train movement missing")
+	}
+	if payload.FinalTrain.Movement.Gradient.NonzeroCount != 3 || payload.FinalTrain.Movement.ParameterDelta.NonzeroCount != 2 {
+		t.Fatalf("movement payload = %+v", payload.FinalTrain.Movement)
+	}
+}
+
 func TestRunCompareTrainMetricsReportsCurrentAndBaselineDeltas(t *testing.T) {
 	dir := t.TempDir()
 	currentPath := filepath.Join(dir, "current.metrics.json")
@@ -5908,10 +5954,60 @@ func TestRunTrainEmbedListwiseGeometryResearchOnlyGate(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "research-only") {
 		t.Fatalf("research-only without flag error = %v", err)
 	}
-	output := captureRunOutput(t, []string{"train-embed", "--tokenizer", tokenizerPath, "--listwise-geometry-train", "--allow-research-only-listwise-geometry", "--epochs", "1", "--batch-size", "1", path, trainPath})
+	defaultMetricsPath := filepath.Join(t.TempDir(), "default.metrics.json")
+	output := captureRunOutput(t, []string{"train-embed", "--tokenizer", tokenizerPath, "--listwise-geometry-train", "--allow-research-only-listwise-geometry", "--epochs", "1", "--batch-size", "1", "--metrics-json", defaultMetricsPath, path, trainPath})
 	if !strings.Contains(output, "trained package") || !strings.Contains(output, "train=1 listwise_geometry examples") {
 		t.Fatalf("listwise train output unexpected:\n%s", output)
 	}
+	var defaultMetrics struct {
+		Config struct {
+			MovementDiagnostics bool `json:"movement_diagnostics"`
+		} `json:"config"`
+		FinalTrain struct {
+			Movement *trainMovementMetricsJSON `json:"movement,omitempty"`
+		} `json:"final_train"`
+	}
+	data, err := os.ReadFile(defaultMetricsPath)
+	if err != nil {
+		t.Fatalf("read default metrics: %v", err)
+	}
+	if err := json.Unmarshal(data, &defaultMetrics); err != nil {
+		t.Fatalf("decode default metrics: %v\n%s", err, data)
+	}
+	if defaultMetrics.Config.MovementDiagnostics {
+		t.Fatalf("default movement diagnostics config = true, want false")
+	}
+	if defaultMetrics.FinalTrain.Movement != nil {
+		t.Fatalf("default movement metrics = %+v, want omitted", defaultMetrics.FinalTrain.Movement)
+	}
+
+	diagnosticMetricsPath := filepath.Join(t.TempDir(), "diagnostic.metrics.json")
+	output = captureRunOutput(t, []string{"train-embed", "--tokenizer", tokenizerPath, "--listwise-geometry-train", "--allow-research-only-listwise-geometry", "--movement-diagnostics", "--epochs", "1", "--batch-size", "1", "--metrics-json", diagnosticMetricsPath, path, trainPath})
+	if !strings.Contains(output, "metrics: "+diagnosticMetricsPath) {
+		t.Fatalf("diagnostic listwise output missing metrics path:\n%s", output)
+	}
+	var diagnosticMetrics struct {
+		Config struct {
+			MovementDiagnostics bool `json:"movement_diagnostics"`
+		} `json:"config"`
+		FinalTrain struct {
+			Movement *trainMovementMetricsJSON `json:"movement,omitempty"`
+		} `json:"final_train"`
+	}
+	data, err = os.ReadFile(diagnosticMetricsPath)
+	if err != nil {
+		t.Fatalf("read diagnostic metrics: %v", err)
+	}
+	if err := json.Unmarshal(data, &diagnosticMetrics); err != nil {
+		t.Fatalf("decode diagnostic metrics: %v\n%s", err, data)
+	}
+	if !diagnosticMetrics.Config.MovementDiagnostics {
+		t.Fatalf("diagnostic movement diagnostics config = false, want true")
+	}
+	if diagnosticMetrics.FinalTrain.Movement == nil || diagnosticMetrics.FinalTrain.Movement.Gradient.NonzeroCount <= 0 || diagnosticMetrics.FinalTrain.Movement.ParameterDelta.NonzeroCount <= 0 {
+		t.Fatalf("diagnostic movement metrics = %+v, want nonzero counts", diagnosticMetrics.FinalTrain.Movement)
+	}
+
 	manifest, err := eosruntime.ReadPackageManifestFile(eosruntime.DefaultPackageManifestPath(path))
 	if err != nil {
 		t.Fatalf("read package manifest: %v", err)

@@ -29,6 +29,7 @@ type EmbeddingTrainRunConfig struct {
 	HardNegativeTrain                 bool
 	ScoreSpectrumTrain                bool
 	ListwiseGeometryTrain             bool
+	MovementDiagnostics               bool
 	AllowResearchOnlyScoreSpectrum    bool
 	AllowResearchOnlyListwiseGeometry bool
 	HardNegativesPerQuery             int
@@ -159,6 +160,7 @@ type EmbeddingTrainRunSummary struct {
 	LastListwiseGeometryEval  *EmbeddingListwiseGeometryEvalMetrics
 	BestListwiseGeometryEval  *EmbeddingListwiseGeometryEvalMetrics
 	FinalListwiseGeometryEval *EmbeddingListwiseGeometryEvalMetrics
+	EffectiveLearningRate     float32
 	RestoredBest              bool
 	StoppedEarly              bool
 	History                   []EmbeddingTrainEpochSummary
@@ -233,9 +235,10 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 	runStart := time.Now()
 	startStep := t.step
 	summary := EmbeddingTrainRunSummary{
-		Config:       cfg,
-		StartProfile: t.TrainProfile(),
-		Workload:     EstimatePairwiseTrainWorkload(len(trainSet), len(evalSet), cfg),
+		Config:                cfg,
+		EffectiveLearningRate: t.config.LearningRate,
+		StartProfile:          t.TrainProfile(),
+		Workload:              EstimatePairwiseTrainWorkload(len(trainSet), len(evalSet), cfg),
 	}
 	if cfg.EvalOnly {
 		evalStart := time.Now()
@@ -454,9 +457,10 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		workload = RetargetWorkloadToPairwiseEval(workload, len(cfg.EvalPairs), cfg)
 	}
 	summary := EmbeddingTrainRunSummary{
-		Config:       cfg,
-		StartProfile: t.TrainProfile(),
-		Workload:     workload,
+		Config:                cfg,
+		EffectiveLearningRate: t.config.LearningRate,
+		StartProfile:          t.TrainProfile(),
+		Workload:              workload,
 	}
 	if cfg.EvalOnly {
 		evalStart := time.Now()
@@ -717,9 +721,10 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 	runStart := time.Now()
 	startStep := t.step
 	summary := EmbeddingTrainRunSummary{
-		Config:       cfg,
-		StartProfile: t.TrainProfile(),
-		Workload:     EstimateHardNegativeTrainWorkload(len(trainSet), cfg.HardNegativesPerQuery, len(evalSet), cfg),
+		Config:                cfg,
+		EffectiveLearningRate: t.config.LearningRate,
+		StartProfile:          t.TrainProfile(),
+		Workload:              EstimateHardNegativeTrainWorkload(len(trainSet), cfg.HardNegativesPerQuery, len(evalSet), cfg),
 	}
 	if cfg.EvalOnly {
 		evalStart := time.Now()
@@ -971,9 +976,10 @@ func (t *EmbeddingTrainer) FitScoreSpectrum(trainSet []EmbeddingScoreSpectrumExa
 	runStart := time.Now()
 	startStep := t.step
 	summary := EmbeddingTrainRunSummary{
-		Config:       cfg,
-		StartProfile: t.TrainProfile(),
-		Workload:     estimateScoreSpectrumTrainWorkload(trainSet, len(evalSet), len(scoreSpectrumEvalSet), scoreSpectrumEvalWorkCount(evalSet, scoreSpectrumEvalSet), cfg),
+		Config:                cfg,
+		EffectiveLearningRate: t.config.LearningRate,
+		StartProfile:          t.TrainProfile(),
+		Workload:              estimateScoreSpectrumTrainWorkload(trainSet, len(evalSet), len(scoreSpectrumEvalSet), scoreSpectrumEvalWorkCount(evalSet, scoreSpectrumEvalSet), cfg),
 	}
 	if cfg.EvalOnly {
 		evalStart := time.Now()
@@ -1270,9 +1276,10 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 	runStart := time.Now()
 	startStep := t.step
 	summary := EmbeddingTrainRunSummary{
-		Config:       cfg,
-		StartProfile: t.TrainProfile(),
-		Workload:     estimateListwiseGeometryTrainWorkload(trainSet, len(evalSet), listwiseGeometryQueryCount(listwiseEvalSet), len(evalSet)+listwiseGeometryQueryCount(listwiseEvalSet), len(evalSet)+listwiseGeometryCellCount(listwiseEvalSet), cfg),
+		Config:                cfg,
+		EffectiveLearningRate: t.config.LearningRate,
+		StartProfile:          t.TrainProfile(),
+		Workload:              estimateListwiseGeometryTrainWorkload(trainSet, len(evalSet), listwiseGeometryQueryCount(listwiseEvalSet), len(evalSet)+listwiseGeometryQueryCount(listwiseEvalSet), len(evalSet)+listwiseGeometryCellCount(listwiseEvalSet), cfg),
 	}
 	if cfg.EvalOnly {
 		evalStart := time.Now()
@@ -2726,6 +2733,8 @@ func (t *EmbeddingTrainer) runListwiseGeometryEpoch(trainSet []EmbeddingTokenize
 	totalTrainExamples := 0
 	totalTrainQueries := 0
 	var totalPairs int64
+	var movement EmbeddingTrainMovementMetrics
+	haveMovement := false
 	batchIndex := 0
 	ordered := make([]EmbeddingTokenizedListwiseGeometryBatch, 0, len(order))
 	for _, idx := range order {
@@ -2744,7 +2753,7 @@ func (t *EmbeddingTrainer) runListwiseGeometryEpoch(trainSet []EmbeddingTokenize
 		if listwiseGeometryBatchPairCount(batch) <= 0 {
 			break
 		}
-		metrics, err := t.TrainListwiseGeometryStep(batch)
+		metrics, err := t.TrainListwiseGeometryStepWithDiagnostics(batch, cfg.MovementDiagnostics)
 		if err != nil {
 			return EmbeddingTrainMetrics{}, err
 		}
@@ -2754,6 +2763,10 @@ func (t *EmbeddingTrainer) runListwiseGeometryEpoch(trainSet []EmbeddingTokenize
 		totalTrainExamples += end - start
 		totalTrainQueries += batchQueries
 		totalPairs += int64(metrics.BatchSize)
+		if metrics.Movement != nil {
+			mergeEmbeddingTrainMovementMetrics(&movement, metrics.Movement)
+			haveMovement = true
+		}
 		batchIndex++
 		if n := trainMemReclaimEvery(); n > 0 && batchIndex%n == 0 {
 			debug.FreeOSMemory()
@@ -2790,11 +2803,15 @@ func (t *EmbeddingTrainer) runListwiseGeometryEpoch(trainSet []EmbeddingTokenize
 	if totalPairs > 0 {
 		scoreAvg = totalScore / float32(totalPairs)
 	}
-	return EmbeddingTrainMetrics{
+	out := EmbeddingTrainMetrics{
 		Loss:         totalLoss / float32(totalTrainQueries),
 		AverageScore: scoreAvg,
 		BatchSize:    totalTrainExamples,
-	}, nil
+	}
+	if haveMovement {
+		out.Movement = &movement
+	}
+	return out, nil
 }
 
 func (t *EmbeddingTrainer) restoreCheckpoint(checkpoint EmbeddingTrainCheckpoint) error {
