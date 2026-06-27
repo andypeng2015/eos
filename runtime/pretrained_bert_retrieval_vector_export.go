@@ -3,8 +3,11 @@ package eosruntime
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -26,6 +29,9 @@ type PretrainedBERTTextEmbedder struct {
 	maxLength       int
 	maxLengthSource string
 	pooling         string
+	normalization   string
+	modelName       string
+	architecture    string
 }
 
 type PretrainedBERTTextEmbedderConfig struct {
@@ -61,41 +67,52 @@ type PretrainedBERTRetrievalVectorExportConfig struct {
 }
 
 type PretrainedBERTRetrievalVectorExportSummary struct {
-	Schema              string    `json:"schema"`
-	Dataset             string    `json:"dataset"`
-	SourceDir           string    `json:"source_dir"`
-	ModulePath          string    `json:"module_path"`
-	WeightsPath         string    `json:"weights_path"`
-	ExecutionMode       string    `json:"execution_mode"`
-	QualityClaim        bool      `json:"quality_claim"`
-	Documents           int       `json:"documents"`
-	Queries             int       `json:"queries"`
-	NativeDim           int       `json:"native_dim"`
-	OutputDim           int       `json:"output_dim"`
-	DocVectorPath       string    `json:"doc_vector_path"`
-	QueryVectorPath     string    `json:"query_vector_path"`
-	QueryPrefix         string    `json:"query_prefix"`
-	DocumentPrefix      string    `json:"document_prefix"`
-	LegacyDocPrefix     string    `json:"doc_prefix"`
-	DocumentRoleApplied bool      `json:"document_role_applied"`
-	QueryRoleApplied    bool      `json:"query_role_applied"`
-	Resume              bool      `json:"resume"`
-	ProgressEvery       int       `json:"progress_every,omitempty"`
-	ReusedDocuments     int       `json:"reused_documents,omitempty"`
-	ReusedQueries       int       `json:"reused_queries,omitempty"`
-	WrittenDocuments    int       `json:"written_documents"`
-	WrittenQueries      int       `json:"written_queries"`
-	MaxLength           int       `json:"max_length"`
-	MaxLengthSource     string    `json:"max_length_source,omitempty"`
-	Pooling             string    `json:"pooling,omitempty"`
-	BatchSize           int       `json:"batch_size"`
-	MaxDocs             int       `json:"max_docs,omitempty"`
-	MaxQueries          int       `json:"max_queries,omitempty"`
-	CorpusPath          string    `json:"corpus_path,omitempty"`
-	QueriesPath         string    `json:"queries_path,omitempty"`
-	QrelsPath           string    `json:"qrels_path,omitempty"`
-	ElapsedSeconds      float64   `json:"elapsed_seconds"`
-	CreatedAt           time.Time `json:"created_at"`
+	Schema                            string    `json:"schema"`
+	Dataset                           string    `json:"dataset"`
+	SourceDir                         string    `json:"source_dir"`
+	ModulePath                        string    `json:"module_path"`
+	WeightsPath                       string    `json:"weights_path"`
+	ExecutionMode                     string    `json:"execution_mode"`
+	QualityClaim                      bool      `json:"quality_claim"`
+	EmbeddingSpaceID                  string    `json:"embedding_space_id,omitempty"`
+	ModuleSHA256                      string    `json:"module_sha256,omitempty"`
+	WeightsSHA256                     string    `json:"weights_sha256,omitempty"`
+	ConfigSHA256                      string    `json:"config_sha256,omitempty"`
+	VocabSHA256                       string    `json:"vocab_sha256,omitempty"`
+	TokenizerJSONSHA256               string    `json:"tokenizer_json_sha256,omitempty"`
+	TokenizerConfigSHA256             string    `json:"tokenizer_config_sha256,omitempty"`
+	SpecialTokensMapSHA256            string    `json:"special_tokens_map_sha256,omitempty"`
+	SentenceTransformersPoolingSHA256 string    `json:"sentence_transformers_pooling_sha256,omitempty"`
+	SentenceTransformersConfigSHA256  string    `json:"sentence_transformers_config_sha256,omitempty"`
+	Normalization                     string    `json:"normalization,omitempty"`
+	Documents                         int       `json:"documents"`
+	Queries                           int       `json:"queries"`
+	NativeDim                         int       `json:"native_dim"`
+	OutputDim                         int       `json:"output_dim"`
+	DocVectorPath                     string    `json:"doc_vector_path"`
+	QueryVectorPath                   string    `json:"query_vector_path"`
+	QueryPrefix                       string    `json:"query_prefix"`
+	DocumentPrefix                    string    `json:"document_prefix"`
+	LegacyDocPrefix                   string    `json:"doc_prefix"`
+	DocumentRoleApplied               bool      `json:"document_role_applied"`
+	QueryRoleApplied                  bool      `json:"query_role_applied"`
+	Resume                            bool      `json:"resume"`
+	ProgressEvery                     int       `json:"progress_every,omitempty"`
+	ReusedDocuments                   int       `json:"reused_documents,omitempty"`
+	ReusedQueries                     int       `json:"reused_queries,omitempty"`
+	WrittenDocuments                  int       `json:"written_documents"`
+	WrittenQueries                    int       `json:"written_queries"`
+	MaxLength                         int       `json:"max_length"`
+	MaxLengthSource                   string    `json:"max_length_source,omitempty"`
+	Pooling                           string    `json:"pooling,omitempty"`
+	BatchSize                         int       `json:"batch_size"`
+	MaxDocs                           int       `json:"max_docs,omitempty"`
+	MaxQueries                        int       `json:"max_queries,omitempty"`
+	CorpusPath                        string    `json:"corpus_path,omitempty"`
+	QueriesPath                       string    `json:"queries_path,omitempty"`
+	QrelsPath                         string    `json:"qrels_path,omitempty"`
+	ElapsedSeconds                    float64   `json:"elapsed_seconds"`
+	CreatedAt                         time.Time `json:"created_at"`
 }
 
 type PretrainedBERTRetrievalVectorExportProgressFunc func(PretrainedBERTRetrievalVectorExportProgress)
@@ -141,6 +158,18 @@ func LoadPretrainedBERTTextEmbedder(ctx context.Context, cfg PretrainedBERTTextE
 	if value, ok := module.Metadata["pooling"].(string); ok {
 		pooling = value
 	}
+	normalization := ""
+	if value, ok := module.Metadata["normalization"].(string); ok {
+		normalization = value
+	}
+	modelName := ""
+	if value, ok := module.Metadata["model_name"].(string); ok {
+		modelName = value
+	}
+	architecture := ""
+	if value, ok := module.Metadata["architecture"].(string); ok {
+		architecture = value
+	}
 	weights, err := ReadWeightFile(cfg.WeightsPath)
 	if err != nil {
 		return nil, err
@@ -157,6 +186,9 @@ func LoadPretrainedBERTTextEmbedder(ctx context.Context, cfg PretrainedBERTTextE
 		maxLength:       maxLength,
 		maxLengthSource: maxLengthSource,
 		pooling:         pooling,
+		normalization:   normalization,
+		modelName:       modelName,
+		architecture:    architecture,
 	}, nil
 }
 
@@ -179,6 +211,13 @@ func (e *PretrainedBERTTextEmbedder) Pooling() string {
 		return ""
 	}
 	return e.pooling
+}
+
+func (e *PretrainedBERTTextEmbedder) Normalization() string {
+	if e == nil {
+		return ""
+	}
+	return e.normalization
 }
 
 func resolvePretrainedBERTMaxLength(explicit int, config PretrainedBERTConfig, stMeta *PretrainedBERTSTMetadata) (int, string) {
@@ -302,6 +341,13 @@ func ExportPretrainedBERTRetrievalVectors(ctx context.Context, cfg PretrainedBER
 	if len(queries) == 0 {
 		return PretrainedBERTRetrievalVectorExportSummary{}, fmt.Errorf("queries are empty")
 	}
+	identity, err := buildPretrainedBERTRetrievalEmbeddingSpaceIdentity(cfg, embedder)
+	if err != nil {
+		return PretrainedBERTRetrievalVectorExportSummary{}, err
+	}
+	if err := validatePretrainedBERTRetrievalVectorExportResumeManifest(cfg, identity.EmbeddingSpaceID); err != nil {
+		return PretrainedBERTRetrievalVectorExportSummary{}, err
+	}
 	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
 		return PretrainedBERTRetrievalVectorExportSummary{}, err
 	}
@@ -331,41 +377,52 @@ func ExportPretrainedBERTRetrievalVectors(ctx context.Context, cfg PretrainedBER
 		return PretrainedBERTRetrievalVectorExportSummary{}, fmt.Errorf("document vectors have dimension %d but query vectors have dimension %d", docDim, queryDim)
 	}
 	summary := PretrainedBERTRetrievalVectorExportSummary{
-		Schema:              PretrainedBERTRetrievalVectorExportManifestSchema,
-		Dataset:             cfg.DatasetName,
-		SourceDir:           cfg.SourceDir,
-		ModulePath:          cfg.ModulePath,
-		WeightsPath:         cfg.WeightsPath,
-		ExecutionMode:       "pretrained_bert_host_reference",
-		QualityClaim:        false,
-		Documents:           len(corpus),
-		Queries:             len(queries),
-		NativeDim:           docDim,
-		OutputDim:           docDim,
-		DocVectorPath:       docVectorPath,
-		QueryVectorPath:     queryVectorPath,
-		QueryPrefix:         cfg.QueryPrefix,
-		DocumentPrefix:      cfg.DocumentPrefix,
-		LegacyDocPrefix:     cfg.DocumentPrefix,
-		DocumentRoleApplied: cfg.DocumentPrefix != "",
-		QueryRoleApplied:    cfg.QueryPrefix != "",
-		Resume:              cfg.Resume,
-		ProgressEvery:       cfg.ProgressEvery,
-		ReusedDocuments:     docResume.Reused,
-		ReusedQueries:       queryResume.Reused,
-		WrittenDocuments:    docResume.Written,
-		WrittenQueries:      queryResume.Written,
-		MaxLength:           embedder.MaxLength(),
-		MaxLengthSource:     embedder.MaxLengthSource(),
-		Pooling:             embedder.Pooling(),
-		BatchSize:           cfg.BatchSize,
-		MaxDocs:             cfg.MaxDocs,
-		MaxQueries:          cfg.MaxQueries,
-		CorpusPath:          cfg.CorpusPath,
-		QueriesPath:         cfg.QueriesPath,
-		QrelsPath:           cfg.QrelsPath,
-		ElapsedSeconds:      time.Since(start).Seconds(),
-		CreatedAt:           time.Now().UTC(),
+		Schema:                            PretrainedBERTRetrievalVectorExportManifestSchema,
+		Dataset:                           cfg.DatasetName,
+		SourceDir:                         cfg.SourceDir,
+		ModulePath:                        cfg.ModulePath,
+		WeightsPath:                       cfg.WeightsPath,
+		ExecutionMode:                     "pretrained_bert_host_reference",
+		QualityClaim:                      false,
+		EmbeddingSpaceID:                  identity.EmbeddingSpaceID,
+		ModuleSHA256:                      identity.ModuleSHA256,
+		WeightsSHA256:                     identity.WeightsSHA256,
+		ConfigSHA256:                      identity.ConfigSHA256,
+		VocabSHA256:                       identity.VocabSHA256,
+		TokenizerJSONSHA256:               identity.TokenizerJSONSHA256,
+		TokenizerConfigSHA256:             identity.TokenizerConfigSHA256,
+		SpecialTokensMapSHA256:            identity.SpecialTokensMapSHA256,
+		SentenceTransformersPoolingSHA256: identity.SentenceTransformersPoolingSHA256,
+		SentenceTransformersConfigSHA256:  identity.SentenceTransformersConfigSHA256,
+		Normalization:                     embedder.Normalization(),
+		Documents:                         len(corpus),
+		Queries:                           len(queries),
+		NativeDim:                         docDim,
+		OutputDim:                         docDim,
+		DocVectorPath:                     docVectorPath,
+		QueryVectorPath:                   queryVectorPath,
+		QueryPrefix:                       cfg.QueryPrefix,
+		DocumentPrefix:                    cfg.DocumentPrefix,
+		LegacyDocPrefix:                   cfg.DocumentPrefix,
+		DocumentRoleApplied:               cfg.DocumentPrefix != "",
+		QueryRoleApplied:                  cfg.QueryPrefix != "",
+		Resume:                            cfg.Resume,
+		ProgressEvery:                     cfg.ProgressEvery,
+		ReusedDocuments:                   docResume.Reused,
+		ReusedQueries:                     queryResume.Reused,
+		WrittenDocuments:                  docResume.Written,
+		WrittenQueries:                    queryResume.Written,
+		MaxLength:                         embedder.MaxLength(),
+		MaxLengthSource:                   embedder.MaxLengthSource(),
+		Pooling:                           embedder.Pooling(),
+		BatchSize:                         cfg.BatchSize,
+		MaxDocs:                           cfg.MaxDocs,
+		MaxQueries:                        cfg.MaxQueries,
+		CorpusPath:                        cfg.CorpusPath,
+		QueriesPath:                       cfg.QueriesPath,
+		QrelsPath:                         cfg.QrelsPath,
+		ElapsedSeconds:                    time.Since(start).Seconds(),
+		CreatedAt:                         time.Now().UTC(),
 	}
 	if err := WritePretrainedBERTRetrievalVectorExportSummaryFile(cfg.ManifestJSONPath, summary); err != nil {
 		return PretrainedBERTRetrievalVectorExportSummary{}, err
@@ -386,6 +443,135 @@ func WritePretrainedBERTRetrievalVectorExportSummaryFile(path string, summary Pr
 		return err
 	}
 	return os.WriteFile(path, data, 0o644)
+}
+
+type pretrainedBERTRetrievalEmbeddingSpaceIdentity struct {
+	EmbeddingSpaceID                  string `json:"-"`
+	Schema                            string `json:"schema"`
+	ExecutionMode                     string `json:"execution_mode"`
+	ModelName                         string `json:"model_name,omitempty"`
+	Architecture                      string `json:"architecture,omitempty"`
+	ModelType                         string `json:"model_type,omitempty"`
+	ModuleSHA256                      string `json:"module_sha256"`
+	WeightsSHA256                     string `json:"weights_sha256"`
+	ConfigSHA256                      string `json:"config_sha256"`
+	VocabSHA256                       string `json:"vocab_sha256"`
+	TokenizerJSONSHA256               string `json:"tokenizer_json_sha256,omitempty"`
+	TokenizerConfigSHA256             string `json:"tokenizer_config_sha256,omitempty"`
+	SpecialTokensMapSHA256            string `json:"special_tokens_map_sha256,omitempty"`
+	SentenceTransformersPoolingSHA256 string `json:"sentence_transformers_pooling_sha256,omitempty"`
+	SentenceTransformersConfigSHA256  string `json:"sentence_transformers_config_sha256,omitempty"`
+	Pooling                           string `json:"pooling,omitempty"`
+	Normalization                     string `json:"normalization,omitempty"`
+	MaxLength                         int    `json:"max_length"`
+	OutputDim                         int    `json:"output_dim"`
+	QueryPrefix                       string `json:"query_prefix"`
+	DocumentPrefix                    string `json:"document_prefix"`
+	QueryRoleApplied                  bool   `json:"query_role_applied"`
+	DocumentRoleApplied               bool   `json:"document_role_applied"`
+}
+
+func buildPretrainedBERTRetrievalEmbeddingSpaceIdentity(cfg PretrainedBERTRetrievalVectorExportConfig, embedder *PretrainedBERTTextEmbedder) (pretrainedBERTRetrievalEmbeddingSpaceIdentity, error) {
+	identity := pretrainedBERTRetrievalEmbeddingSpaceIdentity{
+		Schema:              PretrainedBERTRetrievalVectorExportManifestSchema,
+		ExecutionMode:       "pretrained_bert_host_reference",
+		ModelName:           embedder.modelName,
+		Architecture:        embedder.architecture,
+		ModelType:           embedder.config.ModelType,
+		Pooling:             embedder.Pooling(),
+		Normalization:       embedder.Normalization(),
+		MaxLength:           embedder.MaxLength(),
+		OutputDim:           embedder.config.HiddenSize,
+		QueryPrefix:         cfg.QueryPrefix,
+		DocumentPrefix:      cfg.DocumentPrefix,
+		QueryRoleApplied:    cfg.QueryPrefix != "",
+		DocumentRoleApplied: cfg.DocumentPrefix != "",
+	}
+	var err error
+	if identity.ModuleSHA256, err = sha256FileHex(cfg.ModulePath); err != nil {
+		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("hash module: %w", err)
+	}
+	if identity.WeightsSHA256, err = sha256FileHex(cfg.WeightsPath); err != nil {
+		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("hash weights: %w", err)
+	}
+	if identity.ConfigSHA256, err = sha256FileHex(filepath.Join(cfg.SourceDir, "config.json")); err != nil {
+		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("hash config.json: %w", err)
+	}
+	if identity.VocabSHA256, err = sha256FileHex(filepath.Join(cfg.SourceDir, "vocab.txt")); err != nil {
+		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("hash vocab.txt: %w", err)
+	}
+	if identity.TokenizerJSONSHA256, err = optionalSHA256FileHex(filepath.Join(cfg.SourceDir, "tokenizer.json")); err != nil {
+		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
+	}
+	if identity.TokenizerConfigSHA256, err = optionalSHA256FileHex(filepath.Join(cfg.SourceDir, "tokenizer_config.json")); err != nil {
+		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
+	}
+	if identity.SpecialTokensMapSHA256, err = optionalSHA256FileHex(filepath.Join(cfg.SourceDir, "special_tokens_map.json")); err != nil {
+		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
+	}
+	if identity.SentenceTransformersPoolingSHA256, err = optionalSHA256FileHex(filepath.Join(cfg.SourceDir, "1_Pooling", "config.json")); err != nil {
+		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
+	}
+	if identity.SentenceTransformersConfigSHA256, err = optionalSHA256FileHex(filepath.Join(cfg.SourceDir, "sentence_bert_config.json")); err != nil {
+		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
+	}
+	data, err := json.Marshal(identity)
+	if err != nil {
+		return pretrainedBERTRetrievalEmbeddingSpaceIdentity{}, err
+	}
+	sum := sha256.Sum256(data)
+	identity.EmbeddingSpaceID = hex.EncodeToString(sum[:])
+	return identity, nil
+}
+
+func validatePretrainedBERTRetrievalVectorExportResumeManifest(cfg PretrainedBERTRetrievalVectorExportConfig, embeddingSpaceID string) error {
+	if !cfg.Resume {
+		return nil
+	}
+	data, err := os.ReadFile(cfg.ManifestJSONPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var manifest PretrainedBERTRetrievalVectorExportSummary
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("parse resume manifest %s: %w", cfg.ManifestJSONPath, err)
+	}
+	// Legacy manifests predate embedding_space_id. Keep compatibility for
+	// already-started partial caches and rely on row ID/dimension prefix checks.
+	if manifest.EmbeddingSpaceID == "" {
+		return nil
+	}
+	if manifest.EmbeddingSpaceID != embeddingSpaceID {
+		return fmt.Errorf("resume manifest %s embedding_space_id %q does not match current embedding space %q", cfg.ManifestJSONPath, manifest.EmbeddingSpaceID, embeddingSpaceID)
+	}
+	return nil
+}
+
+func sha256FileHex(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func optionalSHA256FileHex(path string) (string, error) {
+	value, err := sha256FileHex(path)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("hash optional file %s: %w", path, err)
+	}
+	return value, nil
 }
 
 func normalizePretrainedBERTRetrievalVectorExportConfig(cfg PretrainedBERTRetrievalVectorExportConfig) PretrainedBERTRetrievalVectorExportConfig {

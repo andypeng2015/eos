@@ -84,6 +84,14 @@ func TestPretrainedBERTRetrievalVectorExportWritesEvaluatorCompatibleCaches(t *t
 	if !manifest.DocumentRoleApplied || !manifest.QueryRoleApplied {
 		t.Fatalf("manifest role flags = doc:%v query:%v, want true/true", manifest.DocumentRoleApplied, manifest.QueryRoleApplied)
 	}
+	if !isSHA256Hex(manifest.EmbeddingSpaceID) || !isSHA256Hex(manifest.ModuleSHA256) || !isSHA256Hex(manifest.WeightsSHA256) ||
+		!isSHA256Hex(manifest.ConfigSHA256) || !isSHA256Hex(manifest.VocabSHA256) || !isSHA256Hex(manifest.TokenizerConfigSHA256) {
+		t.Fatalf("manifest provenance hashes = embedding:%q module:%q weights:%q config:%q vocab:%q tokenizer_config:%q",
+			manifest.EmbeddingSpaceID, manifest.ModuleSHA256, manifest.WeightsSHA256, manifest.ConfigSHA256, manifest.VocabSHA256, manifest.TokenizerConfigSHA256)
+	}
+	if manifest.Normalization != "l2" {
+		t.Fatalf("manifest normalization = %q, want l2", manifest.Normalization)
+	}
 	var manifestJSON map[string]any
 	if err := json.Unmarshal(manifestData, &manifestJSON); err != nil {
 		t.Fatalf("parse manifest json object: %v", err)
@@ -161,6 +169,41 @@ func TestPretrainedBERTRetrievalVectorExportUsesSentenceTransformersMetadataDefa
 	}
 	if override.Pooling != "cls" {
 		t.Fatalf("override pooling = %q, want cls", override.Pooling)
+	}
+}
+
+func TestPretrainedBERTRetrievalVectorExportEmbeddingSpaceIDIsStable(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixtureWithST(t, "cls", 3)
+	datasetDir := writeTinyPretrainedBERTBEIRFixture(t)
+	rt := New(cuda.New())
+
+	export := func(outputDir string) PretrainedBERTRetrievalVectorExportSummary {
+		t.Helper()
+		summary, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+			DatasetName:    "tiny-bert",
+			DatasetDir:     datasetDir,
+			OutputDir:      outputDir,
+			SourceDir:      sourceDir,
+			ModulePath:     modulePath,
+			WeightsPath:    weightsPath,
+			QueryPrefix:    "query ",
+			DocumentPrefix: "doc ",
+			BatchSize:      1,
+			Runtime:        rt,
+		})
+		if err != nil {
+			t.Fatalf("export pretrained BERT retrieval vectors: %v", err)
+		}
+		return summary
+	}
+
+	first := export(filepath.Join(t.TempDir(), "vectors-a"))
+	second := export(filepath.Join(t.TempDir(), "vectors-b"))
+	if first.EmbeddingSpaceID == "" || first.EmbeddingSpaceID != second.EmbeddingSpaceID {
+		t.Fatalf("embedding space ids = %q and %q, want stable non-empty match", first.EmbeddingSpaceID, second.EmbeddingSpaceID)
+	}
+	if !isSHA256Hex(first.SentenceTransformersPoolingSHA256) || !isSHA256Hex(first.SentenceTransformersConfigSHA256) {
+		t.Fatalf("sentence-transformers hashes = pooling:%q config:%q", first.SentenceTransformersPoolingSHA256, first.SentenceTransformersConfigSHA256)
 	}
 }
 
@@ -250,6 +293,55 @@ func TestPretrainedBERTRetrievalVectorExportResumeAppendsPartialCaches(t *testin
 	}
 	if !manifest.Resume || manifest.ReusedDocuments != 1 || manifest.ReusedQueries != 1 || manifest.WrittenDocuments != 2 || manifest.WrittenQueries != 2 {
 		t.Fatalf("manifest resume counters = %+v", manifest)
+	}
+}
+
+func TestPretrainedBERTRetrievalVectorExportResumeRejectsEmbeddingSpaceMismatchBeforeAppend(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	datasetDir := writeTinyPretrainedBERTBEIRFixtureN(t, 2)
+	rt := New(cuda.New())
+	outputDir := filepath.Join(t.TempDir(), "vectors")
+	seed, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName:    "tiny-bert",
+		DatasetDir:     datasetDir,
+		OutputDir:      outputDir,
+		SourceDir:      sourceDir,
+		ModulePath:     modulePath,
+		WeightsPath:    weightsPath,
+		QueryPrefix:    "query ",
+		DocumentPrefix: "doc ",
+		BatchSize:      1,
+		MaxLength:      4,
+		Runtime:        rt,
+	})
+	if err != nil {
+		t.Fatalf("seed export: %v", err)
+	}
+	beforeDocs := fileSize(t, seed.DocVectorPath)
+	beforeQueries := fileSize(t, seed.QueryVectorPath)
+
+	_, err = ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName:    "tiny-bert",
+		DatasetDir:     datasetDir,
+		OutputDir:      outputDir,
+		SourceDir:      sourceDir,
+		ModulePath:     modulePath,
+		WeightsPath:    weightsPath,
+		QueryPrefix:    "changed query ",
+		DocumentPrefix: "doc ",
+		BatchSize:      1,
+		MaxLength:      4,
+		Runtime:        rt,
+		Resume:         true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "embedding_space_id") {
+		t.Fatalf("err = %v, want embedding_space_id mismatch", err)
+	}
+	if got := fileSize(t, seed.DocVectorPath); got != beforeDocs {
+		t.Fatalf("doc vector size changed after rejected resume: got %d want %d", got, beforeDocs)
+	}
+	if got := fileSize(t, seed.QueryVectorPath); got != beforeQueries {
+		t.Fatalf("query vector size changed after rejected resume: got %d want %d", got, beforeQueries)
 	}
 }
 
@@ -584,6 +676,27 @@ func rowIDs(rows []retrievalVectorExportRow) []string {
 		out[i] = row.ID
 	}
 	return out
+}
+
+func isSHA256Hex(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, ch := range value {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func fileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info.Size()
 }
 
 func assertFiniteUnitishVector(t *testing.T, vector []float32, dim int) {
