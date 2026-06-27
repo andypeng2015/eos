@@ -2,6 +2,7 @@ package backend
 
 import (
 	"math"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -50,6 +51,51 @@ func TestBERTEncoderLayerReferenceMaskAllKeysProducesZeroContext(t *testing.T) {
 	for i, value := range out.F32 {
 		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
 			t.Fatalf("out[%d] = %v, want finite", i, value)
+		}
+	}
+}
+
+func TestBERTSelfAttentionContextParallelMatchesSerial(t *testing.T) {
+	const (
+		batch  = 2
+		tokens = 17
+		hidden = 8
+		heads  = 2
+	)
+	headDim := hidden / heads
+	values := func(name string) []float32 {
+		out := make([]float32, batch*tokens*hidden)
+		offset := len(name) * 11
+		for i := range out {
+			out[i] = benchmarkValue(i+offset, 37, 0.07)
+		}
+		return out
+	}
+	mask := make([]int32, batch*tokens)
+	for b := 0; b < batch; b++ {
+		for i := 0; i < tokens; i++ {
+			if i%5 != 3 {
+				mask[b*tokens+i] = 1
+			}
+		}
+	}
+
+	q := values("query")
+	k := values("key")
+	v := values("value")
+	want := make([]float32, batch*tokens*hidden)
+	bertSelfAttentionContextSerial(want, q, k, v, mask, batch, tokens, hidden, heads, headDim)
+
+	oldProcs := runtime.GOMAXPROCS(4)
+	defer runtime.GOMAXPROCS(oldProcs)
+	got := bertSelfAttentionContext(q, k, v, mask, batch, tokens, hidden, heads, headDim)
+
+	if len(got) != len(want) {
+		t.Fatalf("context values = %d, want %d", len(got), len(want))
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("context[%d] = %.9g, want %.9g", i, got[i], want[i])
 		}
 	}
 }

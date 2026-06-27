@@ -162,17 +162,68 @@ func BERTEncoderLayerReference(
 	q := denseHF(hiddenStates.F32, rows, hidden, queryWeight, queryBias)
 	k := denseHF(hiddenStates.F32, rows, hidden, keyWeight, keyBias)
 	v := denseHF(hiddenStates.F32, rows, hidden, valueWeight, valueBias)
-	context := make([]float32, rows*hidden)
+	context := bertSelfAttentionContext(q, k, v, attentionMask.I32, batch, tokens, hidden, numAttentionHeads, headDim)
+
+	attentionProjected := denseHF(context, rows, hidden, attentionOutputWeight, attentionOutputBias)
+	attentionNormInput := make([]float32, rows*hidden)
+	for i := range attentionNormInput {
+		attentionNormInput[i] = attentionProjected[i] + hiddenStates.F32[i]
+	}
+	attentionLayer := layerNormAffine(attentionNormInput, rows, hidden, attentionLayerNormWeight, attentionLayerNormBias, epsilon)
+
+	intermediateValues := denseHF(attentionLayer, rows, hidden, intermediateWeight, intermediateBias)
+	for i, value := range intermediateValues {
+		intermediateValues[i] = exactGELU(value)
+	}
+	outputProjected := denseHF(intermediateValues, rows, intermediate, outputWeight, outputBias)
+	outputNormInput := make([]float32, rows*hidden)
+	for i := range outputNormInput {
+		outputNormInput[i] = outputProjected[i] + attentionLayer[i]
+	}
+	out := NewTensorF32(hiddenStates.Shape, layerNormAffine(outputNormInput, rows, hidden, outputLayerNormWeight, outputLayerNormBias, epsilon))
+	return out, nil
+}
+
+func bertSelfAttentionContext(q, k, v []float32, attentionMask []int32, batch, tokens, hidden, heads, headDim int) []float32 {
+	context := make([]float32, batch*tokens*hidden)
+	jobs := batch * tokens * heads
+	workers := runtime.GOMAXPROCS(0)
+	if workers <= 1 || jobs < 64 || tokens < 16 {
+		bertSelfAttentionContextSerial(context, q, k, v, attentionMask, batch, tokens, hidden, heads, headDim)
+		return context
+	}
+	if workers > jobs {
+		workers = jobs
+	}
+	chunk := (jobs + workers - 1) / workers
+	var wg sync.WaitGroup
+	for jobStart := 0; jobStart < jobs; jobStart += chunk {
+		jobEnd := jobStart + chunk
+		if jobEnd > jobs {
+			jobEnd = jobs
+		}
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			logits := make([]float64, tokens)
+			bertSelfAttentionContextRange(context, q, k, v, attentionMask, start, end, tokens, hidden, heads, headDim, logits)
+		}(jobStart, jobEnd)
+	}
+	wg.Wait()
+	return context
+}
+
+func bertSelfAttentionContextSerial(context, q, k, v []float32, attentionMask []int32, batch, tokens, hidden, heads, headDim int) {
 	scale := 1 / math.Sqrt(float64(headDim))
 	logits := make([]float64, tokens)
 	for b := 0; b < batch; b++ {
 		for i := 0; i < tokens; i++ {
 			queryRow := b*tokens + i
-			for head := 0; head < numAttentionHeads; head++ {
+			for head := 0; head < heads; head++ {
 				activeKeys := 0
 				maxLogit := math.Inf(-1)
 				for j := 0; j < tokens; j++ {
-					if attentionMask.I32[b*tokens+j] == 0 {
+					if attentionMask[b*tokens+j] == 0 {
 						continue
 					}
 					activeKeys++
@@ -193,7 +244,7 @@ func BERTEncoderLayerReference(
 				}
 				sumExp := 0.0
 				for j := 0; j < tokens; j++ {
-					if attentionMask.I32[b*tokens+j] == 0 {
+					if attentionMask[b*tokens+j] == 0 {
 						continue
 					}
 					ev := math.Exp(logits[j] - maxLogit)
@@ -201,7 +252,7 @@ func BERTEncoderLayerReference(
 					sumExp += ev
 				}
 				for j := 0; j < tokens; j++ {
-					if attentionMask.I32[b*tokens+j] == 0 {
+					if attentionMask[b*tokens+j] == 0 {
 						continue
 					}
 					prob := logits[j] / sumExp
@@ -214,25 +265,61 @@ func BERTEncoderLayerReference(
 			}
 		}
 	}
+}
 
-	attentionProjected := denseHF(context, rows, hidden, attentionOutputWeight, attentionOutputBias)
-	attentionNormInput := make([]float32, rows*hidden)
-	for i := range attentionNormInput {
-		attentionNormInput[i] = attentionProjected[i] + hiddenStates.F32[i]
-	}
-	attentionLayer := layerNormAffine(attentionNormInput, rows, hidden, attentionLayerNormWeight, attentionLayerNormBias, epsilon)
+func bertSelfAttentionContextRange(context, q, k, v []float32, attentionMask []int32, jobStart, jobEnd, tokens, hidden, heads, headDim int, logits []float64) {
+	scale := 1 / math.Sqrt(float64(headDim))
+	for job := jobStart; job < jobEnd; job++ {
+		head := job % heads
+		queryIndex := job / heads
+		batch := queryIndex / tokens
+		queryToken := queryIndex % tokens
+		queryRow := batch*tokens + queryToken
 
-	intermediateValues := denseHF(attentionLayer, rows, hidden, intermediateWeight, intermediateBias)
-	for i, value := range intermediateValues {
-		intermediateValues[i] = exactGELU(value)
+		activeKeys := 0
+		maxLogit := math.Inf(-1)
+		for keyToken := 0; keyToken < tokens; keyToken++ {
+			if attentionMask[batch*tokens+keyToken] == 0 {
+				continue
+			}
+			activeKeys++
+			keyRow := batch*tokens + keyToken
+			dot := 0.0
+			for d := 0; d < headDim; d++ {
+				idx := head*headDim + d
+				dot += float64(q[queryRow*hidden+idx]) * float64(k[keyRow*hidden+idx])
+			}
+			logit := dot * scale
+			logits[keyToken] = logit
+			if logit > maxLogit {
+				maxLogit = logit
+			}
+		}
+		if activeKeys == 0 {
+			continue
+		}
+
+		sumExp := 0.0
+		for keyToken := 0; keyToken < tokens; keyToken++ {
+			if attentionMask[batch*tokens+keyToken] == 0 {
+				continue
+			}
+			ev := math.Exp(logits[keyToken] - maxLogit)
+			logits[keyToken] = ev
+			sumExp += ev
+		}
+		for keyToken := 0; keyToken < tokens; keyToken++ {
+			if attentionMask[batch*tokens+keyToken] == 0 {
+				continue
+			}
+			prob := logits[keyToken] / sumExp
+			valueRow := batch*tokens + keyToken
+			for d := 0; d < headDim; d++ {
+				idx := head*headDim + d
+				context[queryRow*hidden+idx] += float32(prob * float64(v[valueRow*hidden+idx]))
+			}
+		}
 	}
-	outputProjected := denseHF(intermediateValues, rows, intermediate, outputWeight, outputBias)
-	outputNormInput := make([]float32, rows*hidden)
-	for i := range outputNormInput {
-		outputNormInput[i] = outputProjected[i] + attentionLayer[i]
-	}
-	out := NewTensorF32(hiddenStates.Shape, layerNormAffine(outputNormInput, rows, hidden, outputLayerNormWeight, outputLayerNormBias, epsilon))
-	return out, nil
 }
 
 func validateBERTDenseParam(name string, weight, bias *Tensor, in, out int) error {

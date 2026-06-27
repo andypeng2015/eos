@@ -3,9 +3,23 @@ package backend
 import "testing"
 
 func BenchmarkBERTEncoderLayerReferenceBGE128Batch1(b *testing.B) {
+	benchmarkBERTEncoderLayerReferenceBGE(b, 1, 128)
+}
+
+func BenchmarkBERTEncoderLayerReferenceBGE128Batch16(b *testing.B) {
+	benchmarkBERTEncoderLayerReferenceBGE(b, 16, 128)
+}
+
+func BenchmarkBERTEncoderLayerReferenceBGE512Batch1(b *testing.B) {
+	benchmarkBERTEncoderLayerReferenceBGE(b, 1, 512)
+}
+
+func BenchmarkBERTEncoderLayerReferenceBGE512Batch16(b *testing.B) {
+	benchmarkBERTEncoderLayerReferenceBGE(b, 16, 512)
+}
+
+func benchmarkBERTEncoderLayerReferenceBGE(b *testing.B, batch, tokens int) {
 	const (
-		batch  = 1
-		tokens = 128
 		hidden = 384
 		heads  = 12
 		ffn    = 1536
