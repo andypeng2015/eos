@@ -55,7 +55,7 @@ func (rt *Runtime) tryLoadSealedEmbeddingPackage(ctx context.Context, path strin
 	}
 	opts := pkg.Weights.LoadOptions()
 	if pkg.PackageManifest != nil {
-		if err := rejectResearchOnlyScoreSpectrumEmbeddingPackage(*pkg.PackageManifest); err != nil {
+		if err := rejectResearchOnlyRestrictedEmbeddingPackage(*pkg.PackageManifest); err != nil {
 			return nil, true, err
 		}
 		opts = append(opts, WithPackageManifest(*pkg.PackageManifest))
@@ -84,7 +84,7 @@ func (rt *Runtime) LoadEmbeddingPackageWithPaths(ctx context.Context, paths Embe
 			if err != nil {
 				return nil, err
 			}
-			if err := rejectResearchOnlyScoreSpectrumEmbeddingPackage(packageManifest); err != nil {
+			if err := rejectResearchOnlyRestrictedEmbeddingPackage(packageManifest); err != nil {
 				return nil, err
 			}
 			verifyPaths := map[string]string{
@@ -141,9 +141,12 @@ func (rt *Runtime) LoadEmbeddingPackageWithPaths(ctx context.Context, paths Embe
 	return model, nil
 }
 
-func rejectResearchOnlyScoreSpectrumEmbeddingPackage(packageManifest PackageManifest) error {
+func rejectResearchOnlyRestrictedEmbeddingPackage(packageManifest PackageManifest) error {
 	if packageManifest.Kind == PackageEmbedding && packageManifest.ScoreSpectrum.ScoreSpectrumResearchOnly {
 		return fmt.Errorf("embedding package was trained with research-only score-spectrum data; use training package load for continued research training")
+	}
+	if packageManifest.Kind == PackageEmbedding && packageManifest.ListwiseGeometry.ListwiseGeometryResearchOnly {
+		return fmt.Errorf("embedding package was trained with research-only listwise geometry data; use training package load for continued research training")
 	}
 	return nil
 }

@@ -73,6 +73,15 @@ func TestPackageManifestRoundTripAndVerify(t *testing.T) {
 			"turboquant_prefix_seed",
 		},
 	}
+	manifest.ListwiseGeometry = EmbeddingListwiseGeometryPolicy{
+		ListwiseGeometryTrain:        true,
+		ListwiseGeometryResearchOnly: true,
+		TrainAllowedForResearch:      true,
+		ReleaseTrainAllowed:          false,
+		CommercialUseAllowed:         false,
+		SourceArtifactHashes:         []string{"lg-hash-b", "lg-hash-a"},
+		ListwiseGeometryBatchCount:   5,
+	}
 	path := filepath.Join(dir, "tiny_embed.package.mll")
 	if err := manifest.WriteFile(path); err != nil {
 		t.Fatalf("write package manifest: %v", err)
@@ -101,6 +110,12 @@ func TestPackageManifestRoundTripAndVerify(t *testing.T) {
 	if len(loaded.ScoreSpectrum.IsolatedInheritedObjectives) != 2 || loaded.ScoreSpectrum.IsolatedInheritedObjectives[0] != "turboquant_compact_objectives" || loaded.ScoreSpectrum.IsolatedInheritedObjectives[1] != "turboquant_prefix_seed" {
 		t.Fatalf("isolated inherited objectives = %v", loaded.ScoreSpectrum.IsolatedInheritedObjectives)
 	}
+	if !loaded.ListwiseGeometry.ListwiseGeometryResearchOnly || !loaded.ListwiseGeometry.TrainAllowedForResearch || loaded.ListwiseGeometry.ReleaseTrainAllowed || loaded.ListwiseGeometry.CommercialUseAllowed {
+		t.Fatalf("listwise geometry policy mismatch: %+v", loaded.ListwiseGeometry)
+	}
+	if loaded.ListwiseGeometry.ListwiseGeometryBatchCount != 5 || len(loaded.ListwiseGeometry.SourceArtifactHashes) != 2 || loaded.ListwiseGeometry.SourceArtifactHashes[0] != "lg-hash-a" || loaded.ListwiseGeometry.SourceArtifactHashes[1] != "lg-hash-b" {
+		t.Fatalf("listwise geometry provenance mismatch: %+v", loaded.ListwiseGeometry)
+	}
 	if err := os.WriteFile(weightPath, []byte("tampered\n"), 0o644); err != nil {
 		t.Fatalf("tamper weights: %v", err)
 	}
@@ -111,6 +126,57 @@ func TestPackageManifestRoundTripAndVerify(t *testing.T) {
 		"memory_plan":        memoryPlanPath,
 	}); err == nil {
 		t.Fatal("expected verify failure after tampering")
+	}
+}
+
+func TestLoadEmbeddingPackageRejectsResearchOnlyListwiseGeometryPackage(t *testing.T) {
+	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
+	trainer.SetListwiseGeometryLineage(EmbeddingListwiseGeometryPolicy{
+		ListwiseGeometryTrain:        true,
+		ListwiseGeometryResearchOnly: true,
+		TrainAllowedForResearch:      true,
+		ReleaseTrainAllowed:          false,
+		CommercialUseAllowed:         false,
+		SourceArtifactHashes:         []string{"research-listwise-source"},
+		ListwiseGeometryBatchCount:   2,
+	})
+	packagePath := filepath.Join(t.TempDir(), "tiny_train_embed_q8.mll")
+	if _, err := trainer.WriteEmbeddingPackage(packagePath); err != nil {
+		t.Fatalf("write embedding package: %v", err)
+	}
+	rt := New(cuda.New(), metal.New())
+	_, err := rt.LoadEmbeddingPackage(context.Background(), packagePath)
+	if err == nil || !strings.Contains(err.Error(), "research-only listwise geometry") {
+		t.Fatalf("load embedding package error = %v, want research-only listwise geometry guard", err)
+	}
+}
+
+func TestLoadEmbeddingPackageRejectsSealedResearchOnlyListwiseGeometryPackage(t *testing.T) {
+	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
+	trainer.SetListwiseGeometryLineage(EmbeddingListwiseGeometryPolicy{
+		ListwiseGeometryTrain:        true,
+		ListwiseGeometryResearchOnly: true,
+		TrainAllowedForResearch:      true,
+		ReleaseTrainAllowed:          false,
+		CommercialUseAllowed:         false,
+		SourceArtifactHashes:         []string{"research-listwise-source"},
+		ListwiseGeometryBatchCount:   2,
+	})
+	packagePath := filepath.Join(t.TempDir(), "tiny_train_embed_q8.mll")
+	if _, err := trainer.WriteEmbeddingPackage(packagePath); err != nil {
+		t.Fatalf("write embedding package: %v", err)
+	}
+	sealedPath, err := ExportPackageToMLL(packagePath, "")
+	if err != nil {
+		t.Fatalf("export sealed package: %v", err)
+	}
+
+	rt := New(cuda.New(), metal.New())
+	if _, err := rt.LoadEmbeddingPackage(context.Background(), sealedPath); err == nil || !strings.Contains(err.Error(), "research-only listwise geometry") {
+		t.Fatalf("load sealed embedding package error = %v, want research-only listwise geometry guard", err)
+	}
+	if _, err := rt.LoadSealedEmbeddingPackage(context.Background(), sealedPath); err == nil || !strings.Contains(err.Error(), "research-only listwise geometry") {
+		t.Fatalf("direct sealed embedding load error = %v, want research-only listwise geometry guard", err)
 	}
 }
 
@@ -420,5 +486,37 @@ func TestLoadEmbeddingTrainerPackageAllowsResearchOnlyScoreSpectrumPackage(t *te
 	}
 	if !manifest.ScoreSpectrum.ScoreSpectrumResearchOnly || manifest.ScoreSpectrum.ScoreSpectrumRowCount != 2 {
 		t.Fatalf("score-spectrum lineage was not preserved: %+v", manifest.ScoreSpectrum)
+	}
+}
+
+func TestLoadEmbeddingTrainerPackageAllowsResearchOnlyListwiseGeometryPackage(t *testing.T) {
+	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
+	trainer.SetListwiseGeometryLineage(EmbeddingListwiseGeometryPolicy{
+		ListwiseGeometryTrain:        true,
+		ListwiseGeometryResearchOnly: true,
+		TrainAllowedForResearch:      true,
+		ReleaseTrainAllowed:          false,
+		CommercialUseAllowed:         false,
+		SourceArtifactHashes:         []string{"research-listwise-source"},
+		ListwiseGeometryBatchCount:   2,
+	})
+	packagePath := filepath.Join(t.TempDir(), "tiny_train_embed_q8.mll")
+	if _, err := trainer.WriteTrainingPackage(packagePath); err != nil {
+		t.Fatalf("write training package: %v", err)
+	}
+	reloaded, err := LoadEmbeddingTrainerPackage(packagePath)
+	if err != nil {
+		t.Fatalf("load trainer package: %v", err)
+	}
+	paths, err := reloaded.WriteTrainingPackage(packagePath)
+	if err != nil {
+		t.Fatalf("rewrite training package: %v", err)
+	}
+	manifest, err := ReadPackageManifestFile(paths.PackageManifestPath)
+	if err != nil {
+		t.Fatalf("read rewritten package manifest: %v", err)
+	}
+	if !manifest.ListwiseGeometry.ListwiseGeometryResearchOnly || manifest.ListwiseGeometry.ListwiseGeometryBatchCount != 2 {
+		t.Fatalf("listwise geometry lineage was not preserved: %+v", manifest.ListwiseGeometry)
 	}
 }

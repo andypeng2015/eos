@@ -66,6 +66,9 @@ func TrainEmbeddingPackageFromContrastiveFiles(artifactPath, trainPath, evalPath
 		}
 		return summary, paths, nil
 	}
+	if cfg.ListwiseGeometryTrain {
+		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("listwise geometry training requires text tokenization; remove --no-tokenizer or set --tokenizer")
+	}
 	if cfg.HardNegativeTrain {
 		var trainSet []EmbeddingHardNegativeExample
 		if !cfg.EvalOnly {
@@ -232,6 +235,40 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(artifactPath, tokenizerPath, 
 			}
 		}
 		summary, err := trainer.FitScoreSpectrum(trainSet, evalPairs, cfg)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+		}
+		paths, err := trainer.WriteTrainingPackage(artifactPath)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+		}
+		return summary, paths, nil
+	}
+	if cfg.ListwiseGeometryTrain {
+		var trainSet []EmbeddingTokenizedListwiseGeometryBatch
+		if !cfg.EvalOnly {
+			trainText, err := ReadEmbeddingListwiseGeometryBatchesFile(trainPath)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read train listwise geometry dataset: %w", err)
+			}
+			trainSet, err = TokenizeEmbeddingListwiseGeometryBatches(trainText, tokenizer)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize train listwise geometry dataset: %w", err)
+			}
+			trainer.SetListwiseGeometryLineage(ListwiseGeometryPolicyFromBatches(trainSet))
+		}
+		var evalPairs []EmbeddingPairExample
+		if evalPath != "" {
+			evalText, err := ReadEmbeddingTextPairExamplesFile(evalPath)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read eval text pair dataset: %w", err)
+			}
+			evalPairs, err = tokenizeEmbeddingTextPairExamples(evalText, tokenizer, tokenCache, false)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize eval pair dataset: %w", err)
+			}
+		}
+		summary, err := trainer.FitListwiseGeometry(trainSet, evalPairs, cfg)
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 		}
@@ -497,6 +534,39 @@ func ScoreSpectrumPolicyFromExamples(examples []EmbeddingScoreSpectrumExample) E
 		}
 		if example.TrainAllowedForResearch && (!example.ReleaseTrainAllowed || !example.CommercialUseAllowed) {
 			policy.ScoreSpectrumResearchOnly = true
+		}
+	}
+	policy.SourceArtifactHashes = make([]string, 0, len(hashes))
+	for hash := range hashes {
+		policy.SourceArtifactHashes = append(policy.SourceArtifactHashes, hash)
+	}
+	sort.Strings(policy.SourceArtifactHashes)
+	return policy
+}
+
+func ListwiseGeometryPolicyFromBatches(batches []EmbeddingTokenizedListwiseGeometryBatch) EmbeddingListwiseGeometryPolicy {
+	policy := EmbeddingListwiseGeometryPolicy{
+		ListwiseGeometryTrain:      len(batches) > 0,
+		ReleaseTrainAllowed:        len(batches) > 0,
+		CommercialUseAllowed:       len(batches) > 0,
+		ListwiseGeometryBatchCount: len(batches),
+	}
+	hashes := map[string]bool{}
+	for _, batch := range batches {
+		if strings.TrimSpace(batch.SourceArtifactHash) != "" {
+			hashes[strings.TrimSpace(batch.SourceArtifactHash)] = true
+		}
+		if batch.TrainAllowedForResearch {
+			policy.TrainAllowedForResearch = true
+		}
+		if !batch.ReleaseTrainAllowed {
+			policy.ReleaseTrainAllowed = false
+		}
+		if !batch.CommercialUseAllowed {
+			policy.CommercialUseAllowed = false
+		}
+		if batch.TrainAllowedForResearch && (!batch.ReleaseTrainAllowed || !batch.CommercialUseAllowed) {
+			policy.ListwiseGeometryResearchOnly = true
 		}
 	}
 	policy.SourceArtifactHashes = make([]string, 0, len(hashes))

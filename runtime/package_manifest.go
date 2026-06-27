@@ -34,12 +34,13 @@ type PackageManifestFile struct {
 }
 
 type PackageManifest struct {
-	Version         string                       `json:"version"`
-	Kind            PackageKind                  `json:"kind"`
-	ModuleName      string                       `json:"module_name"`
-	ArtifactVersion string                       `json:"artifact_version"`
-	Files           []PackageManifestFile        `json:"files"`
-	ScoreSpectrum   EmbeddingScoreSpectrumPolicy `json:"score_spectrum,omitempty"`
+	Version          string                          `json:"version"`
+	Kind             PackageKind                     `json:"kind"`
+	ModuleName       string                          `json:"module_name"`
+	ArtifactVersion  string                          `json:"artifact_version"`
+	Files            []PackageManifestFile           `json:"files"`
+	ScoreSpectrum    EmbeddingScoreSpectrumPolicy    `json:"score_spectrum,omitempty"`
+	ListwiseGeometry EmbeddingListwiseGeometryPolicy `json:"listwise_geometry,omitempty"`
 }
 
 func DefaultPackageManifestPath(artifactPath string) string {
@@ -144,6 +145,12 @@ func encodePackageManifestMLL(manifest PackageManifest) ([]byte, error) {
 			headIntMeta(strg, "score_spectrum_row_count", int64(manifest.ScoreSpectrum.ScoreSpectrumRowCount)),
 			headStringMeta(strg, "auto_cleared_objectives", formatScoreSpectrumObjectiveNames(manifest.ScoreSpectrum.AutoClearedObjectives)),
 			headStringMeta(strg, "isolated_inherited_objectives", formatScoreSpectrumObjectiveNames(manifest.ScoreSpectrum.IsolatedInheritedObjectives)),
+			headBoolMeta(strg, "listwise_geometry_research_only", manifest.ListwiseGeometry.ListwiseGeometryResearchOnly),
+			headBoolMeta(strg, "listwise_geometry_train_allowed_for_research", manifest.ListwiseGeometry.TrainAllowedForResearch),
+			headBoolMeta(strg, "listwise_geometry_release_train_allowed", manifest.ListwiseGeometry.ReleaseTrainAllowed),
+			headBoolMeta(strg, "listwise_geometry_commercial_use_allowed", manifest.ListwiseGeometry.CommercialUseAllowed),
+			headStringMeta(strg, "listwise_geometry_source_artifact_hashes", formatScoreSpectrumSourceHashes(manifest.ListwiseGeometry.SourceArtifactHashes)),
+			headIntMeta(strg, "listwise_geometry_batch_count", int64(manifest.ListwiseGeometry.ListwiseGeometryBatchCount)),
 		},
 	}
 
@@ -405,6 +412,30 @@ func decodePackageManifestMLL(data []byte) (PackageManifest, error) {
 		scorePolicy.IsolatedInheritedObjectives = parseScoreSpectrumObjectiveNames(value)
 	}
 	scorePolicy.ScoreSpectrumTrain = scorePolicy.ScoreSpectrumResearchOnly || scorePolicy.TrainAllowedForResearch || scorePolicy.ReleaseTrainAllowed || scorePolicy.CommercialUseAllowed || scorePolicy.ScoreSpectrumRowCount > 0 || len(scorePolicy.SourceArtifactHashes) > 0 || len(scorePolicy.AutoClearedObjectives) > 0 || len(scorePolicy.IsolatedInheritedObjectives) > 0
+	listwisePolicy := EmbeddingListwiseGeometryPolicy{}
+	if listwisePolicy.ListwiseGeometryResearchOnly, err = readOptionalBool("listwise_geometry_research_only"); err != nil {
+		return PackageManifest{}, err
+	}
+	if listwisePolicy.TrainAllowedForResearch, err = readOptionalBool("listwise_geometry_train_allowed_for_research"); err != nil {
+		return PackageManifest{}, err
+	}
+	if listwisePolicy.ReleaseTrainAllowed, err = readOptionalBool("listwise_geometry_release_train_allowed"); err != nil {
+		return PackageManifest{}, err
+	}
+	if listwisePolicy.CommercialUseAllowed, err = readOptionalBool("listwise_geometry_commercial_use_allowed"); err != nil {
+		return PackageManifest{}, err
+	}
+	if value, err := readOptionalString("listwise_geometry_source_artifact_hashes"); err != nil {
+		return PackageManifest{}, err
+	} else {
+		listwisePolicy.SourceArtifactHashes = parseScoreSpectrumSourceHashes(value)
+	}
+	if value, err := readOptionalInt("listwise_geometry_batch_count"); err != nil {
+		return PackageManifest{}, err
+	} else {
+		listwisePolicy.ListwiseGeometryBatchCount = int(value)
+	}
+	listwisePolicy.ListwiseGeometryTrain = listwisePolicy.ListwiseGeometryResearchOnly || listwisePolicy.TrainAllowedForResearch || listwisePolicy.ReleaseTrainAllowed || listwisePolicy.CommercialUseAllowed || listwisePolicy.ListwiseGeometryBatchCount > 0 || len(listwisePolicy.SourceArtifactHashes) > 0
 
 	r := bytes.NewReader(xpkgBody)
 	readU32 := func() (uint32, error) {
@@ -454,12 +485,13 @@ func decodePackageManifestMLL(data []byte) (PackageManifest, error) {
 		return PackageManifest{}, fmt.Errorf("package manifest XPKG has %d trailing bytes", r.Len())
 	}
 	manifest := PackageManifest{
-		Version:         version,
-		Kind:            PackageKind(kind),
-		ModuleName:      moduleName,
-		ArtifactVersion: artifactVersion,
-		Files:           files,
-		ScoreSpectrum:   scorePolicy,
+		Version:          version,
+		Kind:             PackageKind(kind),
+		ModuleName:       moduleName,
+		ArtifactVersion:  artifactVersion,
+		Files:            files,
+		ScoreSpectrum:    scorePolicy,
+		ListwiseGeometry: listwisePolicy,
 	}
 	if err := manifest.Validate(); err != nil {
 		return PackageManifest{}, err
@@ -522,6 +554,7 @@ func RebuildSiblingPackageManifest(artifactPath string) (PackageManifest, string
 		return PackageManifest{}, "", err
 	}
 	rebuilt.ScoreSpectrum = current.ScoreSpectrum
+	rebuilt.ListwiseGeometry = current.ListwiseGeometry
 	outPath := DefaultPackageManifestPath(artifactPath)
 	if err := rebuilt.WriteFile(outPath); err != nil {
 		return PackageManifest{}, "", err
@@ -601,6 +634,12 @@ func (m PackageManifest) CacheKey() string {
 	write(fmt.Sprintf("%d", m.ScoreSpectrum.ScoreSpectrumRowCount))
 	write(formatScoreSpectrumObjectiveNames(m.ScoreSpectrum.AutoClearedObjectives))
 	write(formatScoreSpectrumObjectiveNames(m.ScoreSpectrum.IsolatedInheritedObjectives))
+	write(fmt.Sprintf("%t", m.ListwiseGeometry.ListwiseGeometryResearchOnly))
+	write(fmt.Sprintf("%t", m.ListwiseGeometry.TrainAllowedForResearch))
+	write(fmt.Sprintf("%t", m.ListwiseGeometry.ReleaseTrainAllowed))
+	write(fmt.Sprintf("%t", m.ListwiseGeometry.CommercialUseAllowed))
+	write(formatScoreSpectrumSourceHashes(m.ListwiseGeometry.SourceArtifactHashes))
+	write(fmt.Sprintf("%d", m.ListwiseGeometry.ListwiseGeometryBatchCount))
 	for _, item := range m.Files {
 		write(item.Role)
 		write(item.Path)

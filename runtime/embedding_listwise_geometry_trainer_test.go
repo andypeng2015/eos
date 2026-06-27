@@ -1,0 +1,354 @@
+package eosruntime
+
+import (
+	"context"
+	"encoding/json"
+	"math"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestTokenizeEmbeddingListwiseGeometryBatchesPreservesMatrixAlignment(t *testing.T) {
+	tokenizer := tinyListwiseGeometryTokenizer(t)
+	out, err := TokenizeEmbeddingListwiseGeometryBatches(tinyListwiseGeometryBatches(false), tokenizer)
+	if err != nil {
+		t.Fatalf("tokenize listwise geometry: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("tokenized batches = %d, want 1", len(out))
+	}
+	got := out[0]
+	if len(got.QueryTokens) != 2 || len(got.DocumentTokens) != 2 {
+		t.Fatalf("tokenized shape = %dx%d, want 2x2", len(got.QueryTokens), len(got.DocumentTokens))
+	}
+	if got.QueryIDs[0] != "q0" || got.QueryIDs[1] != "q1" || got.DocumentIDs[0] != "d0" || got.DocumentIDs[1] != "d1" {
+		t.Fatalf("ids = q%v d%v, want original order", got.QueryIDs, got.DocumentIDs)
+	}
+	if got.TeacherSimilarity[0][0] != 0.9 || got.TeacherSimilarity[0][1] != 0.1 || got.TeacherSimilarity[1][0] != 0.2 || got.TeacherSimilarity[1][1] != 0.8 {
+		t.Fatalf("teacher matrix = %+v, want original alignment", got.TeacherSimilarity)
+	}
+}
+
+func assertFloat32SlicesClose(t *testing.T, got, want []float32, tol float64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("length = %d, want %d; got=%v want=%v", len(got), len(want), got, want)
+	}
+	for i := range got {
+		if math.Abs(float64(got[i]-want[i])) > tol {
+			t.Fatalf("value[%d] = %f, want %f within %g; got=%v want=%v", i, got[i], want[i], tol, got, want)
+		}
+	}
+}
+
+func TestEmbeddingTrainerTrainListwiseGeometryStep(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	trainer.config.Temperature = 0.05
+
+	metrics, err := trainer.TrainListwiseGeometryStep(tinyTokenizedListwiseGeometryBatches(false))
+	if err != nil {
+		t.Fatalf("train listwise geometry step: %v", err)
+	}
+	if metrics.BatchSize != 4 {
+		t.Fatalf("batch size = %d, want 4 query-document scores", metrics.BatchSize)
+	}
+	if metrics.Loss < 0 || math.IsNaN(float64(metrics.Loss)) || math.IsInf(float64(metrics.Loss), 0) {
+		t.Fatalf("loss = %f, want finite non-negative", metrics.Loss)
+	}
+	if trainer.step != 1 {
+		t.Fatalf("step = %d, want 1", trainer.step)
+	}
+}
+
+func TestEmbeddingTrainerFitListwiseGeometrySmokeAndResearchGate(t *testing.T) {
+	_, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitListwiseGeometry(tinyTokenizedListwiseGeometryBatches(true), nil, EmbeddingTrainRunConfig{
+		Epochs:         1,
+		BatchSize:      1,
+		EvalEveryEpoch: 1,
+		Temperature:    0.05,
+	})
+	if err == nil || !strings.Contains(err.Error(), "research-only") {
+		t.Fatalf("research-only error = %v, want gate rejection", err)
+	}
+
+	summary, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitListwiseGeometry(tinyTokenizedListwiseGeometryBatches(true), nil, EmbeddingTrainRunConfig{
+		Epochs:                            1,
+		BatchSize:                         1,
+		EvalEveryEpoch:                    1,
+		Temperature:                       0.05,
+		AllowResearchOnlyListwiseGeometry: true,
+	})
+	if err != nil {
+		t.Fatalf("fit listwise geometry: %v", err)
+	}
+	if summary.StepsCompleted != 1 || summary.Workload.TrainMode != "listwise_geometry" || summary.Workload.ActualTrainPairs != 4 {
+		t.Fatalf("summary = %+v workload=%+v, want one step and 4 train pairs", summary, summary.Workload)
+	}
+
+	_, err = newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitListwiseGeometry(tinyTokenizedListwiseGeometryBatches(false), nil, EmbeddingTrainRunConfig{
+		Epochs:                            1,
+		BatchSize:                         1,
+		EvalEveryEpoch:                    1,
+		Temperature:                       0.05,
+		AllowResearchOnlyListwiseGeometry: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "must be explicitly research-only") {
+		t.Fatalf("allow flag with non-research row error = %v, want strict rejection", err)
+	}
+}
+
+func TestEmbeddingTrainerFitListwiseGeometryPairwiseEvalSelectionAndAccounting(t *testing.T) {
+	summary, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitListwiseGeometry(tinyTokenizedListwiseGeometryBatches(false), tinyEncoderPairDataset(), EmbeddingTrainRunConfig{
+		Epochs:                2,
+		BatchSize:             1,
+		EvalEveryEpoch:        1,
+		EvalEverySteps:        1,
+		EarlyStoppingPatience: 3,
+		RestoreBest:           true,
+		SelectMetric:          "loss",
+		Temperature:           0.05,
+	})
+	if err != nil {
+		t.Fatalf("fit listwise geometry with eval: %v", err)
+	}
+	if summary.FinalEval == nil || summary.BestEval == nil || len(summary.History) == 0 {
+		t.Fatalf("summary missing eval/history: %+v", summary)
+	}
+	if summary.Workload.ActualEvalPasses != 6 || summary.Workload.ActualEvalPairs != int64(6*len(tinyEncoderPairDataset())) || summary.Workload.ActualEvalExamples != int64(6*len(tinyEncoderPairDataset())) {
+		t.Fatalf("eval accounting = passes %d pairs %d examples %d, want 6/%d/%d", summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalPairs, summary.Workload.ActualEvalExamples, 6*len(tinyEncoderPairDataset()), 6*len(tinyEncoderPairDataset()))
+	}
+	if summary.Workload.PlannedEvalPasses != 6 || summary.Workload.PlannedEvalPairs != int64(6*len(tinyEncoderPairDataset())) {
+		t.Fatalf("planned eval accounting = passes %d pairs %d, want 6/%d", summary.Workload.PlannedEvalPasses, summary.Workload.PlannedEvalPairs, 6*len(tinyEncoderPairDataset()))
+	}
+	if !summary.RestoredBest || summary.BestEval == nil {
+		t.Fatalf("restored/best = %v/%v, want restore-best selection", summary.RestoredBest, summary.BestEval)
+	}
+	for _, record := range summary.History {
+		if record.Eval == nil {
+			t.Fatalf("history record missing eval: %+v", record)
+		}
+	}
+}
+
+func TestListwiseGeometryGradientScaleIsQueryRowAveragedAcrossPackedRows(t *testing.T) {
+	queries := []*embeddingEncodedSequence{
+		{pooled: []float32{1, 0}},
+		{pooled: []float32{0, 1}},
+	}
+	combinedDocs := []*embeddingEncodedSequence{
+		{pooled: []float32{1, 0}},
+		{pooled: []float32{0, 1}},
+	}
+	combinedBatch := []EmbeddingTokenizedListwiseGeometryBatch{{
+		QueryTokens:       [][]int32{{0}, {1}},
+		DocumentTokens:    [][]int32{{0}, {1}},
+		TeacherSimilarity: [][]float32{{0.9, 0.1}, {0.2, 0.8}},
+	}}
+	combinedQueryGrads := [][]float32{{0, 0}, {0, 0}}
+	combinedDocGrads := [][]float32{{0, 0}, {0, 0}}
+	combinedLoss, _, _, combinedQueries, err := accumulateListwiseGeometryGrads(queries, combinedDocs, []embeddingCandidateSpan{{Start: 0, End: 2}}, combinedBatch, 0.5, combinedQueryGrads, combinedDocGrads)
+	if err != nil {
+		t.Fatalf("combined grads: %v", err)
+	}
+
+	splitDocs := []*embeddingEncodedSequence{
+		{pooled: []float32{1, 0}},
+		{pooled: []float32{0, 1}},
+		{pooled: []float32{1, 0}},
+		{pooled: []float32{0, 1}},
+	}
+	splitBatch := []EmbeddingTokenizedListwiseGeometryBatch{
+		{QueryTokens: [][]int32{{0}}, DocumentTokens: [][]int32{{0}, {1}}, TeacherSimilarity: [][]float32{{0.9, 0.1}}},
+		{QueryTokens: [][]int32{{1}}, DocumentTokens: [][]int32{{0}, {1}}, TeacherSimilarity: [][]float32{{0.2, 0.8}}},
+	}
+	splitQueryGrads := [][]float32{{0, 0}, {0, 0}}
+	splitDocGrads := [][]float32{{0, 0}, {0, 0}, {0, 0}, {0, 0}}
+	splitLoss, _, _, splitQueries, err := accumulateListwiseGeometryGrads(queries, splitDocs, []embeddingCandidateSpan{{Start: 0, End: 2}, {Start: 2, End: 4}}, splitBatch, 0.5, splitQueryGrads, splitDocGrads)
+	if err != nil {
+		t.Fatalf("split grads: %v", err)
+	}
+
+	if combinedQueries != 2 || splitQueries != 2 {
+		t.Fatalf("query counts = %d/%d, want 2/2", combinedQueries, splitQueries)
+	}
+	if math.Abs(float64(combinedLoss/float32(combinedQueries)-splitLoss/float32(splitQueries))) > 1e-6 {
+		t.Fatalf("query-averaged loss combined=%f split=%f", combinedLoss/float32(combinedQueries), splitLoss/float32(splitQueries))
+	}
+	for i := range combinedQueryGrads {
+		assertFloat32SlicesClose(t, splitQueryGrads[i], combinedQueryGrads[i], 1e-6)
+	}
+	assertFloat32SlicesClose(t, []float32{splitDocGrads[0][0] + splitDocGrads[2][0], splitDocGrads[0][1] + splitDocGrads[2][1]}, combinedDocGrads[0], 1e-6)
+	assertFloat32SlicesClose(t, []float32{splitDocGrads[1][0] + splitDocGrads[3][0], splitDocGrads[1][1] + splitDocGrads[3][1]}, combinedDocGrads[1], 1e-6)
+}
+
+func TestEstimateListwiseGeometryTrainWorkloadCountsMatrixCells(t *testing.T) {
+	workload := EstimateListwiseGeometryTrainWorkload(tinyTokenizedListwiseGeometryBatches(false), 1, EmbeddingTrainRunConfig{
+		Epochs:         2,
+		BatchSize:      1,
+		EvalEveryEpoch: 1,
+	})
+	if workload.TrainMode != "listwise_geometry" || workload.TrainPairsPerEpoch != 4 || workload.PlannedTrainPairs != 8 {
+		t.Fatalf("workload = %+v, want listwise matrix cell counts", workload)
+	}
+}
+
+func TestTrainEmbeddingPackageFromTextContrastiveFilesResearchOnlyListwiseWritesRejectableEmbeddingLineage(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	path := writeTinyTrainingPackage(t, trainer)
+	tokenizerPath := filepath.Join(t.TempDir(), "tokenizer.mll")
+	if err := tinyListwiseGeometryTokenizerFile().WriteFile(tokenizerPath); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	trainPath := writeTinyListwiseGeometryJSONL(t, tinyListwiseGeometryBatches(true))
+
+	if _, _, err := TrainEmbeddingPackageFromTextContrastiveFiles(path, tokenizerPath, trainPath, "", EmbeddingTrainRunConfig{
+		ListwiseGeometryTrain:             true,
+		AllowResearchOnlyListwiseGeometry: true,
+		Epochs:                            1,
+		BatchSize:                         1,
+		EvalEveryEpoch:                    1,
+		Temperature:                       0.05,
+	}); err != nil {
+		t.Fatalf("train research-only listwise package: %v", err)
+	}
+	reloaded, err := LoadEmbeddingTrainerPackage(path)
+	if err != nil {
+		t.Fatalf("reload training package: %v", err)
+	}
+	embeddingPath := filepath.Join(t.TempDir(), "embedding.mll")
+	paths, err := reloaded.WriteEmbeddingPackage(embeddingPath)
+	if err != nil {
+		t.Fatalf("write embedding package: %v", err)
+	}
+	manifest, err := ReadPackageManifestFile(paths.PackageManifestPath)
+	if err != nil {
+		t.Fatalf("read package manifest: %v", err)
+	}
+	if !manifest.ListwiseGeometry.ListwiseGeometryResearchOnly || manifest.ListwiseGeometry.ListwiseGeometryBatchCount != 1 {
+		t.Fatalf("listwise embedding lineage = %+v, want research-only batch count 1", manifest.ListwiseGeometry)
+	}
+	if _, err := New().LoadEmbeddingPackage(context.Background(), embeddingPath); err == nil || !strings.Contains(err.Error(), "research-only listwise geometry") {
+		t.Fatalf("load embedding package error = %v, want research-only listwise rejection", err)
+	}
+}
+
+func TestTrainEmbeddingPackageFromTextContrastiveFilesListwiseGeometrySmoke(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	path := writeTinyTrainingPackage(t, trainer)
+	tokenizerPath := filepath.Join(t.TempDir(), "tokenizer.mll")
+	if err := tinyListwiseGeometryTokenizerFile().WriteFile(tokenizerPath); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	trainPath := writeTinyListwiseGeometryJSONL(t, tinyListwiseGeometryBatches(false))
+
+	summary, _, err := TrainEmbeddingPackageFromTextContrastiveFiles(path, tokenizerPath, trainPath, "", EmbeddingTrainRunConfig{
+		ListwiseGeometryTrain: true,
+		Epochs:                1,
+		BatchSize:             1,
+		EvalEveryEpoch:        1,
+		Temperature:           0.05,
+	})
+	if err != nil {
+		t.Fatalf("train package listwise geometry: %v", err)
+	}
+	if summary.StepsCompleted != 1 || summary.Workload.TrainMode != "listwise_geometry" {
+		t.Fatalf("summary = %+v, want listwise geometry training", summary)
+	}
+}
+
+func tinyListwiseGeometryBatches(researchOnly bool) []EmbeddingListwiseGeometryBatch {
+	return []EmbeddingListwiseGeometryBatch{{
+		Schema:  "eos.listwise_geometry_batch.v1",
+		BatchID: "batch-0",
+		Examples: []EmbeddingListwiseGeometryExample{
+			{RowID: "r0", Source: "unit", QueryID: "q0", PositiveDocID: "d0", NegativeDocIDs: []string{"d1"}},
+			{RowID: "r1", Source: "unit", QueryID: "q1", PositiveDocID: "d1", NegativeDocIDs: []string{"d0"}},
+		},
+		Queries: []EmbeddingListwiseGeometryQuery{
+			{ID: "q0", Text: "a"},
+			{ID: "q1", Text: "b"},
+		},
+		Documents: []EmbeddingListwiseGeometryDocument{
+			{ID: "d0", Text: "a"},
+			{ID: "d1", Text: "b"},
+		},
+		TeacherSimilarity:       [][]float32{{0.9, 0.1}, {0.2, 0.8}},
+		Score:                   "cosine",
+		TrainAllowedForResearch: researchOnly,
+		ReleaseTrainAllowed:     !researchOnly,
+		CommercialUseAllowed:    !researchOnly,
+	}}
+}
+
+func tinyTokenizedListwiseGeometryBatches(researchOnly bool) []EmbeddingTokenizedListwiseGeometryBatch {
+	batch := tinyListwiseGeometryBatches(researchOnly)[0]
+	return []EmbeddingTokenizedListwiseGeometryBatch{{
+		Schema:                  batch.Schema,
+		BatchID:                 batch.BatchID,
+		Examples:                batch.Examples,
+		QueryIDs:                []string{"q0", "q1"},
+		QueryTokens:             [][]int32{{0}, {1}},
+		QueryMasks:              [][]int32{{1}, {1}},
+		DocumentIDs:             []string{"d0", "d1"},
+		DocumentTokens:          [][]int32{{0}, {1}},
+		DocumentMasks:           [][]int32{{1}, {1}},
+		TeacherSimilarity:       cloneFloat32Matrix(batch.TeacherSimilarity),
+		Score:                   batch.Score,
+		TrainAllowedForResearch: batch.TrainAllowedForResearch,
+		ReleaseTrainAllowed:     batch.ReleaseTrainAllowed,
+		CommercialUseAllowed:    batch.CommercialUseAllowed,
+	}}
+}
+
+func tinyListwiseGeometryTokenizer(t *testing.T) *BPETokenizer {
+	t.Helper()
+	tokenizer, err := NewBPETokenizer(tinyListwiseGeometryTokenizerFile(), TokenizerManifest{VocabSize: 6, MaxSequence: 8})
+	if err != nil {
+		t.Fatalf("new tokenizer: %v", err)
+	}
+	return tokenizer
+}
+
+func tinyListwiseGeometryTokenizerFile() TokenizerFile {
+	return TokenizerFile{
+		Version: TokenizerFileVersion,
+		Tokens:  []string{"[UNK]", "a", "b"},
+	}
+}
+
+func writeTinyListwiseGeometryJSONL(t *testing.T, batches []EmbeddingListwiseGeometryBatch) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "listwise-geometry.jsonl")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create listwise geometry jsonl: %v", err)
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	for _, batch := range batches {
+		record := embeddingListwiseGeometryBatchRecord{
+			Schema:                  batch.Schema,
+			BatchID:                 batch.BatchID,
+			SourceCounts:            batch.SourceCounts,
+			Examples:                batch.Examples,
+			Queries:                 batch.Queries,
+			Documents:               batch.Documents,
+			TeacherSimilarity:       batch.TeacherSimilarity,
+			TeacherModelID:          batch.TeacherModelID,
+			Score:                   batch.Score,
+			Normalized:              batch.Normalized,
+			TrainPolicy:             batch.TrainPolicy,
+			ReleaseTrainAllowed:     batch.ReleaseTrainAllowed,
+			CommercialUseAllowed:    batch.CommercialUseAllowed,
+			TrainAllowedForResearch: batch.TrainAllowedForResearch,
+			SourceArtifactHash:      batch.SourceArtifactHash,
+			ExtraFields:             batch.ExtraFields,
+		}
+		if err := enc.Encode(record); err != nil {
+			t.Fatalf("encode listwise geometry jsonl: %v", err)
+		}
+	}
+	return path
+}

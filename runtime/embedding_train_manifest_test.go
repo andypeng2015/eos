@@ -54,6 +54,15 @@ func TestEmbeddingTrainManifestRoundTrip(t *testing.T) {
 				"matryoshka",
 			},
 		},
+		ListwiseGeometry: EmbeddingListwiseGeometryPolicy{
+			ListwiseGeometryTrain:        true,
+			ListwiseGeometryResearchOnly: true,
+			TrainAllowedForResearch:      true,
+			ReleaseTrainAllowed:          false,
+			CommercialUseAllowed:         false,
+			SourceArtifactHashes:         []string{"lg-bbb", "lg-aaa"},
+			ListwiseGeometryBatchCount:   4,
+		},
 	}
 	if err := want.WriteFile(path); err != nil {
 		t.Fatalf("write manifest: %v", err)
@@ -91,6 +100,12 @@ func TestEmbeddingTrainManifestRoundTrip(t *testing.T) {
 	}
 	if len(got.ScoreSpectrum.IsolatedInheritedObjectives) != 2 || got.ScoreSpectrum.IsolatedInheritedObjectives[0] != "matryoshka" || got.ScoreSpectrum.IsolatedInheritedObjectives[1] != "turboquant_prefix_seed" {
 		t.Fatalf("isolated inherited objectives = %v", got.ScoreSpectrum.IsolatedInheritedObjectives)
+	}
+	if !got.ListwiseGeometry.ListwiseGeometryTrain || !got.ListwiseGeometry.ListwiseGeometryResearchOnly || !got.ListwiseGeometry.TrainAllowedForResearch || got.ListwiseGeometry.ReleaseTrainAllowed || got.ListwiseGeometry.CommercialUseAllowed {
+		t.Fatalf("listwise geometry policy mismatch: %+v", got.ListwiseGeometry)
+	}
+	if got.ListwiseGeometry.ListwiseGeometryBatchCount != 4 || len(got.ListwiseGeometry.SourceArtifactHashes) != 2 || got.ListwiseGeometry.SourceArtifactHashes[0] != "lg-aaa" || got.ListwiseGeometry.SourceArtifactHashes[1] != "lg-bbb" {
+		t.Fatalf("listwise geometry provenance mismatch: %+v", got.ListwiseGeometry)
 	}
 }
 

@@ -29,7 +29,7 @@ func (rt *Runtime) LoadSealedEmbeddingPackage(ctx context.Context, path string, 
 	loadOpts := make([]LoadOption, 0, len(opts)+len(pkg.Weights.Weights)+1)
 	loadOpts = append(loadOpts, opts...)
 	if pkg.PackageManifest != nil {
-		if err := rejectResearchOnlyScoreSpectrumEmbeddingPackage(*pkg.PackageManifest); err != nil {
+		if err := rejectResearchOnlyRestrictedEmbeddingPackage(*pkg.PackageManifest); err != nil {
 			return nil, err
 		}
 		loadOpts = append(loadOpts, WithPackageManifest(*pkg.PackageManifest))

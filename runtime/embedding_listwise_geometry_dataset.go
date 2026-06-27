@@ -29,6 +29,31 @@ type EmbeddingListwiseGeometryBatch struct {
 	ExtraFields             map[string]json.RawMessage
 }
 
+// EmbeddingTokenizedListwiseGeometryBatch is the tokenizer-adapted form used
+// by the trainer. Query/document ordering matches TeacherSimilarity exactly.
+type EmbeddingTokenizedListwiseGeometryBatch struct {
+	Schema                  string
+	BatchID                 string
+	SourceCounts            map[string]int
+	Examples                []EmbeddingListwiseGeometryExample
+	QueryIDs                []string
+	QueryTokens             [][]int32
+	QueryMasks              [][]int32
+	DocumentIDs             []string
+	DocumentTokens          [][]int32
+	DocumentMasks           [][]int32
+	TeacherSimilarity       [][]float32
+	TeacherModelID          string
+	Score                   string
+	Normalized              bool
+	TrainPolicy             string
+	ReleaseTrainAllowed     bool
+	CommercialUseAllowed    bool
+	TrainAllowedForResearch bool
+	SourceArtifactHash      string
+	ExtraFields             map[string]json.RawMessage
+}
+
 type EmbeddingListwiseGeometryExample struct {
 	RowID          string   `json:"row_id"`
 	Source         string   `json:"source"`
@@ -131,6 +156,68 @@ func ReadEmbeddingListwiseGeometryBatchesFile(path string) ([]EmbeddingListwiseG
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("listwise geometry dataset is empty")
+	}
+	return out, nil
+}
+
+// TokenizeEmbeddingListwiseGeometryBatches preserves each row's query/document
+// matrix alignment while adapting text batches for the trainer.
+func TokenizeEmbeddingListwiseGeometryBatches(batches []EmbeddingListwiseGeometryBatch, tokenizer *BPETokenizer) ([]EmbeddingTokenizedListwiseGeometryBatch, error) {
+	if len(batches) == 0 {
+		return nil, fmt.Errorf("listwise geometry dataset is empty")
+	}
+	if tokenizer == nil {
+		return nil, fmt.Errorf("nil tokenizer")
+	}
+	cache := embeddingTextTokenCache{}
+	out := make([]EmbeddingTokenizedListwiseGeometryBatch, 0, len(batches))
+	for i, batch := range batches {
+		if err := validateEmbeddingListwiseGeometryMatrix(batch.TeacherSimilarity, len(batch.Queries), len(batch.Documents), "teacher_similarity"); err != nil {
+			return nil, fmt.Errorf("batch %d: %w", i, err)
+		}
+		tokenized := EmbeddingTokenizedListwiseGeometryBatch{
+			Schema:                  batch.Schema,
+			BatchID:                 batch.BatchID,
+			SourceCounts:            cloneStringIntMap(batch.SourceCounts),
+			Examples:                cloneEmbeddingListwiseGeometryExamples(batch.Examples),
+			QueryIDs:                make([]string, len(batch.Queries)),
+			QueryTokens:             make([][]int32, len(batch.Queries)),
+			QueryMasks:              make([][]int32, len(batch.Queries)),
+			DocumentIDs:             make([]string, len(batch.Documents)),
+			DocumentTokens:          make([][]int32, len(batch.Documents)),
+			DocumentMasks:           make([][]int32, len(batch.Documents)),
+			TeacherSimilarity:       cloneFloat32Matrix(batch.TeacherSimilarity),
+			TeacherModelID:          batch.TeacherModelID,
+			Score:                   batch.Score,
+			Normalized:              batch.Normalized,
+			TrainPolicy:             batch.TrainPolicy,
+			ReleaseTrainAllowed:     batch.ReleaseTrainAllowed,
+			CommercialUseAllowed:    batch.CommercialUseAllowed,
+			TrainAllowedForResearch: batch.TrainAllowedForResearch,
+			SourceArtifactHash:      batch.SourceArtifactHash,
+			ExtraFields:             cloneRawMessageMap(batch.ExtraFields),
+		}
+		for j, query := range batch.Queries {
+			encoded, err := cache.encode(query.Text, tokenizer)
+			if err != nil {
+				return nil, fmt.Errorf("batch %d query %d: %w", i, j, err)
+			}
+			encoded = cloneTokenizedText(encoded)
+			tokenized.QueryIDs[j] = query.ID
+			tokenized.QueryTokens[j] = encoded.tokens
+			tokenized.QueryMasks[j] = encoded.mask
+		}
+		for j, document := range batch.Documents {
+			encoded, err := cache.encode(document.Text, tokenizer)
+			if err != nil {
+				return nil, fmt.Errorf("batch %d document %d: %w", i, j, err)
+			}
+			encoded = cloneTokenizedText(encoded)
+			tokenized.DocumentIDs[j] = document.ID
+			tokenized.DocumentTokens[j] = encoded.tokens
+			tokenized.DocumentMasks[j] = encoded.mask
+		}
+		out = append(out, tokenized)
 	}
 	return out, nil
 }

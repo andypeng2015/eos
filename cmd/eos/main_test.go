@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -5836,6 +5837,78 @@ func TestRunTrainEmbedRejectsScoreSpectrumMutualExclusion(t *testing.T) {
 	}
 }
 
+func TestRunTrainEmbedListwiseGeometryPlanOnlyAndValidation(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	tokenizer := eosruntime.TokenizerFile{
+		Version: eosruntime.TokenizerFileVersion,
+		Tokens:  []string{"[UNK]", "a", "b"},
+	}
+	tokenizerPath := filepath.Join(t.TempDir(), "tokenizer.mll")
+	if err := tokenizer.WriteFile(tokenizerPath); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	trainPath := writeTinyCLIListwiseGeometryJSONL(t, false)
+
+	output := captureRunOutput(t, []string{"train-embed", "--plan-only", "--tokenizer", tokenizerPath, "--listwise-geometry-train", "--epochs", "2", "--batch-size", "1", path, trainPath})
+	for _, want := range []string{
+		"train=1 listwise_geometry examples",
+		"train_pairs/epoch=4",
+		"pairs(planned=8 actual=0)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("listwise plan output missing %q\noutput:\n%s", want, output)
+		}
+	}
+
+	_, err := captureRunOutputAndError(t, []string{"train-embed", "--listwise-geometry-train", "--no-tokenizer", path, trainPath})
+	if err == nil || !strings.Contains(err.Error(), "requires text tokenization") {
+		t.Fatalf("no-tokenizer listwise error = %v, want text tokenization rejection", err)
+	}
+	_, err = captureRunOutputAndError(t, []string{"train-embed", "--allow-research-only-listwise-geometry", path, trainPath})
+	if err == nil || !strings.Contains(err.Error(), "requires --listwise-geometry-train") {
+		t.Fatalf("allow research without listwise error = %v", err)
+	}
+	_, err = captureRunOutputAndError(t, []string{"train-embed", "--tokenizer", tokenizerPath, "--listwise-geometry-train", "--allow-research-only-listwise-geometry", "--epochs", "1", "--batch-size", "1", path, trainPath})
+	if err == nil || !strings.Contains(err.Error(), "must be explicitly research-only") {
+		t.Fatalf("allow research with non-research row error = %v, want strict listwise rejection", err)
+	}
+}
+
+func TestRunTrainEmbedListwiseGeometryResearchOnlyGate(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	tokenizer := eosruntime.TokenizerFile{
+		Version: eosruntime.TokenizerFileVersion,
+		Tokens:  []string{"[UNK]", "a", "b"},
+	}
+	tokenizerPath := filepath.Join(t.TempDir(), "tokenizer.mll")
+	if err := tokenizer.WriteFile(tokenizerPath); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	trainPath := writeTinyCLIListwiseGeometryJSONL(t, true)
+
+	_, err := captureRunOutputAndError(t, []string{"train-embed", "--tokenizer", tokenizerPath, "--listwise-geometry-train", "--epochs", "1", "--batch-size", "1", path, trainPath})
+	if err == nil || !strings.Contains(err.Error(), "research-only") {
+		t.Fatalf("research-only without flag error = %v", err)
+	}
+	output := captureRunOutput(t, []string{"train-embed", "--tokenizer", tokenizerPath, "--listwise-geometry-train", "--allow-research-only-listwise-geometry", "--epochs", "1", "--batch-size", "1", path, trainPath})
+	if !strings.Contains(output, "trained package") || !strings.Contains(output, "train=1 listwise_geometry examples") {
+		t.Fatalf("listwise train output unexpected:\n%s", output)
+	}
+	manifest, err := eosruntime.ReadPackageManifestFile(eosruntime.DefaultPackageManifestPath(path))
+	if err != nil {
+		t.Fatalf("read package manifest: %v", err)
+	}
+	if !manifest.ListwiseGeometry.ListwiseGeometryResearchOnly || manifest.ListwiseGeometry.ListwiseGeometryBatchCount != 1 {
+		t.Fatalf("listwise package policy = %+v, want research-only batch count 1", manifest.ListwiseGeometry)
+	}
+}
+
 func TestRunTrainEmbedRejectsExplicitScoreSpectrumTurboQuantCompactObjectives(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
@@ -6029,6 +6102,22 @@ func tinyCLIScoreSpectrumExamples(researchOnly bool) []eosruntime.EmbeddingScore
 		}
 	}
 	return examples
+}
+
+func writeTinyCLIListwiseGeometryJSONL(t *testing.T, researchOnly bool) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "train-listwise-geometry.jsonl")
+	release := "true"
+	commercial := "true"
+	if researchOnly {
+		release = "false"
+		commercial = "false"
+	}
+	data := fmt.Sprintf(`{"schema":"eos.listwise_geometry_batch.v1","batch_id":"batch-0","examples":[{"row_id":"r0","source":"unit","query_id":"q0","positive_doc_id":"d0","negative_doc_ids":["d1"]},{"row_id":"r1","source":"unit","query_id":"q1","positive_doc_id":"d1","negative_doc_ids":["d0"]}],"queries":[{"id":"q0","text":"a"},{"id":"q1","text":"b"}],"documents":[{"id":"d0","text":"a"},{"id":"d1","text":"b"}],"teacher_similarity":[[0.9,0.1],[0.2,0.8]],"score":"cosine","train_allowed_for_research":%t,"release_train_allowed":%s,"commercial_use_allowed":%s}`+"\n", researchOnly, release, commercial)
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write listwise geometry dataset: %v", err)
+	}
+	return path
 }
 
 func TestRunTokenizeEmbedHardNegativeMode(t *testing.T) {

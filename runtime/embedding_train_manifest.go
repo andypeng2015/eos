@@ -13,10 +13,11 @@ const EmbeddingTrainManifestVersion = "manta/train-manifest/v0alpha1"
 
 // EmbeddingTrainManifest describes the native training contract for an embedding module.
 type EmbeddingTrainManifest struct {
-	Name          string                       `json:"name,omitempty"`
-	Embedding     EmbeddingManifest            `json:"embedding"`
-	Config        EmbeddingTrainConfig         `json:"config"`
-	ScoreSpectrum EmbeddingScoreSpectrumPolicy `json:"score_spectrum,omitempty"`
+	Name             string                          `json:"name,omitempty"`
+	Embedding        EmbeddingManifest               `json:"embedding"`
+	Config           EmbeddingTrainConfig            `json:"config"`
+	ScoreSpectrum    EmbeddingScoreSpectrumPolicy    `json:"score_spectrum,omitempty"`
+	ListwiseGeometry EmbeddingListwiseGeometryPolicy `json:"listwise_geometry,omitempty"`
 }
 
 // EmbeddingScoreSpectrumPolicy records train-time provenance and usage gates
@@ -31,6 +32,18 @@ type EmbeddingScoreSpectrumPolicy struct {
 	ScoreSpectrumRowCount       int      `json:"score_spectrum_row_count,omitempty"`
 	AutoClearedObjectives       []string `json:"auto_cleared_objectives,omitempty"`
 	IsolatedInheritedObjectives []string `json:"isolated_inherited_objectives,omitempty"`
+}
+
+// EmbeddingListwiseGeometryPolicy records train-time provenance and usage
+// gates for listwise geometry data carried through training and package manifests.
+type EmbeddingListwiseGeometryPolicy struct {
+	ListwiseGeometryTrain        bool     `json:"listwise_geometry_train,omitempty"`
+	ListwiseGeometryResearchOnly bool     `json:"listwise_geometry_research_only,omitempty"`
+	TrainAllowedForResearch      bool     `json:"train_allowed_for_research,omitempty"`
+	ReleaseTrainAllowed          bool     `json:"release_train_allowed,omitempty"`
+	CommercialUseAllowed         bool     `json:"commercial_use_allowed,omitempty"`
+	SourceArtifactHashes         []string `json:"source_artifact_hashes,omitempty"`
+	ListwiseGeometryBatchCount   int      `json:"listwise_geometry_batch_count,omitempty"`
 }
 
 // DefaultEmbeddingTrainManifestPath returns the conventional sibling train-manifest path for an .mll artifact.
@@ -126,43 +139,50 @@ func (m EmbeddingTrainManifest) nameOrDefault() string {
 
 func (m EmbeddingTrainManifest) mllValues() map[string]authoredManifestValue {
 	values := map[string]authoredManifestValue{
-		"name":                                         authoredString(m.Name),
-		"config.optimizer":                             authoredString(m.Config.Optimizer),
-		"config.weight_bits":                           authoredInt(int64(m.Config.WeightBits)),
-		"config.learning_rate":                         authoredFloat(float64(m.Config.LearningRate)),
-		"config.weight_decay":                          authoredFloat(float64(m.Config.WeightDecay)),
-		"config.beta1":                                 authoredFloat(float64(m.Config.Beta1)),
-		"config.beta2":                                 authoredFloat(float64(m.Config.Beta2)),
-		"config.epsilon":                               authoredFloat(float64(m.Config.Epsilon)),
-		"config.contrastive_loss":                      authoredString(m.Config.ContrastiveLoss),
-		"config.temperature":                           authoredFloat(float64(m.Config.Temperature)),
-		"config.grouped_loss_weight":                   authoredFloat(float64(m.Config.GroupedLossWeight)),
-		"config.teacher_loss_weight":                   authoredFloat(float64(m.Config.TeacherLossWeight)),
-		"config.teacher_temperature":                   authoredFloat(float64(m.Config.TeacherTemperature)),
-		"config.matryoshka_dims":                       authoredString(formatMatryoshkaDims(m.Config.MatryoshkaDims)),
-		"config.matryoshka_weights":                    authoredString(formatMatryoshkaWeights(m.Config.MatryoshkaWeights)),
-		"config.turboquant_prefix_bits":                authoredString(formatIntList(m.Config.TurboQuantPrefixBits)),
-		"config.turboquant_prefix_objectives":          authoredString(FormatTurboQuantPrefixObjectives(m.Config.TurboQuantPrefixObjectives)),
-		"config.turboquant_prefix_weight":              authoredFloat(float64(m.Config.TurboQuantPrefixWeight)),
-		"config.turboquant_prefix_seed":                authoredInt(m.Config.TurboQuantPrefixSeed),
-		"config.turboquant_prefix_score_mode":          authoredString(m.Config.TurboQuantPrefixScoreMode),
-		"config.turboquant_compact_objectives":         authoredString(FormatTurboQuantPrefixObjectives(m.Config.TurboQuantCompactObjectives)),
-		"config.turboquant_rank_margin_objectives":     authoredString(FormatTurboQuantPrefixObjectives(m.Config.TurboQuantRankMarginObjectives)),
-		"config.turboquant_rank_margin":                authoredFloat(float64(m.Config.TurboQuantRankMargin)),
-		"config.score_spectrum_loss_mode":              authoredString(m.Config.ScoreSpectrumLossMode),
-		"config.score_spectrum_recovery_weight":        authoredFloat(float64(m.Config.ScoreSpectrumRecoveryWeight)),
-		"config.score_spectrum_recovery_margin":        authoredFloat(float64(m.Config.ScoreSpectrumRecoveryMargin)),
-		"config.score_spectrum_recovery_top_k":         authoredInt(int64(m.Config.ScoreSpectrumRecoveryTopK)),
-		"config.score_spectrum_recovery_tau":           authoredFloat(float64(m.Config.ScoreSpectrumRecoveryTau)),
-		"score_spectrum.score_spectrum_train":          authoredBool(m.ScoreSpectrum.ScoreSpectrumTrain),
-		"score_spectrum.score_spectrum_research_only":  authoredBool(m.ScoreSpectrum.ScoreSpectrumResearchOnly),
-		"score_spectrum.train_allowed_for_research":    authoredBool(m.ScoreSpectrum.TrainAllowedForResearch),
-		"score_spectrum.release_train_allowed":         authoredBool(m.ScoreSpectrum.ReleaseTrainAllowed),
-		"score_spectrum.commercial_use_allowed":        authoredBool(m.ScoreSpectrum.CommercialUseAllowed),
-		"score_spectrum.source_artifact_hashes":        authoredString(formatScoreSpectrumSourceHashes(m.ScoreSpectrum.SourceArtifactHashes)),
-		"score_spectrum.score_spectrum_row_count":      authoredInt(int64(m.ScoreSpectrum.ScoreSpectrumRowCount)),
-		"score_spectrum.auto_cleared_objectives":       authoredString(formatScoreSpectrumObjectiveNames(m.ScoreSpectrum.AutoClearedObjectives)),
-		"score_spectrum.isolated_inherited_objectives": authoredString(formatScoreSpectrumObjectiveNames(m.ScoreSpectrum.IsolatedInheritedObjectives)),
+		"name":                                              authoredString(m.Name),
+		"config.optimizer":                                  authoredString(m.Config.Optimizer),
+		"config.weight_bits":                                authoredInt(int64(m.Config.WeightBits)),
+		"config.learning_rate":                              authoredFloat(float64(m.Config.LearningRate)),
+		"config.weight_decay":                               authoredFloat(float64(m.Config.WeightDecay)),
+		"config.beta1":                                      authoredFloat(float64(m.Config.Beta1)),
+		"config.beta2":                                      authoredFloat(float64(m.Config.Beta2)),
+		"config.epsilon":                                    authoredFloat(float64(m.Config.Epsilon)),
+		"config.contrastive_loss":                           authoredString(m.Config.ContrastiveLoss),
+		"config.temperature":                                authoredFloat(float64(m.Config.Temperature)),
+		"config.grouped_loss_weight":                        authoredFloat(float64(m.Config.GroupedLossWeight)),
+		"config.teacher_loss_weight":                        authoredFloat(float64(m.Config.TeacherLossWeight)),
+		"config.teacher_temperature":                        authoredFloat(float64(m.Config.TeacherTemperature)),
+		"config.matryoshka_dims":                            authoredString(formatMatryoshkaDims(m.Config.MatryoshkaDims)),
+		"config.matryoshka_weights":                         authoredString(formatMatryoshkaWeights(m.Config.MatryoshkaWeights)),
+		"config.turboquant_prefix_bits":                     authoredString(formatIntList(m.Config.TurboQuantPrefixBits)),
+		"config.turboquant_prefix_objectives":               authoredString(FormatTurboQuantPrefixObjectives(m.Config.TurboQuantPrefixObjectives)),
+		"config.turboquant_prefix_weight":                   authoredFloat(float64(m.Config.TurboQuantPrefixWeight)),
+		"config.turboquant_prefix_seed":                     authoredInt(m.Config.TurboQuantPrefixSeed),
+		"config.turboquant_prefix_score_mode":               authoredString(m.Config.TurboQuantPrefixScoreMode),
+		"config.turboquant_compact_objectives":              authoredString(FormatTurboQuantPrefixObjectives(m.Config.TurboQuantCompactObjectives)),
+		"config.turboquant_rank_margin_objectives":          authoredString(FormatTurboQuantPrefixObjectives(m.Config.TurboQuantRankMarginObjectives)),
+		"config.turboquant_rank_margin":                     authoredFloat(float64(m.Config.TurboQuantRankMargin)),
+		"config.score_spectrum_loss_mode":                   authoredString(m.Config.ScoreSpectrumLossMode),
+		"config.score_spectrum_recovery_weight":             authoredFloat(float64(m.Config.ScoreSpectrumRecoveryWeight)),
+		"config.score_spectrum_recovery_margin":             authoredFloat(float64(m.Config.ScoreSpectrumRecoveryMargin)),
+		"config.score_spectrum_recovery_top_k":              authoredInt(int64(m.Config.ScoreSpectrumRecoveryTopK)),
+		"config.score_spectrum_recovery_tau":                authoredFloat(float64(m.Config.ScoreSpectrumRecoveryTau)),
+		"score_spectrum.score_spectrum_train":               authoredBool(m.ScoreSpectrum.ScoreSpectrumTrain),
+		"score_spectrum.score_spectrum_research_only":       authoredBool(m.ScoreSpectrum.ScoreSpectrumResearchOnly),
+		"score_spectrum.train_allowed_for_research":         authoredBool(m.ScoreSpectrum.TrainAllowedForResearch),
+		"score_spectrum.release_train_allowed":              authoredBool(m.ScoreSpectrum.ReleaseTrainAllowed),
+		"score_spectrum.commercial_use_allowed":             authoredBool(m.ScoreSpectrum.CommercialUseAllowed),
+		"score_spectrum.source_artifact_hashes":             authoredString(formatScoreSpectrumSourceHashes(m.ScoreSpectrum.SourceArtifactHashes)),
+		"score_spectrum.score_spectrum_row_count":           authoredInt(int64(m.ScoreSpectrum.ScoreSpectrumRowCount)),
+		"score_spectrum.auto_cleared_objectives":            authoredString(formatScoreSpectrumObjectiveNames(m.ScoreSpectrum.AutoClearedObjectives)),
+		"score_spectrum.isolated_inherited_objectives":      authoredString(formatScoreSpectrumObjectiveNames(m.ScoreSpectrum.IsolatedInheritedObjectives)),
+		"listwise_geometry.listwise_geometry_train":         authoredBool(m.ListwiseGeometry.ListwiseGeometryTrain),
+		"listwise_geometry.listwise_geometry_research_only": authoredBool(m.ListwiseGeometry.ListwiseGeometryResearchOnly),
+		"listwise_geometry.train_allowed_for_research":      authoredBool(m.ListwiseGeometry.TrainAllowedForResearch),
+		"listwise_geometry.release_train_allowed":           authoredBool(m.ListwiseGeometry.ReleaseTrainAllowed),
+		"listwise_geometry.commercial_use_allowed":          authoredBool(m.ListwiseGeometry.CommercialUseAllowed),
+		"listwise_geometry.source_artifact_hashes":          authoredString(formatScoreSpectrumSourceHashes(m.ListwiseGeometry.SourceArtifactHashes)),
+		"listwise_geometry.listwise_geometry_batch_count":   authoredInt(int64(m.ListwiseGeometry.ListwiseGeometryBatchCount)),
 	}
 	for key, value := range m.Embedding.mllValues() {
 		values["embedding."+key] = value
@@ -348,6 +368,9 @@ func embeddingTrainManifestFromDoc(doc authoredManifestDoc) (EmbeddingTrainManif
 	if manifest.ScoreSpectrum, err = scoreSpectrumPolicyFromAuthoredDoc(doc, "score_spectrum."); err != nil {
 		return EmbeddingTrainManifest{}, err
 	}
+	if manifest.ListwiseGeometry, err = listwiseGeometryPolicyFromAuthoredDoc(doc, "listwise_geometry."); err != nil {
+		return EmbeddingTrainManifest{}, err
+	}
 	return manifest, nil
 }
 
@@ -403,6 +426,49 @@ func packageScoreSpectrumPolicy(policy EmbeddingScoreSpectrumPolicy) EmbeddingSc
 		ScoreSpectrumRowCount:       policy.ScoreSpectrumRowCount,
 		AutoClearedObjectives:       normalizeScoreSpectrumObjectiveNames(policy.AutoClearedObjectives),
 		IsolatedInheritedObjectives: normalizeScoreSpectrumObjectiveNames(policy.IsolatedInheritedObjectives),
+	}
+}
+
+func listwiseGeometryPolicyFromAuthoredDoc(doc authoredManifestDoc, prefix string) (EmbeddingListwiseGeometryPolicy, error) {
+	var policy EmbeddingListwiseGeometryPolicy
+	var err error
+	if policy.ListwiseGeometryTrain, _, err = doc.bool(prefix + "listwise_geometry_train"); err != nil {
+		return EmbeddingListwiseGeometryPolicy{}, err
+	}
+	if policy.ListwiseGeometryResearchOnly, _, err = doc.bool(prefix + "listwise_geometry_research_only"); err != nil {
+		return EmbeddingListwiseGeometryPolicy{}, err
+	}
+	if policy.TrainAllowedForResearch, _, err = doc.bool(prefix + "train_allowed_for_research"); err != nil {
+		return EmbeddingListwiseGeometryPolicy{}, err
+	}
+	if policy.ReleaseTrainAllowed, _, err = doc.bool(prefix + "release_train_allowed"); err != nil {
+		return EmbeddingListwiseGeometryPolicy{}, err
+	}
+	if policy.CommercialUseAllowed, _, err = doc.bool(prefix + "commercial_use_allowed"); err != nil {
+		return EmbeddingListwiseGeometryPolicy{}, err
+	}
+	if value, _, err := doc.string(prefix + "source_artifact_hashes"); err != nil {
+		return EmbeddingListwiseGeometryPolicy{}, err
+	} else {
+		policy.SourceArtifactHashes = parseScoreSpectrumSourceHashes(value)
+	}
+	if value, _, err := doc.int(prefix + "listwise_geometry_batch_count"); err != nil {
+		return EmbeddingListwiseGeometryPolicy{}, err
+	} else {
+		policy.ListwiseGeometryBatchCount = int(value)
+	}
+	return policy, nil
+}
+
+func packageListwiseGeometryPolicy(policy EmbeddingListwiseGeometryPolicy) EmbeddingListwiseGeometryPolicy {
+	return EmbeddingListwiseGeometryPolicy{
+		ListwiseGeometryTrain:        policy.ListwiseGeometryTrain,
+		ListwiseGeometryResearchOnly: policy.ListwiseGeometryResearchOnly,
+		TrainAllowedForResearch:      policy.TrainAllowedForResearch,
+		ReleaseTrainAllowed:          policy.ReleaseTrainAllowed,
+		CommercialUseAllowed:         policy.CommercialUseAllowed,
+		SourceArtifactHashes:         normalizeScoreSpectrumSourceHashes(policy.SourceArtifactHashes),
+		ListwiseGeometryBatchCount:   policy.ListwiseGeometryBatchCount,
 	}
 }
 

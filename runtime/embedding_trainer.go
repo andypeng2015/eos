@@ -143,11 +143,12 @@ type embeddingEvalRankScore struct {
 
 // EmbeddingTrainer trains a pooled embedding model with quantization-aware forward passes.
 type EmbeddingTrainer struct {
-	module               *eosartifact.Module
-	manifest             EmbeddingManifest
-	config               EmbeddingTrainConfig
-	memoryPlan           *MemoryPlan
-	scoreSpectrumLineage EmbeddingScoreSpectrumPolicy
+	module                  *eosartifact.Module
+	manifest                EmbeddingManifest
+	config                  EmbeddingTrainConfig
+	memoryPlan              *MemoryPlan
+	scoreSpectrumLineage    EmbeddingScoreSpectrumPolicy
+	listwiseGeometryLineage EmbeddingListwiseGeometryPolicy
 	// Retrieval-nDCG eval gate (optional). When enabled, each pairwise/contrastive
 	// eval also embeds a held-out BEIR-style corpus with the current in-training
 	// weights and computes nDCG@10 — the deployment metric — so training can
@@ -215,6 +216,16 @@ func (t *EmbeddingTrainer) SetScoreSpectrumLineage(policy EmbeddingScoreSpectrum
 	policy.AutoClearedObjectives = normalizeScoreSpectrumObjectiveNames(policy.AutoClearedObjectives)
 	policy.IsolatedInheritedObjectives = normalizeScoreSpectrumObjectiveNames(policy.IsolatedInheritedObjectives)
 	t.scoreSpectrumLineage = policy
+}
+
+// SetListwiseGeometryLineage records listwise geometry provenance that must
+// follow future training and inference package writes.
+func (t *EmbeddingTrainer) SetListwiseGeometryLineage(policy EmbeddingListwiseGeometryPolicy) {
+	if t == nil {
+		return
+	}
+	policy.SourceArtifactHashes = normalizeScoreSpectrumSourceHashes(policy.SourceArtifactHashes)
+	t.listwiseGeometryLineage = policy
 }
 
 type embeddingSequenceState struct {
@@ -1612,6 +1623,105 @@ func (t *EmbeddingTrainer) TrainScoreSpectrumStep(batch []EmbeddingScoreSpectrum
 	}, nil
 }
 
+// TrainListwiseGeometryStep runs one update over row-local query/document teacher geometry batches.
+func (t *EmbeddingTrainer) TrainListwiseGeometryStep(batch []EmbeddingTokenizedListwiseGeometryBatch) (EmbeddingTrainMetrics, error) {
+	if t == nil {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("embedding trainer is not initialized")
+	}
+	if len(batch) == 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("listwise geometry training batch is empty")
+	}
+	if err := validateListwiseGeometryTrainerConfig(t.config); err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	queryInputs, documentInputs, spans, err := listwiseGeometrySequenceInputs(batch)
+	if err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	forward := t.prepareForwardWeights()
+	t.primeForwardWeightResidency(forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj)
+	allInputs := make([]embeddingSequenceInput, 0, len(queryInputs)+len(documentInputs))
+	allInputs = append(allInputs, queryInputs...)
+	allInputs = append(allInputs, documentInputs...)
+	encoded, err := t.encodeSequenceInputs(allInputs, forward, true)
+	if err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	defer t.releaseEncodedSequences(encoded)
+	queries := encoded[:len(queryInputs)]
+	documents := encoded[len(queryInputs):]
+
+	gradToken := make([]float32, len(t.tokenEmbed.F32))
+	gradAttnQ := make([]float32, tensorDataLen(t.attentionQuery))
+	gradAttnK := make([]float32, tensorDataLen(t.attentionKey))
+	gradAttnV := make([]float32, tensorDataLen(t.attentionValue))
+	gradAttnO := make([]float32, tensorDataLen(t.attentionOutput))
+	gradHidden := make([]float32, len(t.hiddenProjectionData()))
+	gradProj := make([]float32, len(t.projection.F32))
+	queryGrads := make([][]float32, len(queries))
+	documentGrads := make([][]float32, len(documents))
+	for i := range queries {
+		queryGrads[i] = make([]float32, len(queries[i].pooled))
+	}
+	for i := range documents {
+		documentGrads[i] = make([]float32, len(documents[i].pooled))
+	}
+
+	totalLoss, totalScore, pairCount, queryCount, err := accumulateListwiseGeometryGrads(queries, documents, spans, batch, t.config.Temperature, queryGrads, documentGrads)
+	if err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	if pairCount == 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("listwise geometry training batch has no usable query-document pairs")
+	}
+	if queryCount == 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("listwise geometry training batch has no usable queries")
+	}
+	if !t.tryBackpropContrastiveBatch(
+		queries,
+		documents,
+		queryGrads,
+		documentGrads,
+		forward.attnQ,
+		forward.attnK,
+		forward.attnV,
+		forward.attnO,
+		forward.hidden,
+		forward.proj,
+		gradToken,
+		gradAttnQ,
+		gradAttnK,
+		gradAttnV,
+		gradAttnO,
+		gradHidden,
+		gradProj,
+	) {
+		for i, query := range queries {
+			inputGrad := t.backpropEncodedSequence(query, queryGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
+			t.accumulateInputTokenGrad(query.tokens, inputGrad, gradToken)
+		}
+		for i, document := range documents {
+			inputGrad := t.backpropEncodedSequence(document, documentGrads[i], forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj, gradToken, gradAttnQ, gradAttnK, gradAttnV, gradAttnO, gradHidden, gradProj)
+			t.accumulateInputTokenGrad(document.tokens, inputGrad, gradToken)
+		}
+	}
+
+	batchScale := float32(1) / float32(queryCount)
+	t.step++
+	t.applyOptimizerUpdate(t.tokenParam.Name, t.tokenEmbed, t.tokenMom1, t.tokenMom2, gradToken, batchScale)
+	t.applyOptimizerUpdate(t.attnQParam.Name, t.attentionQuery, t.attnQMom1, t.attnQMom2, gradAttnQ, batchScale)
+	t.applyOptimizerUpdate(t.attnKParam.Name, t.attentionKey, t.attnKMom1, t.attnKMom2, gradAttnK, batchScale)
+	t.applyOptimizerUpdate(t.attnVParam.Name, t.attentionValue, t.attnVMom1, t.attnVMom2, gradAttnV, batchScale)
+	t.applyOptimizerUpdate(t.attnOParam.Name, t.attentionOutput, t.attnOMom1, t.attnOMom2, gradAttnO, batchScale)
+	t.applyOptimizerUpdate(t.hiddenParam.Name, t.hiddenProjection, t.hiddenMom1, t.hiddenMom2, gradHidden, batchScale)
+	t.applyOptimizerUpdate(t.projParam.Name, t.projection, t.projMom1, t.projMom2, gradProj, batchScale)
+	return EmbeddingTrainMetrics{
+		Loss:         totalLoss * batchScale,
+		AverageScore: totalScore / float32(pairCount),
+		BatchSize:    pairCount,
+	}, nil
+}
+
 // EvaluateScoreSpectrum scores tokenized score-spectrum examples without
 // applying optimizer updates or consulting train-policy gates.
 func (t *EmbeddingTrainer) EvaluateScoreSpectrum(examples []EmbeddingScoreSpectrumExample) (EmbeddingScoreSpectrumEvalMetrics, error) {
@@ -1855,6 +1965,7 @@ func (t *EmbeddingTrainer) WriteEmbeddingPackage(artifactPath string) (Embedding
 		return EmbeddingPackagePaths{}, err
 	}
 	packageManifest.ScoreSpectrum = packageScoreSpectrumPolicy(t.scoreSpectrumLineage)
+	packageManifest.ListwiseGeometry = packageListwiseGeometryPolicy(t.listwiseGeometryLineage)
 	packageManifestPath := DefaultPackageManifestPath(artifactPath)
 	if err := packageManifest.WriteFile(packageManifestPath); err != nil {
 		return EmbeddingPackagePaths{}, err
@@ -1896,10 +2007,11 @@ func (t *EmbeddingTrainer) WriteTrainingPackage(artifactPath string) (EmbeddingT
 	}
 	t.memoryPlan = cloneMemoryPlan(&memoryPlan)
 	trainManifest := EmbeddingTrainManifest{
-		Name:          t.manifest.Name,
-		Embedding:     t.manifest,
-		Config:        t.config,
-		ScoreSpectrum: t.scoreSpectrumLineage,
+		Name:             t.manifest.Name,
+		Embedding:        t.manifest,
+		Config:           t.config,
+		ScoreSpectrum:    t.scoreSpectrumLineage,
+		ListwiseGeometry: t.listwiseGeometryLineage,
 	}
 	trainManifestPath := DefaultEmbeddingTrainManifestPath(artifactPath)
 	if err := trainManifest.WriteFile(trainManifestPath); err != nil {
@@ -1936,6 +2048,7 @@ func (t *EmbeddingTrainer) WriteTrainingPackage(artifactPath string) (EmbeddingT
 		return EmbeddingTrainPackagePaths{}, err
 	}
 	packageManifest.ScoreSpectrum = packageScoreSpectrumPolicy(t.scoreSpectrumLineage)
+	packageManifest.ListwiseGeometry = packageListwiseGeometryPolicy(t.listwiseGeometryLineage)
 	packageManifestPath := DefaultPackageManifestPath(artifactPath)
 	if err := packageManifest.WriteFile(packageManifestPath); err != nil {
 		return EmbeddingTrainPackagePaths{}, err
@@ -3899,6 +4012,157 @@ func accumulateScoreSpectrumGrads(queries, candidates []*embeddingEncodedSequenc
 		}
 	}
 	return totalLoss, totalScore, pairCount, nil
+}
+
+func accumulateListwiseGeometryGrads(queries, documents []*embeddingEncodedSequence, spans []embeddingCandidateSpan, batches []EmbeddingTokenizedListwiseGeometryBatch, temperature float32, queryGrads, documentGrads [][]float32) (float32, float32, int, int, error) {
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	pairCount := 0
+	totalQueryCount := 0
+	queryMatrix := newContrastivePooledMatrix(queries)
+	documentMatrix := newContrastivePooledMatrix(documents)
+	queryOffset := 0
+	for i, batch := range batches {
+		if i >= len(spans) {
+			return 0, 0, 0, 0, fmt.Errorf("listwise geometry batch %d missing document span", i)
+		}
+		span := groupedCandidateSpan(spans, i, len(documents))
+		queryCount := len(batch.QueryTokens)
+		docCount := span.End - span.Start
+		if queryCount <= 0 || docCount <= 0 {
+			return 0, 0, 0, 0, fmt.Errorf("listwise geometry batch %d has empty query/document shape", i)
+		}
+		if queryOffset+queryCount > len(queries) {
+			return 0, 0, 0, 0, fmt.Errorf("listwise geometry batch %d query span exceeds encodings", i)
+		}
+		student := make([][]float32, queryCount)
+		for qi := 0; qi < queryCount; qi++ {
+			globalQuery := queryOffset + qi
+			query := queryMatrix.row(globalQuery)
+			queryNorm := queryMatrix.norms[globalQuery]
+			student[qi] = make([]float32, docCount)
+			for localDoc := 0; localDoc < docCount; localDoc++ {
+				globalDoc := span.Start + localDoc
+				score := cosineScoreWithNorms(query, documentMatrix.row(globalDoc), queryNorm, documentMatrix.norms[globalDoc])
+				student[qi][localDoc] = score
+				totalScore += score
+			}
+		}
+		loss, err := EmbeddingListwiseGeometryLossAndGrad(student, batch.TeacherSimilarity, temperature)
+		if err != nil {
+			return 0, 0, 0, 0, fmt.Errorf("listwise geometry batch %d: %w", i, err)
+		}
+		totalLoss += loss.Loss * float32(queryCount)
+		pairCount += queryCount * docCount
+		totalQueryCount += queryCount
+		for qi := 0; qi < queryCount; qi++ {
+			globalQuery := queryOffset + qi
+			query := queryMatrix.row(globalQuery)
+			queryNorm := queryMatrix.norms[globalQuery]
+			for localDoc, scale := range loss.Grad[qi] {
+				if scale == 0 {
+					continue
+				}
+				globalDoc := span.Start + localDoc
+				accumulateCosineGradFromScore(query, documentMatrix.row(globalDoc), queryNorm, documentMatrix.norms[globalDoc], student[qi][localDoc], scale*float32(queryCount), queryGrads[globalQuery], documentGrads[globalDoc])
+			}
+		}
+		queryOffset += queryCount
+	}
+	return totalLoss, totalScore, pairCount, totalQueryCount, nil
+}
+
+func listwiseGeometrySequenceInputs(batches []EmbeddingTokenizedListwiseGeometryBatch) ([]embeddingSequenceInput, []embeddingSequenceInput, []embeddingCandidateSpan, error) {
+	queryInputs := []embeddingSequenceInput{}
+	documentInputs := []embeddingSequenceInput{}
+	documentSpans := make([]embeddingCandidateSpan, len(batches))
+	for i, batch := range batches {
+		if err := validateTokenizedListwiseGeometryBatch(batch); err != nil {
+			return nil, nil, nil, fmt.Errorf("listwise geometry batch %d: %w", i, err)
+		}
+		for j, tokens := range batch.QueryTokens {
+			var mask []int32
+			if j < len(batch.QueryMasks) {
+				mask = batch.QueryMasks[j]
+			}
+			queryInputs = append(queryInputs, embeddingSequenceInput{
+				tokens: tokens,
+				mask:   mask,
+				label:  fmt.Sprintf("listwise geometry batch %d query %d", i, j),
+			})
+		}
+		documentSpans[i].Start = len(documentInputs)
+		for j, tokens := range batch.DocumentTokens {
+			var mask []int32
+			if j < len(batch.DocumentMasks) {
+				mask = batch.DocumentMasks[j]
+			}
+			documentInputs = append(documentInputs, embeddingSequenceInput{
+				tokens: tokens,
+				mask:   mask,
+				label:  fmt.Sprintf("listwise geometry batch %d document %d", i, j),
+			})
+		}
+		documentSpans[i].End = len(documentInputs)
+	}
+	return queryInputs, documentInputs, documentSpans, nil
+}
+
+func validateTokenizedListwiseGeometryBatch(batch EmbeddingTokenizedListwiseGeometryBatch) error {
+	if len(batch.QueryTokens) == 0 {
+		return fmt.Errorf("query_tokens are empty")
+	}
+	if len(batch.DocumentTokens) == 0 {
+		return fmt.Errorf("document_tokens are empty")
+	}
+	if len(batch.QueryIDs) > 0 && len(batch.QueryIDs) != len(batch.QueryTokens) {
+		return fmt.Errorf("query_ids length %d does not match query_tokens length %d", len(batch.QueryIDs), len(batch.QueryTokens))
+	}
+	if len(batch.DocumentIDs) > 0 && len(batch.DocumentIDs) != len(batch.DocumentTokens) {
+		return fmt.Errorf("document_ids length %d does not match document_tokens length %d", len(batch.DocumentIDs), len(batch.DocumentTokens))
+	}
+	if len(batch.QueryMasks) > 0 && len(batch.QueryMasks) != len(batch.QueryTokens) {
+		return fmt.Errorf("query_masks length %d does not match query_tokens length %d", len(batch.QueryMasks), len(batch.QueryTokens))
+	}
+	if len(batch.DocumentMasks) > 0 && len(batch.DocumentMasks) != len(batch.DocumentTokens) {
+		return fmt.Errorf("document_masks length %d does not match document_tokens length %d", len(batch.DocumentMasks), len(batch.DocumentTokens))
+	}
+	for i, tokens := range batch.QueryTokens {
+		if len(tokens) == 0 {
+			return fmt.Errorf("query_tokens[%d] are empty", i)
+		}
+		if len(batch.QueryMasks) > i && len(batch.QueryMasks[i]) > 0 && len(batch.QueryMasks[i]) != len(tokens) {
+			return fmt.Errorf("query_masks[%d] length %d does not match query_tokens[%d] length %d", i, len(batch.QueryMasks[i]), i, len(tokens))
+		}
+	}
+	for i, tokens := range batch.DocumentTokens {
+		if len(tokens) == 0 {
+			return fmt.Errorf("document_tokens[%d] are empty", i)
+		}
+		if len(batch.DocumentMasks) > i && len(batch.DocumentMasks[i]) > 0 && len(batch.DocumentMasks[i]) != len(tokens) {
+			return fmt.Errorf("document_masks[%d] length %d does not match document_tokens[%d] length %d", i, len(batch.DocumentMasks[i]), i, len(tokens))
+		}
+	}
+	return validateEmbeddingListwiseGeometryMatrix(batch.TeacherSimilarity, len(batch.QueryTokens), len(batch.DocumentTokens), "teacher_similarity")
+}
+
+func validateListwiseGeometryTrainerConfig(cfg EmbeddingTrainConfig) error {
+	if len(cfg.MatryoshkaDims) > 0 {
+		return fmt.Errorf("listwise geometry training does not support matryoshka objectives in v1")
+	}
+	if len(cfg.TurboQuantPrefixBits) > 0 || len(cfg.TurboQuantPrefixObjectives) > 0 || len(turboQuantPrefixObjectivesForConfig(cfg)) > 0 {
+		return fmt.Errorf("listwise geometry training does not support turboquant prefix objectives in v1")
+	}
+	if len(cfg.TurboQuantCompactObjectives) > 0 || len(turboQuantCompactObjectivesForConfig(cfg)) > 0 {
+		return fmt.Errorf("listwise geometry training does not support turboquant compact objectives in v1")
+	}
+	if len(cfg.TurboQuantRankMarginObjectives) > 0 || len(turboQuantRankMarginObjectivesForConfig(cfg)) > 0 {
+		return fmt.Errorf("listwise geometry training does not support turboquant rank-margin objectives in v1")
+	}
+	if cfg.Temperature <= 0 || math.IsNaN(float64(cfg.Temperature)) || math.IsInf(float64(cfg.Temperature), 0) {
+		return fmt.Errorf("temperature must be finite and positive")
+	}
+	return nil
 }
 
 func scoreSpectrumSequenceInputs(examples []EmbeddingScoreSpectrumExample) ([]embeddingSequenceInput, []embeddingSequenceInput, []embeddingCandidateSpan, error) {
