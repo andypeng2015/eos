@@ -3,7 +3,9 @@ package backend
 import (
 	"fmt"
 	"math"
+	"runtime"
 	"strconv"
+	"sync"
 
 	eosartifact "m31labs.dev/eos/artifact/eos"
 )
@@ -162,13 +164,13 @@ func BERTEncoderLayerReference(
 	v := denseHF(hiddenStates.F32, rows, hidden, valueWeight, valueBias)
 	context := make([]float32, rows*hidden)
 	scale := 1 / math.Sqrt(float64(headDim))
+	logits := make([]float64, tokens)
 	for b := 0; b < batch; b++ {
 		for i := 0; i < tokens; i++ {
 			queryRow := b*tokens + i
 			for head := 0; head < numAttentionHeads; head++ {
 				activeKeys := 0
 				maxLogit := math.Inf(-1)
-				logits := make([]float64, tokens)
 				for j := 0; j < tokens; j++ {
 					if attentionMask.I32[b*tokens+j] == 0 {
 						continue
@@ -278,16 +280,42 @@ func validateBERTEncoderLayerOutputType(shape []int, outTypes ...eosartifact.Val
 func denseHF(input []float32, rows, in int, weight, bias *Tensor) []float32 {
 	out := weight.Shape[0]
 	result := make([]float32, rows*out)
-	for r := 0; r < rows; r++ {
+	workItems := rows * in * out
+	workers := runtime.GOMAXPROCS(0)
+	if workers <= 1 || rows < 16 || workItems < 1<<20 {
+		denseHFRange(input, result, 0, rows, in, out, weight.F32, bias.F32)
+		return result
+	}
+	if workers > rows {
+		workers = rows
+	}
+	chunk := (rows + workers - 1) / workers
+	var wg sync.WaitGroup
+	for rowStart := 0; rowStart < rows; rowStart += chunk {
+		rowEnd := rowStart + chunk
+		if rowEnd > rows {
+			rowEnd = rows
+		}
+		wg.Add(1)
+		go func(start, end int) {
+			defer wg.Done()
+			denseHFRange(input, result, start, end, in, out, weight.F32, bias.F32)
+		}(rowStart, rowEnd)
+	}
+	wg.Wait()
+	return result
+}
+
+func denseHFRange(input, result []float32, rowStart, rowEnd, in, out int, weight, bias []float32) {
+	for r := rowStart; r < rowEnd; r++ {
 		for o := 0; o < out; o++ {
-			sum := float64(bias.F32[o])
+			sum := float64(bias[o])
 			for c := 0; c < in; c++ {
-				sum += float64(input[r*in+c]) * float64(weight.F32[o*in+c])
+				sum += float64(input[r*in+c]) * float64(weight[o*in+c])
 			}
 			result[r*out+o] = float32(sum)
 		}
 	}
-	return result
 }
 
 func layerNormAffine(input []float32, rows, dim int, gamma, beta *Tensor, epsilon float64) []float32 {

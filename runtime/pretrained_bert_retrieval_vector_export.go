@@ -379,6 +379,9 @@ func writePretrainedBERTVectorCache(ctx context.Context, embedder *PretrainedBER
 				return 0, err
 			}
 		}
+		if err := writer.Flush(); err != nil {
+			return 0, err
+		}
 	}
 	if err := writer.Flush(); err != nil {
 		return 0, err
