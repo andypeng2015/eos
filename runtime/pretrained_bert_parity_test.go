@@ -25,26 +25,29 @@ func TestPretrainedBERTHFParitySnapshot(t *testing.T) {
 		"A neural retriever ranks scientific abstracts.",
 		"The database stores compact vector embeddings.",
 	}
-	const maxLength = 32
-
-	py, err := runPythonBERTParityFixture(t, python, snapshot, texts, maxLength)
-	if err != nil {
-		t.Fatalf("python parity fixture: %v", err)
-	}
 
 	tokenizer, err := LoadHFWordPieceTokenizerFromDir(snapshot)
 	if err != nil {
 		t.Fatalf("load Go tokenizer: %v", err)
+	}
+	plan, err := PlanPretrainedBERTImportFromDir(snapshot, parityModelLabel())
+	if err != nil {
+		t.Fatalf("plan import: %v", err)
+	}
+	maxLength, pooling, err := bertParityReferenceSettings(plan)
+	if err != nil {
+		t.Fatalf("resolve reference settings: %v", err)
+	}
+	t.Logf("BERT HF parity reference: pooling=%s max_length=%d", pooling, maxLength)
+	py, err := runPythonBERTParityFixture(t, python, snapshot, texts, maxLength, pooling)
+	if err != nil {
+		t.Fatalf("python parity fixture: %v", err)
 	}
 	goInputIDs, goAttentionMask, goTokenTypeIDs := encodeBERTParityTexts(t, tokenizer, texts, maxLength)
 	assertInt32SliceEqual(t, goInputIDs, py.InputIDs)
 	assertInt32SliceEqual(t, goAttentionMask, py.AttentionMask)
 	assertInt32SliceEqual(t, goTokenTypeIDs, py.TokenTypeIDs)
 
-	plan, err := PlanPretrainedBERTImportFromDir(snapshot, parityModelLabel())
-	if err != nil {
-		t.Fatalf("plan import: %v", err)
-	}
 	decoded, decodeReport, err := LoadPretrainedBERTDecodedWeightsFromDir(snapshot, plan)
 	if err != nil {
 		t.Fatalf("decode safetensors: %v", err)
@@ -105,7 +108,7 @@ type pythonBERTParityFixture struct {
 	Embeddings    [][]float32 `json:"embeddings"`
 }
 
-func runPythonBERTParityFixture(t *testing.T, python, snapshot string, texts []string, maxLength int) (pythonBERTParityFixture, error) {
+func runPythonBERTParityFixture(t *testing.T, python, snapshot string, texts []string, maxLength int, pooling string) (pythonBERTParityFixture, error) {
 	t.Helper()
 	textsJSON, err := json.Marshal(texts)
 	if err != nil {
@@ -121,6 +124,7 @@ from transformers import AutoModel, AutoTokenizer
 snapshot = sys.argv[1]
 max_length = int(sys.argv[2])
 texts = json.loads(sys.argv[3])
+pooling = sys.argv[4]
 tokenizer = AutoTokenizer.from_pretrained(snapshot, local_files_only=True)
 model = AutoModel.from_pretrained(snapshot, local_files_only=True)
 model.eval()
@@ -136,10 +140,16 @@ if "token_type_ids" not in encoded:
     encoded["token_type_ids"] = torch.zeros_like(encoded["input_ids"])
 with torch.no_grad():
     output = model(**encoded)
-mask = encoded["attention_mask"].unsqueeze(-1).to(output.last_hidden_state.dtype)
-summed = (output.last_hidden_state * mask).sum(dim=1)
-counts = mask.sum(dim=1).clamp(min=1e-9)
-embeddings = F.normalize(summed / counts, p=2, dim=1)
+if pooling == "masked_mean":
+    mask = encoded["attention_mask"].unsqueeze(-1).to(output.last_hidden_state.dtype)
+    summed = (output.last_hidden_state * mask).sum(dim=1)
+    counts = mask.sum(dim=1).clamp(min=1e-9)
+    embeddings = summed / counts
+elif pooling == "cls":
+    embeddings = output.last_hidden_state[:, 0]
+else:
+    raise ValueError(f"unsupported parity pooling: {pooling}")
+embeddings = F.normalize(embeddings, p=2, dim=1)
 payload = {
     "input_ids": encoded["input_ids"].reshape(-1).tolist(),
     "attention_mask": encoded["attention_mask"].reshape(-1).tolist(),
@@ -148,7 +158,7 @@ payload = {
 }
 print(json.dumps(payload, separators=(",", ":")))
 `
-	cmd := exec.Command(python, "-c", script, snapshot, strconv.Itoa(maxLength), string(textsJSON))
+	cmd := exec.Command(python, "-c", script, snapshot, strconv.Itoa(maxLength), string(textsJSON), pooling)
 	cmd.Env = append(os.Environ(),
 		"HF_HUB_OFFLINE=1",
 		"TRANSFORMERS_OFFLINE=1",
@@ -164,6 +174,49 @@ print(json.dumps(payload, separators=(",", ":")))
 		return pythonBERTParityFixture{}, fmt.Errorf("parse python JSON: %w: stdout=%s stderr=%s", err, stdout.String(), stderr.String())
 	}
 	return fixture, nil
+}
+
+func bertParityReferenceSettings(plan PretrainedBERTImportPlan) (int, string, error) {
+	maxLength, _ := resolvePretrainedBERTMaxLength(0, plan.Config, plan.SentenceTransformers)
+	if maxLength <= 0 {
+		return 0, "", fmt.Errorf("max length must be positive, got %d", maxLength)
+	}
+	pooling, err := pretrainedBERTPlanPooling(plan)
+	if err != nil {
+		return 0, "", err
+	}
+	return maxLength, pooling, nil
+}
+
+func TestPretrainedBERTParityReferenceSettingsUseResolvedSTMetadata(t *testing.T) {
+	plan := PretrainedBERTImportPlan{
+		Config:        PretrainedBERTConfig{MaxPositionEmbeddings: 128},
+		PoolingPolicy: "cls",
+		SentenceTransformers: &PretrainedBERTSTMetadata{
+			MaxSeqLength: 512,
+		},
+	}
+	maxLength, pooling, err := bertParityReferenceSettings(plan)
+	if err != nil {
+		t.Fatalf("reference settings: %v", err)
+	}
+	if maxLength != 512 || pooling != "cls" {
+		t.Fatalf("settings = max_length:%d pooling:%q, want max_length:512 pooling:cls", maxLength, pooling)
+	}
+}
+
+func TestPretrainedBERTParityReferenceSettingsDefaultToConfigAndMaskedMean(t *testing.T) {
+	plan := PretrainedBERTImportPlan{
+		Config:        PretrainedBERTConfig{MaxPositionEmbeddings: 128},
+		PoolingPolicy: "",
+	}
+	maxLength, pooling, err := bertParityReferenceSettings(plan)
+	if err != nil {
+		t.Fatalf("reference settings: %v", err)
+	}
+	if maxLength != 128 || pooling != "masked_mean" {
+		t.Fatalf("settings = max_length:%d pooling:%q, want max_length:128 pooling:masked_mean", maxLength, pooling)
+	}
 }
 
 func encodeBERTParityTexts(t *testing.T, tokenizer *HFWordPieceTokenizer, texts []string, maxLength int) ([]int32, []int32, []int32) {
