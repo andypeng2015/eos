@@ -1,6 +1,7 @@
 package eosruntime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"math"
@@ -59,6 +60,94 @@ func TestEmbeddingTrainerTrainListwiseGeometryStep(t *testing.T) {
 	}
 	if trainer.step != 1 {
 		t.Fatalf("step = %d, want 1", trainer.step)
+	}
+}
+
+func TestEmbeddingTrainerEvaluateListwiseGeometryMetricsAndCELowerWhenStudentMatchesTeacher(t *testing.T) {
+	batch := EmbeddingTokenizedListwiseGeometryBatch{
+		QueryIDs:       []string{"q0", "q1"},
+		QueryTokens:    [][]int32{{0}, {1}},
+		DocumentIDs:    []string{"d0", "d1"},
+		DocumentTokens: [][]int32{{0}, {1}},
+		TeacherSimilarity: [][]float32{
+			{1, 0},
+			{0, 1},
+		},
+		Examples: []EmbeddingListwiseGeometryExample{
+			{QueryID: "q0", PositiveDocID: "d0"},
+			{QueryID: "q1", PositiveDocID: "d1"},
+		},
+	}
+	matchedQueries := []*embeddingEncodedSequence{
+		{pooled: []float32{1, 0}},
+		{pooled: []float32{0, 1}},
+	}
+	matchedDocs := []*embeddingEncodedSequence{
+		{pooled: []float32{1, 0}},
+		{pooled: []float32{0, 1}},
+	}
+	matched, err := evaluateListwiseGeometryEncodings(matchedQueries, matchedDocs, []embeddingCandidateSpan{{Start: 0, End: 2}}, []EmbeddingTokenizedListwiseGeometryBatch{batch}, 0.2)
+	if err != nil {
+		t.Fatalf("matched listwise eval: %v", err)
+	}
+	swappedDocs := []*embeddingEncodedSequence{
+		{pooled: []float32{0, 1}},
+		{pooled: []float32{1, 0}},
+	}
+	swapped, err := evaluateListwiseGeometryEncodings(matchedQueries, swappedDocs, []embeddingCandidateSpan{{Start: 0, End: 2}}, []EmbeddingTokenizedListwiseGeometryBatch{batch}, 0.2)
+	if err != nil {
+		t.Fatalf("swapped listwise eval: %v", err)
+	}
+	if matched.TeacherCrossEntropy >= swapped.TeacherCrossEntropy {
+		t.Fatalf("matched CE = %f, swapped CE = %f; want matched lower", matched.TeacherCrossEntropy, swapped.TeacherCrossEntropy)
+	}
+	if matched.Loss != matched.TeacherCrossEntropy {
+		t.Fatalf("loss = %f, teacher CE = %f; want aliases equal", matched.Loss, matched.TeacherCrossEntropy)
+	}
+	if matched.QueryCount != 2 || matched.DocumentCellCount != 4 || matched.BatchCount != 1 {
+		t.Fatalf("matched counts = %+v, want 2 queries/4 cells/1 batch", matched)
+	}
+	if matched.TeacherTop1Agreement != 1 || matched.AnyPositiveTop1 != 1 || matched.AnyPositiveQueryCount != 2 {
+		t.Fatalf("matched top1 metrics = %+v, want perfect teacher/positive top1", matched)
+	}
+	if swapped.TeacherTop1Agreement != 0 || swapped.AnyPositiveTop1 != 0 {
+		t.Fatalf("swapped top1 metrics = %+v, want zero teacher/positive top1", swapped)
+	}
+	if matched.TeacherKL < -1e-6 || math.IsNaN(float64(matched.TeacherKL)) {
+		t.Fatalf("teacher KL = %f, want finite non-negative", matched.TeacherKL)
+	}
+}
+
+func TestEmbeddingTrainerFitListwiseGeometryEvalOnlyRecordsMetricsAndDoesNotUpdate(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	startProfile := trainer.TrainProfile()
+	startStep := trainer.step
+	summary, err := trainer.FitListwiseGeometry(nil, nil, EmbeddingTrainRunConfig{
+		EvalOnly:             true,
+		BatchSize:            1,
+		Temperature:          0.05,
+		ListwiseGeometryEval: tinyTokenizedListwiseGeometryBatches(false),
+	})
+	if err != nil {
+		t.Fatalf("fit listwise geometry eval-only: %v", err)
+	}
+	if trainer.step != startStep || summary.StepsRun != 0 || summary.StepsCompleted != startStep {
+		t.Fatalf("steps trainer=%d summary=%+v, want no optimizer steps", trainer.step, summary)
+	}
+	if summary.DeltaProfile.Optimizer.UpdateCalls != 0 {
+		t.Fatalf("optimizer updates = %d, want 0", summary.DeltaProfile.Optimizer.UpdateCalls)
+	}
+	if trainer.TrainProfile().Optimizer.UpdateCalls != startProfile.Optimizer.UpdateCalls {
+		t.Fatalf("profile optimizer updates = %d, want unchanged %d", trainer.TrainProfile().Optimizer.UpdateCalls, startProfile.Optimizer.UpdateCalls)
+	}
+	if summary.FinalListwiseGeometryEval == nil || summary.LastListwiseGeometryEval == nil || summary.BestListwiseGeometryEval == nil {
+		t.Fatalf("missing listwise eval metrics: %+v", summary)
+	}
+	if summary.FinalEval != nil {
+		t.Fatalf("pairwise eval = %+v, want nil for listwise-only eval", summary.FinalEval)
+	}
+	if summary.Workload.EvalMode != "listwise_geometry" || summary.Workload.ActualEvalPasses != 1 || summary.Workload.ActualEvalExamples != 2 || summary.Workload.ActualEvalPairs != 4 || summary.Workload.ActualTrainPairs != 0 {
+		t.Fatalf("workload = %+v, want one listwise eval pass over 2 query rows/4 cells and no train pairs", summary.Workload)
 	}
 }
 
@@ -261,6 +350,15 @@ func TestEstimateListwiseGeometryTrainWorkloadCountsMatrixCells(t *testing.T) {
 	if workload.TrainMode != "listwise_geometry" || workload.TrainPairsPerEpoch != 4 || workload.PlannedTrainPairs != 8 {
 		t.Fatalf("workload = %+v, want listwise matrix cell counts", workload)
 	}
+
+	workload = EstimateListwiseGeometryTrainWorkload(nil, 0, EmbeddingTrainRunConfig{
+		EvalOnly:             true,
+		BatchSize:            1,
+		ListwiseGeometryEval: tinyTokenizedListwiseGeometryBatches(false),
+	})
+	if workload.EvalMode != "listwise_geometry" || workload.EvalExamples != 2 || workload.EvalPairsPerPass != 4 || workload.PlannedEvalPairs != 4 {
+		t.Fatalf("eval workload = %+v, want 2 query rows and 4 matrix cells", workload)
+	}
 }
 
 func TestTrainEmbeddingPackageFromTextContrastiveFilesResearchOnlyListwiseWritesRejectableEmbeddingLineage(t *testing.T) {
@@ -324,6 +422,59 @@ func TestTrainEmbeddingPackageFromTextContrastiveFilesListwiseGeometrySmoke(t *t
 	}
 	if summary.StepsCompleted != 1 || summary.Workload.TrainMode != "listwise_geometry" {
 		t.Fatalf("summary = %+v, want listwise geometry training", summary)
+	}
+}
+
+func TestTrainEmbeddingPackageFromTextContrastiveFilesListwiseEvalOnlyDoesNotRewritePackage(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	path := writeTinyTrainingPackage(t, trainer)
+	tokenizerPath := filepath.Join(t.TempDir(), "tokenizer.mll")
+	if err := tinyListwiseGeometryTokenizerFile().WriteFile(tokenizerPath); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	evalPath := writeTinyListwiseGeometryJSONL(t, tinyListwiseGeometryBatches(false))
+	packageFiles := []string{
+		path,
+		DefaultEmbeddingManifestPath(path),
+		DefaultWeightFilePath(path),
+		DefaultMemoryPlanPath(path),
+		DefaultEmbeddingTrainManifestPath(path),
+		DefaultEmbeddingCheckpointPath(path),
+		DefaultEmbeddingTrainProfilePath(path),
+		DefaultPackageManifestPath(path),
+	}
+	before := map[string][]byte{}
+	for _, file := range packageFiles {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read package file %s: %v", file, err)
+		}
+		before[file] = data
+	}
+
+	summary, paths, err := TrainEmbeddingPackageFromTextContrastiveFiles(path, tokenizerPath, evalPath, "", EmbeddingTrainRunConfig{
+		EvalOnly:              true,
+		ListwiseGeometryTrain: true,
+		BatchSize:             1,
+		Temperature:           0.05,
+	})
+	if err != nil {
+		t.Fatalf("eval-only listwise package: %v", err)
+	}
+	if paths.ArtifactPath != path || paths.CheckpointPath != DefaultEmbeddingCheckpointPath(path) || paths.TrainProfilePath != DefaultEmbeddingTrainProfilePath(path) {
+		t.Fatalf("paths = %+v, want default package paths for %s", paths, path)
+	}
+	if summary.FinalListwiseGeometryEval == nil || summary.Workload.ActualEvalExamples != 2 || summary.Workload.ActualEvalPairs != 4 || summary.DeltaProfile.Optimizer.UpdateCalls != 0 {
+		t.Fatalf("summary = %+v workload=%+v, want read-only listwise eval metrics", summary, summary.Workload)
+	}
+	for _, file := range packageFiles {
+		after, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read package file after eval %s: %v", file, err)
+		}
+		if !bytes.Equal(after, before[file]) {
+			t.Fatalf("package file %s changed during listwise eval-only", file)
+		}
 	}
 }
 

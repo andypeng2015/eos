@@ -5863,6 +5863,18 @@ func TestRunTrainEmbedListwiseGeometryPlanOnlyAndValidation(t *testing.T) {
 		}
 	}
 
+	output = captureRunOutput(t, []string{"train-embed", "--plan-only", "--eval-only", "--tokenizer", tokenizerPath, "--listwise-geometry-train", "--batch-size", "1", path, trainPath})
+	for _, want := range []string{
+		"train=0 listwise_geometry examples",
+		"eval=2 listwise_geometry examples",
+		"eval_pairs/pass=4",
+		"pairs(planned=4 actual=0)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("listwise eval-only plan output missing %q\noutput:\n%s", want, output)
+		}
+	}
+
 	_, err := captureRunOutputAndError(t, []string{"train-embed", "--listwise-geometry-train", "--no-tokenizer", path, trainPath})
 	if err == nil || !strings.Contains(err.Error(), "requires text tokenization") {
 		t.Fatalf("no-tokenizer listwise error = %v, want text tokenization rejection", err)

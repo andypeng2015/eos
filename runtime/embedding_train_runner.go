@@ -57,6 +57,7 @@ type EmbeddingTrainRunConfig struct {
 	TurboQuantRankMargin              float32
 	ScoreSpectrumEval                 []EmbeddingScoreSpectrumExample
 	ScoreSpectrumEvalPath             string
+	ListwiseGeometryEval              []EmbeddingTokenizedListwiseGeometryBatch
 	ScoreSpectrumLossMode             string
 	ScoreSpectrumRecoveryWeight       float32
 	ScoreSpectrumRecoveryMargin       float32
@@ -105,12 +106,13 @@ type EmbeddingTrainProgress struct {
 
 // EmbeddingTrainEpochSummary records one epoch of training progress.
 type EmbeddingTrainEpochSummary struct {
-	Epoch             int
-	Step              int
-	Train             EmbeddingTrainMetrics
-	Eval              *EmbeddingEvalMetrics
-	ScoreSpectrumEval *EmbeddingScoreSpectrumEvalMetrics
-	Improved          bool
+	Epoch                int
+	Step                 int
+	Train                EmbeddingTrainMetrics
+	Eval                 *EmbeddingEvalMetrics
+	ScoreSpectrumEval    *EmbeddingScoreSpectrumEvalMetrics
+	ListwiseGeometryEval *EmbeddingListwiseGeometryEvalMetrics
+	Improved             bool
 }
 
 // EmbeddingTrainWorkload summarizes planned and actual pairwise work for a run.
@@ -140,29 +142,32 @@ type EmbeddingTrainWorkload struct {
 
 // EmbeddingTrainRunSummary summarizes a full train/eval run.
 type EmbeddingTrainRunSummary struct {
-	Config                 EmbeddingTrainRunConfig
-	Workload               EmbeddingTrainWorkload
-	EpochsCompleted        int
-	StepsCompleted         int
-	StepsRun               int
-	BestEpoch              int
-	BestStep               int
-	FinalTrain             EmbeddingTrainMetrics
-	LastEval               *EmbeddingEvalMetrics
-	BestEval               *EmbeddingEvalMetrics
-	FinalEval              *EmbeddingEvalMetrics
-	LastScoreSpectrumEval  *EmbeddingScoreSpectrumEvalMetrics
-	BestScoreSpectrumEval  *EmbeddingScoreSpectrumEvalMetrics
-	FinalScoreSpectrumEval *EmbeddingScoreSpectrumEvalMetrics
-	RestoredBest           bool
-	StoppedEarly           bool
-	History                []EmbeddingTrainEpochSummary
-	StartProfile           EmbeddingTrainProfile
-	EndProfile             EmbeddingTrainProfile
-	DeltaProfile           EmbeddingTrainProfile
-	Elapsed                time.Duration
-	TrainDuration          time.Duration
-	EvalDuration           time.Duration
+	Config                    EmbeddingTrainRunConfig
+	Workload                  EmbeddingTrainWorkload
+	EpochsCompleted           int
+	StepsCompleted            int
+	StepsRun                  int
+	BestEpoch                 int
+	BestStep                  int
+	FinalTrain                EmbeddingTrainMetrics
+	LastEval                  *EmbeddingEvalMetrics
+	BestEval                  *EmbeddingEvalMetrics
+	FinalEval                 *EmbeddingEvalMetrics
+	LastScoreSpectrumEval     *EmbeddingScoreSpectrumEvalMetrics
+	BestScoreSpectrumEval     *EmbeddingScoreSpectrumEvalMetrics
+	FinalScoreSpectrumEval    *EmbeddingScoreSpectrumEvalMetrics
+	LastListwiseGeometryEval  *EmbeddingListwiseGeometryEvalMetrics
+	BestListwiseGeometryEval  *EmbeddingListwiseGeometryEvalMetrics
+	FinalListwiseGeometryEval *EmbeddingListwiseGeometryEvalMetrics
+	RestoredBest              bool
+	StoppedEarly              bool
+	History                   []EmbeddingTrainEpochSummary
+	StartProfile              EmbeddingTrainProfile
+	EndProfile                EmbeddingTrainProfile
+	DeltaProfile              EmbeddingTrainProfile
+	Elapsed                   time.Duration
+	TrainDuration             time.Duration
+	EvalDuration              time.Duration
 }
 
 // Fit trains over a dataset, periodically evaluates, and can restore the best checkpoint.
@@ -1212,8 +1217,9 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("embedding trainer is not initialized")
 	}
 	cfg = normalizedTrainRunConfig(cfg)
+	listwiseEvalSet := cfg.ListwiseGeometryEval
 	if cfg.EvalOnly {
-		if len(evalSet) == 0 {
+		if len(evalSet) == 0 && len(listwiseEvalSet) == 0 {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("eval dataset is empty")
 		}
 	} else {
@@ -1266,24 +1272,36 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 	summary := EmbeddingTrainRunSummary{
 		Config:       cfg,
 		StartProfile: t.TrainProfile(),
-		Workload:     EstimateListwiseGeometryTrainWorkload(trainSet, len(evalSet), cfg),
+		Workload:     estimateListwiseGeometryTrainWorkload(trainSet, len(evalSet), listwiseGeometryQueryCount(listwiseEvalSet), len(evalSet)+listwiseGeometryQueryCount(listwiseEvalSet), len(evalSet)+listwiseGeometryCellCount(listwiseEvalSet), cfg),
 	}
 	if cfg.EvalOnly {
 		evalStart := time.Now()
-		maybeReportEvalProgress(cfg, "eval_start", 0, t.step, 1, int64(len(evalSet)), int64(len(evalSet)), runStart)
-		finalEval, err := t.EvaluatePairs(evalSet)
-		if err != nil {
-			return EmbeddingTrainRunSummary{}, fmt.Errorf("eval: %w", err)
+		evalExamples, evalPairs := listwiseGeometryEvalProgressWork(evalSet, listwiseEvalSet)
+		maybeReportEvalProgress(cfg, "eval_start", 0, t.step, 1, evalExamples, evalPairs, runStart)
+		if len(evalSet) > 0 {
+			finalEval, err := t.EvaluatePairs(evalSet)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, fmt.Errorf("eval: %w", err)
+			}
+			summary.FinalEval = cloneEvalMetrics(finalEval)
+			summary.LastEval = cloneEvalMetrics(finalEval)
+			summary.BestEval = cloneEvalMetrics(finalEval)
+		}
+		if len(listwiseEvalSet) > 0 {
+			finalListwiseEval, err := t.EvaluateListwiseGeometryBatched(listwiseEvalSet, cfg.BatchSize)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, fmt.Errorf("listwise geometry eval: %w", err)
+			}
+			summary.FinalListwiseGeometryEval = cloneListwiseGeometryEvalMetrics(finalListwiseEval)
+			summary.LastListwiseGeometryEval = cloneListwiseGeometryEvalMetrics(finalListwiseEval)
+			summary.BestListwiseGeometryEval = cloneListwiseGeometryEvalMetrics(finalListwiseEval)
 		}
 		summary.EvalDuration = time.Since(evalStart)
 		summary.StepsCompleted = t.step
-		summary.FinalEval = cloneEvalMetrics(finalEval)
-		summary.LastEval = cloneEvalMetrics(finalEval)
-		summary.BestEval = cloneEvalMetrics(finalEval)
 		summary.BestStep = t.step
 		summary.Workload.ActualEvalPasses = 1
-		summary.Workload.ActualEvalPairs = int64(len(evalSet))
-		summary.Workload.ActualEvalExamples = int64(len(evalSet))
+		summary.Workload.ActualEvalPairs = evalPairs
+		summary.Workload.ActualEvalExamples = evalExamples
 		maybeReportEvalProgress(cfg, "eval_done", 0, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
 		summary.EndProfile = t.TrainProfile()
 		summary.DeltaProfile = diffTrainProfile(summary.StartProfile, summary.EndProfile)
@@ -1303,39 +1321,57 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 		haveBest       bool
 		noImproveEvals int
 	)
-	recordEval := func(epoch int) (*EmbeddingEvalMetrics, bool, error) {
+	recordEval := func(epoch int) (*EmbeddingEvalMetrics, *EmbeddingListwiseGeometryEvalMetrics, bool, error) {
 		evalStart := time.Now()
 		evalPass := summary.Workload.ActualEvalPasses + 1
-		maybeReportEvalProgress(cfg, "eval_start", epoch, t.step, evalPass, int64(len(evalSet)), int64(len(evalSet)), runStart)
-		evalMetrics, err := t.EvaluatePairs(evalSet)
-		if err != nil {
-			return nil, false, err
+		evalExamples, evalPairs := listwiseGeometryEvalProgressWork(evalSet, listwiseEvalSet)
+		maybeReportEvalProgress(cfg, "eval_start", epoch, t.step, evalPass, evalExamples, evalPairs, runStart)
+		var evalMetrics *EmbeddingEvalMetrics
+		if len(evalSet) > 0 {
+			metrics, err := t.EvaluatePairs(evalSet)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			evalMetrics = cloneEvalMetrics(metrics)
+			summary.LastEval = cloneEvalMetrics(metrics)
+		}
+		var listwiseEvalMetrics *EmbeddingListwiseGeometryEvalMetrics
+		if len(listwiseEvalSet) > 0 {
+			metrics, err := t.EvaluateListwiseGeometryBatched(listwiseEvalSet, cfg.BatchSize)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			listwiseEvalMetrics = cloneListwiseGeometryEvalMetrics(metrics)
+			summary.LastListwiseGeometryEval = cloneListwiseGeometryEvalMetrics(metrics)
 		}
 		summary.EvalDuration += time.Since(evalStart)
 		summary.Workload.ActualEvalPasses++
-		summary.Workload.ActualEvalPairs += int64(len(evalSet))
-		summary.Workload.ActualEvalExamples += int64(len(evalSet))
-		summary.LastEval = cloneEvalMetrics(evalMetrics)
+		summary.Workload.ActualEvalPairs += evalPairs
+		summary.Workload.ActualEvalExamples += evalExamples
 		maybeReportEvalProgress(cfg, "eval_done", epoch, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
 		improved := false
-		if !haveBest || betterEvalMetrics(evalMetrics, *summary.BestEval, cfg.SelectMetric, cfg.MinDelta) {
-			bestCheckpoint, err = t.Checkpoint()
+		if evalMetrics != nil && (!haveBest || betterEvalMetrics(*evalMetrics, *summary.BestEval, cfg.SelectMetric, cfg.MinDelta)) {
+			checkpoint, err := t.Checkpoint()
 			if err != nil {
-				return nil, false, err
+				return nil, nil, false, err
 			}
+			bestCheckpoint = checkpoint
 			haveBest = true
 			improved = true
-			summary.BestEval = cloneEvalMetrics(evalMetrics)
+			summary.BestEval = cloneEvalMetrics(*evalMetrics)
+			if listwiseEvalMetrics != nil {
+				summary.BestListwiseGeometryEval = cloneListwiseGeometryEvalMetrics(*listwiseEvalMetrics)
+			}
 			summary.BestEpoch = epoch
 			summary.BestStep = t.step
 			noImproveEvals = 0
-		} else {
+		} else if evalMetrics != nil {
 			noImproveEvals++
 		}
-		return cloneEvalMetrics(evalMetrics), improved, nil
+		return evalMetrics, listwiseEvalMetrics, improved, nil
 	}
 	if len(evalSet) > 0 && cfg.RestoreBest {
-		if _, _, err := recordEval(0); err != nil {
+		if _, _, _, err := recordEval(0); err != nil {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("initial eval: %w", err)
 		}
 	}
@@ -1348,12 +1384,12 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 		}
 		trainStart := time.Now()
 		var afterBatch contrastiveEpochBatchHook
-		if len(evalSet) > 0 && cfg.EvalEverySteps > 0 {
+		if (len(evalSet) > 0 || len(listwiseEvalSet) > 0) && cfg.EvalEverySteps > 0 {
 			afterBatch = func(progress EmbeddingTrainProgress) error {
 				if progress.Batch <= 0 || progress.Batch%cfg.EvalEverySteps != 0 {
 					return nil
 				}
-				if _, _, err := recordEval(epoch); err != nil {
+				if _, _, _, err := recordEval(epoch); err != nil {
 					return fmt.Errorf("step %d eval: %w", progress.Step, err)
 				}
 				return nil
@@ -1375,14 +1411,15 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 		_, epochPairs := listwiseGeometryBatchWork(listwiseGeometryOrderedBatches(trainSet, indices), cfg.BatchSize)
 		summary.Workload.ActualTrainPairs += epochPairs
 		summary.Workload.ActualTrainExamples += int64(len(indices))
-		if len(evalSet) > 0 && epoch%cfg.EvalEveryEpoch == 0 {
-			evalMetrics, improved, err := recordEval(epoch)
+		if (len(evalSet) > 0 || len(listwiseEvalSet) > 0) && epoch%cfg.EvalEveryEpoch == 0 {
+			evalMetrics, listwiseEvalMetrics, improved, err := recordEval(epoch)
 			if err != nil {
 				return EmbeddingTrainRunSummary{}, fmt.Errorf("epoch %d eval: %w", epoch, err)
 			}
 			record.Eval = evalMetrics
+			record.ListwiseGeometryEval = listwiseEvalMetrics
 			record.Improved = improved
-			if !improved && cfg.EarlyStoppingPatience > 0 && noImproveEvals >= cfg.EarlyStoppingPatience {
+			if len(evalSet) > 0 && !improved && cfg.EarlyStoppingPatience > 0 && noImproveEvals >= cfg.EarlyStoppingPatience {
 				summary.StoppedEarly = true
 				summary.History = append(summary.History, record)
 				break
@@ -1403,28 +1440,43 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 		restoreStartProfile = t.TrainProfile()
 		restored = true
 	}
-	if len(evalSet) > 0 {
+	if len(evalSet) > 0 || len(listwiseEvalSet) > 0 {
 		evalStart := time.Now()
 		evalPass := summary.Workload.ActualEvalPasses + 1
-		maybeReportEvalProgress(cfg, "eval_start", summary.EpochsCompleted, t.step, evalPass, int64(len(evalSet)), int64(len(evalSet)), runStart)
-		finalEval, err := t.EvaluatePairs(evalSet)
-		if err != nil {
-			return EmbeddingTrainRunSummary{}, fmt.Errorf("final eval: %w", err)
+		evalExamples, evalPairs := listwiseGeometryEvalProgressWork(evalSet, listwiseEvalSet)
+		maybeReportEvalProgress(cfg, "eval_start", summary.EpochsCompleted, t.step, evalPass, evalExamples, evalPairs, runStart)
+		if len(evalSet) > 0 {
+			finalEval, err := t.EvaluatePairs(evalSet)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, fmt.Errorf("final eval: %w", err)
+			}
+			summary.FinalEval = cloneEvalMetrics(finalEval)
+		}
+		if len(listwiseEvalSet) > 0 {
+			finalListwiseEval, err := t.EvaluateListwiseGeometryBatched(listwiseEvalSet, cfg.BatchSize)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, fmt.Errorf("final listwise geometry eval: %w", err)
+			}
+			summary.FinalListwiseGeometryEval = cloneListwiseGeometryEvalMetrics(finalListwiseEval)
 		}
 		summary.EvalDuration += time.Since(evalStart)
 		summary.Workload.ActualEvalPasses++
-		summary.Workload.ActualEvalPairs += int64(len(evalSet))
-		summary.Workload.ActualEvalExamples += int64(len(evalSet))
-		summary.FinalEval = cloneEvalMetrics(finalEval)
+		summary.Workload.ActualEvalPairs += evalPairs
+		summary.Workload.ActualEvalExamples += evalExamples
 		maybeReportEvalProgress(cfg, "eval_done", summary.EpochsCompleted, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
 		if summary.BestEval == nil {
-			summary.BestEval = cloneEvalMetrics(finalEval)
+			if summary.FinalEval != nil {
+				summary.BestEval = cloneEvalMetrics(*summary.FinalEval)
+			}
 			if summary.BestEpoch == 0 {
 				summary.BestEpoch = summary.EpochsCompleted
 			}
 			if summary.BestStep == 0 {
 				summary.BestStep = summary.StepsCompleted
 			}
+		}
+		if summary.FinalListwiseGeometryEval != nil && summary.BestListwiseGeometryEval == nil {
+			summary.BestListwiseGeometryEval = cloneListwiseGeometryEvalMetrics(*summary.FinalListwiseGeometryEval)
 		}
 	}
 	finalProfile := t.TrainProfile()
@@ -1582,6 +1634,15 @@ func EstimateScoreSpectrumTrainWorkload(trainSet []EmbeddingScoreSpectrumExample
 
 // EstimateListwiseGeometryTrainWorkload returns planned query-document matrix scoring work.
 func EstimateListwiseGeometryTrainWorkload(trainSet []EmbeddingTokenizedListwiseGeometryBatch, evalExamples int, cfg EmbeddingTrainRunConfig) EmbeddingTrainWorkload {
+	if len(cfg.ListwiseGeometryEval) > 0 {
+		listwiseEvalExamples := listwiseGeometryQueryCount(cfg.ListwiseGeometryEval)
+		evalPairs := evalExamples + listwiseGeometryCellCount(cfg.ListwiseGeometryEval)
+		return estimateListwiseGeometryTrainWorkload(trainSet, evalExamples, listwiseEvalExamples, evalExamples+listwiseEvalExamples, evalPairs, cfg)
+	}
+	return estimateListwiseGeometryTrainWorkload(trainSet, evalExamples, 0, evalExamples, evalExamples, cfg)
+}
+
+func estimateListwiseGeometryTrainWorkload(trainSet []EmbeddingTokenizedListwiseGeometryBatch, pairwiseEvalExamples, listwiseEvalExamples, evalExamples, evalPairs int, cfg EmbeddingTrainRunConfig) EmbeddingTrainWorkload {
 	cfg = normalizedTrainRunConfig(cfg)
 	batches, trainPairsPerEpoch := listwiseGeometryBatchWork(trainSet, cfg.BatchSize)
 	evalPasses := plannedEvalPassCount(evalExamples, cfg.Epochs, cfg.EvalEveryEpoch)
@@ -1598,10 +1659,17 @@ func EstimateListwiseGeometryTrainWorkload(trainSet []EmbeddingTokenizedListwise
 			evalPasses = 1
 		}
 	}
-	evalPairsPerPass := int64(evalExamples)
+	evalPairsPerPass := int64(evalPairs)
+	evalMode := workloadEvalMode(evalExamples, "pairwise")
+	if listwiseEvalExamples > 0 {
+		evalMode = "listwise_geometry"
+		if pairwiseEvalExamples > 0 {
+			evalMode = "mixed"
+		}
+	}
 	return EmbeddingTrainWorkload{
 		TrainMode:            "listwise_geometry",
-		EvalMode:             workloadEvalMode(evalExamples, "pairwise"),
+		EvalMode:             evalMode,
 		TrainExamples:        len(trainSet),
 		EvalExamples:         evalExamples,
 		BatchSize:            cfg.BatchSize,
@@ -1614,6 +1682,28 @@ func EstimateListwiseGeometryTrainWorkload(trainSet []EmbeddingTokenizedListwise
 		PlannedEvalPairs:     evalPairsPerPass * int64(evalPasses),
 		PlannedTotalPairs:    trainPairsPerEpoch*int64(cfg.Epochs) + evalPairsPerPass*int64(evalPasses),
 	}
+}
+
+func listwiseGeometryEvalProgressWork(evalSet []EmbeddingPairExample, listwiseEvalSet []EmbeddingTokenizedListwiseGeometryBatch) (int64, int64) {
+	examples := int64(len(evalSet) + listwiseGeometryQueryCount(listwiseEvalSet))
+	pairs := int64(len(evalSet) + listwiseGeometryCellCount(listwiseEvalSet))
+	return examples, pairs
+}
+
+func listwiseGeometryQueryCount(batches []EmbeddingTokenizedListwiseGeometryBatch) int {
+	total := 0
+	for _, batch := range batches {
+		total += len(batch.QueryTokens)
+	}
+	return total
+}
+
+func listwiseGeometryCellCount(batches []EmbeddingTokenizedListwiseGeometryBatch) int {
+	total := 0
+	for _, batch := range batches {
+		total += len(batch.QueryTokens) * len(batch.DocumentTokens)
+	}
+	return total
 }
 
 func estimateScoreSpectrumTrainWorkload(trainSet []EmbeddingScoreSpectrumExample, pairwiseEvalExamples, scoreSpectrumEvalExamples, evalExamples int, cfg EmbeddingTrainRunConfig) EmbeddingTrainWorkload {
@@ -3548,6 +3638,11 @@ func scoreSpectrumEvalMetric(metrics EmbeddingScoreSpectrumEvalMetrics, metric s
 }
 
 func cloneScoreSpectrumEvalMetrics(metrics EmbeddingScoreSpectrumEvalMetrics) *EmbeddingScoreSpectrumEvalMetrics {
+	out := metrics
+	return &out
+}
+
+func cloneListwiseGeometryEvalMetrics(metrics EmbeddingListwiseGeometryEvalMetrics) *EmbeddingListwiseGeometryEvalMetrics {
 	out := metrics
 	return &out
 }

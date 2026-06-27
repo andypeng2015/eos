@@ -5455,7 +5455,7 @@ func runTrainEmbed(args []string) error {
 	if fs.NArg() > 2 {
 		evalPath = fs.Arg(2)
 	}
-	if evalOnly && fs.NArg() == 2 && strings.TrimSpace(scoreSpectrumEvalPath) == "" {
+	if evalOnly && fs.NArg() == 2 && strings.TrimSpace(scoreSpectrumEvalPath) == "" && !listwiseGeometryTrain {
 		evalPath = trainPath
 		trainPath = ""
 	}
@@ -5789,7 +5789,7 @@ func parseNonNegativeFloatMap(raw string) (map[string]float32, error) {
 }
 
 func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg eosruntime.EmbeddingTrainRunConfig) (eosruntime.EmbeddingTrainWorkload, error) {
-	if cfg.EvalOnly && evalPath == "" && cfg.ScoreSpectrumEvalPath == "" {
+	if cfg.EvalOnly && evalPath == "" && cfg.ScoreSpectrumEvalPath == "" && !cfg.ListwiseGeometryTrain {
 		evalPath = trainPath
 		trainPath = ""
 	}
@@ -5835,15 +5835,22 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg e
 		if tokenizerPath == "" {
 			return eosruntime.EmbeddingTrainWorkload{}, fmt.Errorf("listwise geometry training requires text tokenization; remove --no-tokenizer or set --tokenizer")
 		}
-		evalCount := 0
+		pairwiseEvalCount := 0
 		if evalPath != "" {
 			evalPairs, err := eosruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
 			if err != nil {
 				return eosruntime.EmbeddingTrainWorkload{}, err
 			}
-			evalCount = len(evalPairs)
+			pairwiseEvalCount = len(evalPairs)
 		}
-		return eosruntime.EstimateListwiseGeometryTrainWorkload(nil, evalCount, cfg), nil
+		if trainPath != "" {
+			listwiseEval, err := eosruntime.ReadEmbeddingListwiseGeometryBatchesFile(trainPath)
+			if err != nil {
+				return eosruntime.EmbeddingTrainWorkload{}, err
+			}
+			cfg.ListwiseGeometryEval = tokenizedListwiseGeometryWorkloadShape(listwiseEval)
+		}
+		return eosruntime.EstimateListwiseGeometryTrainWorkload(nil, pairwiseEvalCount, cfg), nil
 	}
 	if tokenizerPath != "" {
 		if cfg.EvalOnly {
@@ -6095,6 +6102,26 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg e
 		evalCount = len(evalSet)
 	}
 	return eosruntime.EstimateContrastiveTrainWorkload(len(trainSet), evalCount, cfg), nil
+}
+
+func tokenizedListwiseGeometryWorkloadShape(batches []eosruntime.EmbeddingListwiseGeometryBatch) []eosruntime.EmbeddingTokenizedListwiseGeometryBatch {
+	tokenized := make([]eosruntime.EmbeddingTokenizedListwiseGeometryBatch, 0, len(batches))
+	for _, batch := range batches {
+		tokenized = append(tokenized, eosruntime.EmbeddingTokenizedListwiseGeometryBatch{
+			QueryTokens:       make([][]int32, len(batch.Queries)),
+			DocumentTokens:    make([][]int32, len(batch.Documents)),
+			TeacherSimilarity: batch.TeacherSimilarity,
+		})
+	}
+	for i := range tokenized {
+		for j := range tokenized[i].QueryTokens {
+			tokenized[i].QueryTokens[j] = []int32{1}
+		}
+		for j := range tokenized[i].DocumentTokens {
+			tokenized[i].DocumentTokens[j] = []int32{1}
+		}
+	}
+	return tokenized
 }
 
 func formatTrainWorkload(workload eosruntime.EmbeddingTrainWorkload) string {
@@ -6455,26 +6482,29 @@ func runTrainCorpus(args []string) error {
 }
 
 type trainMetricsJSON struct {
-	Schema                 string                        `json:"schema"`
-	Command                string                        `json:"command"`
-	Mode                   string                        `json:"mode"`
-	Artifact               string                        `json:"artifact"`
-	Tokenizer              string                        `json:"tokenizer,omitempty"`
-	Summary                trainRunSummaryJSON           `json:"summary"`
-	Config                 trainRunConfigJSON            `json:"config"`
-	FinalTrain             trainBatchMetricsJSON         `json:"final_train"`
-	LastEval               *evalMetricsJSON              `json:"last_eval,omitempty"`
-	BestEval               *evalMetricsJSON              `json:"best_eval,omitempty"`
-	FinalEval              *evalMetricsJSON              `json:"final_eval,omitempty"`
-	LastScoreSpectrumEval  *scoreSpectrumEvalMetricsJSON `json:"last_score_spectrum_eval,omitempty"`
-	BestScoreSpectrumEval  *scoreSpectrumEvalMetricsJSON `json:"best_score_spectrum_eval,omitempty"`
-	FinalScoreSpectrumEval *scoreSpectrumEvalMetricsJSON `json:"final_score_spectrum_eval,omitempty"`
-	Workload               trainWorkloadJSON             `json:"workload"`
-	Throughput             trainThroughputJSON           `json:"throughput"`
-	Accelerators           trainAcceleratorsJSON         `json:"accelerators"`
-	ProfileDelta           trainProfileDeltaJSON         `json:"profile_delta"`
-	Package                trainPackagePathsJSON         `json:"package"`
-	Artifacts              map[string]string             `json:"artifacts,omitempty"`
+	Schema                    string                           `json:"schema"`
+	Command                   string                           `json:"command"`
+	Mode                      string                           `json:"mode"`
+	Artifact                  string                           `json:"artifact"`
+	Tokenizer                 string                           `json:"tokenizer,omitempty"`
+	Summary                   trainRunSummaryJSON              `json:"summary"`
+	Config                    trainRunConfigJSON               `json:"config"`
+	FinalTrain                trainBatchMetricsJSON            `json:"final_train"`
+	LastEval                  *evalMetricsJSON                 `json:"last_eval,omitempty"`
+	BestEval                  *evalMetricsJSON                 `json:"best_eval,omitempty"`
+	FinalEval                 *evalMetricsJSON                 `json:"final_eval,omitempty"`
+	LastScoreSpectrumEval     *scoreSpectrumEvalMetricsJSON    `json:"last_score_spectrum_eval,omitempty"`
+	BestScoreSpectrumEval     *scoreSpectrumEvalMetricsJSON    `json:"best_score_spectrum_eval,omitempty"`
+	FinalScoreSpectrumEval    *scoreSpectrumEvalMetricsJSON    `json:"final_score_spectrum_eval,omitempty"`
+	LastListwiseGeometryEval  *listwiseGeometryEvalMetricsJSON `json:"last_listwise_geometry_eval,omitempty"`
+	BestListwiseGeometryEval  *listwiseGeometryEvalMetricsJSON `json:"best_listwise_geometry_eval,omitempty"`
+	FinalListwiseGeometryEval *listwiseGeometryEvalMetricsJSON `json:"final_listwise_geometry_eval,omitempty"`
+	Workload                  trainWorkloadJSON                `json:"workload"`
+	Throughput                trainThroughputJSON              `json:"throughput"`
+	Accelerators              trainAcceleratorsJSON            `json:"accelerators"`
+	ProfileDelta              trainProfileDeltaJSON            `json:"profile_delta"`
+	Package                   trainPackagePathsJSON            `json:"package"`
+	Artifacts                 map[string]string                `json:"artifacts,omitempty"`
 }
 
 type trainRunSummaryJSON struct {
@@ -6580,6 +6610,19 @@ type scoreSpectrumEvalMetricsJSON struct {
 	TargetDistributionRowCount        int     `json:"target_distribution_row_count"`
 }
 
+type listwiseGeometryEvalMetricsJSON struct {
+	Loss                  float32 `json:"loss"`
+	AverageScore          float32 `json:"average_score"`
+	TeacherCrossEntropy   float32 `json:"teacher_cross_entropy"`
+	TeacherKL             float32 `json:"teacher_kl"`
+	TeacherTop1Agreement  float32 `json:"teacher_top1_agreement"`
+	AnyPositiveTop1       float32 `json:"any_positive_top1"`
+	QueryCount            int     `json:"query_count"`
+	DocumentCellCount     int     `json:"document_cell_count"`
+	BatchCount            int     `json:"batch_count"`
+	AnyPositiveQueryCount int     `json:"any_positive_query_count"`
+}
+
 type trainWorkloadJSON struct {
 	TrainMode            string `json:"train_mode"`
 	EvalMode             string `json:"eval_mode,omitempty"`
@@ -6660,26 +6703,29 @@ func writeTrainMetricsJSON(outputPath, command, mode, artifactPath, tokenizerPat
 
 func trainMetricsPayload(command, mode, artifactPath, tokenizerPath string, summary eosruntime.EmbeddingTrainRunSummary, paths eosruntime.EmbeddingTrainPackagePaths, extraArtifacts map[string]string) trainMetricsJSON {
 	return trainMetricsJSON{
-		Schema:                 "manta.embedding_train_metrics.v1",
-		Command:                command,
-		Mode:                   mode,
-		Artifact:               artifactPath,
-		Tokenizer:              tokenizerPath,
-		Summary:                trainRunSummaryPayload(summary),
-		Config:                 trainRunConfigPayload(summary.Config),
-		FinalTrain:             trainBatchMetricsPayload(summary.FinalTrain),
-		LastEval:               evalMetricsPayload(summary.LastEval),
-		BestEval:               evalMetricsPayload(summary.BestEval),
-		FinalEval:              evalMetricsPayload(summary.FinalEval),
-		LastScoreSpectrumEval:  scoreSpectrumEvalMetricsPayload(summary.LastScoreSpectrumEval),
-		BestScoreSpectrumEval:  scoreSpectrumEvalMetricsPayload(summary.BestScoreSpectrumEval),
-		FinalScoreSpectrumEval: scoreSpectrumEvalMetricsPayload(summary.FinalScoreSpectrumEval),
-		Workload:               trainWorkloadPayload(summary.Workload),
-		Throughput:             trainThroughputPayload(summary),
-		Accelerators:           trainAcceleratorsPayload(summary.EndProfile),
-		ProfileDelta:           trainProfileDeltaPayload(summary.DeltaProfile),
-		Package:                trainPackagePathsPayload(paths),
-		Artifacts:              extraArtifacts,
+		Schema:                    "manta.embedding_train_metrics.v1",
+		Command:                   command,
+		Mode:                      mode,
+		Artifact:                  artifactPath,
+		Tokenizer:                 tokenizerPath,
+		Summary:                   trainRunSummaryPayload(summary),
+		Config:                    trainRunConfigPayload(summary.Config),
+		FinalTrain:                trainBatchMetricsPayload(summary.FinalTrain),
+		LastEval:                  evalMetricsPayload(summary.LastEval),
+		BestEval:                  evalMetricsPayload(summary.BestEval),
+		FinalEval:                 evalMetricsPayload(summary.FinalEval),
+		LastScoreSpectrumEval:     scoreSpectrumEvalMetricsPayload(summary.LastScoreSpectrumEval),
+		BestScoreSpectrumEval:     scoreSpectrumEvalMetricsPayload(summary.BestScoreSpectrumEval),
+		FinalScoreSpectrumEval:    scoreSpectrumEvalMetricsPayload(summary.FinalScoreSpectrumEval),
+		LastListwiseGeometryEval:  listwiseGeometryEvalMetricsPayload(summary.LastListwiseGeometryEval),
+		BestListwiseGeometryEval:  listwiseGeometryEvalMetricsPayload(summary.BestListwiseGeometryEval),
+		FinalListwiseGeometryEval: listwiseGeometryEvalMetricsPayload(summary.FinalListwiseGeometryEval),
+		Workload:                  trainWorkloadPayload(summary.Workload),
+		Throughput:                trainThroughputPayload(summary),
+		Accelerators:              trainAcceleratorsPayload(summary.EndProfile),
+		ProfileDelta:              trainProfileDeltaPayload(summary.DeltaProfile),
+		Package:                   trainPackagePathsPayload(paths),
+		Artifacts:                 extraArtifacts,
 	}
 }
 
@@ -6799,6 +6845,24 @@ func scoreSpectrumEvalMetricsPayload(metrics *eosruntime.EmbeddingScoreSpectrumE
 		AlternateRecoveryRowCount:         metrics.AlternateRecoveryRowCount,
 		MarginRowCount:                    metrics.MarginRowCount,
 		TargetDistributionRowCount:        metrics.TargetDistributionRowCount,
+	}
+}
+
+func listwiseGeometryEvalMetricsPayload(metrics *eosruntime.EmbeddingListwiseGeometryEvalMetrics) *listwiseGeometryEvalMetricsJSON {
+	if metrics == nil {
+		return nil
+	}
+	return &listwiseGeometryEvalMetricsJSON{
+		Loss:                  metrics.Loss,
+		AverageScore:          metrics.AverageScore,
+		TeacherCrossEntropy:   metrics.TeacherCrossEntropy,
+		TeacherKL:             metrics.TeacherKL,
+		TeacherTop1Agreement:  metrics.TeacherTop1Agreement,
+		AnyPositiveTop1:       metrics.AnyPositiveTop1,
+		QueryCount:            metrics.QueryCount,
+		DocumentCellCount:     metrics.DocumentCellCount,
+		BatchCount:            metrics.BatchCount,
+		AnyPositiveQueryCount: metrics.AnyPositiveQueryCount,
 	}
 }
 

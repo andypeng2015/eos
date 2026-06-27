@@ -23,6 +23,20 @@ type EmbeddingCorpusTrainPaths struct {
 	Package        EmbeddingTrainPackagePaths
 }
 
+func defaultEmbeddingTrainPackagePaths(artifactPath string) EmbeddingTrainPackagePaths {
+	return EmbeddingTrainPackagePaths{
+		ArtifactPath:          artifactPath,
+		EmbeddingManifestPath: ResolveEmbeddingManifestPath(artifactPath),
+		TokenizerPath:         DefaultTokenizerPath(artifactPath),
+		WeightFilePath:        DefaultWeightFilePath(artifactPath),
+		MemoryPlanPath:        DefaultMemoryPlanPath(artifactPath),
+		TrainManifestPath:     ResolveEmbeddingTrainManifestPath(artifactPath),
+		CheckpointPath:        DefaultEmbeddingCheckpointPath(artifactPath),
+		TrainProfilePath:      DefaultEmbeddingTrainProfilePath(artifactPath),
+		PackageManifestPath:   ResolvePackageManifestPath(artifactPath),
+	}
+}
+
 // TrainEmbeddingPackageFromContrastiveFiles reloads a packaged trainer, fits it on a JSONL contrastive dataset, and writes the updated package back.
 func TrainEmbeddingPackageFromContrastiveFiles(artifactPath, trainPath, evalPath string, cfg EmbeddingTrainRunConfig) (EmbeddingTrainRunSummary, EmbeddingTrainPackagePaths, error) {
 	trainer, err := LoadEmbeddingTrainerPackage(artifactPath)
@@ -30,7 +44,7 @@ func TrainEmbeddingPackageFromContrastiveFiles(artifactPath, trainPath, evalPath
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 	}
 	defer trainer.Close()
-	if cfg.EvalOnly && evalPath == "" && cfg.ScoreSpectrumEvalPath == "" {
+	if cfg.EvalOnly && evalPath == "" && cfg.ScoreSpectrumEvalPath == "" && !cfg.ListwiseGeometryTrain {
 		evalPath = trainPath
 		trainPath = ""
 	}
@@ -187,7 +201,7 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(artifactPath, tokenizerPath, 
 		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 	}
 	defer trainer.Close()
-	if cfg.EvalOnly && evalPath == "" && cfg.ScoreSpectrumEvalPath == "" {
+	if cfg.EvalOnly && evalPath == "" && cfg.ScoreSpectrumEvalPath == "" && !cfg.ListwiseGeometryTrain {
 		evalPath = trainPath
 		trainPath = ""
 	}
@@ -257,6 +271,17 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(artifactPath, tokenizerPath, 
 			}
 			trainer.SetListwiseGeometryLineage(ListwiseGeometryPolicyFromBatches(trainSet))
 		}
+		if cfg.EvalOnly && evalPath == "" && len(cfg.ListwiseGeometryEval) == 0 {
+			evalText, err := ReadEmbeddingListwiseGeometryBatchesFile(trainPath)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read listwise geometry eval dataset: %w", err)
+			}
+			cfg.ListwiseGeometryEval, err = TokenizeEmbeddingListwiseGeometryBatches(evalText, tokenizer)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize listwise geometry eval dataset: %w", err)
+			}
+			trainPath = ""
+		}
 		var evalPairs []EmbeddingPairExample
 		if evalPath != "" {
 			evalText, err := ReadEmbeddingTextPairExamplesFile(evalPath)
@@ -271,6 +296,9 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(artifactPath, tokenizerPath, 
 		summary, err := trainer.FitListwiseGeometry(trainSet, evalPairs, cfg)
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+		}
+		if cfg.EvalOnly && len(trainSet) == 0 {
+			return summary, defaultEmbeddingTrainPackagePaths(artifactPath), nil
 		}
 		paths, err := trainer.WriteTrainingPackage(artifactPath)
 		if err != nil {

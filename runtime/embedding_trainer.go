@@ -124,6 +124,21 @@ type EmbeddingScoreSpectrumEvalMetrics struct {
 	TargetDistributionRowCount        int
 }
 
+// EmbeddingListwiseGeometryEvalMetrics summarizes read-only listwise teacher
+// geometry quality over tokenized query/document matrix batches.
+type EmbeddingListwiseGeometryEvalMetrics struct {
+	Loss                  float32
+	AverageScore          float32
+	TeacherCrossEntropy   float32
+	TeacherKL             float32
+	TeacherTop1Agreement  float32
+	AnyPositiveTop1       float32
+	QueryCount            int
+	DocumentCellCount     int
+	BatchCount            int
+	AnyPositiveQueryCount int
+}
+
 // EmbeddingForwardResidencyStats summarizes trainer-level bind suppression plus backend prep activity.
 type EmbeddingForwardResidencyStats struct {
 	BindSkips int64
@@ -1784,6 +1799,96 @@ func (t *EmbeddingTrainer) evaluateScoreSpectrumCanonicalBatch(canonicalExamples
 	queries := encoded[:len(queryInputs)]
 	candidates := encoded[len(queryInputs):]
 	return evaluateScoreSpectrumEncodings(queries, candidates, candidateSpans, canonicalExamples, t.config.Temperature)
+}
+
+// EvaluateListwiseGeometry scores tokenized listwise geometry batches without
+// applying optimizer updates or consulting train-policy gates.
+func (t *EmbeddingTrainer) EvaluateListwiseGeometry(batches []EmbeddingTokenizedListwiseGeometryBatch) (EmbeddingListwiseGeometryEvalMetrics, error) {
+	return t.EvaluateListwiseGeometryBatched(batches, len(batches))
+}
+
+// EvaluateListwiseGeometryBatched scores tokenized listwise geometry batches in
+// bounded row chunks without applying optimizer updates or consulting
+// train-policy gates.
+func (t *EmbeddingTrainer) EvaluateListwiseGeometryBatched(batches []EmbeddingTokenizedListwiseGeometryBatch, batchSize int) (EmbeddingListwiseGeometryEvalMetrics, error) {
+	if t == nil {
+		return EmbeddingListwiseGeometryEvalMetrics{}, fmt.Errorf("embedding trainer is not initialized")
+	}
+	if len(batches) == 0 {
+		return EmbeddingListwiseGeometryEvalMetrics{}, fmt.Errorf("listwise geometry eval dataset is empty")
+	}
+	if batchSize <= 0 || batchSize > len(batches) {
+		batchSize = len(batches)
+	}
+	if err := validateListwiseGeometryTrainerConfig(t.config); err != nil {
+		return EmbeddingListwiseGeometryEvalMetrics{}, err
+	}
+	forward := t.prepareForwardWeights()
+	t.primeForwardWeightResidency(forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj)
+	var aggregate EmbeddingListwiseGeometryEvalMetrics
+	for start := 0; start < len(batches); start += batchSize {
+		end := start + batchSize
+		if end > len(batches) {
+			end = len(batches)
+		}
+		chunkMetrics, err := t.evaluateListwiseGeometryBatch(batches[start:end], forward)
+		if err != nil {
+			return EmbeddingListwiseGeometryEvalMetrics{}, fmt.Errorf("listwise geometry eval batches %d-%d: %w", start, end-1, err)
+		}
+		mergeListwiseGeometryEvalMetrics(&aggregate, chunkMetrics)
+	}
+	normalizeListwiseGeometryEvalMetrics(&aggregate)
+	return aggregate, nil
+}
+
+func (t *EmbeddingTrainer) evaluateListwiseGeometryBatch(batches []EmbeddingTokenizedListwiseGeometryBatch, forward *embeddingForwardWeights) (EmbeddingListwiseGeometryEvalMetrics, error) {
+	if len(batches) == 0 {
+		return EmbeddingListwiseGeometryEvalMetrics{}, fmt.Errorf("listwise geometry eval batch is empty")
+	}
+	queryInputs, documentInputs, spans, err := listwiseGeometrySequenceInputs(batches)
+	if err != nil {
+		return EmbeddingListwiseGeometryEvalMetrics{}, err
+	}
+	allInputs := make([]embeddingSequenceInput, 0, len(queryInputs)+len(documentInputs))
+	allInputs = append(allInputs, queryInputs...)
+	allInputs = append(allInputs, documentInputs...)
+	encoded, err := t.encodeSequenceInputs(allInputs, forward, false)
+	if err != nil {
+		return EmbeddingListwiseGeometryEvalMetrics{}, err
+	}
+	defer t.releaseEncodedSequences(encoded)
+	queries := encoded[:len(queryInputs)]
+	documents := encoded[len(queryInputs):]
+	return evaluateListwiseGeometryEncodings(queries, documents, spans, batches, t.config.Temperature)
+}
+
+func mergeListwiseGeometryEvalMetrics(dst *EmbeddingListwiseGeometryEvalMetrics, chunk EmbeddingListwiseGeometryEvalMetrics) {
+	dst.Loss += chunk.Loss * float32(chunk.QueryCount)
+	dst.AverageScore += chunk.AverageScore * float32(chunk.DocumentCellCount)
+	dst.TeacherCrossEntropy += chunk.TeacherCrossEntropy * float32(chunk.QueryCount)
+	dst.TeacherKL += chunk.TeacherKL * float32(chunk.QueryCount)
+	dst.TeacherTop1Agreement += chunk.TeacherTop1Agreement * float32(chunk.QueryCount)
+	dst.AnyPositiveTop1 += chunk.AnyPositiveTop1 * float32(chunk.AnyPositiveQueryCount)
+	dst.QueryCount += chunk.QueryCount
+	dst.DocumentCellCount += chunk.DocumentCellCount
+	dst.BatchCount += chunk.BatchCount
+	dst.AnyPositiveQueryCount += chunk.AnyPositiveQueryCount
+}
+
+func normalizeListwiseGeometryEvalMetrics(metrics *EmbeddingListwiseGeometryEvalMetrics) {
+	if metrics.QueryCount > 0 {
+		invQueries := float32(1) / float32(metrics.QueryCount)
+		metrics.Loss *= invQueries
+		metrics.TeacherCrossEntropy *= invQueries
+		metrics.TeacherKL *= invQueries
+		metrics.TeacherTop1Agreement *= invQueries
+	}
+	if metrics.DocumentCellCount > 0 {
+		metrics.AverageScore /= float32(metrics.DocumentCellCount)
+	}
+	if metrics.AnyPositiveQueryCount > 0 {
+		metrics.AnyPositiveTop1 /= float32(metrics.AnyPositiveQueryCount)
+	}
 }
 
 func mergeScoreSpectrumEvalMetrics(dst *EmbeddingScoreSpectrumEvalMetrics, chunk EmbeddingScoreSpectrumEvalMetrics) {
@@ -4074,6 +4179,80 @@ func accumulateListwiseGeometryGrads(queries, documents []*embeddingEncodedSeque
 	return totalLoss, totalScore, pairCount, totalQueryCount, nil
 }
 
+func evaluateListwiseGeometryEncodings(queries, documents []*embeddingEncodedSequence, spans []embeddingCandidateSpan, batches []EmbeddingTokenizedListwiseGeometryBatch, temperature float32) (EmbeddingListwiseGeometryEvalMetrics, error) {
+	var metrics EmbeddingListwiseGeometryEvalMetrics
+	metrics.BatchCount = len(batches)
+	queryMatrix := newContrastivePooledMatrix(queries)
+	documentMatrix := newContrastivePooledMatrix(documents)
+	queryOffset := 0
+	for i, batch := range batches {
+		if i >= len(spans) {
+			return EmbeddingListwiseGeometryEvalMetrics{}, fmt.Errorf("listwise geometry batch %d missing document span", i)
+		}
+		span := groupedCandidateSpan(spans, i, len(documents))
+		queryCount := len(batch.QueryTokens)
+		docCount := span.End - span.Start
+		if queryCount <= 0 || docCount <= 0 {
+			return EmbeddingListwiseGeometryEvalMetrics{}, fmt.Errorf("listwise geometry batch %d has empty query/document shape", i)
+		}
+		if queryOffset+queryCount > len(queries) {
+			return EmbeddingListwiseGeometryEvalMetrics{}, fmt.Errorf("listwise geometry batch %d query span exceeds encodings", i)
+		}
+		student := make([][]float32, queryCount)
+		for qi := 0; qi < queryCount; qi++ {
+			globalQuery := queryOffset + qi
+			query := queryMatrix.row(globalQuery)
+			queryNorm := queryMatrix.norms[globalQuery]
+			student[qi] = make([]float32, docCount)
+			for localDoc := 0; localDoc < docCount; localDoc++ {
+				globalDoc := span.Start + localDoc
+				score := cosineScoreWithNorms(query, documentMatrix.row(globalDoc), queryNorm, documentMatrix.norms[globalDoc])
+				student[qi][localDoc] = score
+				metrics.AverageScore += score
+			}
+		}
+		loss, err := EmbeddingListwiseGeometryLossAndGrad(student, batch.TeacherSimilarity, temperature)
+		if err != nil {
+			return EmbeddingListwiseGeometryEvalMetrics{}, fmt.Errorf("listwise geometry batch %d: %w", i, err)
+		}
+		queryPositiveDocs := listwiseGeometryQueryPositiveDocSets(batch)
+		for qi := 0; qi < queryCount; qi++ {
+			rowCE := float32(0)
+			teacherEntropy := float32(0)
+			for j, p := range loss.TeacherProbs[qi] {
+				if p > 0 {
+					prob := loss.StudentProbs[qi][j]
+					if prob < 1e-12 {
+						prob = 1e-12
+					}
+					rowCE -= p * float32(math.Log(float64(prob)))
+					teacherEntropy -= p * float32(math.Log(float64(p)))
+				}
+			}
+			metrics.TeacherCrossEntropy += rowCE
+			metrics.Loss += rowCE
+			metrics.TeacherKL += rowCE - teacherEntropy
+			teacherTop := maxFloat32Index(batch.TeacherSimilarity[qi])
+			studentTop := maxFloat32Index(student[qi])
+			if studentTop == teacherTop {
+				metrics.TeacherTop1Agreement++
+			}
+			positiveDocs := queryPositiveDocs[listwiseGeometryQueryID(batch, qi)]
+			if len(positiveDocs) > 0 {
+				metrics.AnyPositiveQueryCount++
+				if positiveDocs[listwiseGeometryDocumentID(batch, studentTop)] {
+					metrics.AnyPositiveTop1++
+				}
+			}
+		}
+		metrics.QueryCount += queryCount
+		metrics.DocumentCellCount += queryCount * docCount
+		queryOffset += queryCount
+	}
+	normalizeListwiseGeometryEvalMetrics(&metrics)
+	return metrics, nil
+}
+
 func listwiseGeometrySequenceInputs(batches []EmbeddingTokenizedListwiseGeometryBatch) ([]embeddingSequenceInput, []embeddingSequenceInput, []embeddingCandidateSpan, error) {
 	queryInputs := []embeddingSequenceInput{}
 	documentInputs := []embeddingSequenceInput{}
@@ -4108,6 +4287,48 @@ func listwiseGeometrySequenceInputs(batches []EmbeddingTokenizedListwiseGeometry
 		documentSpans[i].End = len(documentInputs)
 	}
 	return queryInputs, documentInputs, documentSpans, nil
+}
+
+func listwiseGeometryQueryPositiveDocSets(batch EmbeddingTokenizedListwiseGeometryBatch) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	for _, example := range batch.Examples {
+		queryID := strings.TrimSpace(example.QueryID)
+		docID := strings.TrimSpace(example.PositiveDocID)
+		if queryID == "" || docID == "" {
+			continue
+		}
+		set := out[queryID]
+		if set == nil {
+			set = map[string]bool{}
+			out[queryID] = set
+		}
+		set[docID] = true
+	}
+	return out
+}
+
+func listwiseGeometryQueryID(batch EmbeddingTokenizedListwiseGeometryBatch, index int) string {
+	if index >= 0 && index < len(batch.QueryIDs) {
+		return strings.TrimSpace(batch.QueryIDs[index])
+	}
+	return ""
+}
+
+func listwiseGeometryDocumentID(batch EmbeddingTokenizedListwiseGeometryBatch, index int) string {
+	if index >= 0 && index < len(batch.DocumentIDs) {
+		return strings.TrimSpace(batch.DocumentIDs[index])
+	}
+	return ""
+}
+
+func maxFloat32Index(values []float32) int {
+	best := 0
+	for i, value := range values {
+		if i == 0 || value > values[best] {
+			best = i
+		}
+	}
+	return best
 }
 
 func validateTokenizedListwiseGeometryBatch(batch EmbeddingTokenizedListwiseGeometryBatch) error {
