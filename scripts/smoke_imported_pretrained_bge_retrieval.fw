@@ -1,0 +1,747 @@
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const bgeQueryPrefix = "Represent this sentence for searching relevant passages: "
+const manifestSchema = "manta.imported_pretrained_bge_retrieval_smoke.v1"
+
+type exportManifest struct {
+	Schema         string  `json:"schema"`
+	Dataset        string  `json:"dataset"`
+	QualityClaim   bool    `json:"quality_claim"`
+	Documents      int     `json:"documents"`
+	Queries        int     `json:"queries"`
+	NativeDim      int     `json:"native_dim"`
+	OutputDim      int     `json:"output_dim"`
+	DocVectorPath  string  `json:"doc_vector_path"`
+	QueryVectorPath string  `json:"query_vector_path"`
+	QueryPrefix    string  `json:"query_prefix"`
+	DocumentPrefix string  `json:"document_prefix"`
+	BatchSize      int     `json:"batch_size"`
+	MaxDocs        int     `json:"max_docs,omitempty"`
+	MaxQueries     int     `json:"max_queries,omitempty"`
+	Pooling        string  `json:"pooling,omitempty"`
+	MaxLength      int     `json:"max_length"`
+	ElapsedSeconds float64 `json:"elapsed_seconds"`
+}
+
+type retrievalMetrics struct {
+	Schema  string `json:"schema"`
+	Dataset string `json:"dataset"`
+	Backend string `json:"backend"`
+	Inputs  struct {
+		Documents     int   `json:"documents"`
+		Queries       int   `json:"queries"`
+		RelevantPairs int   `json:"relevant_pairs"`
+		ScoredPairs   int64 `json:"scored_pairs"`
+	} `json:"inputs"`
+	Quality struct {
+		NDCGAt10    float64 `json:"ndcg_at_10"`
+		RecallAt100 float64 `json:"recall_at_100"`
+	} `json:"quality"`
+}
+
+type turboQuantMetrics struct {
+	Schema  string `json:"schema"`
+	Dataset string `json:"dataset"`
+	Backend string `json:"backend"`
+	Inputs  struct {
+		Documents     int   `json:"documents"`
+		Queries       int   `json:"queries"`
+		RelevantPairs int   `json:"relevant_pairs"`
+		ScoredPairs   int64 `json:"scored_pairs"`
+	} `json:"inputs"`
+	Dense struct {
+		Quality struct {
+			NDCGAt10    float64 `json:"ndcg_at_10"`
+			RecallAt100 float64 `json:"recall_at_100"`
+		} `json:"quality"`
+	} `json:"dense"`
+	Rows []struct {
+		Bits            int    `json:"bits"`
+		Method          string `json:"method"`
+		RerankOverfetch int    `json:"rerank_overfetch,omitempty"`
+		Quality struct {
+			NDCGAt10    float64 `json:"ndcg_at_10"`
+			RecallAt100 float64 `json:"recall_at_100"`
+		} `json:"quality"`
+		CompressionRatio float64 `json:"compression_ratio"`
+		TotalCompression float64 `json:"total_compression_ratio"`
+	} `json:"rows"`
+}
+
+type summaryRow struct {
+	Storage          string  `json:"storage"`
+	Bits             int     `json:"bits,omitempty"`
+	Method           string  `json:"method"`
+	NDCGAt10         float64 `json:"ndcg_at_10"`
+	RecallAt100      float64 `json:"recall_at_100"`
+	CompressionRatio float64 `json:"compression_ratio,omitempty"`
+	Gate             string  `json:"gate"`
+	MinNDCGAt10      float64 `json:"min_ndcg_at_10,omitempty"`
+	MinRecallAt100   float64 `json:"min_recall_at_100,omitempty"`
+}
+
+type smokeManifest struct {
+	Schema         string       `json:"schema"`
+	GeneratedAt    string       `json:"generated_at"`
+	RunDir         string       `json:"run_dir"`
+	Dataset        string       `json:"dataset"`
+	Split          string       `json:"split"`
+	Uncapped       bool         `json:"uncapped"`
+	Source         string       `json:"source"`
+	Module         string       `json:"module"`
+	Weights        string       `json:"weights"`
+	DatasetDir     string       `json:"dataset_dir"`
+	VectorDir      string       `json:"vector_dir"`
+	MaxDocs        int          `json:"max_docs"`
+	MaxQueries     int          `json:"max_queries"`
+	BatchSize      int          `json:"batch_size"`
+	QualityClaim   bool         `json:"quality_claim"`
+	ExportManifest string       `json:"export_manifest"`
+	DenseMetrics   string       `json:"dense_metrics"`
+	TurboMetrics   string       `json:"turboquant_metrics"`
+	SummaryTSV     string       `json:"summary_tsv"`
+	Gates          []string     `json:"gates"`
+	Rows           []summaryRow `json:"rows"`
+	Caveats        []string     `json:"caveats"`
+}
+
+func usage() {
+	fmt.Println(`Imported pretrained BGE retrieval smoke.
+
+This wraps export-pretrained-bert-retrieval-vectors for BAAI/bge-small-en-v1.5
+style imported BERT artifacts, then runs dense and q8/q4 TurboQuant vector-cache
+eval gates. It preserves quality_claim=false and does not promote defaults.
+
+Run:
+  EOS_REPO_ROOT=$PWD ferrous-wheel run scripts/smoke_imported_pretrained_bge_retrieval.fw
+
+Environment:
+  EOS_IMPORTED_BGE_SMOKE_SOURCE=/path/to/hf/snapshot
+  EOS_IMPORTED_BGE_SMOKE_MODULE=/path/to/bge.module.mll
+  EOS_IMPORTED_BGE_SMOKE_WEIGHTS=/path/to/bge.weights.mll
+  EOS_IMPORTED_BGE_SMOKE_DATASET_ROOT=datasets/manta-embed-v1/raw
+  EOS_IMPORTED_BGE_SMOKE_DATASET_DIR=datasets/manta-embed-v1/raw/scifact/scifact
+  EOS_IMPORTED_BGE_SMOKE_DATASET=scifact
+  EOS_IMPORTED_BGE_SMOKE_SPLIT=test
+  EOS_IMPORTED_BGE_SMOKE_RUN_DIR=runs/imported-pretrained-bge-retrieval-smoke-<timestamp>
+  EOS_IMPORTED_BGE_SMOKE_BATCH_SIZE=64
+  EOS_IMPORTED_BGE_SMOKE_MAX_DOCS=120      # capped fast smoke; set 0 or use uncapped
+  EOS_IMPORTED_BGE_SMOKE_MAX_QUERIES=8
+  EOS_IMPORTED_BGE_SMOKE_UNCAPPED=0        # 1 enables full SciFact quality floors
+  EOS_IMPORTED_BGE_SMOKE_TOP_K=100
+  EOS_IMPORTED_BGE_SMOKE_PROGRESS_EVERY=0
+  EOS_IMPORTED_BGE_SMOKE_MIN_DENSE_NDCG=0.70 # uncapped default
+  EOS_IMPORTED_BGE_SMOKE_MIN_Q8_NDCG=0.70
+  EOS_IMPORTED_BGE_SMOKE_MIN_Q4_NDCG=0.66
+  EOS_IMPORTED_BGE_SMOKE_MIN_DENSE_RECALL=0 # optional
+  EOS_IMPORTED_BGE_SMOKE_MIN_Q8_RECALL=0
+  EOS_IMPORTED_BGE_SMOKE_MIN_Q4_RECALL=0`)
+}
+
+func getenv(name string, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envBool(name string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	if value == "" {
+		return fallback
+	}
+	return value == "1" || value == "true" || value == "yes" || value == "on"
+}
+
+func parseIntEnv(name string, fallback int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("%s must be >= 0", name)
+	}
+	return value, nil
+}
+
+func parseFloatEnv(name string, fallback float64) (float64, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a float: %w", name, err)
+	}
+	return value, nil
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findAncestorRoot(start string) string {
+	if start == "" {
+		return ""
+	}
+	dir, err := filepath.Abs(start)
+	if err != nil {
+		return ""
+	}
+	for {
+		if hasRepoRoot(dir) {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+func findRoot() (string, error) {
+	for _, candidate := range []string{os.Getenv("EOS_REPO_ROOT"), os.Getenv("PWD")} {
+		if root := findAncestorRoot(candidate); root != "" {
+			return root, nil
+		}
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if root := findAncestorRoot(cwd); root != "" {
+		return root, nil
+	}
+	return "", fmt.Errorf("could not find Eos repo root; set EOS_REPO_ROOT")
+}
+
+func firstExistingFile(paths []string, fallback string) string {
+	for _, path := range paths {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path
+		}
+	}
+	return fallback
+}
+
+func firstExistingDir(paths []string, fallback string) string {
+	for _, path := range paths {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return path
+		}
+	}
+	return fallback
+}
+
+func retrievalDatasetDir(root string, datasetRoot string, dataset string) string {
+	if explicit := strings.TrimSpace(os.Getenv("EOS_IMPORTED_BGE_SMOKE_DATASET_DIR")); explicit != "" {
+		if filepath.IsAbs(explicit) {
+			return explicit
+		}
+		return filepath.Join(root, explicit)
+	}
+	candidate := filepath.Join(datasetRoot, dataset, dataset)
+	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+		return candidate
+	}
+	return filepath.Join(datasetRoot, dataset)
+}
+
+func defaultRunDir(root string) string {
+	if explicit := strings.TrimSpace(os.Getenv("EOS_IMPORTED_BGE_SMOKE_RUN_DIR")); explicit != "" {
+		if filepath.IsAbs(explicit) {
+			return explicit
+		}
+		return filepath.Join(root, explicit)
+	}
+	stamp := time.Now().UTC().Format("20060102T150405Z")
+	return filepath.Join(root, "runs", "imported-pretrained-bge-retrieval-smoke-"+stamp)
+}
+
+func rel(root string, path string) string {
+	relPath, err := filepath.Rel(root, path)
+	if err != nil {
+		return filepath.ToSlash(path)
+	}
+	return filepath.ToSlash(relPath)
+}
+
+func readJSON(path string, value interface{}) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(data, value); err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	return nil
+}
+
+func writeJSON(path string, value interface{}) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o644)
+}
+
+func runCapture(root string, label string, args []string, logPath string) error {
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	var b strings.Builder
+	b.WriteString("+ ")
+	b.WriteString(strings.Join(args, " "))
+	b.WriteByte('\n')
+	b.Write(output)
+	if writeErr := os.WriteFile(logPath, []byte(b.String()), 0o644); writeErr != nil {
+		return writeErr
+	}
+	if err != nil {
+		return fmt.Errorf("%s failed: %w; see %s", label, err, logPath)
+	}
+	return nil
+}
+
+func validateJSONL(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	line := 0
+	for scanner.Scan() {
+		line++
+		var row map[string]interface{}
+		if err := json.Unmarshal(scanner.Bytes(), &row); err != nil {
+			return fmt.Errorf("%s line %d: %w", path, line, err)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if line == 0 {
+		return fmt.Errorf("%s is empty", path)
+	}
+	return nil
+}
+
+func requirePath(label string, path string) error {
+	if path == "" {
+		return fmt.Errorf("%s path is empty", label)
+	}
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("%s path %s: %w", label, path, err)
+	}
+	return nil
+}
+
+func gateMetric(name string, got float64, min float64) error {
+	if min <= 0 {
+		return nil
+	}
+	if got < min {
+		return fmt.Errorf("%s %.6f below gate %.6f", name, got, min)
+	}
+	return nil
+}
+
+func turboRow(metrics turboQuantMetrics, bits int) (summaryRow, bool) {
+	for _, row := range metrics.Rows {
+		if row.Bits == bits && row.RerankOverfetch == 0 {
+			compression := row.TotalCompression
+			if compression == 0 {
+				compression = row.CompressionRatio
+			}
+			return summaryRow{
+				Storage:          fmt.Sprintf("q%d", bits),
+				Bits:             bits,
+				Method:           row.Method,
+				NDCGAt10:         row.Quality.NDCGAt10,
+				RecallAt100:      row.Quality.RecallAt100,
+				CompressionRatio: compression,
+			}, true
+		}
+	}
+	return summaryRow{}, false
+}
+
+func writeSummaryTSV(path string, rows []summaryRow) error {
+	var b strings.Builder
+	b.WriteString("storage\tbits\tmethod\tndcg_at_10\trecall_at_100\tcompression_ratio\tgate\tmin_ndcg_at_10\tmin_recall_at_100\n")
+	for _, row := range rows {
+		b.WriteString(fmt.Sprintf("%s\t%d\t%s\t%.9f\t%.9f\t%.6f\t%s\t%.6f\t%.6f\n",
+			row.Storage,
+			row.Bits,
+			row.Method,
+			row.NDCGAt10,
+			row.RecallAt100,
+			row.CompressionRatio,
+			row.Gate,
+			row.MinNDCGAt10,
+			row.MinRecallAt100,
+		))
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	dataset := getenv("EOS_IMPORTED_BGE_SMOKE_DATASET", "scifact")
+	split := getenv("EOS_IMPORTED_BGE_SMOKE_SPLIT", "test")
+	datasetRoot := getenv("EOS_IMPORTED_BGE_SMOKE_DATASET_ROOT", filepath.Join(root, "datasets", "manta-embed-v1", "raw"))
+	if !filepath.IsAbs(datasetRoot) {
+		datasetRoot = filepath.Join(root, datasetRoot)
+	}
+	datasetDir := retrievalDatasetDir(root, datasetRoot, dataset)
+	source := getenv("EOS_IMPORTED_BGE_SMOKE_SOURCE", firstExistingDir([]string{
+		"/home/draco/.cache/huggingface/hub/models--BAAI--bge-small-en-v1.5/snapshots/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+	}, ""))
+	module := getenv("EOS_IMPORTED_BGE_SMOKE_MODULE", firstExistingFile([]string{
+		filepath.Join(root, "runs", "imported-bge-full-scifact-cls512-v1-20260627T060855Z", "bge.module.mll"),
+		filepath.Join(root, "runs", "imported-bge-full-scifact-resumable-v1-20260627T045408Z", "bge.module.mll"),
+	}, ""))
+	weights := getenv("EOS_IMPORTED_BGE_SMOKE_WEIGHTS", firstExistingFile([]string{
+		filepath.Join(root, "runs", "imported-bge-full-scifact-cls512-v1-20260627T060855Z", "bge.weights.mll"),
+		filepath.Join(root, "runs", "imported-bge-full-scifact-resumable-v1-20260627T045408Z", "bge.weights.mll"),
+	}, ""))
+	uncapped := envBool("EOS_IMPORTED_BGE_SMOKE_UNCAPPED", false)
+	defaultMaxDocs := 120
+	defaultMaxQueries := 8
+	if uncapped {
+		defaultMaxDocs = 0
+		defaultMaxQueries = 0
+	}
+	batchSize, err := parseIntEnv("EOS_IMPORTED_BGE_SMOKE_BATCH_SIZE", 64)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	maxDocs, err := parseIntEnv("EOS_IMPORTED_BGE_SMOKE_MAX_DOCS", defaultMaxDocs)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	maxQueries, err := parseIntEnv("EOS_IMPORTED_BGE_SMOKE_MAX_QUERIES", defaultMaxQueries)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	topK, err := parseIntEnv("EOS_IMPORTED_BGE_SMOKE_TOP_K", 100)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	progressEvery, err := parseIntEnv("EOS_IMPORTED_BGE_SMOKE_PROGRESS_EVERY", 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	denseGate := 0.0
+	q8Gate := 0.0
+	q4Gate := 0.0
+	if uncapped {
+		denseGate = 0.70
+		q8Gate = 0.70
+		q4Gate = 0.66
+	}
+	minDenseNDCG, err := parseFloatEnv("EOS_IMPORTED_BGE_SMOKE_MIN_DENSE_NDCG", denseGate)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	minQ8NDCG, err := parseFloatEnv("EOS_IMPORTED_BGE_SMOKE_MIN_Q8_NDCG", q8Gate)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	minQ4NDCG, err := parseFloatEnv("EOS_IMPORTED_BGE_SMOKE_MIN_Q4_NDCG", q4Gate)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	minDenseRecall, err := parseFloatEnv("EOS_IMPORTED_BGE_SMOKE_MIN_DENSE_RECALL", 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	minQ8Recall, err := parseFloatEnv("EOS_IMPORTED_BGE_SMOKE_MIN_Q8_RECALL", 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	minQ4Recall, err := parseFloatEnv("EOS_IMPORTED_BGE_SMOKE_MIN_Q4_RECALL", 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	for label, path := range map[string]string{
+		"source":  source,
+		"module":  module,
+		"weights": weights,
+		"dataset": datasetDir,
+	} {
+		if err := requirePath(label, path); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	runDir := defaultRunDir(root)
+	logDir := filepath.Join(runDir, "logs")
+	vectorDir := filepath.Join(runDir, "vectors")
+	evalDir := filepath.Join(runDir, "eval")
+	for _, dir := range []string{logDir, vectorDir, evalDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	exportManifestPath := filepath.Join(vectorDir, "manifest.json")
+	exportArgs := []string{
+		"go", "run", "./cmd/eos", "export-pretrained-bert-retrieval-vectors",
+		"--source", source,
+		"--module", module,
+		"--weights", weights,
+		"--dataset", dataset,
+		"--split", split,
+		"--query-prefix", bgeQueryPrefix,
+		"--document-prefix", "",
+		"--batch-size", strconv.Itoa(batchSize),
+		"--max-docs", strconv.Itoa(maxDocs),
+		"--max-queries", strconv.Itoa(maxQueries),
+		"--manifest-json", rel(root, exportManifestPath),
+	}
+	if progressEvery > 0 {
+		exportArgs = append(exportArgs, "--progress-every", strconv.Itoa(progressEvery))
+	}
+	exportArgs = append(exportArgs, rel(root, datasetDir), rel(root, vectorDir))
+	if err := runCapture(root, "export-pretrained-bert-retrieval-vectors", exportArgs, filepath.Join(logDir, "export-pretrained-bert-retrieval-vectors.log")); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	docVectors := filepath.Join(vectorDir, "doc-vectors.jsonl")
+	queryVectors := filepath.Join(vectorDir, "query-vectors.jsonl")
+	for _, path := range []string{docVectors, queryVectors} {
+		if err := validateJSONL(path); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	denseMetricsPath := filepath.Join(evalDir, "dense.metrics.json")
+	denseArgs := []string{
+		"go", "run", "./cmd/eos", "eval-retrieval-vectors",
+		"--dataset", dataset,
+		"--split", split,
+		"--backend", "imported-pretrained-bge-dense",
+		"--artifact", rel(root, module),
+		"--top-k", strconv.Itoa(topK),
+		"--max-docs", strconv.Itoa(maxDocs),
+		"--max-queries", strconv.Itoa(maxQueries),
+		"--doc-vectors", rel(root, docVectors),
+		"--query-vectors", rel(root, queryVectors),
+		"--metrics-json", rel(root, denseMetricsPath),
+		rel(root, datasetDir),
+	}
+	if err := runCapture(root, "eval-retrieval-vectors", denseArgs, filepath.Join(logDir, "eval-retrieval-vectors.log")); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	turboMetricsPath := filepath.Join(evalDir, "turboquant-q8-q4.metrics.json")
+	turboTSVPath := filepath.Join(evalDir, "turboquant-q8-q4.metrics.tsv")
+	turboArgs := []string{
+		"go", "run", "./cmd/eos", "eval-retrieval-vectors-turboquant",
+		"--dataset", dataset,
+		"--split", split,
+		"--backend", "imported-pretrained-bge-turboquant",
+		"--artifact", rel(root, module),
+		"--top-k", strconv.Itoa(topK),
+		"--max-docs", strconv.Itoa(maxDocs),
+		"--max-queries", strconv.Itoa(maxQueries),
+		"--bits", "8,4",
+		"--doc-vectors", rel(root, docVectors),
+		"--query-vectors", rel(root, queryVectors),
+		"--metrics-json", rel(root, turboMetricsPath),
+		"--metrics-tsv", rel(root, turboTSVPath),
+		rel(root, datasetDir),
+	}
+	if err := runCapture(root, "eval-retrieval-vectors-turboquant", turboArgs, filepath.Join(logDir, "eval-retrieval-vectors-turboquant.log")); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	var exported exportManifest
+	var dense retrievalMetrics
+	var turbo turboQuantMetrics
+	if err := readJSON(exportManifestPath, &exported); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := readJSON(denseMetricsPath, &dense); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := readJSON(turboMetricsPath, &turbo); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if exported.QualityClaim {
+		fmt.Fprintln(os.Stderr, "export manifest quality_claim=true, want false")
+		os.Exit(1)
+	}
+	if exported.QueryPrefix != bgeQueryPrefix {
+		fmt.Fprintf(os.Stderr, "query prefix %q, want %q\n", exported.QueryPrefix, bgeQueryPrefix)
+		os.Exit(1)
+	}
+	if exported.DocumentPrefix != "" {
+		fmt.Fprintf(os.Stderr, "document prefix %q, want empty\n", exported.DocumentPrefix)
+		os.Exit(1)
+	}
+	if exported.Documents <= 0 || exported.Queries <= 0 || exported.OutputDim <= 0 {
+		fmt.Fprintf(os.Stderr, "bad export counts/dim: docs=%d queries=%d dim=%d\n", exported.Documents, exported.Queries, exported.OutputDim)
+		os.Exit(1)
+	}
+	if dense.Inputs.Documents <= 0 || dense.Inputs.Queries <= 0 || dense.Inputs.ScoredPairs <= 0 {
+		fmt.Fprintf(os.Stderr, "bad dense eval inputs: docs=%d queries=%d scored=%d\n", dense.Inputs.Documents, dense.Inputs.Queries, dense.Inputs.ScoredPairs)
+		os.Exit(1)
+	}
+	q8, ok := turboRow(turbo, 8)
+	if !ok {
+		fmt.Fprintln(os.Stderr, "missing q8 TurboQuant metrics row")
+		os.Exit(1)
+	}
+	q4, ok := turboRow(turbo, 4)
+	if !ok {
+		fmt.Fprintln(os.Stderr, "missing q4 TurboQuant metrics row")
+		os.Exit(1)
+	}
+	rows := []summaryRow{
+		{
+			Storage:        "dense",
+			Method:         "float32",
+			NDCGAt10:       dense.Quality.NDCGAt10,
+			RecallAt100:    dense.Quality.RecallAt100,
+			Gate:           "pass",
+			MinNDCGAt10:    minDenseNDCG,
+			MinRecallAt100: minDenseRecall,
+		},
+		q8,
+		q4,
+	}
+	rows[1].Gate = "pass"
+	rows[1].MinNDCGAt10 = minQ8NDCG
+	rows[1].MinRecallAt100 = minQ8Recall
+	rows[2].Gate = "pass"
+	rows[2].MinNDCGAt10 = minQ4NDCG
+	rows[2].MinRecallAt100 = minQ4Recall
+	for _, check := range []struct {
+		Name string
+		Got  float64
+		Min  float64
+	}{
+		{"dense ndcg@10", rows[0].NDCGAt10, minDenseNDCG},
+		{"dense recall@100", rows[0].RecallAt100, minDenseRecall},
+		{"q8 ndcg@10", rows[1].NDCGAt10, minQ8NDCG},
+		{"q8 recall@100", rows[1].RecallAt100, minQ8Recall},
+		{"q4 ndcg@10", rows[2].NDCGAt10, minQ4NDCG},
+		{"q4 recall@100", rows[2].RecallAt100, minQ4Recall},
+	} {
+		if err := gateMetric(check.Name, check.Got, check.Min); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	summaryTSV := filepath.Join(runDir, "summary.tsv")
+	if err := writeSummaryTSV(summaryTSV, rows); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	gates := []string{
+		"export manifest quality_claim=false",
+		"BGE query prefix applied and document prefix empty",
+		"non-empty doc/query vector JSONL",
+		"positive document/query/scored-pair counts",
+		"q8 and q4 TurboQuant rows present",
+	}
+	if uncapped || minDenseNDCG > 0 || minQ8NDCG > 0 || minQ4NDCG > 0 {
+		gates = append(gates, fmt.Sprintf("quality floors dense>=%.3f q8>=%.3f q4>=%.3f nDCG@10", minDenseNDCG, minQ8NDCG, minQ4NDCG))
+	} else {
+		gates = append(gates, "capped mode uses metric existence/count gates by default; set EOS_IMPORTED_BGE_SMOKE_UNCAPPED=1 for SciFact quality floors")
+	}
+	manifest := smokeManifest{
+		Schema:         manifestSchema,
+		GeneratedAt:    time.Now().UTC().Format(time.RFC3339),
+		RunDir:         rel(root, runDir),
+		Dataset:        dataset,
+		Split:          split,
+		Uncapped:       uncapped,
+		Source:         source,
+		Module:         rel(root, module),
+		Weights:        rel(root, weights),
+		DatasetDir:     rel(root, datasetDir),
+		VectorDir:      rel(root, vectorDir),
+		MaxDocs:        maxDocs,
+		MaxQueries:     maxQueries,
+		BatchSize:      batchSize,
+		QualityClaim:   false,
+		ExportManifest: rel(root, exportManifestPath),
+		DenseMetrics:   rel(root, denseMetricsPath),
+		TurboMetrics:   rel(root, turboMetricsPath),
+		SummaryTSV:     rel(root, summaryTSV),
+		Gates:          gates,
+		Rows:           rows,
+		Caveats: []string{
+			"quality_claim=false is required and preserved.",
+			"Capped mode is a plumbing smoke; uncapped SciFact mode carries the production quality floors.",
+			"No defaults or aliases are promoted by this wrapper.",
+		},
+	}
+	manifestPath := filepath.Join(runDir, "smoke-manifest.json")
+	if err := writeJSON(manifestPath, manifest); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println("imported pretrained BGE retrieval smoke: pass")
+	fmt.Printf("run_dir: %s\n", rel(root, runDir))
+	fmt.Printf("quality_claim: false\n")
+	fmt.Printf("dense_ndcg_at_10: %.6f\n", rows[0].NDCGAt10)
+	fmt.Printf("q8_ndcg_at_10: %.6f\n", rows[1].NDCGAt10)
+	fmt.Printf("q4_ndcg_at_10: %.6f\n", rows[2].NDCGAt10)
+	fmt.Printf("summary: %s\n", rel(root, summaryTSV))
+	fmt.Printf("manifest: %s\n", rel(root, manifestPath))
+}
