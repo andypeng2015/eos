@@ -46,6 +46,7 @@ type PretrainedBERTImportPlan struct {
 	ModelName              string                            `json:"model_name,omitempty"`
 	Architecture           string                            `json:"architecture"`
 	Config                 PretrainedBERTConfig              `json:"config"`
+	SentenceTransformers   *PretrainedBERTSTMetadata         `json:"sentence_transformers,omitempty"`
 	Tensors                []PretrainedBERTTensorPlan        `json:"tensors"`
 	WeightVerification     *PretrainedBERTWeightVerification `json:"weight_verification,omitempty"`
 	WeightLoadSmoke        *PretrainedBERTWeightLoadReport   `json:"weight_load_smoke,omitempty"`
@@ -55,6 +56,13 @@ type PretrainedBERTImportPlan struct {
 	PoolingPolicy          string                            `json:"pooling_policy"`
 	OutputProjectionPolicy string                            `json:"output_projection_policy"`
 	ExecutionStatus        string                            `json:"execution_status"`
+}
+
+type PretrainedBERTSTMetadata struct {
+	Pooling         string `json:"pooling,omitempty"`
+	MaxSeqLength    int    `json:"max_seq_length,omitempty"`
+	PoolingSource   string `json:"pooling_source,omitempty"`
+	MaxLengthSource string `json:"max_length_source,omitempty"`
 }
 
 type PretrainedBERTWeightVerification struct {
@@ -179,7 +187,21 @@ func PlanPretrainedBERTImportFromDir(dir, modelName string) (PretrainedBERTImpor
 	if err != nil {
 		return PretrainedBERTImportPlan{}, err
 	}
-	return PlanPretrainedBERTImport(cfg, modelName)
+	plan, err := PlanPretrainedBERTImport(cfg, modelName)
+	if err != nil {
+		return PretrainedBERTImportPlan{}, err
+	}
+	st, err := LoadPretrainedBERTSentenceTransformersMetadata(dir)
+	if err != nil {
+		return PretrainedBERTImportPlan{}, err
+	}
+	if st != nil {
+		plan.SentenceTransformers = st
+		if st.Pooling != "" {
+			plan.PoolingPolicy = st.Pooling
+		}
+	}
+	return plan, nil
 }
 
 func PlanPretrainedBERTImport(cfg PretrainedBERTConfig, modelName string) (PretrainedBERTImportPlan, error) {
@@ -231,10 +253,91 @@ func PlanPretrainedBERTImport(cfg PretrainedBERTConfig, modelName string) (Pretr
 		Architecture:           architecture,
 		Config:                 cfg,
 		Tensors:                tensors,
-		PoolingPolicy:          "deferred: sentence-transformers pooling metadata is not imported yet; BGE/E5 typically use masked mean pooling plus L2 normalization",
+		PoolingPolicy:          "masked_mean",
 		OutputProjectionPolicy: "deferred: dense/sparse projection heads and safetensors ingestion are outside this first planning slice",
 		ExecutionStatus:        "plan_only: tokenizer/config/tensor metadata gate; no BERT graph execution or weight import",
 	}, nil
+}
+
+func LoadPretrainedBERTSentenceTransformersMetadata(dir string) (*PretrainedBERTSTMetadata, error) {
+	if dir == "" {
+		return nil, nil
+	}
+	meta := &PretrainedBERTSTMetadata{}
+	pooling, source, err := loadPretrainedBERTSTPooling(filepath.Join(dir, "1_Pooling", "config.json"))
+	if err != nil {
+		return nil, err
+	}
+	if pooling != "" {
+		meta.Pooling = pooling
+		meta.PoolingSource = source
+	}
+	maxSeqLength, source, err := loadPretrainedBERTSTMaxSeqLength(filepath.Join(dir, "sentence_bert_config.json"))
+	if err != nil {
+		return nil, err
+	}
+	if maxSeqLength > 0 {
+		meta.MaxSeqLength = maxSeqLength
+		meta.MaxLengthSource = source
+	}
+	if meta.Pooling == "" && meta.MaxSeqLength == 0 {
+		return nil, nil
+	}
+	return meta, nil
+}
+
+func loadPretrainedBERTSTPooling(path string) (string, string, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	var raw struct {
+		PoolingModeCLSToken    bool `json:"pooling_mode_cls_token"`
+		PoolingModeMeanTokens  bool `json:"pooling_mode_mean_tokens"`
+		PoolingModeMaxTokens   bool `json:"pooling_mode_max_tokens"`
+		PoolingModeMeanSqrtLen bool `json:"pooling_mode_mean_sqrt_len_tokens"`
+		PoolingModeWeighted    bool `json:"pooling_mode_weightedmean_tokens"`
+		PoolingModeLastToken   bool `json:"pooling_mode_lasttoken"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return "", "", fmt.Errorf("parse %s: %w", path, err)
+	}
+	switch {
+	case raw.PoolingModeCLSToken && !raw.PoolingModeMeanTokens && !raw.PoolingModeMaxTokens && !raw.PoolingModeMeanSqrtLen && !raw.PoolingModeWeighted && !raw.PoolingModeLastToken:
+		return "cls", path, nil
+	case raw.PoolingModeMeanTokens && !raw.PoolingModeCLSToken && !raw.PoolingModeMaxTokens && !raw.PoolingModeMeanSqrtLen && !raw.PoolingModeWeighted && !raw.PoolingModeLastToken:
+		return "masked_mean", path, nil
+	case !raw.PoolingModeCLSToken && !raw.PoolingModeMeanTokens && !raw.PoolingModeMaxTokens && !raw.PoolingModeMeanSqrtLen && !raw.PoolingModeWeighted && !raw.PoolingModeLastToken:
+		return "", path, nil
+	default:
+		return "", "", fmt.Errorf("unsupported SentenceTransformers pooling config %s: only CLS-only and mean-only pooling are supported", path)
+	}
+}
+
+func loadPretrainedBERTSTMaxSeqLength(path string) (int, string, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return 0, "", nil
+	}
+	if err != nil {
+		return 0, "", err
+	}
+	var raw struct {
+		MaxSeqLength int `json:"max_seq_length"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return 0, "", fmt.Errorf("parse %s: %w", path, err)
+	}
+	if raw.MaxSeqLength < 0 {
+		return 0, "", fmt.Errorf("sentence-transformers max_seq_length must be non-negative, got %d", raw.MaxSeqLength)
+	}
+	if raw.MaxSeqLength == 0 {
+		return 0, path, nil
+	}
+	return raw.MaxSeqLength, path, nil
 }
 
 func VerifyPretrainedBERTWeightsFromDir(dir string, plan PretrainedBERTImportPlan) (PretrainedBERTWeightVerification, error) {
@@ -735,8 +838,8 @@ func BuildPretrainedBERTSingleLayerModule(plan PretrainedBERTImportPlan, layer i
 }
 
 // BuildPretrainedBERTEmbedderModule builds a host-reference full-stack BERT
-// sentence embedder: embeddings, every encoder layer, masked mean pooling, and
-// row L2 normalization.
+// sentence embedder: embeddings, every encoder layer, sentence pooling, and row
+// L2 normalization.
 func BuildPretrainedBERTEmbedderModule(plan PretrainedBERTImportPlan) (*eosartifact.Module, error) {
 	if err := plan.Config.Validate(); err != nil {
 		return nil, err
@@ -747,6 +850,10 @@ func BuildPretrainedBERTEmbedderModule(plan PretrainedBERTImportPlan) (*eosartif
 	}
 	if hiddenAct != "gelu" {
 		return nil, fmt.Errorf("pretrained BERT embedder unsupported hidden_act %q; only gelu is supported", hiddenAct)
+	}
+	pooling, err := pretrainedBERTPlanPooling(plan)
+	if err != nil {
+		return nil, err
 	}
 	hidden := plan.Config.HiddenSize
 	intermediate := plan.Config.IntermediateSize
@@ -796,9 +903,9 @@ func BuildPretrainedBERTEmbedderModule(plan PretrainedBERTImportPlan) (*eosartif
 		"source":           "pretrained_bert_import_plan",
 		"model_name":       plan.ModelName,
 		"architecture":     plan.Architecture,
-		"pooling":          "masked_mean",
+		"pooling":          pooling,
 		"normalization":    "l2",
-		"execution_status": "host_reference_full_stack: embeddings plus all encoder layers plus masked mean pooling and L2 normalization; no tokenizer, package export, quantized execution, or device execution claim",
+		"execution_status": fmt.Sprintf("host_reference_full_stack: embeddings plus all encoder layers plus %s pooling and L2 normalization; no tokenizer, package export, quantized execution, or device execution claim", pooling),
 	}
 	hiddenStr := strconv.Itoa(hidden)
 	intermediateStr := strconv.Itoa(intermediate)
@@ -882,7 +989,7 @@ func BuildPretrainedBERTEmbedderModule(plan PretrainedBERTImportPlan) (*eosartif
 				"hidden_act":          hiddenAct,
 				"num_attention_heads": strconv.Itoa(plan.Config.NumAttentionHeads),
 				"num_hidden_layers":   strconv.Itoa(plan.Config.NumHiddenLayers),
-				"pooling":             "masked_mean",
+				"pooling":             pooling,
 				"normalization":       "l2",
 			},
 		},
@@ -897,6 +1004,25 @@ func BuildPretrainedBERTEmbedderModule(plan PretrainedBERTImportPlan) (*eosartif
 		return nil, err
 	}
 	return mod, nil
+}
+
+func pretrainedBERTPlanPooling(plan PretrainedBERTImportPlan) (string, error) {
+	pooling := plan.PoolingPolicy
+	if pooling == "" && plan.SentenceTransformers != nil {
+		pooling = plan.SentenceTransformers.Pooling
+	}
+	if pooling == "" {
+		pooling = "masked_mean"
+	}
+	switch pooling {
+	case "masked_mean", "cls":
+		return pooling, nil
+	default:
+		if strings.HasPrefix(pooling, "deferred:") {
+			return "masked_mean", nil
+		}
+		return "", fmt.Errorf("pretrained BERT unsupported pooling policy %q", pooling)
+	}
 }
 
 func bertEmbeddingParam(name string, shape ...string) eosartifact.Param {

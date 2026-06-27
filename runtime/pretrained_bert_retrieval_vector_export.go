@@ -19,10 +19,13 @@ const PretrainedBERTRetrievalVectorExportManifestSchema = "manta.pretrained_bert
 // PretrainedBERTTextEmbedder runs an imported BERT-family embedder module with
 // Hugging Face WordPiece tokenization and role-named weight files.
 type PretrainedBERTTextEmbedder struct {
-	config    PretrainedBERTConfig
-	tokenizer *HFWordPieceTokenizer
-	program   *Program
-	maxLength int
+	config          PretrainedBERTConfig
+	stMeta          *PretrainedBERTSTMetadata
+	tokenizer       *HFWordPieceTokenizer
+	program         *Program
+	maxLength       int
+	maxLengthSource string
+	pooling         string
 }
 
 type PretrainedBERTTextEmbedderConfig struct {
@@ -83,6 +86,8 @@ type PretrainedBERTRetrievalVectorExportSummary struct {
 	WrittenDocuments    int       `json:"written_documents"`
 	WrittenQueries      int       `json:"written_queries"`
 	MaxLength           int       `json:"max_length"`
+	MaxLengthSource     string    `json:"max_length_source,omitempty"`
+	Pooling             string    `json:"pooling,omitempty"`
 	BatchSize           int       `json:"batch_size"`
 	MaxDocs             int       `json:"max_docs,omitempty"`
 	MaxQueries          int       `json:"max_queries,omitempty"`
@@ -116,10 +121,11 @@ func LoadPretrainedBERTTextEmbedder(ctx context.Context, cfg PretrainedBERTTextE
 	if err != nil {
 		return nil, err
 	}
-	maxLength := cfg.MaxLength
-	if maxLength <= 0 {
-		maxLength = config.MaxPositionEmbeddings
+	stMeta, err := LoadPretrainedBERTSentenceTransformersMetadata(cfg.SourceDir)
+	if err != nil {
+		return nil, err
 	}
+	maxLength, maxLengthSource := resolvePretrainedBERTMaxLength(cfg.MaxLength, config, stMeta)
 	if maxLength <= 0 || maxLength > config.MaxPositionEmbeddings {
 		return nil, fmt.Errorf("max length must be in [1,%d], got %d", config.MaxPositionEmbeddings, maxLength)
 	}
@@ -131,6 +137,10 @@ func LoadPretrainedBERTTextEmbedder(ctx context.Context, cfg PretrainedBERTTextE
 	if err != nil {
 		return nil, err
 	}
+	pooling := ""
+	if value, ok := module.Metadata["pooling"].(string); ok {
+		pooling = value
+	}
 	weights, err := ReadWeightFile(cfg.WeightsPath)
 	if err != nil {
 		return nil, err
@@ -140,10 +150,13 @@ func LoadPretrainedBERTTextEmbedder(ctx context.Context, cfg PretrainedBERTTextE
 		return nil, err
 	}
 	return &PretrainedBERTTextEmbedder{
-		config:    config,
-		tokenizer: tokenizer,
-		program:   program,
-		maxLength: maxLength,
+		config:          config,
+		stMeta:          stMeta,
+		tokenizer:       tokenizer,
+		program:         program,
+		maxLength:       maxLength,
+		maxLengthSource: maxLengthSource,
+		pooling:         pooling,
 	}, nil
 }
 
@@ -152,6 +165,30 @@ func (e *PretrainedBERTTextEmbedder) MaxLength() int {
 		return 0
 	}
 	return e.maxLength
+}
+
+func (e *PretrainedBERTTextEmbedder) MaxLengthSource() string {
+	if e == nil {
+		return ""
+	}
+	return e.maxLengthSource
+}
+
+func (e *PretrainedBERTTextEmbedder) Pooling() string {
+	if e == nil {
+		return ""
+	}
+	return e.pooling
+}
+
+func resolvePretrainedBERTMaxLength(explicit int, config PretrainedBERTConfig, stMeta *PretrainedBERTSTMetadata) (int, string) {
+	if explicit > 0 {
+		return explicit, "explicit"
+	}
+	if stMeta != nil && stMeta.MaxSeqLength > 0 {
+		return stMeta.MaxSeqLength, stMeta.MaxLengthSource
+	}
+	return config.MaxPositionEmbeddings, "config.max_position_embeddings"
 }
 
 func (e *PretrainedBERTTextEmbedder) EmbedTextBatch(ctx context.Context, texts []string, prefix string) ([][]float32, error) {
@@ -319,6 +356,8 @@ func ExportPretrainedBERTRetrievalVectors(ctx context.Context, cfg PretrainedBER
 		WrittenDocuments:    docResume.Written,
 		WrittenQueries:      queryResume.Written,
 		MaxLength:           embedder.MaxLength(),
+		MaxLengthSource:     embedder.MaxLengthSource(),
+		Pooling:             embedder.Pooling(),
 		BatchSize:           cfg.BatchSize,
 		MaxDocs:             cfg.MaxDocs,
 		MaxQueries:          cfg.MaxQueries,

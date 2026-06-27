@@ -126,7 +126,11 @@ func executeStep(ctx context.Context, mod *eosartifact.Module, entry eosartifact
 			return nil, "", err
 		}
 		meta := hostReferenceMetadata("bert_embedder")
-		meta["pooling"] = "masked_mean"
+		pooling := step.Attributes["pooling"]
+		if pooling == "" {
+			pooling = "masked_mean"
+		}
+		meta["pooling"] = pooling
 		meta["normalization"] = "l2"
 		meta["execution_status"] = "host_reference_full_stack"
 		return []Value{makeTensorValue(mod, entry, step, 0, out, bindings, kind, "", "", meta)}, "", nil

@@ -78,6 +78,57 @@ func TestPlanPretrainedBERTImportFromDir(t *testing.T) {
 	assertBERTTensorPlan(t, plan, "encoder.layer.0.attention.self.value.bias", []int{32}, true)
 }
 
+func TestPlanPretrainedBERTImportFromDirReadsSentenceTransformersMetadata(t *testing.T) {
+	dir := t.TempDir()
+	config := `{
+		"architectures": ["BertModel"],
+		"model_type": "bert",
+		"vocab_size": 100,
+		"hidden_size": 32,
+		"num_hidden_layers": 1,
+		"num_attention_heads": 4,
+		"intermediate_size": 64,
+		"hidden_act": "gelu",
+		"max_position_embeddings": 512,
+		"type_vocab_size": 2
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(config), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "1_Pooling"), 0o755); err != nil {
+		t.Fatalf("mkdir pooling: %v", err)
+	}
+	pooling := `{
+		"pooling_mode_cls_token": true,
+		"pooling_mode_mean_tokens": false,
+		"pooling_mode_max_tokens": false,
+		"pooling_mode_mean_sqrt_len_tokens": false,
+		"pooling_mode_weightedmean_tokens": false,
+		"pooling_mode_lasttoken": false
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "1_Pooling", "config.json"), []byte(pooling), 0o644); err != nil {
+		t.Fatalf("write pooling: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sentence_bert_config.json"), []byte(`{"max_seq_length":512}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write sentence config: %v", err)
+	}
+
+	plan, err := PlanPretrainedBERTImportFromDir(dir, "BAAI/bge-small-en-v1.5")
+	if err != nil {
+		t.Fatalf("plan from dir: %v", err)
+	}
+	if plan.SentenceTransformers == nil {
+		t.Fatalf("expected sentence-transformers metadata")
+	}
+	if plan.PoolingPolicy != "cls" || plan.SentenceTransformers.Pooling != "cls" || plan.SentenceTransformers.MaxSeqLength != 512 {
+		t.Fatalf("metadata = %+v pooling_policy=%q", plan.SentenceTransformers, plan.PoolingPolicy)
+	}
+	if !strings.Contains(plan.SentenceTransformers.PoolingSource, filepath.Join("1_Pooling", "config.json")) ||
+		!strings.Contains(plan.SentenceTransformers.MaxLengthSource, "sentence_bert_config.json") {
+		t.Fatalf("metadata sources = %+v", plan.SentenceTransformers)
+	}
+}
+
 func TestBuildPretrainedBERTEmbeddingStageModuleExecutesWeightFile(t *testing.T) {
 	cfg := PretrainedBERTConfig{
 		ModelType:             "bert",
@@ -375,6 +426,80 @@ func TestBuildPretrainedBERTEmbedderModuleExecutesWeightFile(t *testing.T) {
 		if value != 0 || math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
 			t.Fatalf("all-masked output %d = %v, want finite zero", i, value)
 		}
+	}
+}
+
+func TestBuildPretrainedBERTEmbedderModuleSupportsCLSPooling(t *testing.T) {
+	cfg := PretrainedBERTConfig{
+		ModelType:             "bert",
+		VocabSize:             2,
+		HiddenSize:            2,
+		NumHiddenLayers:       1,
+		NumAttentionHeads:     1,
+		IntermediateSize:      3,
+		HiddenAct:             "gelu",
+		MaxPositionEmbeddings: 3,
+		TypeVocabSize:         2,
+		LayerNormEps:          0.25,
+	}
+	plan, err := PlanPretrainedBERTImport(cfg, "fixture")
+	if err != nil {
+		t.Fatalf("plan import: %v", err)
+	}
+	plan.PoolingPolicy = "cls"
+	mod, err := BuildPretrainedBERTEmbedderModule(plan)
+	if err != nil {
+		t.Fatalf("build embedder module: %v", err)
+	}
+	if mod.Steps[0].Attributes["pooling"] != "cls" || mod.Metadata["pooling"] != "cls" {
+		t.Fatalf("pooling attrs metadata = attrs:%+v metadata:%+v", mod.Steps[0].Attributes, mod.Metadata)
+	}
+	decoded := pretrainedBERTFullStackDecodedWeights()[:21]
+	weights, _, err := BuildPretrainedBERTWeightFileFromDecoded(PretrainedBERTDecodedWeightSet{Tensors: decoded})
+	if err != nil {
+		t.Fatalf("build weight file: %v", err)
+	}
+	rt := New(bertEmbeddingHostBackend{})
+	prog, err := rt.Load(context.Background(), mod, weights.LoadOptions()...)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	inputIDs := backend.NewTensorI32([]int{2, 3}, []int32{0, 1, 0, 1, 0, 1})
+	attentionMask := backend.NewTensorI32([]int{2, 3}, []int32{1, 1, 0, 0, 0, 0})
+	tokenTypeIDs := backend.NewTensorI32([]int{2, 3}, []int32{0, 1, 1, 1, 0, 1})
+	result, err := prog.Run(context.Background(), backend.Request{
+		Entry: "bert_embed",
+		Inputs: map[string]any{
+			"input_ids":      inputIDs,
+			"attention_mask": attentionMask,
+			"token_type_ids": tokenTypeIDs,
+		},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	value := result.Outputs["embeddings"]
+	tensor, ok := value.Data.(*backend.Tensor)
+	if !ok {
+		t.Fatalf("output data type = %T, want *backend.Tensor", value.Data)
+	}
+	expectedWeights := weights.Weights
+	want, err := backend.BERTEmbedderReferenceWithPooling(
+		inputIDs, attentionMask, tokenTypeIDs,
+		expectedWeights["token_embeddings"],
+		expectedWeights["position_embeddings"],
+		expectedWeights["token_type_embeddings"],
+		expectedWeights["embedding_layernorm_weight"],
+		expectedWeights["embedding_layernorm_bias"],
+		pretrainedBERTEmbedderLayerWeights(expectedWeights, 1),
+		1, 1, 0.25, "gelu", "cls",
+	)
+	if err != nil {
+		t.Fatalf("expected reference: %v", err)
+	}
+	assertTensorClose(t, tensor, want.Shape, want.F32)
+	if value.Metadata["pooling"] != "cls" || value.Metadata["normalization"] != "l2" {
+		t.Fatalf("metadata = %+v", value.Metadata)
 	}
 }
 

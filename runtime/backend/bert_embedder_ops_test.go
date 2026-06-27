@@ -73,6 +73,62 @@ func TestBERTEmbedderReferenceComposesLayersPoolsAndNormalizes(t *testing.T) {
 	}
 }
 
+func TestBERTEmbedderReferenceSupportsCLSPooling(t *testing.T) {
+	layer := bertEncoderLayerFixture()
+	inputIDs := NewTensorI32([]int{1, 3}, []int32{0, 1, 0})
+	attentionMask := NewTensorI32([]int{1, 3}, []int32{1, 1, 0})
+	tokenTypeIDs := NewTensorI32([]int{1, 3}, []int32{0, 1, 1})
+	layerWeights := bertLayerWeightTensors(layer)
+
+	out, err := BERTEmbedderReferenceWithPooling(
+		inputIDs, attentionMask, tokenTypeIDs,
+		bertTokenEmbeddingsFixture(),
+		NewTensorF32([]int{3, 2}, []float32{0, 1, 1, 0, -1, 0.5}),
+		bertTokenTypeEmbeddingsFixture(),
+		NewTensorF32([]int{2}, []float32{2, 3}),
+		NewTensorF32([]int{2}, []float32{0.5, -0.5}),
+		layerWeights,
+		1, 1, 0.25, "gelu", "cls",
+	)
+	if err != nil {
+		t.Fatalf("bert embedder cls: %v", err)
+	}
+
+	positionIDs := NewTensorI32([]int{1, 3}, []int32{0, 1, 2})
+	hidden, err := BERTEmbeddingsReference(
+		bertTokenEmbeddingsFixture(),
+		NewTensorF32([]int{3, 2}, []float32{0, 1, 1, 0, -1, 0.5}),
+		bertTokenTypeEmbeddingsFixture(),
+		NewTensorF32([]int{2}, []float32{2, 3}),
+		NewTensorF32([]int{2}, []float32{0.5, -0.5}),
+		inputIDs, positionIDs, tokenTypeIDs, 0.25,
+	)
+	if err != nil {
+		t.Fatalf("manual embeddings: %v", err)
+	}
+	hidden, err = BERTEncoderLayerReference(
+		hidden, attentionMask,
+		layer.queryWeight, layer.queryBias,
+		layer.keyWeight, layer.keyBias,
+		layer.valueWeight, layer.valueBias,
+		layer.attentionOutputWeight, layer.attentionOutputBias,
+		layer.attentionLayerNormWeight, layer.attentionLayerNormBias,
+		layer.intermediateWeight, layer.intermediateBias,
+		layer.outputWeight, layer.outputBias,
+		layer.outputLayerNormWeight, layer.outputLayerNormBias,
+		1, 0.25, "gelu",
+	)
+	if err != nil {
+		t.Fatalf("manual layer: %v", err)
+	}
+	cls, err := clsPoolTensor(hidden)
+	if err != nil {
+		t.Fatalf("manual cls pool: %v", err)
+	}
+	want := normalizeRows(cls)
+	assertTensorClose(t, out, []int{1, 2}, want.F32)
+}
+
 func TestBERTEmbedderReferenceValidationFailures(t *testing.T) {
 	f := bertEncoderLayerFixture()
 	_, err := bertEmbedderTensor([]*Tensor{

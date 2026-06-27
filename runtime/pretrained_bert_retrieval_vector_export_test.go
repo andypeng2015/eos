@@ -115,6 +115,55 @@ func TestPretrainedBERTRetrievalVectorExportWritesEvaluatorCompatibleCaches(t *t
 	}
 }
 
+func TestPretrainedBERTRetrievalVectorExportUsesSentenceTransformersMetadataDefaults(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixtureWithST(t, "cls", 3)
+	datasetDir := writeTinyPretrainedBERTBEIRFixture(t)
+	outputDir := filepath.Join(t.TempDir(), "vectors")
+
+	summary, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName: "tiny-bert",
+		DatasetDir:  datasetDir,
+		OutputDir:   outputDir,
+		SourceDir:   sourceDir,
+		ModulePath:  modulePath,
+		WeightsPath: weightsPath,
+		BatchSize:   1,
+		Runtime:     New(cuda.New()),
+	})
+	if err != nil {
+		t.Fatalf("export pretrained BERT retrieval vectors: %v", err)
+	}
+	if summary.MaxLength != 3 || !strings.Contains(summary.MaxLengthSource, "sentence_bert_config.json") {
+		t.Fatalf("summary max length = %d source=%q", summary.MaxLength, summary.MaxLengthSource)
+	}
+	if summary.Pooling != "cls" {
+		t.Fatalf("summary pooling = %q, want cls", summary.Pooling)
+	}
+	assertFiniteUnitishVector(t, readTinyVectorRows(t, summary.DocVectorPath)[0].Embedding, 2)
+
+	overrideDir := filepath.Join(t.TempDir(), "override")
+	override, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName: "tiny-bert",
+		DatasetDir:  datasetDir,
+		OutputDir:   overrideDir,
+		SourceDir:   sourceDir,
+		ModulePath:  modulePath,
+		WeightsPath: weightsPath,
+		BatchSize:   1,
+		MaxLength:   4,
+		Runtime:     New(cuda.New()),
+	})
+	if err != nil {
+		t.Fatalf("export pretrained BERT retrieval vectors with override: %v", err)
+	}
+	if override.MaxLength != 4 || override.MaxLengthSource != "explicit" {
+		t.Fatalf("override max length = %d source=%q", override.MaxLength, override.MaxLengthSource)
+	}
+	if override.Pooling != "cls" {
+		t.Fatalf("override pooling = %q, want cls", override.Pooling)
+	}
+}
+
 func TestPretrainedBERTTextEmbedderRejectsTooLargeMaxLength(t *testing.T) {
 	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
 	_, err := LoadPretrainedBERTTextEmbedder(context.Background(), PretrainedBERTTextEmbedderConfig{
@@ -387,6 +436,44 @@ func writeTinyPretrainedBERTExportFixture(t *testing.T) (sourceDir, modulePath, 
 	weightsPath = filepath.Join(dir, "bert_weights.mll")
 	if err := weights.WriteFile(weightsPath); err != nil {
 		t.Fatalf("write weights: %v", err)
+	}
+	return sourceDir, modulePath, weightsPath
+}
+
+func writeTinyPretrainedBERTExportFixtureWithST(t *testing.T, pooling string, maxSeqLength int) (sourceDir, modulePath, weightsPath string) {
+	t.Helper()
+	sourceDir, modulePath, weightsPath = writeTinyPretrainedBERTExportFixture(t)
+	if err := os.MkdirAll(filepath.Join(sourceDir, "1_Pooling"), 0o755); err != nil {
+		t.Fatalf("mkdir pooling: %v", err)
+	}
+	cls := pooling == "cls"
+	mean := pooling == "masked_mean"
+	poolingConfig := fmt.Sprintf(`{
+		"pooling_mode_cls_token": %t,
+		"pooling_mode_mean_tokens": %t,
+		"pooling_mode_max_tokens": false,
+		"pooling_mode_mean_sqrt_len_tokens": false,
+		"pooling_mode_weightedmean_tokens": false,
+		"pooling_mode_lasttoken": false
+	}`+"\n", cls, mean)
+	if err := os.WriteFile(filepath.Join(sourceDir, "1_Pooling", "config.json"), []byte(poolingConfig), 0o644); err != nil {
+		t.Fatalf("write pooling config: %v", err)
+	}
+	if maxSeqLength > 0 {
+		if err := os.WriteFile(filepath.Join(sourceDir, "sentence_bert_config.json"), []byte(fmt.Sprintf(`{"max_seq_length":%d}`+"\n", maxSeqLength)), 0o644); err != nil {
+			t.Fatalf("write sentence config: %v", err)
+		}
+	}
+	plan, err := PlanPretrainedBERTImportFromDir(sourceDir, "fixture")
+	if err != nil {
+		t.Fatalf("plan with st metadata: %v", err)
+	}
+	mod, err := BuildPretrainedBERTEmbedderModule(plan)
+	if err != nil {
+		t.Fatalf("build st module: %v", err)
+	}
+	if err := eosartifact.WriteFile(modulePath, mod); err != nil {
+		t.Fatalf("rewrite st module: %v", err)
 	}
 	return sourceDir, modulePath, weightsPath
 }

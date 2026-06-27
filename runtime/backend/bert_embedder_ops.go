@@ -16,11 +16,11 @@ func bertEmbedderTensor(inputs []*Tensor, outputType eosartifact.ValueType, attr
 	if len(inputs) != expected {
 		return nil, fmt.Errorf("bert_embedder expects %d tensors for %d layers, got %d", expected, cfg.NumHiddenLayers, len(inputs))
 	}
-	return BERTEmbedderReference(
+	return BERTEmbedderReferenceWithPooling(
 		inputs[0], inputs[1], inputs[2],
 		inputs[3], inputs[4], inputs[5], inputs[6], inputs[7],
 		inputs[8:],
-		cfg.NumHiddenLayers, cfg.NumAttentionHeads, cfg.Epsilon, cfg.HiddenAct, outputType,
+		cfg.NumHiddenLayers, cfg.NumAttentionHeads, cfg.Epsilon, cfg.HiddenAct, cfg.Pooling, outputType,
 	)
 }
 
@@ -29,10 +29,11 @@ type bertEmbedderConfig struct {
 	NumAttentionHeads int
 	Epsilon           float64
 	HiddenAct         string
+	Pooling           string
 }
 
 func bertEmbedderConfigFromAttrs(attrs map[string]string) (bertEmbedderConfig, error) {
-	cfg := bertEmbedderConfig{NumHiddenLayers: 1, NumAttentionHeads: 1, Epsilon: 1e-12, HiddenAct: "gelu"}
+	cfg := bertEmbedderConfig{NumHiddenLayers: 1, NumAttentionHeads: 1, Epsilon: 1e-12, HiddenAct: "gelu", Pooling: "masked_mean"}
 	if attrs == nil {
 		return cfg, nil
 	}
@@ -63,8 +64,14 @@ func bertEmbedderConfigFromAttrs(attrs map[string]string) (bertEmbedderConfig, e
 	if attrs["hidden_act"] != "" {
 		cfg.HiddenAct = attrs["hidden_act"]
 	}
+	if attrs["pooling"] != "" {
+		cfg.Pooling = attrs["pooling"]
+	}
 	if cfg.HiddenAct != "gelu" {
 		return cfg, fmt.Errorf("bert_embedder unsupported hidden_act %q; only gelu is supported", cfg.HiddenAct)
+	}
+	if cfg.Pooling != "masked_mean" && cfg.Pooling != "cls" {
+		return cfg, fmt.Errorf("bert_embedder unsupported pooling %q; supported values are masked_mean and cls", cfg.Pooling)
 	}
 	return cfg, nil
 }
@@ -79,6 +86,26 @@ func BERTEmbedderReference(
 	numHiddenLayers, numAttentionHeads int,
 	epsilon float64,
 	hiddenAct string,
+	outTypes ...eosartifact.ValueType,
+) (*Tensor, error) {
+	return BERTEmbedderReferenceWithPooling(
+		inputIDs, attentionMask, tokenTypeIDs,
+		tokenEmbeddings, positionEmbeddings, tokenTypeEmbeddings, embeddingLayerNormWeight, embeddingLayerNormBias,
+		layerWeights,
+		numHiddenLayers, numAttentionHeads, epsilon, hiddenAct, "masked_mean", outTypes...,
+	)
+}
+
+// BERTEmbedderReferenceWithPooling composes BERT embeddings, every configured
+// encoder layer, requested sentence pooling, and row L2 normalization.
+func BERTEmbedderReferenceWithPooling(
+	inputIDs, attentionMask, tokenTypeIDs *Tensor,
+	tokenEmbeddings, positionEmbeddings, tokenTypeEmbeddings, embeddingLayerNormWeight, embeddingLayerNormBias *Tensor,
+	layerWeights []*Tensor,
+	numHiddenLayers, numAttentionHeads int,
+	epsilon float64,
+	hiddenAct string,
+	pooling string,
 	outTypes ...eosartifact.ValueType,
 ) (*Tensor, error) {
 	if inputIDs == nil || attentionMask == nil || tokenTypeIDs == nil {
@@ -117,6 +144,12 @@ func BERTEmbedderReference(
 	if len(layerWeights) != numHiddenLayers*16 {
 		return nil, fmt.Errorf("bert_embedder expects %d encoder layer tensors, got %d", numHiddenLayers*16, len(layerWeights))
 	}
+	if pooling == "" {
+		pooling = "masked_mean"
+	}
+	if pooling != "masked_mean" && pooling != "cls" {
+		return nil, fmt.Errorf("bert_embedder unsupported pooling %q; supported values are masked_mean and cls", pooling)
+	}
 	positionIDs := generatedBERTPositionIDs(inputIDs.Shape[0], inputIDs.Shape[1])
 	hiddenStates, err := BERTEmbeddingsReference(
 		tokenEmbeddings, positionEmbeddings, tokenTypeEmbeddings, embeddingLayerNormWeight, embeddingLayerNormBias,
@@ -143,15 +176,45 @@ func BERTEmbedderReference(
 			return nil, fmt.Errorf("bert_embedder encoder layer %d: %w", layer, err)
 		}
 	}
-	pooled, err := meanPoolMaskedTensor(hiddenStates, attentionMask)
-	if err != nil {
-		return nil, err
+	var pooled *Tensor
+	switch pooling {
+	case "masked_mean":
+		pooled, err = meanPoolMaskedTensor(hiddenStates, attentionMask)
+		if err != nil {
+			return nil, err
+		}
+	case "cls":
+		pooled, err = clsPoolTensor(hiddenStates)
+		if err != nil {
+			return nil, err
+		}
 	}
 	normalized := normalizeRows(pooled)
 	if err := validateBERTEmbedderOutputType(normalized.Shape, outTypes...); err != nil {
 		return nil, err
 	}
 	return normalized, nil
+}
+
+func clsPoolTensor(hiddenStates *Tensor) (*Tensor, error) {
+	if hiddenStates == nil || hiddenStates.DType != "f32" || len(hiddenStates.Shape) != 3 {
+		dtype := "<nil>"
+		var shape []int
+		if hiddenStates != nil {
+			dtype = hiddenStates.DType
+			shape = hiddenStates.Shape
+		}
+		return nil, fmt.Errorf("cls pooling expects f32 hidden_states [B,T,H], got dtype=%q shape=%v", dtype, shape)
+	}
+	batch, tokens, hidden := hiddenStates.Shape[0], hiddenStates.Shape[1], hiddenStates.Shape[2]
+	if tokens <= 0 || hidden <= 0 || hiddenStates.Elements() != len(hiddenStates.F32) {
+		return nil, fmt.Errorf("cls pooling hidden_states backing data length %d does not match shape %v", len(hiddenStates.F32), hiddenStates.Shape)
+	}
+	out := make([]float32, batch*hidden)
+	for b := 0; b < batch; b++ {
+		copy(out[b*hidden:(b+1)*hidden], hiddenStates.F32[b*tokens*hidden:b*tokens*hidden+hidden])
+	}
+	return NewTensorF32([]int{batch, hidden}, out), nil
 }
 
 func generatedBERTPositionIDs(batch, tokens int) *Tensor {
