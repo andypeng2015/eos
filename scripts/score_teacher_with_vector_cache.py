@@ -261,7 +261,7 @@ def main() -> int:
     missing_doc_vector = 0
     candidate_rows = 0
     import_score_rows = 0
-    import_score_keys: set[tuple[str, str, str]] = set()
+    import_score_keys: set[tuple[Any, ...]] = set()
     all_scores: list[float] = []
     positive_scores: list[float] = []
     negative_scores: list[float] = []
@@ -281,6 +281,11 @@ def main() -> int:
             negatives = [str(value or "") for value in example.get("negatives") or []]
             candidates = [positive] + negatives
             source = str(example.get("source") or "")
+            row_id_value = str(example.get("row_id") or "")
+            query_id_value = str(example.get("query_id") or "")
+            candidate_doc_ids = [str(example.get("positive_doc_id") or "")] + [
+                str(value or "") for value in example.get("negative_doc_ids") or []
+            ]
 
             query_id = query_text_to_id.get(stable_text(query))
             query_vector = query_vectors.get(query_id or "")
@@ -330,23 +335,39 @@ def main() -> int:
 
             if complete and len(scores) == len(candidates):
                 example["teacher_scores"] = scores
-                for candidate, score in zip(candidates, scores):
-                    import_key = (source, query, candidate)
+                for candidate_index, (candidate, score) in enumerate(zip(candidates, scores)):
+                    candidate_doc_id = ""
+                    if candidate_index < len(candidate_doc_ids):
+                        candidate_doc_id = candidate_doc_ids[candidate_index]
+                    if row_id_value and candidate_doc_id:
+                        import_key = ("row_doc", row_id_value, candidate_doc_id)
+                    elif row_id_value:
+                        import_key = ("row_index", row_id_value, candidate_index)
+                    elif query_id_value and candidate_doc_id:
+                        import_key = ("query_doc", query_id_value, candidate_doc_id)
+                    else:
+                        import_key = ("text", source, query, candidate)
                     if import_key in import_score_keys:
                         continue
                     import_score_keys.add(import_key)
+                    score_row = {
+                        "source": source,
+                        "query": query,
+                        "candidate": candidate,
+                        "score": score,
+                        "score_scale": args.score,
+                        "teacher_model_id": args.model_id,
+                    }
+                    if row_id_value:
+                        score_row["row_id"] = row_id_value
+                    if query_id_value:
+                        score_row["query_id"] = query_id_value
+                    if candidate_doc_id:
+                        score_row["candidate_doc_id"] = candidate_doc_id
+                    score_row["candidate_index"] = candidate_index
+                    score_row["role"] = "positive" if candidate_index == 0 else "negative"
                     score_handle.write(
-                        json.dumps(
-                            {
-                                "source": source,
-                                "query": query,
-                                "candidate": candidate,
-                                "score": score,
-                                "score_scale": args.score,
-                                "teacher_model_id": args.model_id,
-                            },
-                            ensure_ascii=False,
-                        )
+                        json.dumps(score_row, ensure_ascii=False)
                         + "\n"
                     )
                     import_score_rows += 1
