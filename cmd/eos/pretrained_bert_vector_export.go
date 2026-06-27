@@ -28,6 +28,7 @@ func runExportPretrainedBERTRetrievalVectors(args []string) error {
 	documentPrefix := fs.String("document-prefix", "", "prefix prepended to document text before WordPiece tokenization")
 	docPrefix := fs.String("doc-prefix", "", "compatibility alias for --document-prefix")
 	batchSize := fs.Int("batch-size", 64, "embedding batch size")
+	outputDim := fs.Int("output-dim", 0, "when positive, prefix-truncate embeddings to this dimension and L2-renormalize before writing")
 	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke exports")
 	maxQueries := fs.Int("max-queries", 0, "limit queries for smoke exports")
 	maxLength := fs.Int("max-length", 0, "WordPiece max sequence length; default uses config max_position_embeddings")
@@ -68,6 +69,7 @@ func runExportPretrainedBERTRetrievalVectors(args []string) error {
 		QueryPrefix:      *queryPrefix,
 		DocumentPrefix:   resolvedDocumentPrefix,
 		BatchSize:        *batchSize,
+		OutputDim:        *outputDim,
 		MaxDocs:          *maxDocs,
 		MaxQueries:       *maxQueries,
 		MaxLength:        *maxLength,

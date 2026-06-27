@@ -55,6 +55,7 @@ type PretrainedBERTRetrievalVectorExportConfig struct {
 	QueryPrefix      string
 	DocumentPrefix   string
 	BatchSize        int
+	OutputDim        int
 	MaxDocs          int
 	MaxQueries       int
 	MaxLength        int
@@ -303,6 +304,9 @@ func ExportPretrainedBERTRetrievalVectors(ctx context.Context, cfg PretrainedBER
 	if cfg.BatchSize <= 0 {
 		return PretrainedBERTRetrievalVectorExportSummary{}, fmt.Errorf("batch-size must be positive")
 	}
+	if cfg.OutputDim < 0 {
+		return PretrainedBERTRetrievalVectorExportSummary{}, fmt.Errorf("output-dim must be non-negative")
+	}
 	if cfg.MaxDocs < 0 || cfg.MaxQueries < 0 {
 		return PretrainedBERTRetrievalVectorExportSummary{}, fmt.Errorf("max-docs and max-queries must be non-negative")
 	}
@@ -319,6 +323,14 @@ func ExportPretrainedBERTRetrievalVectors(ctx context.Context, cfg PretrainedBER
 	})
 	if err != nil {
 		return PretrainedBERTRetrievalVectorExportSummary{}, err
+	}
+	nativeDim := embedder.config.HiddenSize
+	effectiveOutputDim := cfg.OutputDim
+	if effectiveOutputDim == 0 {
+		effectiveOutputDim = nativeDim
+	}
+	if effectiveOutputDim > nativeDim {
+		return PretrainedBERTRetrievalVectorExportSummary{}, fmt.Errorf("output-dim %d exceeds pretrained BERT native dimension %d", effectiveOutputDim, nativeDim)
 	}
 	var qrels retrievalQrels
 	if cfg.QrelsPath != "" {
@@ -358,7 +370,9 @@ func ExportPretrainedBERTRetrievalVectors(ctx context.Context, cfg PretrainedBER
 		Resume:        cfg.Resume,
 		ProgressEvery: cfg.ProgressEvery,
 		Progress:      cfg.Progress,
-		ExpectedDim:   embedder.config.HiddenSize,
+		OutputDim:     cfg.OutputDim,
+		ExpectedDim:   effectiveOutputDim,
+		NativeDim:     nativeDim,
 	})
 	if err != nil {
 		return PretrainedBERTRetrievalVectorExportSummary{}, fmt.Errorf("write document vectors: %w", err)
@@ -368,7 +382,9 @@ func ExportPretrainedBERTRetrievalVectors(ctx context.Context, cfg PretrainedBER
 		Resume:        cfg.Resume,
 		ProgressEvery: cfg.ProgressEvery,
 		Progress:      cfg.Progress,
-		ExpectedDim:   embedder.config.HiddenSize,
+		OutputDim:     cfg.OutputDim,
+		ExpectedDim:   effectiveOutputDim,
+		NativeDim:     nativeDim,
 	})
 	if err != nil {
 		return PretrainedBERTRetrievalVectorExportSummary{}, fmt.Errorf("write query vectors: %w", err)
@@ -397,7 +413,7 @@ func ExportPretrainedBERTRetrievalVectors(ctx context.Context, cfg PretrainedBER
 		Normalization:                     embedder.Normalization(),
 		Documents:                         len(corpus),
 		Queries:                           len(queries),
-		NativeDim:                         docDim,
+		NativeDim:                         nativeDim,
 		OutputDim:                         docDim,
 		DocVectorPath:                     docVectorPath,
 		QueryVectorPath:                   queryVectorPath,
@@ -481,7 +497,7 @@ func buildPretrainedBERTRetrievalEmbeddingSpaceIdentity(cfg PretrainedBERTRetrie
 		Pooling:             embedder.Pooling(),
 		Normalization:       embedder.Normalization(),
 		MaxLength:           embedder.MaxLength(),
-		OutputDim:           embedder.config.HiddenSize,
+		OutputDim:           resolvePretrainedBERTOutputDim(cfg.OutputDim, embedder.config.HiddenSize),
 		QueryPrefix:         cfg.QueryPrefix,
 		DocumentPrefix:      cfg.DocumentPrefix,
 		QueryRoleApplied:    cfg.QueryPrefix != "",
@@ -522,6 +538,13 @@ func buildPretrainedBERTRetrievalEmbeddingSpaceIdentity(cfg PretrainedBERTRetrie
 	sum := sha256.Sum256(data)
 	identity.EmbeddingSpaceID = hex.EncodeToString(sum[:])
 	return identity, nil
+}
+
+func resolvePretrainedBERTOutputDim(outputDim, nativeDim int) int {
+	if outputDim > 0 {
+		return outputDim
+	}
+	return nativeDim
 }
 
 func validatePretrainedBERTRetrievalVectorExportResumeManifest(cfg PretrainedBERTRetrievalVectorExportConfig, embeddingSpaceID string) error {
@@ -611,7 +634,9 @@ type pretrainedBERTVectorCacheWriteOptions struct {
 	Resume        bool
 	ProgressEvery int
 	Progress      PretrainedBERTRetrievalVectorExportProgressFunc
+	OutputDim     int
 	ExpectedDim   int
+	NativeDim     int
 }
 
 type pretrainedBERTVectorCacheResumeResult struct {
@@ -664,12 +689,22 @@ func writePretrainedBERTVectorCache(ctx context.Context, embedder *PretrainedBER
 		}
 		for i, vector := range vectors {
 			record := records[start+i]
-			nextDim, err := validatePretrainedBERTVectorCacheRow(path, start+i+1, retrievalVectorExportRow{ID: record.ID, Embedding: vector}, record.ID, dim, opts.ExpectedDim)
+			if len(vector) == 0 {
+				return 0, pretrainedBERTVectorCacheResumeResult{}, fmt.Errorf("vector for %q is empty", record.ID)
+			}
+			if opts.NativeDim > 0 && len(vector) != opts.NativeDim {
+				return 0, pretrainedBERTVectorCacheResumeResult{}, fmt.Errorf("vector for %q has native dimension %d, want %d", record.ID, len(vector), opts.NativeDim)
+			}
+			embedding, err := transformRetrievalExportVector(vector, opts.OutputDim)
+			if err != nil {
+				return 0, pretrainedBERTVectorCacheResumeResult{}, fmt.Errorf("vector for %q: %w", record.ID, err)
+			}
+			nextDim, err := validatePretrainedBERTVectorCacheRow(path, start+i+1, retrievalVectorExportRow{ID: record.ID, Embedding: embedding}, record.ID, dim, opts.ExpectedDim)
 			if err != nil {
 				return 0, pretrainedBERTVectorCacheResumeResult{}, err
 			}
 			dim = nextDim
-			row := retrievalVectorExportRow{ID: record.ID, Embedding: vector}
+			row := retrievalVectorExportRow{ID: record.ID, Embedding: embedding}
 			data, err := json.Marshal(row)
 			if err != nil {
 				return 0, pretrainedBERTVectorCacheResumeResult{}, err
