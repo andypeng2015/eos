@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"m31labs.dev/eos/runtime/backend"
 )
 
 const PretrainedBERTImporterPlanVersion = "manta/pretrained-bert-import-plan/v0alpha1"
@@ -46,6 +48,7 @@ type PretrainedBERTImportPlan struct {
 	WeightVerification     *PretrainedBERTWeightVerification `json:"weight_verification,omitempty"`
 	WeightLoadSmoke        *PretrainedBERTWeightLoadReport   `json:"weight_load_smoke,omitempty"`
 	WeightDecodeSmoke      *PretrainedBERTWeightDecodeReport `json:"weight_decode_smoke,omitempty"`
+	WeightFileExport       *PretrainedBERTWeightFileReport   `json:"weight_file_export,omitempty"`
 	PoolingPolicy          string                            `json:"pooling_policy"`
 	OutputProjectionPolicy string                            `json:"output_projection_policy"`
 	ExecutionStatus        string                            `json:"execution_status"`
@@ -120,6 +123,26 @@ type PretrainedBERTWeightDecodeReport struct {
 	SourceDTypes  map[string]int `json:"source_dtypes,omitempty"`
 	Loaded        []string       `json:"loaded,omitempty"`
 	SkippedExtra  []string       `json:"skipped_extra,omitempty"`
+}
+
+type PretrainedBERTWeightFileReport struct {
+	Status        string                                 `json:"status"`
+	OutputPath    string                                 `json:"output_path,omitempty"`
+	Files         []string                               `json:"files,omitempty"`
+	TensorCount   int                                    `json:"tensor_count"`
+	TotalElements int64                                  `json:"total_elements"`
+	StorageDTypes map[string]int                         `json:"storage_dtypes,omitempty"`
+	SourceDTypes  map[string]int                         `json:"source_dtypes,omitempty"`
+	Loaded        []PretrainedBERTWeightFileTensorReport `json:"loaded,omitempty"`
+	SkippedExtra  []string                               `json:"skipped_extra,omitempty"`
+}
+
+type PretrainedBERTWeightFileTensorReport struct {
+	Role         string  `json:"role"`
+	Name         string  `json:"name"`
+	Shape        []int64 `json:"shape"`
+	SourceDType  string  `json:"source_dtype"`
+	StorageDType string  `json:"storage_dtype"`
 }
 
 func LoadPretrainedBERTConfig(path string) (PretrainedBERTConfig, error) {
@@ -346,6 +369,108 @@ func LoadPretrainedBERTDecodedWeightsFromDir(dir string, plan PretrainedBERTImpo
 	}
 	slices.Sort(report.SkippedExtra)
 	return set, report, nil
+}
+
+func BuildPretrainedBERTWeightFileFromDecoded(set PretrainedBERTDecodedWeightSet) (WeightFile, PretrainedBERTWeightFileReport, error) {
+	if len(set.Tensors) == 0 {
+		return WeightFile{}, PretrainedBERTWeightFileReport{}, fmt.Errorf("pretrained BERT decoded tensor set is empty")
+	}
+	weights := make(map[string]*backend.Tensor, len(set.Tensors))
+	seenFiles := map[string]struct{}{}
+	report := PretrainedBERTWeightFileReport{
+		Status:        "ok",
+		StorageDTypes: map[string]int{},
+		SourceDTypes:  map[string]int{},
+		Loaded:        make([]PretrainedBERTWeightFileTensorReport, 0, len(set.Tensors)),
+	}
+	for _, tensor := range set.Tensors {
+		if tensor.Role == "" {
+			return WeightFile{}, PretrainedBERTWeightFileReport{}, fmt.Errorf("pretrained BERT tensor %q has empty role", tensor.Name)
+		}
+		if _, exists := weights[tensor.Role]; exists {
+			return WeightFile{}, PretrainedBERTWeightFileReport{}, fmt.Errorf("duplicate pretrained BERT tensor role %q", tensor.Role)
+		}
+		if !acceptablePretrainedBERTDType(tensor.SourceDType) {
+			return WeightFile{}, PretrainedBERTWeightFileReport{}, fmt.Errorf("pretrained BERT tensor %q source dtype %q is not supported", tensor.Name, tensor.SourceDType)
+		}
+		shape, elements, err := backendShapeFromBERTDecodedTensor(tensor)
+		if err != nil {
+			return WeightFile{}, PretrainedBERTWeightFileReport{}, err
+		}
+		if int64(len(tensor.Values)) != elements {
+			return WeightFile{}, PretrainedBERTWeightFileReport{}, fmt.Errorf("pretrained BERT tensor %q values=%d does not match shape elements=%d", tensor.Name, len(tensor.Values), elements)
+		}
+		weights[tensor.Role] = backend.NewTensorF32(shape, tensor.Values)
+		report.TensorCount++
+		report.TotalElements += elements
+		report.StorageDTypes["f32"]++
+		report.SourceDTypes[tensor.SourceDType]++
+		if tensor.SourceFile != "" {
+			seenFiles[tensor.SourceFile] = struct{}{}
+		}
+		report.Loaded = append(report.Loaded, PretrainedBERTWeightFileTensorReport{
+			Role:         tensor.Role,
+			Name:         tensor.Name,
+			Shape:        append([]int64(nil), tensor.Shape...),
+			SourceDType:  tensor.SourceDType,
+			StorageDType: "f32",
+		})
+	}
+	for file := range seenFiles {
+		report.Files = append(report.Files, file)
+	}
+	slices.Sort(report.Files)
+	slices.SortFunc(report.Loaded, func(a, b PretrainedBERTWeightFileTensorReport) int {
+		if cmp := strings.Compare(a.Role, b.Role); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	return NewWeightFile(weights), report, nil
+}
+
+func ExportPretrainedBERTWeightFileFromDir(dir string, plan PretrainedBERTImportPlan, outPath string) (PretrainedBERTWeightFileReport, error) {
+	if outPath == "" {
+		return PretrainedBERTWeightFileReport{}, fmt.Errorf("weights output path is required")
+	}
+	set, decodeReport, err := LoadPretrainedBERTDecodedWeightsFromDir(dir, plan)
+	if err != nil {
+		return PretrainedBERTWeightFileReport{}, err
+	}
+	weightFile, report, err := BuildPretrainedBERTWeightFileFromDecoded(set)
+	if err != nil {
+		return PretrainedBERTWeightFileReport{}, err
+	}
+	report.OutputPath = outPath
+	report.Files = append([]string(nil), decodeReport.Files...)
+	report.SkippedExtra = append([]string(nil), decodeReport.SkippedExtra...)
+	if err := weightFile.WriteFile(outPath); err != nil {
+		return PretrainedBERTWeightFileReport{}, err
+	}
+	return report, nil
+}
+
+func backendShapeFromBERTDecodedTensor(tensor PretrainedBERTDecodedWeightTensor) ([]int, int64, error) {
+	if len(tensor.Shape) == 0 {
+		return nil, 0, fmt.Errorf("pretrained BERT tensor %q shape is empty", tensor.Name)
+	}
+	maxInt := int64(int(^uint(0) >> 1))
+	shape := make([]int, len(tensor.Shape))
+	var elements int64 = 1
+	for i, dim := range tensor.Shape {
+		if dim <= 0 {
+			return nil, 0, fmt.Errorf("pretrained BERT tensor %q shape dim %d must be positive, got %d", tensor.Name, i, dim)
+		}
+		if dim > maxInt {
+			return nil, 0, fmt.Errorf("pretrained BERT tensor %q shape dim %d overflows int: %d", tensor.Name, i, dim)
+		}
+		if elements > maxInt/dim {
+			return nil, 0, fmt.Errorf("pretrained BERT tensor %q element count overflows int", tensor.Name)
+		}
+		elements *= dim
+		shape[i] = int(dim)
+	}
+	return shape, elements, nil
 }
 
 func requestedPretrainedBERTWeightPlans(plan PretrainedBERTImportPlan, collection SafeTensorsCollection, action string) ([]PretrainedBERTTensorPlan, map[string]struct{}, error) {

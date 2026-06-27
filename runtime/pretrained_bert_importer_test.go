@@ -348,6 +348,85 @@ func TestLoadPretrainedBERTDecodedWeightsPreservesPlanOrderRolesDTypesAndValues(
 	assertFloat32Values(t, set.Tensors[2].Values[:2], []float32{-2.5, 3.25})
 }
 
+func TestBuildPretrainedBERTWeightFileFromDecodedUsesRolesAndF32Storage(t *testing.T) {
+	set := PretrainedBERTDecodedWeightSet{Tensors: []PretrainedBERTDecodedWeightTensor{
+		{
+			Name:        "embeddings.word_embeddings.weight",
+			Role:        "token_embeddings",
+			SourceDType: "BF16",
+			Shape:       []int64{2, 2},
+			SourceFile:  "model.safetensors",
+			Values:      []float32{1, 2, 3, 4},
+		},
+		{
+			Name:        "encoder.layer.0.attention.self.query.bias",
+			Role:        "encoder_layer_0_attention_query_bias",
+			SourceDType: "F32",
+			Shape:       []int64{2},
+			SourceFile:  "model.safetensors",
+			Values:      []float32{-1, 0.5},
+		},
+	}}
+	weightFile, report, err := BuildPretrainedBERTWeightFileFromDecoded(set)
+	if err != nil {
+		t.Fatalf("build weight file: %v", err)
+	}
+	if report.Status != "ok" || report.TensorCount != 2 || report.TotalElements != 6 {
+		t.Fatalf("report = %+v", report)
+	}
+	if report.StorageDTypes["f32"] != 2 {
+		t.Fatalf("storage dtype counts = %+v", report.StorageDTypes)
+	}
+	if report.SourceDTypes["BF16"] != 1 || report.SourceDTypes["F32"] != 1 {
+		t.Fatalf("source dtype counts = %+v", report.SourceDTypes)
+	}
+	if len(report.Loaded) != 2 || report.Loaded[0].Role != "encoder_layer_0_attention_query_bias" || report.Loaded[1].Role != "token_embeddings" {
+		t.Fatalf("loaded order = %+v", report.Loaded)
+	}
+	if _, ok := weightFile.Weights["embeddings.word_embeddings.weight"]; ok {
+		t.Fatalf("weight file should use role names, got raw HF name")
+	}
+	token := weightFile.Weights["token_embeddings"]
+	if token == nil {
+		t.Fatalf("missing token_embeddings weight")
+	}
+	if token.DType != "f32" || !slices.Equal(token.Shape, []int{2, 2}) {
+		t.Fatalf("token tensor dtype/shape = %s %v", token.DType, token.Shape)
+	}
+	assertFloat32Values(t, token.F32, []float32{1, 2, 3, 4})
+
+	path := filepath.Join(t.TempDir(), "bert.weights.mll")
+	if err := weightFile.WriteFile(path); err != nil {
+		t.Fatalf("write weight file: %v", err)
+	}
+	roundTrip, err := ReadWeightFile(path)
+	if err != nil {
+		t.Fatalf("read weight file: %v", err)
+	}
+	roundToken := roundTrip.Weights["token_embeddings"]
+	if roundToken == nil || roundToken.DType != "f32" || !slices.Equal(roundToken.Shape, []int{2, 2}) {
+		t.Fatalf("round-trip token tensor = %+v", roundToken)
+	}
+	assertFloat32Values(t, roundToken.F32, []float32{1, 2, 3, 4})
+}
+
+func TestBuildPretrainedBERTWeightFileFromDecodedRejectsInvalidTensors(t *testing.T) {
+	_, _, err := BuildPretrainedBERTWeightFileFromDecoded(PretrainedBERTDecodedWeightSet{Tensors: []PretrainedBERTDecodedWeightTensor{
+		{Name: "a", Role: "dup", SourceDType: "F32", Shape: []int64{1}, Values: []float32{1}},
+		{Name: "b", Role: "dup", SourceDType: "F32", Shape: []int64{1}, Values: []float32{2}},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("expected duplicate role error, got %v", err)
+	}
+
+	_, _, err = BuildPretrainedBERTWeightFileFromDecoded(PretrainedBERTDecodedWeightSet{Tensors: []PretrainedBERTDecodedWeightTensor{
+		{Name: "bad", Role: "bad", SourceDType: "F32", Shape: []int64{2, 2}, Values: []float32{1, 2, 3}},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "does not match shape elements") {
+		t.Fatalf("expected element count error, got %v", err)
+	}
+}
+
 func assertBERTTensorPlan(t *testing.T, plan PretrainedBERTImportPlan, name string, shape []int, required bool) {
 	t.Helper()
 	for _, tensor := range plan.Tensors {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -177,6 +178,92 @@ func TestRunImportPretrainedBERTLoadWeightsSmoke(t *testing.T) {
 	}
 }
 
+func TestRunImportPretrainedBERTWeightsOutWritesReadableWeightFile(t *testing.T) {
+	dir := t.TempDir()
+	snapshot := filepath.Join(dir, "hf-snapshot")
+	if err := os.MkdirAll(snapshot, 0o755); err != nil {
+		t.Fatalf("mkdir snapshot: %v", err)
+	}
+	config := `{
+		"architectures": ["BertModel"],
+		"model_type": "bert",
+		"vocab_size": 3,
+		"hidden_size": 2,
+		"num_hidden_layers": 1,
+		"num_attention_heads": 1,
+		"intermediate_size": 4,
+		"hidden_act": "gelu",
+		"max_position_embeddings": 4,
+		"type_vocab_size": 2
+	}`
+	if err := os.WriteFile(filepath.Join(snapshot, "config.json"), []byte(config), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	plan, err := eosruntime.PlanPretrainedBERTImportFromDir(snapshot, "fixture")
+	if err != nil {
+		t.Fatalf("plan fixture: %v", err)
+	}
+	header := commandSafeTensorsHeaderForBERTPlan(plan)
+	header["embeddings.token_type_embeddings.weight"].(map[string]any)["dtype"] = "BF16"
+	payloadSize := renumberCommandSafeTensorFixtureOffsets(header)
+	payload := make([]byte, payloadSize)
+	putCommandF32Payload(t, header, payload, "embeddings.word_embeddings.weight", []float32{1, 2, 3, 4, 5, 6})
+	putCommandU16Payload(t, header, payload, "embeddings.token_type_embeddings.weight", []uint16{0x3f80, 0xc000, 0x4020, 0x0000})
+	if err := writeCommandSafeTensorsFixture(filepath.Join(snapshot, "model.safetensors"), header, payload); err != nil {
+		t.Fatalf("write safetensors: %v", err)
+	}
+	planPath := filepath.Join(dir, "plan.json")
+	weightsPath := filepath.Join(dir, "bert.weights.mll")
+	if err := runImportPretrainedBERT([]string{
+		"--source", snapshot,
+		"--plan-json", planPath,
+		"--weights-out", weightsPath,
+	}); err != nil {
+		t.Fatalf("run import-pretrained-bert: %v", err)
+	}
+	data, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatalf("read plan json: %v", err)
+	}
+	var loaded eosruntime.PretrainedBERTImportPlan
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		t.Fatalf("parse plan json: %v\n%s", err, data)
+	}
+	if loaded.WeightFileExport == nil {
+		t.Fatal("expected weight file export report")
+	}
+	if loaded.WeightFileExport.OutputPath != weightsPath || loaded.WeightFileExport.TensorCount != len(plan.Tensors)-2 {
+		t.Fatalf("weight file export = %+v", loaded.WeightFileExport)
+	}
+	if loaded.WeightFileExport.StorageDTypes["f32"] != loaded.WeightFileExport.TensorCount {
+		t.Fatalf("storage dtype counts = %+v", loaded.WeightFileExport.StorageDTypes)
+	}
+	if loaded.WeightFileExport.SourceDTypes["BF16"] != 1 {
+		t.Fatalf("source dtype counts = %+v", loaded.WeightFileExport.SourceDTypes)
+	}
+
+	weightFile, err := eosruntime.ReadWeightFile(weightsPath)
+	if err != nil {
+		t.Fatalf("read exported weight file: %v", err)
+	}
+	token := weightFile.Weights["token_embeddings"]
+	if token == nil {
+		t.Fatalf("missing token_embeddings in weight file")
+	}
+	if token.DType != "f32" || !slices.Equal(token.Shape, []int{3, 2}) {
+		t.Fatalf("token tensor dtype/shape = %s %v", token.DType, token.Shape)
+	}
+	assertCommandFloat32Values(t, token.F32, []float32{1, 2, 3, 4, 5, 6})
+	if _, ok := weightFile.Weights["embeddings.word_embeddings.weight"]; ok {
+		t.Fatalf("weight file should use role names, got raw HF tensor key")
+	}
+	tokenTypes := weightFile.Weights["token_type_embeddings"]
+	if tokenTypes == nil || tokenTypes.DType != "f32" || !slices.Equal(tokenTypes.Shape, []int{2, 2}) {
+		t.Fatalf("token_type_embeddings = %+v", tokenTypes)
+	}
+	assertCommandFloat32Values(t, tokenTypes.F32, []float32{1, -2, 2.5, 0})
+}
+
 func writeCommandSafeTensorsFixture(path string, header map[string]any, payload []byte) error {
 	data, err := json.Marshal(header)
 	if err != nil {
@@ -215,13 +302,61 @@ func renumberCommandSafeTensorFixtureOffsets(header map[string]any) int {
 	var offset int64
 	for _, raw := range header {
 		tensor := raw.(map[string]any)
+		dtype := tensor["dtype"].(string)
+		var dtypeSize int64 = 4
+		switch dtype {
+		case "F16", "BF16":
+			dtypeSize = 2
+		case "I64":
+			dtypeSize = 8
+		}
 		var elements int64 = 1
 		for _, dim := range tensor["shape"].([]int64) {
 			elements *= dim
 		}
-		span := elements * 4
+		span := elements * dtypeSize
 		tensor["data_offsets"] = []int64{offset, offset + span}
 		offset += span
 	}
 	return int(offset)
+}
+
+func putCommandF32Payload(t *testing.T, header map[string]any, payload []byte, name string, values []float32) {
+	t.Helper()
+	tensor := header[name].(map[string]any)
+	offsets := tensor["data_offsets"].([]int64)
+	span := int(offsets[1] - offsets[0])
+	if len(values)*4 > span {
+		t.Fatalf("%s values need %d bytes, span is %d", name, len(values)*4, span)
+	}
+	start := int(offsets[0])
+	for i, value := range values {
+		binary.LittleEndian.PutUint32(payload[start+i*4:], math.Float32bits(value))
+	}
+}
+
+func putCommandU16Payload(t *testing.T, header map[string]any, payload []byte, name string, values []uint16) {
+	t.Helper()
+	tensor := header[name].(map[string]any)
+	offsets := tensor["data_offsets"].([]int64)
+	span := int(offsets[1] - offsets[0])
+	if len(values)*2 > span {
+		t.Fatalf("%s values need %d bytes, span is %d", name, len(values)*2, span)
+	}
+	start := int(offsets[0])
+	for i, value := range values {
+		binary.LittleEndian.PutUint16(payload[start+i*2:], value)
+	}
+}
+
+func assertCommandFloat32Values(t *testing.T, got, want []float32) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("len(got)=%d want=%d got=%v want=%v", len(got), len(want), got, want)
+	}
+	for i := range got {
+		if math.Abs(float64(got[i]-want[i])) > 1e-6 {
+			t.Fatalf("got[%d]=%f want %f; got=%v want=%v", i, got[i], want[i], got, want)
+		}
+	}
 }
