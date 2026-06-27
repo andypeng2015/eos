@@ -471,6 +471,34 @@ func TestTrainEmbeddingPackageFromTextContrastiveFilesListwiseGeometrySmoke(t *t
 	}
 }
 
+func TestTrainEmbeddingPackageFromTextContrastiveFilesListwiseGeometryPositionalEval(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	path := writeTinyTrainingPackage(t, trainer)
+	tokenizerPath := filepath.Join(t.TempDir(), "tokenizer.mll")
+	if err := tinyListwiseGeometryTokenizerFile().WriteFile(tokenizerPath); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	trainPath := writeTinyListwiseGeometryJSONL(t, tinyListwiseGeometryBatches(false))
+	evalPath := writeTinyListwiseGeometryJSONL(t, tinyListwiseGeometryBatches(false))
+
+	summary, _, err := TrainEmbeddingPackageFromTextContrastiveFiles(path, tokenizerPath, trainPath, evalPath, EmbeddingTrainRunConfig{
+		ListwiseGeometryTrain: true,
+		Epochs:                1,
+		BatchSize:             1,
+		EvalEveryEpoch:        1,
+		Temperature:           0.05,
+	})
+	if err != nil {
+		t.Fatalf("train package listwise geometry with positional eval: %v", err)
+	}
+	if summary.FinalListwiseGeometryEval == nil {
+		t.Fatalf("summary = %+v, want final listwise geometry eval", summary)
+	}
+	if summary.Workload.EvalMode != "listwise_geometry" || summary.Workload.EvalExamples != 2 || summary.Workload.EvalPairsPerPass != 4 {
+		t.Fatalf("workload = %+v, want listwise eval query/cell counts", summary.Workload)
+	}
+}
+
 func TestTrainEmbeddingPackageFromTextContrastiveFilesListwiseEvalOnlyDoesNotRewritePackage(t *testing.T) {
 	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
 	path := writeTinyTrainingPackage(t, trainer)

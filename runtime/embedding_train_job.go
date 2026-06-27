@@ -282,17 +282,17 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(artifactPath, tokenizerPath, 
 			}
 			trainPath = ""
 		}
-		var evalPairs []EmbeddingPairExample
 		if evalPath != "" {
-			evalText, err := ReadEmbeddingTextPairExamplesFile(evalPath)
+			evalText, err := ReadEmbeddingListwiseGeometryBatchesFile(evalPath)
 			if err != nil {
-				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read eval text pair dataset: %w", err)
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read listwise geometry eval dataset: %w", err)
 			}
-			evalPairs, err = tokenizeEmbeddingTextPairExamples(evalText, tokenizer, tokenCache, false)
+			cfg.ListwiseGeometryEval, err = TokenizeEmbeddingListwiseGeometryBatches(evalText, tokenizer)
 			if err != nil {
-				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize eval pair dataset: %w", err)
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize listwise geometry eval dataset: %w", err)
 			}
 		}
+		var evalPairs []EmbeddingPairExample
 		summary, err := trainer.FitListwiseGeometry(trainSet, evalPairs, cfg)
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err

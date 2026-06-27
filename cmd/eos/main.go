@@ -5848,22 +5848,20 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg e
 		if tokenizerPath == "" {
 			return eosruntime.EmbeddingTrainWorkload{}, fmt.Errorf("listwise geometry training requires text tokenization; remove --no-tokenizer or set --tokenizer")
 		}
-		pairwiseEvalCount := 0
 		if evalPath != "" {
-			evalPairs, err := eosruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
+			listwiseEval, err := eosruntime.ReadEmbeddingListwiseGeometryBatchesFile(evalPath)
 			if err != nil {
 				return eosruntime.EmbeddingTrainWorkload{}, err
 			}
-			pairwiseEvalCount = len(evalPairs)
-		}
-		if trainPath != "" {
+			cfg.ListwiseGeometryEval = tokenizedListwiseGeometryWorkloadShape(listwiseEval)
+		} else if trainPath != "" {
 			listwiseEval, err := eosruntime.ReadEmbeddingListwiseGeometryBatchesFile(trainPath)
 			if err != nil {
 				return eosruntime.EmbeddingTrainWorkload{}, err
 			}
 			cfg.ListwiseGeometryEval = tokenizedListwiseGeometryWorkloadShape(listwiseEval)
 		}
-		return eosruntime.EstimateListwiseGeometryTrainWorkload(nil, pairwiseEvalCount, cfg), nil
+		return eosruntime.EstimateListwiseGeometryTrainWorkload(nil, 0, cfg), nil
 	}
 	if tokenizerPath != "" {
 		if cfg.EvalOnly {
@@ -5940,31 +5938,15 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg e
 			if err != nil {
 				return eosruntime.EmbeddingTrainWorkload{}, err
 			}
-			evalCount := 0
 			if evalPath != "" {
-				evalPairs, err := eosruntime.ReadEmbeddingTextPairExamplesFile(evalPath)
+				listwiseEval, err := eosruntime.ReadEmbeddingListwiseGeometryBatchesFile(evalPath)
 				if err != nil {
 					return eosruntime.EmbeddingTrainWorkload{}, err
 				}
-				evalCount = len(evalPairs)
+				cfg.ListwiseGeometryEval = tokenizedListwiseGeometryWorkloadShape(listwiseEval)
 			}
-			tokenized := make([]eosruntime.EmbeddingTokenizedListwiseGeometryBatch, 0, len(trainSet))
-			for _, row := range trainSet {
-				tokenized = append(tokenized, eosruntime.EmbeddingTokenizedListwiseGeometryBatch{
-					QueryTokens:       make([][]int32, len(row.Queries)),
-					DocumentTokens:    make([][]int32, len(row.Documents)),
-					TeacherSimilarity: row.TeacherSimilarity,
-				})
-			}
-			for i := range tokenized {
-				for j := range tokenized[i].QueryTokens {
-					tokenized[i].QueryTokens[j] = []int32{1}
-				}
-				for j := range tokenized[i].DocumentTokens {
-					tokenized[i].DocumentTokens[j] = []int32{1}
-				}
-			}
-			return eosruntime.EstimateListwiseGeometryTrainWorkload(tokenized, evalCount, cfg), nil
+			tokenized := tokenizedListwiseGeometryWorkloadShape(trainSet)
+			return eosruntime.EstimateListwiseGeometryTrainWorkload(tokenized, 0, cfg), nil
 		}
 		if cfg.HardNegativeTrain {
 			trainSet, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(trainPath)

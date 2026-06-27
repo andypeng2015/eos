@@ -5897,6 +5897,7 @@ func TestRunTrainEmbedListwiseGeometryPlanOnlyAndValidation(t *testing.T) {
 		t.Fatalf("write tokenizer: %v", err)
 	}
 	trainPath := writeTinyCLIListwiseGeometryJSONL(t, false)
+	evalPath := writeTinyCLIListwiseGeometryJSONL(t, false)
 
 	output := captureRunOutput(t, []string{"train-embed", "--plan-only", "--tokenizer", tokenizerPath, "--listwise-geometry-train", "--epochs", "2", "--batch-size", "1", path, trainPath})
 	for _, want := range []string{
@@ -5906,6 +5907,17 @@ func TestRunTrainEmbedListwiseGeometryPlanOnlyAndValidation(t *testing.T) {
 	} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("listwise plan output missing %q\noutput:\n%s", want, output)
+		}
+	}
+
+	output = captureRunOutput(t, []string{"train-embed", "--plan-only", "--tokenizer", tokenizerPath, "--listwise-geometry-train", "--epochs", "2", "--batch-size", "1", path, trainPath, evalPath})
+	for _, want := range []string{
+		"train=1 listwise_geometry examples",
+		"eval=2 listwise_geometry examples",
+		"eval_pairs/pass=4",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("listwise train+eval plan output missing %q\noutput:\n%s", want, output)
 		}
 	}
 
