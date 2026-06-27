@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	eosartifact "m31labs.dev/eos/artifact/eos"
+	"m31labs.dev/eos/runtime/backend"
 	"m31labs.dev/eos/runtime/backends/cuda"
 )
 
@@ -286,6 +287,54 @@ func TestPretrainedBERTTextEmbedderRejectsTooLargeMaxLength(t *testing.T) {
 	}
 }
 
+func TestPretrainedBERTTextEmbedderDynamicBatchLengthMatchesFixedCLS(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixtureWithST(t, "cls", 4)
+	embedder, err := LoadPretrainedBERTTextEmbedder(context.Background(), PretrainedBERTTextEmbedderConfig{
+		SourceDir:   sourceDir,
+		ModulePath:  modulePath,
+		WeightsPath: weightsPath,
+		MaxLength:   4,
+		Runtime:     New(cuda.New()),
+	})
+	if err != nil {
+		t.Fatalf("load embedder: %v", err)
+	}
+	texts := []string{"alpha", "alpha"}
+	dynamic, err := embedder.EmbedTextBatch(context.Background(), texts, "")
+	if err != nil {
+		t.Fatalf("dynamic embed: %v", err)
+	}
+	fixed, err := embedTextBatchFixedPretrainedBERTMaxLength(context.Background(), embedder, texts, "")
+	if err != nil {
+		t.Fatalf("fixed embed: %v", err)
+	}
+	assertEmbeddingBatchesClose(t, dynamic, fixed, 1e-6)
+}
+
+func TestPretrainedBERTTextEmbedderDynamicBatchLengthMatchesFixedMaskedMean(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixtureWithST(t, "masked_mean", 4)
+	embedder, err := LoadPretrainedBERTTextEmbedder(context.Background(), PretrainedBERTTextEmbedderConfig{
+		SourceDir:   sourceDir,
+		ModulePath:  modulePath,
+		WeightsPath: weightsPath,
+		MaxLength:   4,
+		Runtime:     New(cuda.New()),
+	})
+	if err != nil {
+		t.Fatalf("load embedder: %v", err)
+	}
+	texts := []string{"alpha", "alpha"}
+	dynamic, err := embedder.EmbedTextBatch(context.Background(), texts, "")
+	if err != nil {
+		t.Fatalf("dynamic embed: %v", err)
+	}
+	fixed, err := embedTextBatchFixedPretrainedBERTMaxLength(context.Background(), embedder, texts, "")
+	if err != nil {
+		t.Fatalf("fixed embed: %v", err)
+	}
+	assertEmbeddingBatchesClose(t, dynamic, fixed, 1e-6)
+}
+
 func TestPretrainedBERTRetrievalVectorExportResumeAppendsPartialCaches(t *testing.T) {
 	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
 	datasetDir := writeTinyPretrainedBERTBEIRFixtureN(t, 3)
@@ -358,6 +407,42 @@ func TestPretrainedBERTRetrievalVectorExportResumeAppendsPartialCaches(t *testin
 	}
 	if !manifest.Resume || manifest.ReusedDocuments != 1 || manifest.ReusedQueries != 1 || manifest.WrittenDocuments != 2 || manifest.WrittenQueries != 2 {
 		t.Fatalf("manifest resume counters = %+v", manifest)
+	}
+}
+
+func BenchmarkPretrainedBERTTextEmbedderShortBatchDynamicLength(b *testing.B) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixtureWithST(b, "cls", 4)
+	benchmarkPretrainedBERTTextEmbedderShortBatch(b, sourceDir, modulePath, weightsPath, false)
+}
+
+func BenchmarkPretrainedBERTTextEmbedderShortBatchFixedMaxLength(b *testing.B) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixtureWithST(b, "cls", 4)
+	benchmarkPretrainedBERTTextEmbedderShortBatch(b, sourceDir, modulePath, weightsPath, true)
+}
+
+func benchmarkPretrainedBERTTextEmbedderShortBatch(b *testing.B, sourceDir, modulePath, weightsPath string, fixed bool) {
+	embedder, err := LoadPretrainedBERTTextEmbedder(context.Background(), PretrainedBERTTextEmbedderConfig{
+		SourceDir:   sourceDir,
+		ModulePath:  modulePath,
+		WeightsPath: weightsPath,
+		MaxLength:   4,
+		Runtime:     New(cuda.New()),
+	})
+	if err != nil {
+		b.Fatalf("load embedder: %v", err)
+	}
+	texts := []string{"alpha", "alpha", "alpha", "alpha", "alpha", "alpha", "alpha", "alpha"}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if fixed {
+			_, err = embedTextBatchFixedPretrainedBERTMaxLength(context.Background(), embedder, texts, "")
+		} else {
+			_, err = embedder.EmbedTextBatch(context.Background(), texts, "")
+		}
+		if err != nil {
+			b.Fatalf("embed: %v", err)
+		}
 	}
 }
 
@@ -566,7 +651,7 @@ func TestPretrainedBERTRetrievalVectorExportWithoutResumeOverwritesStaleFiles(t 
 	}
 }
 
-func writeTinyPretrainedBERTExportFixture(t *testing.T) (sourceDir, modulePath, weightsPath string) {
+func writeTinyPretrainedBERTExportFixture(t testing.TB) (sourceDir, modulePath, weightsPath string) {
 	t.Helper()
 	dir := t.TempDir()
 	sourceDir = filepath.Join(dir, "source")
@@ -622,7 +707,7 @@ func writeTinyPretrainedBERTExportFixture(t *testing.T) (sourceDir, modulePath, 
 	return sourceDir, modulePath, weightsPath
 }
 
-func writeTinyPretrainedBERTExportFixtureWithST(t *testing.T, pooling string, maxSeqLength int) (sourceDir, modulePath, weightsPath string) {
+func writeTinyPretrainedBERTExportFixtureWithST(t testing.TB, pooling string, maxSeqLength int) (sourceDir, modulePath, weightsPath string) {
 	t.Helper()
 	sourceDir, modulePath, weightsPath = writeTinyPretrainedBERTExportFixture(t)
 	if err := os.MkdirAll(filepath.Join(sourceDir, "1_Pooling"), 0o755); err != nil {
@@ -758,6 +843,71 @@ func readTinyVectorRows(t *testing.T, path string) []retrievalVectorExportRow {
 		t.Fatalf("scan rows: %v", err)
 	}
 	return rows
+}
+
+func embedTextBatchFixedPretrainedBERTMaxLength(ctx context.Context, embedder *PretrainedBERTTextEmbedder, texts []string, prefix string) ([][]float32, error) {
+	inputIDs := make([]int32, 0, len(texts)*embedder.maxLength)
+	attentionMask := make([]int32, 0, len(texts)*embedder.maxLength)
+	tokenTypeIDs := make([]int32, 0, len(texts)*embedder.maxLength)
+	for _, text := range texts {
+		encoded, err := embedder.tokenizer.Encode(prefix+text, HFWordPieceEncodeOptions{
+			MaxLength:      embedder.maxLength,
+			PadToMaxLength: true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		inputIDs = append(inputIDs, encoded.IDs...)
+		attentionMask = append(attentionMask, encoded.AttentionMask...)
+		tokenTypeIDs = append(tokenTypeIDs, encoded.TokenTypeIDs...)
+	}
+	result, err := embedder.program.Run(ctx, backend.Request{
+		Entry: "bert_embed",
+		Inputs: map[string]any{
+			"input_ids":      backend.NewTensorI32([]int{len(texts), embedder.maxLength}, inputIDs),
+			"attention_mask": backend.NewTensorI32([]int{len(texts), embedder.maxLength}, attentionMask),
+			"token_type_ids": backend.NewTensorI32([]int{len(texts), embedder.maxLength}, tokenTypeIDs),
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	value, ok := result.Outputs["embeddings"]
+	if !ok {
+		return nil, fmt.Errorf("bert_embed output missing embeddings")
+	}
+	tensor, ok := value.Data.(*backend.Tensor)
+	if !ok {
+		return nil, fmt.Errorf("bert_embed embeddings output has data type %T, want *backend.Tensor", value.Data)
+	}
+	if len(tensor.Shape) != 2 || tensor.Shape[0] != len(texts) {
+		return nil, fmt.Errorf("bert_embed embeddings shape = %v, want [%d,D]", tensor.Shape, len(texts))
+	}
+	dim := tensor.Shape[1]
+	out := make([][]float32, len(texts))
+	for row := range texts {
+		start := row * dim
+		out[row] = append([]float32(nil), tensor.F32[start:start+dim]...)
+	}
+	return out, nil
+}
+
+func assertEmbeddingBatchesClose(t *testing.T, got, want [][]float32, tol float64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("embedding batch rows = %d, want %d", len(got), len(want))
+	}
+	for row := range got {
+		if len(got[row]) != len(want[row]) {
+			t.Fatalf("embedding row %d dim = %d, want %d", row, len(got[row]), len(want[row]))
+		}
+		for col := range got[row] {
+			diff := math.Abs(float64(got[row][col] - want[row][col]))
+			if diff > tol {
+				t.Fatalf("embedding[%d][%d] = %.9g, want %.9g (diff %.3g > %.3g)", row, col, got[row][col], want[row][col], diff, tol)
+			}
+		}
+	}
 }
 
 func rowIDs(rows []retrievalVectorExportRow) []string {

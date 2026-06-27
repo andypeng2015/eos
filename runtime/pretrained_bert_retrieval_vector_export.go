@@ -32,6 +32,7 @@ type PretrainedBERTTextEmbedder struct {
 	normalization   string
 	modelName       string
 	architecture    string
+	dynamicTokens   bool
 }
 
 type PretrainedBERTTextEmbedderConfig struct {
@@ -190,6 +191,7 @@ func LoadPretrainedBERTTextEmbedder(ctx context.Context, cfg PretrainedBERTTextE
 		normalization:   normalization,
 		modelName:       modelName,
 		architecture:    architecture,
+		dynamicTokens:   pretrainedBERTProgramSupportsDynamicTokens(program, "bert_embed"),
 	}, nil
 }
 
@@ -238,27 +240,36 @@ func (e *PretrainedBERTTextEmbedder) EmbedTextBatch(ctx context.Context, texts [
 	if len(texts) == 0 {
 		return nil, nil
 	}
-	inputIDs := make([]int32, 0, len(texts)*e.maxLength)
-	attentionMask := make([]int32, 0, len(texts)*e.maxLength)
-	tokenTypeIDs := make([]int32, 0, len(texts)*e.maxLength)
-	for _, text := range texts {
+	encodedRows := make([]HFWordPieceEncoding, len(texts))
+	effectiveLength := 1
+	for i, text := range texts {
 		encoded, err := e.tokenizer.Encode(prefix+text, HFWordPieceEncodeOptions{
-			MaxLength:      e.maxLength,
-			PadToMaxLength: true,
+			MaxLength: e.maxLength,
 		})
 		if err != nil {
 			return nil, err
 		}
-		inputIDs = append(inputIDs, encoded.IDs...)
-		attentionMask = append(attentionMask, encoded.AttentionMask...)
-		tokenTypeIDs = append(tokenTypeIDs, encoded.TokenTypeIDs...)
+		encodedRows[i] = encoded
+		if len(encoded.IDs) > effectiveLength {
+			effectiveLength = len(encoded.IDs)
+		}
+	}
+	if !e.dynamicTokens {
+		effectiveLength = e.maxLength
+	}
+	if effectiveLength > e.maxLength {
+		effectiveLength = e.maxLength
+	}
+	inputIDs, attentionMask, tokenTypeIDs, err := padPretrainedBERTBatchEncodings(e.tokenizer, encodedRows, effectiveLength)
+	if err != nil {
+		return nil, err
 	}
 	result, err := e.program.Run(ctx, backend.Request{
 		Entry: "bert_embed",
 		Inputs: map[string]any{
-			"input_ids":      backend.NewTensorI32([]int{len(texts), e.maxLength}, inputIDs),
-			"attention_mask": backend.NewTensorI32([]int{len(texts), e.maxLength}, attentionMask),
-			"token_type_ids": backend.NewTensorI32([]int{len(texts), e.maxLength}, tokenTypeIDs),
+			"input_ids":      backend.NewTensorI32([]int{len(texts), effectiveLength}, inputIDs),
+			"attention_mask": backend.NewTensorI32([]int{len(texts), effectiveLength}, attentionMask),
+			"token_type_ids": backend.NewTensorI32([]int{len(texts), effectiveLength}, tokenTypeIDs),
 		},
 	})
 	if err != nil {
@@ -291,6 +302,58 @@ func (e *PretrainedBERTTextEmbedder) EmbedTextBatch(ctx context.Context, texts [
 		out[row] = vec
 	}
 	return out, nil
+}
+
+func padPretrainedBERTBatchEncodings(tokenizer *HFWordPieceTokenizer, rows []HFWordPieceEncoding, length int) ([]int32, []int32, []int32, error) {
+	if tokenizer == nil {
+		return nil, nil, nil, fmt.Errorf("nil wordpiece tokenizer")
+	}
+	if length <= 0 {
+		return nil, nil, nil, fmt.Errorf("pretrained BERT batch padded length must be positive, got %d", length)
+	}
+	padID, ok := tokenizer.TokenID(tokenizer.Config().PadToken)
+	if !ok {
+		return nil, nil, nil, fmt.Errorf("wordpiece vocab missing pad token %q", tokenizer.Config().PadToken)
+	}
+	inputIDs := make([]int32, 0, len(rows)*length)
+	attentionMask := make([]int32, 0, len(rows)*length)
+	tokenTypeIDs := make([]int32, 0, len(rows)*length)
+	for row, encoded := range rows {
+		if len(encoded.IDs) > length {
+			return nil, nil, nil, fmt.Errorf("encoded row %d length %d exceeds padded length %d", row, len(encoded.IDs), length)
+		}
+		if len(encoded.AttentionMask) != len(encoded.IDs) || len(encoded.TokenTypeIDs) != len(encoded.IDs) {
+			return nil, nil, nil, fmt.Errorf("encoded row %d has inconsistent ids/masks/token types lengths: %d/%d/%d", row, len(encoded.IDs), len(encoded.AttentionMask), len(encoded.TokenTypeIDs))
+		}
+		inputIDs = append(inputIDs, encoded.IDs...)
+		attentionMask = append(attentionMask, encoded.AttentionMask...)
+		tokenTypeIDs = append(tokenTypeIDs, encoded.TokenTypeIDs...)
+		for pad := len(encoded.IDs); pad < length; pad++ {
+			inputIDs = append(inputIDs, padID)
+			attentionMask = append(attentionMask, 0)
+			tokenTypeIDs = append(tokenTypeIDs, 0)
+		}
+	}
+	return inputIDs, attentionMask, tokenTypeIDs, nil
+}
+
+func pretrainedBERTProgramSupportsDynamicTokens(program *Program, entryName string) bool {
+	if program == nil || program.module == nil {
+		return false
+	}
+	for _, entry := range program.module.EntryPoints {
+		if entry.Name != entryName {
+			continue
+		}
+		for _, input := range entry.Inputs {
+			if input.Name != "input_ids" || input.Type.Tensor == nil {
+				continue
+			}
+			shape := input.Type.Tensor.Shape
+			return len(shape) == 2 && shape[1] == "T"
+		}
+	}
+	return false
 }
 
 func ExportPretrainedBERTRetrievalVectors(ctx context.Context, cfg PretrainedBERTRetrievalVectorExportConfig) (PretrainedBERTRetrievalVectorExportSummary, error) {
