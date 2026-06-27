@@ -44,6 +44,7 @@ type PretrainedBERTImportPlan struct {
 	Config                 PretrainedBERTConfig              `json:"config"`
 	Tensors                []PretrainedBERTTensorPlan        `json:"tensors"`
 	WeightVerification     *PretrainedBERTWeightVerification `json:"weight_verification,omitempty"`
+	WeightLoadSmoke        *PretrainedBERTWeightLoadReport   `json:"weight_load_smoke,omitempty"`
 	PoolingPolicy          string                            `json:"pooling_policy"`
 	OutputProjectionPolicy string                            `json:"output_projection_policy"`
 	ExecutionStatus        string                            `json:"execution_status"`
@@ -69,6 +70,30 @@ type PretrainedBERTDTypeMismatch struct {
 	Name       string   `json:"name"`
 	Actual     string   `json:"actual"`
 	Acceptable []string `json:"acceptable"`
+}
+
+type PretrainedBERTWeightTensor struct {
+	Name       string  `json:"name"`
+	Role       string  `json:"role"`
+	DType      string  `json:"dtype"`
+	Shape      []int64 `json:"shape"`
+	SourceFile string  `json:"source_file"`
+	ByteOffset int64   `json:"byte_offset"`
+	ByteLength int64   `json:"byte_length"`
+	Bytes      []byte  `json:"-"`
+}
+
+type PretrainedBERTWeightSet struct {
+	Tensors []PretrainedBERTWeightTensor `json:"tensors"`
+}
+
+type PretrainedBERTWeightLoadReport struct {
+	Status       string   `json:"status"`
+	Files        []string `json:"files,omitempty"`
+	TensorCount  int      `json:"tensor_count"`
+	TotalBytes   int64    `json:"total_bytes"`
+	Loaded       []string `json:"loaded,omitempty"`
+	SkippedExtra []string `json:"skipped_extra,omitempty"`
 }
 
 func LoadPretrainedBERTConfig(path string) (PretrainedBERTConfig, error) {
@@ -150,32 +175,19 @@ func PlanPretrainedBERTImport(cfg PretrainedBERTConfig, modelName string) (Pretr
 }
 
 func VerifyPretrainedBERTWeightsFromDir(dir string, plan PretrainedBERTImportPlan) (PretrainedBERTWeightVerification, error) {
-	if matches, err := filepath.Glob(filepath.Join(dir, "*.safetensors.index.json")); err != nil {
-		return PretrainedBERTWeightVerification{}, err
-	} else if len(matches) > 0 {
-		slices.Sort(matches)
-		return PretrainedBERTWeightVerification{}, fmt.Errorf("safetensors sharded index is not supported yet: %s", filepath.Base(matches[0]))
-	}
-	path := filepath.Join(dir, "model.safetensors")
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			return PretrainedBERTWeightVerification{}, fmt.Errorf("model.safetensors not found in %s", dir)
-		}
-		return PretrainedBERTWeightVerification{}, err
-	}
-	metadata, err := ReadSafeTensorsMetadata(path)
+	collection, err := ReadSafeTensorsCollectionFromDir(dir)
 	if err != nil {
 		return PretrainedBERTWeightVerification{}, err
 	}
-	report := VerifyPretrainedBERTWeights(plan, metadata)
-	report.Files = []string{filepath.Base(path)}
+	report := VerifyPretrainedBERTWeights(plan, collection)
 	return report, nil
 }
 
-func VerifyPretrainedBERTWeights(plan PretrainedBERTImportPlan, metadata SafeTensorsMetadata) PretrainedBERTWeightVerification {
+func VerifyPretrainedBERTWeights(plan PretrainedBERTImportPlan, metadata SafeTensorsCollection) PretrainedBERTWeightVerification {
 	report := PretrainedBERTWeightVerification{
 		Status:      "ok",
 		TensorCount: len(metadata.Tensors),
+		Files:       append([]string(nil), metadata.Files...),
 	}
 	planned := make(map[string]PretrainedBERTTensorPlan, len(plan.Tensors))
 	for _, tensor := range plan.Tensors {
@@ -215,6 +227,68 @@ func VerifyPretrainedBERTWeights(plan PretrainedBERTImportPlan, metadata SafeTen
 		report.Status = "mismatch"
 	}
 	return report
+}
+
+func LoadPretrainedBERTWeightsFromDir(dir string, plan PretrainedBERTImportPlan) (PretrainedBERTWeightSet, PretrainedBERTWeightLoadReport, error) {
+	collection, err := ReadSafeTensorsCollectionFromDir(dir)
+	if err != nil {
+		return PretrainedBERTWeightSet{}, PretrainedBERTWeightLoadReport{}, err
+	}
+	verification := VerifyPretrainedBERTWeights(plan, collection)
+	if len(verification.Missing) > 0 || len(verification.ShapeMismatches) > 0 || len(verification.DTypeMismatches) > 0 {
+		return PretrainedBERTWeightSet{}, PretrainedBERTWeightLoadReport{}, fmt.Errorf("pretrained BERT weight verification failed before byte ingestion: missing=%d shape_mismatches=%d dtype_mismatches=%d", len(verification.Missing), len(verification.ShapeMismatches), len(verification.DTypeMismatches))
+	}
+	requestedPlans := make([]PretrainedBERTTensorPlan, 0, len(plan.Tensors))
+	plannedNames := make(map[string]struct{}, len(plan.Tensors))
+	for _, tensor := range plan.Tensors {
+		plannedNames[tensor.Name] = struct{}{}
+		if tensor.Required {
+			requestedPlans = append(requestedPlans, tensor)
+			continue
+		}
+		if _, ok := collection.Tensors[tensor.Name]; ok {
+			requestedPlans = append(requestedPlans, tensor)
+		}
+	}
+	requestedNames := make([]string, 0, len(requestedPlans))
+	roles := make(map[string]string, len(requestedPlans))
+	for _, tensor := range requestedPlans {
+		requestedNames = append(requestedNames, tensor.Name)
+		roles[tensor.Name] = tensor.Role
+	}
+	slices.Sort(requestedNames)
+	data, err := LoadSafeTensorData(collection, dir, requestedNames)
+	if err != nil {
+		return PretrainedBERTWeightSet{}, PretrainedBERTWeightLoadReport{}, err
+	}
+	set := PretrainedBERTWeightSet{Tensors: make([]PretrainedBERTWeightTensor, 0, len(requestedNames))}
+	report := PretrainedBERTWeightLoadReport{
+		Status:      "ok",
+		Files:       append([]string(nil), collection.Files...),
+		TensorCount: len(requestedNames),
+		Loaded:      append([]string(nil), requestedNames...),
+	}
+	for _, name := range requestedNames {
+		tensor := data[name]
+		report.TotalBytes += tensor.ByteLength
+		set.Tensors = append(set.Tensors, PretrainedBERTWeightTensor{
+			Name:       name,
+			Role:       roles[name],
+			DType:      tensor.DType,
+			Shape:      append([]int64(nil), tensor.Shape...),
+			SourceFile: tensor.SourceFile,
+			ByteOffset: tensor.ByteOffset,
+			ByteLength: tensor.ByteLength,
+			Bytes:      append([]byte(nil), tensor.Bytes...),
+		})
+	}
+	for name := range collection.Tensors {
+		if _, ok := plannedNames[name]; !ok {
+			report.SkippedExtra = append(report.SkippedExtra, name)
+		}
+	}
+	slices.Sort(report.SkippedExtra)
+	return set, report, nil
 }
 
 func (cfg PretrainedBERTConfig) Validate() error {

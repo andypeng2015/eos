@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -41,10 +42,10 @@ func TestRunImportPretrainedBERTWritesPlanJSON(t *testing.T) {
 		"embeddings.word_embeddings.weight": map[string]any{
 			"dtype":        "F32",
 			"shape":        []int64{7, 8},
-			"data_offsets": []int64{0, 1},
+			"data_offsets": []int64{0, 224},
 		},
 	}
-	if err := writeCommandSafeTensorsFixture(filepath.Join(snapshot, "model.safetensors"), header, []byte{0}); err != nil {
+	if err := writeCommandSafeTensorsFixture(filepath.Join(snapshot, "model.safetensors"), header, make([]byte, 224)); err != nil {
 		t.Fatalf("write safetensors: %v", err)
 	}
 	planPath := filepath.Join(dir, "plan.json")
@@ -100,6 +101,69 @@ func TestRunImportPretrainedBERTWritesPlanJSON(t *testing.T) {
 	}
 }
 
+func TestRunImportPretrainedBERTLoadWeightsSmoke(t *testing.T) {
+	dir := t.TempDir()
+	snapshot := filepath.Join(dir, "hf-snapshot")
+	if err := os.MkdirAll(snapshot, 0o755); err != nil {
+		t.Fatalf("mkdir snapshot: %v", err)
+	}
+	config := `{
+		"architectures": ["BertModel"],
+		"model_type": "bert",
+		"vocab_size": 3,
+		"hidden_size": 2,
+		"num_hidden_layers": 1,
+		"num_attention_heads": 1,
+		"intermediate_size": 4,
+		"hidden_act": "gelu",
+		"max_position_embeddings": 4,
+		"type_vocab_size": 2
+	}`
+	if err := os.WriteFile(filepath.Join(snapshot, "config.json"), []byte(config), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	plan, err := eosruntime.PlanPretrainedBERTImportFromDir(snapshot, "fixture")
+	if err != nil {
+		t.Fatalf("plan fixture: %v", err)
+	}
+	header := commandSafeTensorsHeaderForBERTPlan(plan)
+	header["cls.predictions.decoder.weight"] = map[string]any{
+		"dtype":        "F32",
+		"shape":        []int64{3, 2},
+		"data_offsets": []int64{0, 24},
+	}
+	payloadSize := renumberCommandSafeTensorFixtureOffsets(header)
+	if err := writeCommandSafeTensorsFixture(filepath.Join(snapshot, "model.safetensors"), header, bytes.Repeat([]byte{7}, payloadSize)); err != nil {
+		t.Fatalf("write safetensors: %v", err)
+	}
+	planPath := filepath.Join(dir, "plan.json")
+	if err := runImportPretrainedBERT([]string{
+		"--source", snapshot,
+		"--plan-json", planPath,
+		"--verify-weights",
+		"--load-weights-smoke",
+	}); err != nil {
+		t.Fatalf("run import-pretrained-bert: %v", err)
+	}
+	data, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatalf("read plan json: %v", err)
+	}
+	var loaded eosruntime.PretrainedBERTImportPlan
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		t.Fatalf("parse plan json: %v\n%s", err, data)
+	}
+	if loaded.WeightLoadSmoke == nil {
+		t.Fatal("expected load smoke report")
+	}
+	if loaded.WeightLoadSmoke.Status != "ok" || loaded.WeightLoadSmoke.TotalBytes == 0 {
+		t.Fatalf("load smoke = %+v", loaded.WeightLoadSmoke)
+	}
+	if !slices.Contains(loaded.WeightLoadSmoke.SkippedExtra, "cls.predictions.decoder.weight") {
+		t.Fatalf("expected classifier skipped, got %+v", loaded.WeightLoadSmoke.SkippedExtra)
+	}
+}
+
 func writeCommandSafeTensorsFixture(path string, header map[string]any, payload []byte) error {
 	data, err := json.Marshal(header)
 	if err != nil {
@@ -112,4 +176,39 @@ func writeCommandSafeTensorsFixture(path string, header map[string]any, payload 
 	buf.Write(data)
 	buf.Write(payload)
 	return os.WriteFile(path, buf.Bytes(), 0o644)
+}
+
+func commandSafeTensorsHeaderForBERTPlan(plan eosruntime.PretrainedBERTImportPlan) map[string]any {
+	header := make(map[string]any)
+	for _, tensor := range plan.Tensors {
+		if !tensor.Required {
+			continue
+		}
+		shape := make([]int64, len(tensor.Shape))
+		for i, dim := range tensor.Shape {
+			shape[i] = int64(dim)
+		}
+		header[tensor.Name] = map[string]any{
+			"dtype":        "F32",
+			"shape":        shape,
+			"data_offsets": []int64{0, 0},
+		}
+	}
+	renumberCommandSafeTensorFixtureOffsets(header)
+	return header
+}
+
+func renumberCommandSafeTensorFixtureOffsets(header map[string]any) int {
+	var offset int64
+	for _, raw := range header {
+		tensor := raw.(map[string]any)
+		var elements int64 = 1
+		for _, dim := range tensor["shape"].([]int64) {
+			elements *= dim
+		}
+		span := elements * 4
+		tensor["data_offsets"] = []int64{offset, offset + span}
+		offset += span
+	}
+	return int(offset)
 }
