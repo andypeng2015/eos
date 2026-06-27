@@ -3,6 +3,7 @@ package eosruntime
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	eosartifact "m31labs.dev/eos/artifact/eos"
@@ -343,11 +344,76 @@ func TestInitializeEmbeddingTrainerPackageBootstrapCopiesOverlap(t *testing.T) {
 	}
 }
 
+func TestInitializeEmbeddingTrainerPackageBootstrapCopiesGenericExactName(t *testing.T) {
+	dir := t.TempDir()
+	checkpointPath := writeSyntheticBootstrapCheckpoint(t, dir, map[string]*backend.Tensor{
+		"layers.0.attn_q": backend.NewTensorF32([]int{2, 2}, []float32{
+			31, 32,
+			33, 34,
+		}),
+	}, nil)
+	weights := map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF32([]int{2, 2}, filledFloat32(4, -1)),
+		"projection":      backend.NewTensorF32([]int{2, 2}, filledFloat32(4, -2)),
+		"layers.0.attn_q": backend.NewTensorF32([]int{2, 2}, filledFloat32(4, 0)),
+	}
+	if err := bootstrapTrainingWeights(weights, tinyBootstrapManifest(), EmbeddingTrainInitOptions{BootstrapCheckpointPath: checkpointPath}); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	assertFloat32Values(t, weights["layers.0.attn_q"].F32, []float32{31, 32, 33, 34})
+}
+
+func TestInitializeEmbeddingTrainerPackageBootstrapCopiesGenericOverlapAndIgnoresMoments(t *testing.T) {
+	dir := t.TempDir()
+	checkpointPath := writeSyntheticBootstrapCheckpoint(t, dir, map[string]*backend.Tensor{
+		"layers.0.attn_q": backend.NewTensorF32([]int{2, 2}, []float32{
+			41, 42,
+			43, 44,
+		}),
+	}, map[string]*backend.Tensor{
+		"layers.0.attn_q_moment_1": backend.NewTensorF32([]int{3, 3}, filledFloat32(9, 99)),
+	})
+	weights := map[string]*backend.Tensor{
+		"token_embedding":          backend.NewTensorF32([]int{2, 2}, filledFloat32(4, -1)),
+		"projection":               backend.NewTensorF32([]int{2, 2}, filledFloat32(4, -2)),
+		"layers.0.attn_q":          backend.NewTensorF32([]int{3, 3}, []float32{1, 2, 3, 4, 5, 6, 7, 8, 9}),
+		"layers.0.attn_q_moment_1": backend.NewTensorF32([]int{3, 3}, filledFloat32(9, 7)),
+	}
+	if err := bootstrapTrainingWeights(weights, tinyBootstrapManifest(), EmbeddingTrainInitOptions{BootstrapCheckpointPath: checkpointPath}); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	assertFloat32Values(t, weights["layers.0.attn_q"].F32, []float32{
+		41, 42, 3,
+		43, 44, 6,
+		7, 8, 9,
+	})
+	assertFloat32Values(t, weights["layers.0.attn_q_moment_1"].F32, filledFloat32(9, 7))
+}
+
 func TestInitializeEmbeddingTrainerPackageBootstrapRejectsRankMismatch(t *testing.T) {
 	target := backend.NewTensorF32([]int{2, 2}, []float32{1, 2, 3, 4})
 	source := backend.NewTensorF32([]int{2, 1, 2}, []float32{1, 2, 3, 4})
 	if err := copyOverlappingTensor(target, source); err == nil {
 		t.Fatal("expected rank mismatch error")
+	}
+}
+
+func TestInitializeEmbeddingTrainerPackageBootstrapRejectsGenericRankMismatch(t *testing.T) {
+	dir := t.TempDir()
+	checkpointPath := writeSyntheticBootstrapCheckpoint(t, dir, map[string]*backend.Tensor{
+		"layers.0.attn_q": backend.NewTensorF32([]int{2, 1, 2}, []float32{1, 2, 3, 4}),
+	}, nil)
+	weights := map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF32([]int{2, 2}, filledFloat32(4, -1)),
+		"projection":      backend.NewTensorF32([]int{2, 2}, filledFloat32(4, -2)),
+		"layers.0.attn_q": backend.NewTensorF32([]int{2, 2}, filledFloat32(4, 0)),
+	}
+	err := bootstrapTrainingWeights(weights, tinyBootstrapManifest(), EmbeddingTrainInitOptions{BootstrapCheckpointPath: checkpointPath})
+	if err == nil {
+		t.Fatal("expected generic rank mismatch error")
+	}
+	if got := err.Error(); !strings.Contains(got, `bootstrap generic tensor "layers.0.attn_q"`) || !strings.Contains(got, "rank mismatch") {
+		t.Fatalf("error = %q, want generic tensor name and rank mismatch", got)
 	}
 }
 
@@ -401,6 +467,42 @@ func filledFloat32(n int, value float32) []float32 {
 		out[i] = value
 	}
 	return out
+}
+
+func writeSyntheticBootstrapCheckpoint(t *testing.T, dir string, tensors, moments map[string]*backend.Tensor) string {
+	t.Helper()
+	path := filepath.Join(dir, "source.embed-train.mll")
+	checkpoint := EmbeddingTrainCheckpoint{
+		Version:        EmbeddingTrainCheckpointVersion,
+		Manifest:       tinyBootstrapManifest(),
+		Config:         EmbeddingTrainConfig{LearningRate: 0.01},
+		TokenEmbedding: backend.NewTensorF32([]int{2, 2}, []float32{11, 12, 13, 14}),
+		Projection:     backend.NewTensorF32([]int{2, 2}, []float32{21, 22, 23, 24}),
+		Tensors:        tensors,
+		MomentTensors:  moments,
+	}
+	if err := checkpoint.WriteFile(path); err != nil {
+		t.Fatalf("write synthetic checkpoint: %v", err)
+	}
+	return path
+}
+
+func tinyBootstrapManifest() EmbeddingManifest {
+	return EmbeddingManifest{
+		Name:                "tiny-bootstrap",
+		PooledEntry:         "embed_pooled",
+		BatchEntry:          "embed_pooled_batch",
+		TokenInput:          "tokens",
+		OutputName:          "result",
+		OutputDType:         "q8",
+		TokenEmbeddingParam: "token_embedding",
+		ProjectionParam:     "projection",
+		Tokenizer: TokenizerManifest{
+			VocabSize:   2,
+			MaxSequence: 2,
+			PadID:       0,
+		},
+	}
 }
 
 func assertFloat32SliceEqual(t *testing.T, got, want []int) {

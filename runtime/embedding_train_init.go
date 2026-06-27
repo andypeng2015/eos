@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -206,6 +207,7 @@ func bootstrapTrainingWeights(weights map[string]*backend.Tensor, targetManifest
 		{role: "hidden_projection", targetName: targetManifest.HiddenProjectionParam, source: checkpoint.HiddenProjection},
 		{role: "projection", targetName: targetManifest.ProjectionParam, source: checkpoint.Projection},
 	}
+	copied := map[string]struct{}{}
 	for _, copySpec := range copies {
 		if copySpec.targetName == "" || copySpec.source == nil {
 			continue
@@ -216,6 +218,24 @@ func bootstrapTrainingWeights(weights map[string]*backend.Tensor, targetManifest
 		}
 		if err := copyOverlappingTensor(target, copySpec.source); err != nil {
 			return fmt.Errorf("bootstrap %s: %w", copySpec.role, err)
+		}
+		copied[copySpec.targetName] = struct{}{}
+	}
+	targetNames := make([]string, 0, len(weights))
+	for name := range weights {
+		targetNames = append(targetNames, name)
+	}
+	sort.Strings(targetNames)
+	for _, name := range targetNames {
+		if _, ok := copied[name]; ok {
+			continue
+		}
+		source := checkpoint.Tensors[name]
+		if source == nil {
+			continue
+		}
+		if err := copyOverlappingTensor(weights[name], source); err != nil {
+			return fmt.Errorf("bootstrap generic tensor %q into target %q: %w", name, name, err)
 		}
 	}
 	return nil
