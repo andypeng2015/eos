@@ -260,6 +260,8 @@ Do not promote the dense model from hybrid evidence. Do not silently switch defa
 | checkpoint criteria | yes for manifests and reusable acquisition docs/scripts only |
 | report contract | Outcome; distillation; files changed/inspected; verification commands/results; caveats/residual risk; checkpoint candidate yes/no; Arbiter next action |
 
+Maintained script: `scripts/acquire_msmarco_passage.py`. It defaults to a bounded query/qrels acquisition manifest and only audits passage text resolvability when `--download-corpus` or `--corpus-path` is explicitly supplied.
+
 ### eos-teacher-cache-and-score-v1
 
 | Field | Value |
