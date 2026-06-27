@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	eosruntime "m31labs.dev/eos/runtime"
@@ -31,6 +32,8 @@ func runExportPretrainedBERTRetrievalVectors(args []string) error {
 	maxQueries := fs.Int("max-queries", 0, "limit queries for smoke exports")
 	maxLength := fs.Int("max-length", 0, "WordPiece max sequence length; default uses config max_position_embeddings")
 	manifestPath := fs.String("manifest-json", "", "write export summary JSON manifest; default is <output-dir>/manifest.json")
+	resume := fs.Bool("resume", false, "reuse a valid prefix of existing vector cache JSONL files and append missing rows")
+	progressEvery := fs.Int("progress-every", 0, "emit export progress every N completed records; default off")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -71,6 +74,9 @@ func runExportPretrainedBERTRetrievalVectors(args []string) error {
 		Split:            *split,
 		Runtime:          rt,
 		ManifestJSONPath: *manifestPath,
+		Resume:           *resume,
+		ProgressEvery:    *progressEvery,
+		Progress:         printPretrainedBERTVectorExportProgress,
 	})
 	if err != nil {
 		return err
@@ -78,6 +84,9 @@ func runExportPretrainedBERTRetrievalVectors(args []string) error {
 	fmt.Printf("exported pretrained BERT retrieval vectors: dataset=%s mode=%s docs=%d queries=%d dim=%d\n", summary.Dataset, summary.ExecutionMode, summary.Documents, summary.Queries, summary.OutputDim)
 	fmt.Printf("doc_vectors: %s\n", summary.DocVectorPath)
 	fmt.Printf("query_vectors: %s\n", summary.QueryVectorPath)
+	if summary.Resume || summary.ProgressEvery > 0 {
+		fmt.Printf("resume: enabled=%t progress_every=%d reused_documents=%d reused_queries=%d written_documents=%d written_queries=%d\n", summary.Resume, summary.ProgressEvery, summary.ReusedDocuments, summary.ReusedQueries, summary.WrittenDocuments, summary.WrittenQueries)
+	}
 	if *manifestPath != "" {
 		fmt.Printf("manifest: %s\n", *manifestPath)
 	} else {
@@ -96,4 +105,8 @@ func resolvePretrainedBERTDocumentPrefix(fs *flag.FlagSet, documentPrefix, docPr
 		return documentPrefix, nil
 	}
 	return docPrefix, nil
+}
+
+func printPretrainedBERTVectorExportProgress(progress eosruntime.PretrainedBERTRetrievalVectorExportProgress) {
+	fmt.Fprintf(os.Stderr, "export-pretrained-bert-retrieval-vectors progress: kind=%s completed=%d/%d reused=%d written=%d elapsed=%.1fs path=%s\n", progress.Kind, progress.Completed, progress.Total, progress.Reused, progress.Written, progress.ElapsedSeconds, progress.Path)
 }

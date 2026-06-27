@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -128,6 +129,212 @@ func TestPretrainedBERTTextEmbedderRejectsTooLargeMaxLength(t *testing.T) {
 	}
 }
 
+func TestPretrainedBERTRetrievalVectorExportResumeAppendsPartialCaches(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	datasetDir := writeTinyPretrainedBERTBEIRFixtureN(t, 3)
+	rt := New(cuda.New())
+	seedOutput := filepath.Join(t.TempDir(), "seed")
+	seed, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName:    "tiny-bert",
+		DatasetDir:     datasetDir,
+		OutputDir:      seedOutput,
+		SourceDir:      sourceDir,
+		ModulePath:     modulePath,
+		WeightsPath:    weightsPath,
+		QueryPrefix:    "query ",
+		DocumentPrefix: "doc ",
+		BatchSize:      1,
+		MaxLength:      4,
+		Runtime:        rt,
+	})
+	if err != nil {
+		t.Fatalf("seed export: %v", err)
+	}
+	outputDir := filepath.Join(t.TempDir(), "vectors")
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		t.Fatalf("mkdir output: %v", err)
+	}
+	writeVectorRows(t, filepath.Join(outputDir, "doc-vectors.jsonl"), readTinyVectorRows(t, seed.DocVectorPath)[:1])
+	writeVectorRows(t, filepath.Join(outputDir, "query-vectors.jsonl"), readTinyVectorRows(t, seed.QueryVectorPath)[:1])
+
+	var progress []PretrainedBERTRetrievalVectorExportProgress
+	summary, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName:    "tiny-bert",
+		DatasetDir:     datasetDir,
+		OutputDir:      outputDir,
+		SourceDir:      sourceDir,
+		ModulePath:     modulePath,
+		WeightsPath:    weightsPath,
+		QueryPrefix:    "query ",
+		DocumentPrefix: "doc ",
+		BatchSize:      1,
+		MaxLength:      4,
+		Runtime:        rt,
+		Resume:         true,
+		ProgressEvery:  1,
+		Progress: func(p PretrainedBERTRetrievalVectorExportProgress) {
+			progress = append(progress, p)
+		},
+	})
+	if err != nil {
+		t.Fatalf("resume export: %v", err)
+	}
+	if !summary.Resume || summary.ReusedDocuments != 1 || summary.ReusedQueries != 1 || summary.WrittenDocuments != 2 || summary.WrittenQueries != 2 {
+		t.Fatalf("summary resume counters = %+v", summary)
+	}
+	if len(progress) == 0 {
+		t.Fatalf("expected progress callbacks")
+	}
+	if got := rowIDs(readTinyVectorRows(t, summary.DocVectorPath)); !slices.Equal(got, []string{"d1", "d2", "d3"}) {
+		t.Fatalf("doc ids = %v", got)
+	}
+	if got := rowIDs(readTinyVectorRows(t, summary.QueryVectorPath)); !slices.Equal(got, []string{"q1", "q2", "q3"}) {
+		t.Fatalf("query ids = %v", got)
+	}
+	var manifest PretrainedBERTRetrievalVectorExportSummary
+	data, err := os.ReadFile(filepath.Join(outputDir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("parse manifest: %v", err)
+	}
+	if !manifest.Resume || manifest.ReusedDocuments != 1 || manifest.ReusedQueries != 1 || manifest.WrittenDocuments != 2 || manifest.WrittenQueries != 2 {
+		t.Fatalf("manifest resume counters = %+v", manifest)
+	}
+}
+
+func TestPretrainedBERTRetrievalVectorExportResumeRejectsMismatchedID(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	datasetDir := writeTinyPretrainedBERTBEIRFixtureN(t, 2)
+	outputDir := filepath.Join(t.TempDir(), "vectors")
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		t.Fatalf("mkdir output: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outputDir, "doc-vectors.jsonl"), []byte(`{"id":"not-d1","embedding":[1,0]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write stale doc vectors: %v", err)
+	}
+
+	_, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName: "tiny-bert",
+		DatasetDir:  datasetDir,
+		OutputDir:   outputDir,
+		SourceDir:   sourceDir,
+		ModulePath:  modulePath,
+		WeightsPath: weightsPath,
+		BatchSize:   1,
+		MaxLength:   4,
+		Runtime:     New(cuda.New()),
+		Resume:      true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "want prefix id") {
+		t.Fatalf("err = %v, want mismatched id error", err)
+	}
+}
+
+func TestPretrainedBERTRetrievalVectorExportResumeRejectsDimensionMismatch(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	datasetDir := writeTinyPretrainedBERTBEIRFixtureN(t, 2)
+	outputDir := filepath.Join(t.TempDir(), "vectors")
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		t.Fatalf("mkdir output: %v", err)
+	}
+	stale := `{"id":"d1","embedding":[1,0]}` + "\n" + `{"id":"d2","embedding":[1,0,0]}` + "\n"
+	if err := os.WriteFile(filepath.Join(outputDir, "doc-vectors.jsonl"), []byte(stale), 0o644); err != nil {
+		t.Fatalf("write stale doc vectors: %v", err)
+	}
+
+	_, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName: "tiny-bert",
+		DatasetDir:  datasetDir,
+		OutputDir:   outputDir,
+		SourceDir:   sourceDir,
+		ModulePath:  modulePath,
+		WeightsPath: weightsPath,
+		BatchSize:   1,
+		MaxLength:   4,
+		Runtime:     New(cuda.New()),
+		Resume:      true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "has dimension 3, want 2") {
+		t.Fatalf("err = %v, want dimension mismatch error", err)
+	}
+}
+
+func TestPretrainedBERTRetrievalVectorExportResumeRejectsCompleteCacheWithWrongModelDimension(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	datasetDir := writeTinyPretrainedBERTBEIRFixtureN(t, 2)
+	outputDir := filepath.Join(t.TempDir(), "vectors")
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		t.Fatalf("mkdir output: %v", err)
+	}
+	wrongDimDocs := []retrievalVectorExportRow{
+		{ID: "d1", Embedding: []float32{1, 0, 0}},
+		{ID: "d2", Embedding: []float32{0, 1, 0}},
+	}
+	wrongDimQueries := []retrievalVectorExportRow{
+		{ID: "q1", Embedding: []float32{1, 0, 0}},
+		{ID: "q2", Embedding: []float32{0, 1, 0}},
+	}
+	writeVectorRows(t, filepath.Join(outputDir, "doc-vectors.jsonl"), wrongDimDocs)
+	writeVectorRows(t, filepath.Join(outputDir, "query-vectors.jsonl"), wrongDimQueries)
+
+	_, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName: "tiny-bert",
+		DatasetDir:  datasetDir,
+		OutputDir:   outputDir,
+		SourceDir:   sourceDir,
+		ModulePath:  modulePath,
+		WeightsPath: weightsPath,
+		BatchSize:   1,
+		MaxLength:   4,
+		Runtime:     New(cuda.New()),
+		Resume:      true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "want current model output dimension 2") {
+		t.Fatalf("err = %v, want current model dimension error", err)
+	}
+}
+
+func TestPretrainedBERTRetrievalVectorExportWithoutResumeOverwritesStaleFiles(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	datasetDir := writeTinyPretrainedBERTBEIRFixtureN(t, 2)
+	outputDir := filepath.Join(t.TempDir(), "vectors")
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		t.Fatalf("mkdir output: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outputDir, "doc-vectors.jsonl"), []byte(`{"id":"stale","embedding":[1,0,0]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write stale doc vectors: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outputDir, "query-vectors.jsonl"), []byte(`{"id":"stale","embedding":[1,0,0]}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write stale query vectors: %v", err)
+	}
+
+	summary, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName: "tiny-bert",
+		DatasetDir:  datasetDir,
+		OutputDir:   outputDir,
+		SourceDir:   sourceDir,
+		ModulePath:  modulePath,
+		WeightsPath: weightsPath,
+		BatchSize:   1,
+		MaxLength:   4,
+		Runtime:     New(cuda.New()),
+	})
+	if err != nil {
+		t.Fatalf("export without resume: %v", err)
+	}
+	if summary.Resume || summary.ReusedDocuments != 0 || summary.ReusedQueries != 0 || summary.WrittenDocuments != 2 || summary.WrittenQueries != 2 {
+		t.Fatalf("summary counters = %+v", summary)
+	}
+	if got := rowIDs(readTinyVectorRows(t, summary.DocVectorPath)); !slices.Equal(got, []string{"d1", "d2"}) {
+		t.Fatalf("doc ids = %v", got)
+	}
+	if got := rowIDs(readTinyVectorRows(t, summary.QueryVectorPath)); !slices.Equal(got, []string{"q1", "q2"}) {
+		t.Fatalf("query ids = %v", got)
+	}
+}
+
 func writeTinyPretrainedBERTExportFixture(t *testing.T) (sourceDir, modulePath, weightsPath string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -212,21 +419,54 @@ func tinyPretrainedBERTExportDecodedWeights() []PretrainedBERTDecodedWeightTenso
 }
 
 func writeTinyPretrainedBERTBEIRFixture(t *testing.T) string {
+	return writeTinyPretrainedBERTBEIRFixtureN(t, 1)
+}
+
+func writeTinyPretrainedBERTBEIRFixtureN(t *testing.T, n int) string {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "qrels"), 0o755); err != nil {
 		t.Fatalf("mkdir qrels: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "corpus.jsonl"), []byte(`{"_id":"d1","title":"", "text":"alpha"}`+"\n"), 0o644); err != nil {
+	var corpus, queries, qrels strings.Builder
+	qrels.WriteString("query-id\tcorpus-id\tscore\n")
+	for i := 1; i <= n; i++ {
+		fmt.Fprintf(&corpus, `{"_id":"d%d","title":"", "text":"alpha"}`+"\n", i)
+		fmt.Fprintf(&queries, `{"_id":"q%d","text":"alpha"}`+"\n", i)
+		fmt.Fprintf(&qrels, "q%d\td%d\t1\n", i, i)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "corpus.jsonl"), []byte(corpus.String()), 0o644); err != nil {
 		t.Fatalf("write corpus: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "queries.jsonl"), []byte(`{"_id":"q1","text":"alpha"}`+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "queries.jsonl"), []byte(queries.String()), 0o644); err != nil {
 		t.Fatalf("write queries: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "qrels", "test.tsv"), []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "qrels", "test.tsv"), []byte(qrels.String()), 0o644); err != nil {
 		t.Fatalf("write qrels: %v", err)
 	}
 	return dir
+}
+
+func writeVectorRows(t *testing.T, path string, rows []retrievalVectorExportRow) {
+	t.Helper()
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create %s: %v", path, err)
+	}
+	defer file.Close()
+	writer := bufio.NewWriter(file)
+	for _, row := range rows {
+		data, err := json.Marshal(row)
+		if err != nil {
+			t.Fatalf("marshal row: %v", err)
+		}
+		if _, err := writer.Write(append(data, '\n')); err != nil {
+			t.Fatalf("write row: %v", err)
+		}
+	}
+	if err := writer.Flush(); err != nil {
+		t.Fatalf("flush rows: %v", err)
+	}
 }
 
 func readTinyVectorRows(t *testing.T, path string) []retrievalVectorExportRow {

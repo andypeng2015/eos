@@ -13,6 +13,19 @@ func TestRunExportPretrainedBERTRetrievalVectorsRequiresArtifacts(t *testing.T) 
 	}
 }
 
+func TestRunExportPretrainedBERTRetrievalVectorsAcceptsResumeProgressFlags(t *testing.T) {
+	err := runExportPretrainedBERTRetrievalVectors([]string{"--resume", "--progress-every", "7"})
+	if err == nil {
+		t.Fatal("runExportPretrainedBERTRetrievalVectors succeeded without positional args, want usage error")
+	}
+	if strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatalf("pretrained BERT vector export flags were not registered: %v", err)
+	}
+	if !strings.Contains(err.Error(), "usage: eos export-pretrained-bert-retrieval-vectors") {
+		t.Fatalf("err = %v, want usage error after parsing flags", err)
+	}
+}
+
 func TestRunExportPretrainedBERTRetrievalVectorsDocumentPrefixAlias(t *testing.T) {
 	tests := []struct {
 		name string
