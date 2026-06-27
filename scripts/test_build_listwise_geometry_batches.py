@@ -288,6 +288,82 @@ class BuildListwiseGeometryBatchesTest(unittest.TestCase):
         self.assertEqual(manifest["missing_samples"][0]["kind"], "doc_vector")
         self.assertFalse(manifest["quality_claim"])
 
+    def test_explicit_doc_alias_from_beir_manifest_resolves_to_canonical_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = base_fixture(Path(tmp))
+            write_jsonl(
+                paths["dataset"] / "corpus.jsonl",
+                [
+                    {"_id": "2440787", "title": "", "text": "canonical positive"},
+                    {"_id": "doc-neg", "title": "", "text": "canonical negative"},
+                ],
+            )
+            write_jsonl(
+                paths["dataset"] / "queries.jsonl",
+                [
+                    {"_id": "query-canonical", "text": "alias query"},
+                ],
+            )
+            (paths["dataset"] / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "aliases": {
+                            "docs": {"2440787": ["4130251"]},
+                            "queries": {"query-canonical": ["query-alias"]},
+                        }
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            write_jsonl(
+                paths["hard"],
+                [
+                    {
+                        "row_id": "alias-row",
+                        "source": "fixture-alias",
+                        "query_id": "query-alias",
+                        "positive_doc_id": "4130251",
+                        "negatives": ["canonical negative"],
+                        "negative_doc_ids": ["doc-neg"],
+                    }
+                ],
+            )
+            write_jsonl(
+                paths["doc_vectors"],
+                [
+                    {"id": "2440787", "embedding": [1.0, 0.0]},
+                    {"id": "doc-neg", "embedding": [0.0, 1.0]},
+                ],
+            )
+            write_jsonl(
+                paths["query_vectors"],
+                [
+                    {"id": "query-canonical", "embedding": [1.0, 0.0]},
+                ],
+            )
+
+            completed = run_builder(paths)
+            rows = read_jsonl(paths["output"])
+            manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+
+        self.assertIn("examples_written=1", completed.stdout)
+        self.assertIn("dropped=0", completed.stdout)
+        self.assertEqual(len(rows), 1)
+        batch = rows[0]
+        self.assertEqual([query["id"] for query in batch["queries"]], ["query-canonical"])
+        self.assertEqual([doc["id"] for doc in batch["documents"]], ["2440787", "doc-neg"])
+        self.assertEqual(batch["examples"][0]["query_id"], "query-canonical")
+        self.assertEqual(batch["examples"][0]["positive_doc_id"], "2440787")
+        self.assertEqual(batch["examples"][0]["negative_doc_ids"], ["doc-neg"])
+        self.assertEqual(manifest["coverage"]["examples_written"], 1)
+        self.assertEqual(manifest["coverage"]["examples_dropped"], 0)
+        self.assertEqual(manifest["coverage"]["missing_query_text"], 0)
+        self.assertEqual(manifest["coverage"]["missing_doc_text"], 0)
+        self.assertEqual(manifest["coverage"]["missing_query_vector"], 0)
+        self.assertEqual(manifest["coverage"]["missing_doc_vector"], 0)
+
     def test_duplicate_query_starts_new_batch_before_batch_size_limit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             paths = base_fixture(Path(tmp))

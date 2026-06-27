@@ -190,6 +190,31 @@ def load_vectors(path: Path, normalize: bool) -> tuple[dict[str, list[float]], i
     return vectors, rows, zero_norm
 
 
+def load_manifest_aliases(dataset_dir: Path) -> tuple[dict[str, str], dict[str, str]]:
+    manifest_path = dataset_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return {}, {}
+    with manifest_path.open("r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    aliases = manifest.get("aliases") or {}
+
+    def invert(raw: Any) -> dict[str, str]:
+        alias_to_canonical: dict[str, str] = {}
+        if not isinstance(raw, dict):
+            return alias_to_canonical
+        for canonical, values in raw.items():
+            if not isinstance(values, list):
+                continue
+            canonical_id = str(canonical)
+            for value in values:
+                alias_id = str(value)
+                if alias_id and alias_id != canonical_id:
+                    alias_to_canonical[alias_id] = canonical_id
+        return alias_to_canonical
+
+    return invert(aliases.get("queries")), invert(aliases.get("docs"))
+
+
 def score_vectors(query_vector: list[float], doc_vector: list[float]) -> float:
     if len(query_vector) != len(doc_vector):
         raise ValueError(
@@ -244,10 +269,12 @@ def resolve_item(
     text: Any,
     text_to_id: dict[str, str],
     id_to_text: dict[str, str],
+    alias_to_canonical: dict[str, str],
 ) -> tuple[str | None, str]:
     item_id = str(explicit_id) if explicit_id not in (None, "") else ""
     normalized_text = stable_text(text)
     if item_id:
+        item_id = alias_to_canonical.get(item_id, item_id)
         if not normalized_text:
             normalized_text = id_to_text.get(item_id, "")
         return item_id, normalized_text
@@ -508,6 +535,7 @@ def main() -> int:
     doc_text_to_id, doc_id_to_text, doc_rows, duplicate_docs, empty_docs = load_text_maps(
         corpus_path, corpus_text, args.skip_empty_beir_text
     )
+    query_alias_to_canonical, doc_alias_to_canonical = load_manifest_aliases(args.dataset_dir)
     normalize_vectors = args.score == "cosine"
     doc_vectors, doc_vector_rows, zero_doc_vectors = load_vectors(args.doc_vectors, normalize_vectors)
     query_vectors, query_vector_rows, zero_query_vectors = load_vectors(
@@ -541,6 +569,7 @@ def main() -> int:
             text=row.get("query"),
             text_to_id=query_text_to_id,
             id_to_text=query_id_to_text,
+            alias_to_canonical=query_alias_to_canonical,
         )
         complete = True
         if query_id is None or not resolved_query_text:
@@ -588,6 +617,7 @@ def main() -> int:
                 text=text,
                 text_to_id=doc_text_to_id,
                 id_to_text=doc_id_to_text,
+                alias_to_canonical=doc_alias_to_canonical,
             )
             if doc_id is None or not resolved_doc_text:
                 missing_doc_text += 1
