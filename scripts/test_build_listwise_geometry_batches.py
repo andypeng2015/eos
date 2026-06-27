@@ -32,7 +32,9 @@ def base_fixture(root: Path, *, include_d3_vector: bool = True) -> dict[str, Pat
     doc_vectors = root / "doc-vectors.jsonl"
     query_vectors = root / "query-vectors.jsonl"
     output = root / "geometry.jsonl"
+    eval_output = root / "geometry.eval.jsonl"
     manifest = root / "manifest.json"
+    eval_manifest = root / "manifest.eval.json"
 
     write_jsonl(
         dataset / "corpus.jsonl",
@@ -91,8 +93,82 @@ def base_fixture(root: Path, *, include_d3_vector: bool = True) -> dict[str, Pat
         "doc_vectors": doc_vectors,
         "query_vectors": query_vectors,
         "output": output,
+        "eval_output": eval_output,
         "manifest": manifest,
+        "eval_manifest": eval_manifest,
     }
+
+
+def split_fixture(root: Path) -> dict[str, Path]:
+    paths = base_fixture(root)
+    write_jsonl(
+        paths["dataset"] / "corpus.jsonl",
+        [
+            {"_id": "d1", "title": "", "text": "positive one"},
+            {"_id": "d2", "title": "", "text": "shared document"},
+            {"_id": "d3", "title": "", "text": "diagonal negative"},
+            {"_id": "d4", "title": "", "text": "extra positive"},
+        ],
+    )
+    write_jsonl(
+        paths["dataset"] / "queries.jsonl",
+        [
+            {"_id": "q1", "text": "query one"},
+            {"_id": "q2", "text": "query two"},
+            {"_id": "q3", "text": "query three"},
+        ],
+    )
+    write_jsonl(
+        paths["hard"],
+        [
+            {
+                "row_id": "row-1",
+                "source": "fixture-a",
+                "query_id": "q1",
+                "positive_doc_id": "d1",
+                "negative_doc_ids": ["d2"],
+            },
+            {
+                "row_id": "row-2",
+                "source": "fixture-b",
+                "query_id": "q2",
+                "positive_doc_id": "d2",
+                "negative_doc_ids": ["d3"],
+            },
+            {
+                "row_id": "row-3",
+                "source": "fixture-c",
+                "query_id": "q1",
+                "positive_doc_id": "d4",
+                "negative_doc_ids": ["d3"],
+            },
+            {
+                "row_id": "row-4",
+                "source": "fixture-d",
+                "query_id": "q3",
+                "positive_doc_id": "d4",
+                "negative_doc_ids": ["d1"],
+            },
+        ],
+    )
+    write_jsonl(
+        paths["doc_vectors"],
+        [
+            {"id": "d1", "embedding": [1.0, 0.0]},
+            {"id": "d2", "embedding": [0.0, 1.0]},
+            {"id": "d3", "embedding": [1.0, 1.0]},
+            {"id": "d4", "embedding": [2.0, 1.0]},
+        ],
+    )
+    write_jsonl(
+        paths["query_vectors"],
+        [
+            {"id": "q1", "embedding": [1.0, 0.0]},
+            {"id": "q2", "embedding": [1.0, 1.0]},
+            {"id": "q3", "embedding": [0.0, 1.0]},
+        ],
+    )
+    return paths
 
 
 def run_builder(paths: dict[str, Path], *extra: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -136,6 +212,7 @@ class BuildListwiseGeometryBatchesTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         batch = rows[0]
         self.assertEqual(batch["schema"], "eos.listwise_geometry_batch.v1")
+        self.assertEqual(batch["batch_id"], "batch-000000")
         self.assertEqual(batch["teacher_model_id"], "fixture-teacher")
         self.assertEqual(batch["score"], "cosine")
         self.assertTrue(batch["normalized"])
@@ -182,6 +259,9 @@ class BuildListwiseGeometryBatchesTest(unittest.TestCase):
         self.assertEqual(manifest["coverage"]["documents_written"], 3)
         self.assertEqual(manifest["source_counts"], {"fixture-a": 1, "fixture-b": 1})
         self.assertIn("hard_negatives", manifest["sha256"])
+        self.assertEqual(manifest["split"], {"enabled": False})
+        self.assertEqual(manifest["train"]["examples_written"], 2)
+        self.assertEqual(manifest["eval"]["examples_written"], 0)
 
     def test_missing_vector_fails_by_default_or_drops_with_allow_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -258,6 +338,176 @@ class BuildListwiseGeometryBatchesTest(unittest.TestCase):
         self.assertEqual(rows[0]["examples"][0]["source"], "unknown")
         self.assertEqual(rows[0]["source_counts"], {"unknown": 1})
         self.assertEqual(manifest["source_counts"], {"unknown": 1})
+
+    def test_eval_count_query_split_is_deterministic_and_keeps_queries_disjoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            first = split_fixture(Path(tmp) / "first")
+            run_builder(
+                first,
+                "--eval-output-jsonl",
+                str(first["eval_output"]),
+                "--eval-manifest",
+                str(first["eval_manifest"]),
+                "--eval-count",
+                "2",
+                "--split-seed",
+                "17",
+            )
+            first_train = read_jsonl(first["output"])
+            first_eval = read_jsonl(first["eval_output"])
+            first_manifest = json.loads(first["manifest"].read_text(encoding="utf-8"))
+            first_eval_manifest = json.loads(first["eval_manifest"].read_text(encoding="utf-8"))
+
+            second = split_fixture(Path(tmp) / "second")
+            run_builder(
+                second,
+                "--eval-output-jsonl",
+                str(second["eval_output"]),
+                "--eval-manifest",
+                str(second["eval_manifest"]),
+                "--eval-count",
+                "2",
+                "--split-seed",
+                "17",
+            )
+            second_train = read_jsonl(second["output"])
+            second_eval = read_jsonl(second["eval_output"])
+
+        self.assertEqual(first_train, second_train)
+        self.assertEqual(first_eval, second_eval)
+        self.assertTrue(all(row["batch_id"].startswith("train-batch-") for row in first_train))
+        self.assertTrue(all(row["batch_id"].startswith("eval-batch-") for row in first_eval))
+
+        train_query_ids = {
+            example["query_id"]
+            for batch in first_train
+            for example in batch["examples"]
+        }
+        eval_query_ids = {
+            example["query_id"]
+            for batch in first_eval
+            for example in batch["examples"]
+        }
+        self.assertFalse(train_query_ids & eval_query_ids)
+        self.assertEqual(first_manifest, first_eval_manifest)
+        self.assertTrue(first_manifest["split"]["enabled"])
+        self.assertEqual(first_manifest["split"]["policy"], "count")
+        self.assertEqual(first_manifest["split"]["seed"], 17)
+        self.assertEqual(first_manifest["split"]["key"], "query_id")
+        self.assertEqual(first_manifest["split"]["target_eval_examples"], 2)
+        self.assertEqual(first_manifest["split"]["query_id_overlap_count"], 0)
+        self.assertEqual(first_manifest["coverage"]["examples_seen"], 4)
+        self.assertEqual(first_manifest["coverage"]["examples_written"], 4)
+        self.assertEqual(
+            first_manifest["train"]["examples_written"] + first_manifest["eval"]["examples_written"],
+            4,
+        )
+        self.assertIn("eval_output_jsonl", first_manifest["outputs"])
+        self.assertIn("eval_manifest", first_manifest["outputs"])
+        self.assertIn("hard_negatives", first_manifest["sha256"])
+
+    def test_eval_fraction_requires_eval_output_and_records_fraction_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = split_fixture(Path(tmp))
+            missing_output = run_builder(paths, "--eval-fraction", "0.5", check=False)
+            self.assertNotEqual(missing_output.returncode, 0)
+            self.assertIn("--eval-output-jsonl is required", missing_output.stderr)
+
+            run_builder(
+                paths,
+                "--eval-output-jsonl",
+                str(paths["eval_output"]),
+                "--eval-fraction",
+                "0.5",
+                "--split-seed",
+                "3",
+            )
+            manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["split"]["policy"], "fraction")
+        self.assertEqual(manifest["split"]["eval_fraction"], 0.5)
+        self.assertEqual(manifest["split"]["target_eval_examples"], 2)
+
+    def test_eval_fraction_low_count_rounds_up_to_non_empty_eval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = base_fixture(Path(tmp))
+            run_builder(
+                paths,
+                "--eval-output-jsonl",
+                str(paths["eval_output"]),
+                "--eval-fraction",
+                "0.01",
+                "--split-seed",
+                "5",
+            )
+            manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+            train_rows = read_jsonl(paths["output"])
+            eval_rows = read_jsonl(paths["eval_output"])
+
+        self.assertEqual(manifest["split"]["policy"], "fraction")
+        self.assertEqual(manifest["split"]["target_eval_examples"], 1)
+        self.assertEqual(manifest["train"]["examples_written"], 1)
+        self.assertEqual(manifest["eval"]["examples_written"], 1)
+        self.assertEqual(sum(len(batch["examples"]) for batch in train_rows), 1)
+        self.assertEqual(sum(len(batch["examples"]) for batch in eval_rows), 1)
+
+    def test_eval_count_equal_complete_examples_fails_before_writing_split_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = base_fixture(Path(tmp))
+            completed = run_builder(
+                paths,
+                "--eval-output-jsonl",
+                str(paths["eval_output"]),
+                "--eval-count",
+                "2",
+                check=False,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("eval split requested", completed.stderr)
+            self.assertIn("--eval-count=2", completed.stderr)
+            self.assertIn("complete_examples=2", completed.stderr)
+            self.assertIn("train split would be empty", completed.stderr)
+            self.assertFalse(paths["output"].exists())
+            self.assertFalse(paths["eval_output"].exists())
+
+    def test_split_after_allow_missing_requires_two_complete_examples(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = base_fixture(Path(tmp), include_d3_vector=False)
+            completed = run_builder(
+                paths,
+                "--allow-missing",
+                "--eval-output-jsonl",
+                str(paths["eval_output"]),
+                "--eval-fraction",
+                "0.5",
+                check=False,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("eval split requested", completed.stderr)
+            self.assertIn("complete_examples=1", completed.stderr)
+            self.assertIn("need at least 2 complete examples", completed.stderr)
+
+    def test_row_id_split_records_duplicate_query_overlap_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = split_fixture(Path(tmp))
+            run_builder(
+                paths,
+                "--eval-output-jsonl",
+                str(paths["eval_output"]),
+                "--eval-count",
+                "2",
+                "--split-key",
+                "row_id",
+                "--split-seed",
+                "2",
+            )
+            manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["split"]["key"], "row_id")
+        self.assertEqual(manifest["split"]["query_id_overlap_count"], 1)
+        self.assertEqual(manifest["split"]["query_id_overlap_sample"], ["q1"])
 
 
 if __name__ == "__main__":

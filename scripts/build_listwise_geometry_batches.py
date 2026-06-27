@@ -36,6 +36,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-jsonl", required=True, type=Path)
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument(
+        "--eval-output-jsonl",
+        type=Path,
+        help="Optional held-out eval JSONL. Requires --eval-fraction or --eval-count.",
+    )
+    parser.add_argument(
+        "--eval-manifest",
+        type=Path,
+        help="Optional extra copy of the manifest for eval split auditing.",
+    )
+    parser.add_argument(
         "--model-id",
         "--teacher-model-id",
         dest="model_id",
@@ -65,6 +75,30 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=20,
         help="Maximum missing coverage samples to include in the manifest.",
+    )
+    parser.add_argument(
+        "--eval-fraction",
+        type=float,
+        default=0.0,
+        help="Fraction of complete examples to assign to held-out eval; 0 disables splitting.",
+    )
+    parser.add_argument(
+        "--eval-count",
+        type=int,
+        default=0,
+        help="Target number of complete examples to assign to held-out eval; 0 disables count splitting.",
+    )
+    parser.add_argument(
+        "--split-seed",
+        type=int,
+        default=0,
+        help="Deterministic seed used for train/eval split assignment.",
+    )
+    parser.add_argument(
+        "--split-key",
+        choices=("query_id", "row_id"),
+        default="query_id",
+        help="Key used for split assignment. query_id avoids train/eval query overlap where possible.",
     )
     return parser.parse_args()
 
@@ -175,6 +209,11 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def stable_split_digest(seed: int, key: str) -> str:
+    payload = f"{seed}\0{key}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def add_missing_sample(
     samples: list[dict[str, Any]],
     limit: int,
@@ -244,6 +283,7 @@ def finalize_batch(
     batch_index: int,
     model_id: str,
     score: str,
+    batch_id_prefix: str = "batch",
 ) -> dict[str, Any]:
     doc_order: list[str] = []
     doc_text: dict[str, str] = {}
@@ -273,7 +313,7 @@ def finalize_batch(
 
     row: dict[str, Any] = {
         "schema": SCHEMA,
-        "batch_id": f"batch-{batch_index:06d}",
+        "batch_id": f"{batch_id_prefix}-{batch_index:06d}",
         "source_counts": dict(Counter(source_label(item["raw"]) for item in batch_examples)),
         "examples": [provenance(item["raw"], item) for item in batch_examples],
         "queries": queries,
@@ -290,6 +330,140 @@ def finalize_batch(
     return row
 
 
+def write_batches(
+    *,
+    examples: list[dict[str, Any]],
+    output_jsonl: Path,
+    batch_size: int,
+    model_id: str,
+    score: str,
+    batch_id_prefix: str = "batch",
+) -> dict[str, Any]:
+    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    batches_written = 0
+    queries_written = 0
+    documents_written = 0
+    written_query_ids: set[str] = set()
+    written_doc_ids: set[str] = set()
+    source_counts: Counter[str] = Counter()
+    batch_examples: list[dict[str, Any]] = []
+
+    def flush(out_handle) -> None:
+        nonlocal batch_examples, batches_written, queries_written, documents_written
+        if not batch_examples:
+            return
+        batch_row = finalize_batch(
+            batch_examples=batch_examples,
+            batch_index=batches_written,
+            model_id=model_id,
+            score=score,
+            batch_id_prefix=batch_id_prefix,
+        )
+        out_handle.write(json.dumps(batch_row, ensure_ascii=False) + "\n")
+        batches_written += 1
+        queries_written += len(batch_row["queries"])
+        documents_written += len(batch_row["documents"])
+        batch_examples = []
+
+    with output_jsonl.open("w", encoding="utf-8") as out_handle:
+        for item in examples:
+            if any(batch_item["query_id"] == item["query_id"] for batch_item in batch_examples):
+                flush(out_handle)
+
+            source_counts[source_label(item["raw"])] += 1
+            batch_examples.append(item)
+            written_query_ids.add(item["query_id"])
+            written_doc_ids.update(doc_id for doc_id, _, _ in item["documents"])
+
+            if len(batch_examples) >= batch_size:
+                flush(out_handle)
+
+        flush(out_handle)
+
+    return {
+        "examples_written": len(examples),
+        "batches_written": batches_written,
+        "queries_written": queries_written,
+        "documents_written": documents_written,
+        "unique_query_ids_written": len(written_query_ids),
+        "unique_doc_ids_written": len(written_doc_ids),
+        "source_counts": dict(source_counts),
+    }
+
+
+def split_examples(
+    examples: list[dict[str, Any]],
+    *,
+    eval_fraction: float,
+    eval_count: int,
+    split_seed: int,
+    split_key: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    complete_count = len(examples)
+    if complete_count < 2:
+        raise SystemExit(
+            "eval split requested but complete_examples="
+            f"{complete_count}; need at least 2 complete examples for non-empty train and eval splits"
+        )
+    if eval_count > 0:
+        if eval_count >= complete_count:
+            raise SystemExit(
+                "eval split requested with --eval-count="
+                f"{eval_count} and complete_examples={complete_count}; train split would be empty"
+            )
+        target_eval_count = eval_count
+        policy = "count"
+    else:
+        target_eval_count = min(complete_count, math.ceil(complete_count * eval_fraction))
+        policy = "fraction"
+
+    def item_split_key(item: dict[str, Any]) -> str:
+        if split_key == "query_id":
+            return item["query_id"]
+        return str(provenance(item["raw"], item).get("row_id", ""))
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in examples:
+        key = item_split_key(item)
+        groups.setdefault(key, []).append(item)
+
+    ordered_keys = sorted(groups, key=lambda key: (stable_split_digest(split_seed, key), key))
+    eval_keys: set[str] = set()
+    eval_examples_count = 0
+    for key in ordered_keys:
+        if eval_examples_count >= target_eval_count:
+            break
+        eval_keys.add(key)
+        eval_examples_count += len(groups[key])
+
+    train_examples = [item for item in examples if item_split_key(item) not in eval_keys]
+    eval_examples = [item for item in examples if item_split_key(item) in eval_keys]
+    if not train_examples or not eval_examples:
+        raise SystemExit(
+            "eval split requested but produced an empty "
+            f"{'train' if not train_examples else 'eval'} split "
+            f"(complete_examples={complete_count}, target_eval_examples={target_eval_count}, "
+            f"split_key={split_key!r}); choose a smaller target or a more granular --split-key"
+        )
+    train_query_ids = {item["query_id"] for item in train_examples}
+    eval_query_ids = {item["query_id"] for item in eval_examples}
+    overlap = sorted(train_query_ids & eval_query_ids)
+
+    return train_examples, eval_examples, {
+        "enabled": True,
+        "policy": policy,
+        "seed": split_seed,
+        "key": split_key,
+        "eval_fraction": eval_fraction,
+        "eval_count": eval_count,
+        "target_eval_examples": target_eval_count,
+        "group_count": len(groups),
+        "eval_group_count": len(eval_keys),
+        "query_id_overlap_count": len(overlap),
+        "query_id_overlap_sample": overlap[:20],
+    }
+
+
 def main() -> int:
     args = parse_args()
     if args.batch_size <= 0:
@@ -298,6 +472,19 @@ def main() -> int:
         raise SystemExit("--max-examples must be non-negative")
     if args.missing_sample_limit < 0:
         raise SystemExit("--missing-sample-limit must be non-negative")
+    if not 0.0 <= args.eval_fraction <= 1.0:
+        raise SystemExit("--eval-fraction must be between 0.0 and 1.0")
+    if args.eval_count < 0:
+        raise SystemExit("--eval-count must be non-negative")
+    if args.eval_fraction > 0.0 and args.eval_count > 0:
+        raise SystemExit("use only one of --eval-fraction or --eval-count")
+    split_requested = args.eval_fraction > 0.0 or args.eval_count > 0
+    if split_requested and args.eval_output_jsonl is None:
+        raise SystemExit("--eval-output-jsonl is required when an eval split is requested")
+    if args.eval_output_jsonl is not None and not split_requested:
+        raise SystemExit("--eval-output-jsonl requires --eval-fraction or --eval-count")
+    if args.eval_manifest is not None and args.eval_output_jsonl is None:
+        raise SystemExit("--eval-manifest requires --eval-output-jsonl")
 
     corpus_path = args.dataset_dir / "corpus.jsonl"
     queries_path = args.dataset_dir / "queries.jsonl"
@@ -311,8 +498,9 @@ def main() -> int:
         if not path.is_file():
             raise SystemExit(f"missing input file: {path}")
 
-    args.output_jsonl.parent.mkdir(parents=True, exist_ok=True)
     args.manifest.parent.mkdir(parents=True, exist_ok=True)
+    if args.eval_manifest is not None:
+        args.eval_manifest.parent.mkdir(parents=True, exist_ok=True)
 
     query_text_to_id, query_id_to_text, query_rows, duplicate_queries, empty_queries = load_text_maps(
         queries_path, query_text, args.skip_empty_beir_text
@@ -327,20 +515,13 @@ def main() -> int:
     )
 
     examples_seen = 0
-    examples_written = 0
     examples_dropped = 0
-    batches_written = 0
     missing_query_text = 0
     missing_doc_text = 0
     missing_query_vector = 0
     missing_doc_vector = 0
-    source_counts: Counter[str] = Counter()
     missing_samples: list[dict[str, Any]] = []
-    batch_examples: list[dict[str, Any]] = []
-    written_query_ids: set[str] = set()
-    written_doc_ids: set[str] = set()
-    queries_written = 0
-    documents_written = 0
+    complete_examples: list[dict[str, Any]] = []
 
     def handle_incomplete(line_number: int, reason: str) -> None:
         if not args.allow_missing:
@@ -349,173 +530,183 @@ def main() -> int:
                 "for listwise geometry example; use --allow-missing to drop incomplete examples"
             )
 
-    with args.output_jsonl.open("w", encoding="utf-8") as out_handle:
-        for line_number, row in iter_jsonl(args.hard_negatives):
-            if args.max_examples > 0 and examples_seen >= args.max_examples:
-                break
-            example_index = examples_seen
-            examples_seen += 1
+    for line_number, row in iter_jsonl(args.hard_negatives):
+        if args.max_examples > 0 and examples_seen >= args.max_examples:
+            break
+        example_index = examples_seen
+        examples_seen += 1
 
-            query_id, resolved_query_text = resolve_item(
-                explicit_id=row.get("query_id"),
-                text=row.get("query"),
-                text_to_id=query_text_to_id,
-                id_to_text=query_id_to_text,
+        query_id, resolved_query_text = resolve_item(
+            explicit_id=row.get("query_id"),
+            text=row.get("query"),
+            text_to_id=query_text_to_id,
+            id_to_text=query_id_to_text,
+        )
+        complete = True
+        if query_id is None or not resolved_query_text:
+            missing_query_text += 1
+            complete = False
+            add_missing_sample(
+                missing_samples,
+                args.missing_sample_limit,
+                kind="query_text",
+                example_index=example_index,
+                line_number=line_number,
+                item_id=str(row.get("query_id") or ""),
+                text=str(row.get("query") or ""),
             )
-            complete = True
-            if query_id is None or not resolved_query_text:
-                missing_query_text += 1
+        query_vector = query_vectors.get(query_id or "")
+        if query_id is not None and query_vector is None:
+            missing_query_vector += 1
+            complete = False
+            add_missing_sample(
+                missing_samples,
+                args.missing_sample_limit,
+                kind="query_vector",
+                example_index=example_index,
+                line_number=line_number,
+                item_id=query_id,
+                text=resolved_query_text,
+            )
+
+        negatives = [str(value or "") for value in row.get("negatives") or []]
+        negative_ids_raw = row.get("negative_doc_ids") or []
+        if not isinstance(negative_ids_raw, list):
+            negative_ids_raw = []
+        candidate_specs = [
+            ("positive", row.get("positive_doc_id"), row.get("positive")),
+        ]
+        for idx, negative_text in enumerate(negatives):
+            explicit_negative_id = negative_ids_raw[idx] if idx < len(negative_ids_raw) else None
+            candidate_specs.append(("negative", explicit_negative_id, negative_text))
+
+        resolved_docs: list[tuple[str, str, str]] = []
+        doc_vector_map: dict[str, list[float]] = {}
+        for role, explicit_doc_id, text in candidate_specs:
+            doc_id, resolved_doc_text = resolve_item(
+                explicit_id=explicit_doc_id,
+                text=text,
+                text_to_id=doc_text_to_id,
+                id_to_text=doc_id_to_text,
+            )
+            if doc_id is None or not resolved_doc_text:
+                missing_doc_text += 1
                 complete = False
                 add_missing_sample(
                     missing_samples,
                     args.missing_sample_limit,
-                    kind="query_text",
+                    kind="doc_text",
                     example_index=example_index,
                     line_number=line_number,
-                    item_id=str(row.get("query_id") or ""),
-                    text=str(row.get("query") or ""),
+                    item_id=str(explicit_doc_id or ""),
+                    text=str(text or ""),
                 )
-            query_vector = query_vectors.get(query_id or "")
-            if query_id is not None and query_vector is None:
-                missing_query_vector += 1
-                complete = False
-                add_missing_sample(
-                    missing_samples,
-                    args.missing_sample_limit,
-                    kind="query_vector",
-                    example_index=example_index,
-                    line_number=line_number,
-                    item_id=query_id,
-                    text=resolved_query_text,
-                )
-
-            negatives = [str(value or "") for value in row.get("negatives") or []]
-            negative_ids_raw = row.get("negative_doc_ids") or []
-            if not isinstance(negative_ids_raw, list):
-                negative_ids_raw = []
-            candidate_specs = [
-                ("positive", row.get("positive_doc_id"), row.get("positive")),
-            ]
-            for idx, negative_text in enumerate(negatives):
-                explicit_negative_id = negative_ids_raw[idx] if idx < len(negative_ids_raw) else None
-                candidate_specs.append(("negative", explicit_negative_id, negative_text))
-
-            resolved_docs: list[tuple[str, str, str]] = []
-            doc_vector_map: dict[str, list[float]] = {}
-            for role, explicit_doc_id, text in candidate_specs:
-                doc_id, resolved_doc_text = resolve_item(
-                    explicit_id=explicit_doc_id,
-                    text=text,
-                    text_to_id=doc_text_to_id,
-                    id_to_text=doc_id_to_text,
-                )
-                if doc_id is None or not resolved_doc_text:
-                    missing_doc_text += 1
-                    complete = False
-                    add_missing_sample(
-                        missing_samples,
-                        args.missing_sample_limit,
-                        kind="doc_text",
-                        example_index=example_index,
-                        line_number=line_number,
-                        item_id=str(explicit_doc_id or ""),
-                        text=str(text or ""),
-                    )
-                    continue
-                doc_vector = doc_vectors.get(doc_id)
-                if doc_vector is None:
-                    missing_doc_vector += 1
-                    complete = False
-                    add_missing_sample(
-                        missing_samples,
-                        args.missing_sample_limit,
-                        kind="doc_vector",
-                        example_index=example_index,
-                        line_number=line_number,
-                        item_id=doc_id,
-                        text=resolved_doc_text,
-                    )
-                    continue
-                resolved_docs.append((doc_id, resolved_doc_text, role))
-                doc_vector_map[doc_id] = doc_vector
-
-            if complete and query_vector is not None:
-                try:
-                    for doc_id, _, _ in resolved_docs:
-                        score_vectors(query_vector, doc_vector_map[doc_id])
-                except ValueError as exc:
-                    complete = False
-                    add_missing_sample(
-                        missing_samples,
-                        args.missing_sample_limit,
-                        kind="vector_score",
-                        example_index=example_index,
-                        line_number=line_number,
-                        text=str(exc),
-                    )
-
-            if not complete:
-                examples_dropped += 1
-                handle_incomplete(line_number, "missing text/vector")
                 continue
-
-            positive_doc_id = resolved_docs[0][0]
-            negative_doc_ids = [doc_id for doc_id, _, role in resolved_docs if role == "negative"]
-            if any(item["query_id"] == query_id for item in batch_examples):
-                batch_row = finalize_batch(
-                    batch_examples=batch_examples,
-                    batch_index=batches_written,
-                    model_id=args.model_id,
-                    score=args.score,
+            doc_vector = doc_vectors.get(doc_id)
+            if doc_vector is None:
+                missing_doc_vector += 1
+                complete = False
+                add_missing_sample(
+                    missing_samples,
+                    args.missing_sample_limit,
+                    kind="doc_vector",
+                    example_index=example_index,
+                    line_number=line_number,
+                    item_id=doc_id,
+                    text=resolved_doc_text,
                 )
-                out_handle.write(json.dumps(batch_row, ensure_ascii=False) + "\n")
-                batches_written += 1
-                queries_written += len(batch_row["queries"])
-                documents_written += len(batch_row["documents"])
-                batch_examples = []
+                continue
+            resolved_docs.append((doc_id, resolved_doc_text, role))
+            doc_vector_map[doc_id] = doc_vector
 
-            source_counts[source_label(row)] += 1
-            batch_examples.append(
-                {
-                    "raw": row,
-                    "example_index": example_index,
-                    "query_id": query_id,
-                    "query_text": resolved_query_text,
-                    "query_vector": query_vector,
-                    "positive_doc_id": positive_doc_id,
-                    "negative_doc_ids": negative_doc_ids,
-                    "documents": resolved_docs,
-                    "doc_vectors": doc_vector_map,
-                }
-            )
-            examples_written += 1
-            written_query_ids.add(query_id)
-            written_doc_ids.update(doc_id for doc_id, _, _ in resolved_docs)
-
-            if len(batch_examples) >= args.batch_size:
-                batch_row = finalize_batch(
-                    batch_examples=batch_examples,
-                    batch_index=batches_written,
-                    model_id=args.model_id,
-                    score=args.score,
+        if complete and query_vector is not None:
+            try:
+                for doc_id, _, _ in resolved_docs:
+                    score_vectors(query_vector, doc_vector_map[doc_id])
+            except ValueError as exc:
+                complete = False
+                add_missing_sample(
+                    missing_samples,
+                    args.missing_sample_limit,
+                    kind="vector_score",
+                    example_index=example_index,
+                    line_number=line_number,
+                    text=str(exc),
                 )
-                out_handle.write(json.dumps(batch_row, ensure_ascii=False) + "\n")
-                batches_written += 1
-                queries_written += len(batch_row["queries"])
-                documents_written += len(batch_row["documents"])
-                batch_examples = []
 
-        if batch_examples:
-            batch_row = finalize_batch(
-                batch_examples=batch_examples,
-                batch_index=batches_written,
-                model_id=args.model_id,
-                score=args.score,
-            )
-            out_handle.write(json.dumps(batch_row, ensure_ascii=False) + "\n")
-            batches_written += 1
-            queries_written += len(batch_row["queries"])
-            documents_written += len(batch_row["documents"])
+        if not complete:
+            examples_dropped += 1
+            handle_incomplete(line_number, "missing text/vector")
+            continue
+
+        positive_doc_id = resolved_docs[0][0]
+        negative_doc_ids = [doc_id for doc_id, _, role in resolved_docs if role == "negative"]
+        complete_examples.append(
+            {
+                "raw": row,
+                "example_index": example_index,
+                "query_id": query_id,
+                "query_text": resolved_query_text,
+                "query_vector": query_vector,
+                "positive_doc_id": positive_doc_id,
+                "negative_doc_ids": negative_doc_ids,
+                "documents": resolved_docs,
+                "doc_vectors": doc_vector_map,
+            }
+        )
+
+    if split_requested:
+        train_examples, eval_examples, split_manifest = split_examples(
+            complete_examples,
+            eval_fraction=args.eval_fraction,
+            eval_count=args.eval_count,
+            split_seed=args.split_seed,
+            split_key=args.split_key,
+        )
+        train_stats = write_batches(
+            examples=train_examples,
+            output_jsonl=args.output_jsonl,
+            batch_size=args.batch_size,
+            model_id=args.model_id,
+            score=args.score,
+            batch_id_prefix="train-batch",
+        )
+        eval_stats = write_batches(
+            examples=eval_examples,
+            output_jsonl=args.eval_output_jsonl,
+            batch_size=args.batch_size,
+            model_id=args.model_id,
+            score=args.score,
+            batch_id_prefix="eval-batch",
+        )
+    else:
+        train_examples = complete_examples
+        eval_examples = []
+        split_manifest = {"enabled": False}
+        train_stats = write_batches(
+            examples=train_examples,
+            output_jsonl=args.output_jsonl,
+            batch_size=args.batch_size,
+            model_id=args.model_id,
+            score=args.score,
+        )
+        eval_stats = {
+            "examples_written": 0,
+            "batches_written": 0,
+            "queries_written": 0,
+            "documents_written": 0,
+            "unique_query_ids_written": 0,
+            "unique_doc_ids_written": 0,
+            "source_counts": {},
+        }
+
+    examples_written = train_stats["examples_written"] + eval_stats["examples_written"]
+    batches_written = train_stats["batches_written"] + eval_stats["batches_written"]
+    queries_written = train_stats["queries_written"] + eval_stats["queries_written"]
+    documents_written = train_stats["documents_written"] + eval_stats["documents_written"]
+    all_query_ids = {item["query_id"] for item in complete_examples}
+    all_doc_ids = {doc_id for item in complete_examples for doc_id, _, _ in item["documents"]}
+    source_counts = Counter(source_label(item["raw"]) for item in complete_examples)
 
     manifest: dict[str, Any] = {
         "schema": MANIFEST_SCHEMA,
@@ -556,13 +747,16 @@ def main() -> int:
             "batches_written": batches_written,
             "queries_written": queries_written,
             "documents_written": documents_written,
-            "unique_query_ids_written": len(written_query_ids),
-            "unique_doc_ids_written": len(written_doc_ids),
+            "unique_query_ids_written": len(all_query_ids),
+            "unique_doc_ids_written": len(all_doc_ids),
             "missing_query_text": missing_query_text,
             "missing_doc_text": missing_doc_text,
             "missing_query_vector": missing_query_vector,
             "missing_doc_vector": missing_doc_vector,
         },
+        "split": split_manifest,
+        "train": train_stats,
+        "eval": eval_stats,
         "source_counts": dict(source_counts),
         "beir": {
             "query_rows": query_rows,
@@ -580,9 +774,18 @@ def main() -> int:
         },
         "missing_samples": missing_samples,
     }
+    if args.eval_output_jsonl is not None:
+        manifest["outputs"]["eval_output_jsonl"] = str(args.eval_output_jsonl)
+    if args.eval_manifest is not None:
+        manifest["outputs"]["eval_manifest"] = str(args.eval_manifest)
+
     with args.manifest.open("w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2, sort_keys=True)
         handle.write("\n")
+    if args.eval_manifest is not None:
+        with args.eval_manifest.open("w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2, sort_keys=True)
+            handle.write("\n")
 
     print(
         "built listwise geometry batches: "
@@ -590,7 +793,11 @@ def main() -> int:
         f"dropped={examples_dropped} batches={batches_written}"
     )
     print(f"output_jsonl: {args.output_jsonl}")
+    if args.eval_output_jsonl is not None:
+        print(f"eval_output_jsonl: {args.eval_output_jsonl}")
     print(f"manifest: {args.manifest}")
+    if args.eval_manifest is not None:
+        print(f"eval_manifest: {args.eval_manifest}")
     return 0
 
 
