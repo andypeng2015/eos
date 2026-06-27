@@ -278,7 +278,7 @@ func inferSemanticCallType(call *syntax.CallExpr, callable *syntax.CallableDecl,
 			}, diags
 		}
 		if isRank2Tensor(args[0]) && isRank2Tensor(args[1]) {
-			if args[0].Tensor.Shape[0].Name == args[1].Tensor.Shape[0].Name {
+			if sameSymbolicDim(args[0].Tensor.Shape[0].Name, args[1].Tensor.Shape[0].Name) {
 				return hir.Type{
 					Kind: hir.TypeTensor,
 					Tensor: &hir.TensorType{
@@ -846,6 +846,26 @@ func sameDimShape(a, b []hir.DimExpr) bool {
 	}
 	for i := range a {
 		if a[i].Name != b[i].Name {
+			return false
+		}
+	}
+	return true
+}
+
+func sameSymbolicDim(a, b string) bool {
+	if a != b {
+		return false
+	}
+	return !isConcreteDim(a)
+}
+
+func isConcreteDim(dim string) bool {
+	dim = strings.TrimSpace(dim)
+	if dim == "" {
+		return false
+	}
+	for _, r := range dim {
+		if r < '0' || r > '9' {
 			return false
 		}
 	}

@@ -40,7 +40,7 @@ func executeStep(ctx context.Context, mod *eosartifact.Module, entry eosartifact
 		if err != nil {
 			return nil, "", err
 		}
-		out, err := gatherTensor(table, indices, resolveStepOutputType(mod, entry, step, 0, env))
+		out, err := gatherTensor(table, indices, resolveStepOutputType(mod, entry, step, 0, env), gatherModeOutputType(step.Attributes))
 		if err != nil {
 			return nil, "", err
 		}
@@ -1691,10 +1691,30 @@ func meanPoolMaskedTensor(in, mask *Tensor) (*Tensor, error) {
 }
 
 func expectedTensorRank(outTypes ...eosartifact.ValueType) int {
-	if len(outTypes) == 0 || outTypes[0].Tensor == nil {
-		return 0
+	rank := 0
+	for _, outType := range outTypes {
+		if outType.Tensor == nil {
+			continue
+		}
+		if n := len(outType.Tensor.Shape); n > rank {
+			rank = n
+		}
 	}
-	return len(outTypes[0].Tensor.Shape)
+	return rank
+}
+
+func gatherModeOutputType(attrs map[string]string) eosartifact.ValueType {
+	if attrs == nil {
+		return eosartifact.ValueType{}
+	}
+	switch attrs["mode"] {
+	case "shared":
+		return eosartifact.ValueType{Kind: eosartifact.ValueTensor, Tensor: &eosartifact.TensorType{Shape: []string{"B", "T", "D"}}}
+	case "batched":
+		return eosartifact.ValueType{Kind: eosartifact.ValueTensor, Tensor: &eosartifact.TensorType{Shape: []string{"B", "T"}}}
+	default:
+		return eosartifact.ValueType{}
+	}
 }
 
 func tensorForDType(dtype string, shape []int, elements int) *Tensor {

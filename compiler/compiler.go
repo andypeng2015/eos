@@ -1815,17 +1815,25 @@ func inferCallPlan(call *syntax.CallExpr, output string, env map[string]hir.Type
 		if table.Tensor != nil && index.Tensor != nil && len(table.Tensor.Shape) == 2 && len(index.Tensor.Shape) == 1 {
 			out.Tensor.Shape = []hir.DimExpr{{Name: index.Tensor.Shape[0].Name}, {Name: table.Tensor.Shape[1].Name}}
 		}
+		gatherMode := ""
 		if table.Tensor != nil && index.Tensor != nil && len(table.Tensor.Shape) == 2 && len(index.Tensor.Shape) == 2 {
-			if table.Tensor.Shape[0].Name == index.Tensor.Shape[0].Name {
+			if sameSymbolicDim(table.Tensor.Shape[0].Name, index.Tensor.Shape[0].Name) {
 				out.Tensor.Shape = []hir.DimExpr{{Name: index.Tensor.Shape[0].Name}, {Name: index.Tensor.Shape[1].Name}}
+				gatherMode = "batched"
 			} else {
 				out.Tensor.Shape = []hir.DimExpr{{Name: index.Tensor.Shape[0].Name}, {Name: index.Tensor.Shape[1].Name}, {Name: table.Tensor.Shape[1].Name}}
+				gatherMode = "shared"
 			}
 		}
 		if table.Tensor != nil && index.Tensor != nil && len(table.Tensor.Shape) == 3 && len(index.Tensor.Shape) == 2 {
 			out.Tensor.Shape = []hir.DimExpr{{Name: index.Tensor.Shape[0].Name}, {Name: index.Tensor.Shape[1].Name}, {Name: table.Tensor.Shape[2].Name}}
+			gatherMode = "batched"
 		}
-		steps = append(steps, eosartifact.Step{Kind: eosartifact.StepGather, Name: call.Callee, Inputs: inputs, Outputs: maybeOutput(output)})
+		attrs := map[string]string(nil)
+		if gatherMode != "" {
+			attrs = map[string]string{"mode": gatherMode}
+		}
+		steps = append(steps, eosartifact.Step{Kind: eosartifact.StepGather, Name: call.Callee, Inputs: inputs, Outputs: maybeOutput(output), Attributes: attrs})
 		buffers = appendOutputBuffer(buffers, output, out)
 		return out, steps, buffers, newKernels, nil
 	case call.Callee == "pack_candidates":
@@ -2218,7 +2226,7 @@ func inferExprType(expr syntax.Expr, env map[string]hir.Type) (hir.Type, error) 
 				}, nil
 			}
 			if len(argTypes) == 2 && isRank2HIRTensor(argTypes[0]) && isRank2HIRTensor(argTypes[1]) {
-				if argTypes[0].Tensor.Shape[0].Name == argTypes[1].Tensor.Shape[0].Name {
+				if sameSymbolicDim(argTypes[0].Tensor.Shape[0].Name, argTypes[1].Tensor.Shape[0].Name) {
 					return hir.Type{
 						Kind: hir.TypeTensor,
 						Tensor: &hir.TensorType{
