@@ -81,6 +81,11 @@ func TestPackageManifestRoundTripAndVerify(t *testing.T) {
 		CommercialUseAllowed:         false,
 		SourceArtifactHashes:         []string{"lg-hash-b", "lg-hash-a"},
 		ListwiseGeometryBatchCount:   5,
+		AutoClearedObjectives:        []string{"turboquant_compact_objectives"},
+		IsolatedInheritedObjectives: []string{
+			"turboquant_compact_objectives",
+			"turboquant_prefix_seed",
+		},
 	}
 	path := filepath.Join(dir, "tiny_embed.package.mll")
 	if err := manifest.WriteFile(path); err != nil {
@@ -115,6 +120,12 @@ func TestPackageManifestRoundTripAndVerify(t *testing.T) {
 	}
 	if loaded.ListwiseGeometry.ListwiseGeometryBatchCount != 5 || len(loaded.ListwiseGeometry.SourceArtifactHashes) != 2 || loaded.ListwiseGeometry.SourceArtifactHashes[0] != "lg-hash-a" || loaded.ListwiseGeometry.SourceArtifactHashes[1] != "lg-hash-b" {
 		t.Fatalf("listwise geometry provenance mismatch: %+v", loaded.ListwiseGeometry)
+	}
+	if len(loaded.ListwiseGeometry.AutoClearedObjectives) != 1 || loaded.ListwiseGeometry.AutoClearedObjectives[0] != "turboquant_compact_objectives" {
+		t.Fatalf("listwise auto-cleared objectives = %v", loaded.ListwiseGeometry.AutoClearedObjectives)
+	}
+	if len(loaded.ListwiseGeometry.IsolatedInheritedObjectives) != 2 || loaded.ListwiseGeometry.IsolatedInheritedObjectives[0] != "turboquant_compact_objectives" || loaded.ListwiseGeometry.IsolatedInheritedObjectives[1] != "turboquant_prefix_seed" {
+		t.Fatalf("listwise isolated inherited objectives = %v", loaded.ListwiseGeometry.IsolatedInheritedObjectives)
 	}
 	if err := os.WriteFile(weightPath, []byte("tampered\n"), 0o644); err != nil {
 		t.Fatalf("tamper weights: %v", err)

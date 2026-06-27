@@ -151,6 +151,8 @@ func encodePackageManifestMLL(manifest PackageManifest) ([]byte, error) {
 			headBoolMeta(strg, "listwise_geometry_commercial_use_allowed", manifest.ListwiseGeometry.CommercialUseAllowed),
 			headStringMeta(strg, "listwise_geometry_source_artifact_hashes", formatScoreSpectrumSourceHashes(manifest.ListwiseGeometry.SourceArtifactHashes)),
 			headIntMeta(strg, "listwise_geometry_batch_count", int64(manifest.ListwiseGeometry.ListwiseGeometryBatchCount)),
+			headStringMeta(strg, "listwise_geometry_auto_cleared_objectives", formatScoreSpectrumObjectiveNames(manifest.ListwiseGeometry.AutoClearedObjectives)),
+			headStringMeta(strg, "listwise_geometry_isolated_inherited_objectives", formatScoreSpectrumObjectiveNames(manifest.ListwiseGeometry.IsolatedInheritedObjectives)),
 		},
 	}
 
@@ -435,7 +437,17 @@ func decodePackageManifestMLL(data []byte) (PackageManifest, error) {
 	} else {
 		listwisePolicy.ListwiseGeometryBatchCount = int(value)
 	}
-	listwisePolicy.ListwiseGeometryTrain = listwisePolicy.ListwiseGeometryResearchOnly || listwisePolicy.TrainAllowedForResearch || listwisePolicy.ReleaseTrainAllowed || listwisePolicy.CommercialUseAllowed || listwisePolicy.ListwiseGeometryBatchCount > 0 || len(listwisePolicy.SourceArtifactHashes) > 0
+	if value, err := readOptionalString("listwise_geometry_auto_cleared_objectives"); err != nil {
+		return PackageManifest{}, err
+	} else {
+		listwisePolicy.AutoClearedObjectives = parseScoreSpectrumObjectiveNames(value)
+	}
+	if value, err := readOptionalString("listwise_geometry_isolated_inherited_objectives"); err != nil {
+		return PackageManifest{}, err
+	} else {
+		listwisePolicy.IsolatedInheritedObjectives = parseScoreSpectrumObjectiveNames(value)
+	}
+	listwisePolicy.ListwiseGeometryTrain = listwisePolicy.ListwiseGeometryResearchOnly || listwisePolicy.TrainAllowedForResearch || listwisePolicy.ReleaseTrainAllowed || listwisePolicy.CommercialUseAllowed || listwisePolicy.ListwiseGeometryBatchCount > 0 || len(listwisePolicy.SourceArtifactHashes) > 0 || len(listwisePolicy.AutoClearedObjectives) > 0 || len(listwisePolicy.IsolatedInheritedObjectives) > 0
 
 	r := bytes.NewReader(xpkgBody)
 	readU32 := func() (uint32, error) {
@@ -640,6 +652,8 @@ func (m PackageManifest) CacheKey() string {
 	write(fmt.Sprintf("%t", m.ListwiseGeometry.CommercialUseAllowed))
 	write(formatScoreSpectrumSourceHashes(m.ListwiseGeometry.SourceArtifactHashes))
 	write(fmt.Sprintf("%d", m.ListwiseGeometry.ListwiseGeometryBatchCount))
+	write(formatScoreSpectrumObjectiveNames(m.ListwiseGeometry.AutoClearedObjectives))
+	write(formatScoreSpectrumObjectiveNames(m.ListwiseGeometry.IsolatedInheritedObjectives))
 	for _, item := range m.Files {
 		write(item.Role)
 		write(item.Path)

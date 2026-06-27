@@ -99,6 +99,75 @@ func TestEmbeddingTrainerFitListwiseGeometrySmokeAndResearchGate(t *testing.T) {
 	}
 }
 
+func TestEmbeddingTrainerFitListwiseGeometryIsolatesInheritedCompactPackageObjectives(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	trainer.config.MatryoshkaDims = []int{2}
+	trainer.config.MatryoshkaWeights = []float32{1}
+	trainer.config.TurboQuantCompactObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 2, Weight: 0.25}}
+	trainer.config.TurboQuantPrefixSeed = 11
+
+	summary, err := trainer.FitListwiseGeometry(tinyTokenizedListwiseGeometryBatches(false), nil, EmbeddingTrainRunConfig{
+		Epochs:         1,
+		BatchSize:      1,
+		EvalEveryEpoch: 1,
+		Temperature:    0.05,
+	})
+	if err != nil {
+		t.Fatalf("fit listwise geometry with inherited compact objectives: %v", err)
+	}
+	if len(summary.Config.TurboQuantCompactObjectives) != 0 || len(trainer.config.TurboQuantCompactObjectives) != 0 {
+		t.Fatalf("compact objectives were not isolated: summary=%+v trainer=%+v", summary.Config.TurboQuantCompactObjectives, trainer.config.TurboQuantCompactObjectives)
+	}
+	if len(summary.Config.MatryoshkaDims) != 0 || len(trainer.config.MatryoshkaDims) != 0 {
+		t.Fatalf("matryoshka objectives were not isolated: summary=%v trainer=%v", summary.Config.MatryoshkaDims, trainer.config.MatryoshkaDims)
+	}
+	if trainer.config.TurboQuantPrefixSeed != 0 {
+		t.Fatalf("prefix seed = %d, want cleared", trainer.config.TurboQuantPrefixSeed)
+	}
+
+	artifactPath := filepath.Join(t.TempDir(), "tiny_train_embed_q8.mll")
+	paths, err := trainer.WriteTrainingPackage(artifactPath)
+	if err != nil {
+		t.Fatalf("write isolated package: %v", err)
+	}
+	trainManifest, err := ReadEmbeddingTrainManifestFile(paths.TrainManifestPath)
+	if err != nil {
+		t.Fatalf("read train manifest: %v", err)
+	}
+	packageManifest, err := ReadPackageManifestFile(paths.PackageManifestPath)
+	if err != nil {
+		t.Fatalf("read package manifest: %v", err)
+	}
+	for _, want := range []string{"matryoshka", "turboquant_compact_objectives", "turboquant_prefix_seed"} {
+		if !hasScoreSpectrumObjectiveName(trainManifest.ListwiseGeometry.AutoClearedObjectives, want) {
+			t.Fatalf("train manifest listwise auto-cleared objectives = %v, missing %q", trainManifest.ListwiseGeometry.AutoClearedObjectives, want)
+		}
+		if !hasScoreSpectrumObjectiveName(packageManifest.ListwiseGeometry.IsolatedInheritedObjectives, want) {
+			t.Fatalf("package manifest listwise isolated objectives = %v, missing %q", packageManifest.ListwiseGeometry.IsolatedInheritedObjectives, want)
+		}
+	}
+}
+
+func TestEmbeddingTrainerFitListwiseGeometryRejectsExplicitIncompatibleObjectivesBeforeIsolation(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	trainer.config.TurboQuantCompactObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 2, Weight: 0.25}}
+
+	_, err := trainer.FitListwiseGeometry(tinyTokenizedListwiseGeometryBatches(false), nil, EmbeddingTrainRunConfig{
+		Epochs:                      1,
+		BatchSize:                   1,
+		EvalEveryEpoch:              1,
+		Temperature:                 0.05,
+		MatryoshkaDims:              []int{2},
+		TurboQuantCompactObjectives: []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 2, Weight: 0.25}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "listwise geometry training does not support matryoshka objectives") {
+		t.Fatalf("error = %v, want explicit listwise matryoshka rejection", err)
+	}
+	if len(trainer.config.TurboQuantCompactObjectives) == 0 {
+		t.Fatalf("inherited objectives were cleared after explicit run-config rejection")
+	}
+}
+
 func TestEmbeddingTrainerFitListwiseGeometryPairwiseEvalSelectionAndAccounting(t *testing.T) {
 	summary, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitListwiseGeometry(tinyTokenizedListwiseGeometryBatches(false), tinyEncoderPairDataset(), EmbeddingTrainRunConfig{
 		Epochs:                2,

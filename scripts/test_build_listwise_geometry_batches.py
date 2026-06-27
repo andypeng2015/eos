@@ -139,6 +139,9 @@ class BuildListwiseGeometryBatchesTest(unittest.TestCase):
         self.assertEqual(batch["teacher_model_id"], "fixture-teacher")
         self.assertEqual(batch["score"], "cosine")
         self.assertTrue(batch["normalized"])
+        self.assertFalse(batch["release_train_allowed"])
+        self.assertFalse(batch["commercial_use_allowed"])
+        self.assertTrue(batch["train_allowed_for_research"])
         self.assertEqual(batch["source_counts"], {"fixture-a": 1, "fixture-b": 1})
 
         self.assertEqual([query["id"] for query in batch["queries"]], ["q1", "q2"])
@@ -160,12 +163,17 @@ class BuildListwiseGeometryBatchesTest(unittest.TestCase):
         self.assertEqual(batch["examples"][0]["positive_doc_id"], "d1")
         self.assertEqual(batch["examples"][0]["negative_doc_ids"], ["d2"])
         self.assertEqual(batch["examples"][1]["query_id"], "q2")
+        self.assertEqual(batch["examples"][1]["row_id"], "source-line-000001")
+        self.assertEqual(batch["examples"][1]["source"], "fixture-b")
         self.assertEqual(batch["examples"][1]["positive_doc_id"], "d2")
         self.assertEqual(batch["examples"][1]["negative_doc_ids"], ["d3"])
 
         self.assertEqual(manifest["schema"], "eos.listwise_geometry_batches_manifest.v1")
         self.assertFalse(manifest["quality_claim"])
         self.assertEqual(manifest["teacher_model_id"], "fixture-teacher")
+        self.assertFalse(manifest["release_train_allowed"])
+        self.assertFalse(manifest["commercial_use_allowed"])
+        self.assertTrue(manifest["train_allowed_for_research"])
         self.assertEqual(manifest["coverage"]["examples_seen"], 2)
         self.assertEqual(manifest["coverage"]["examples_written"], 2)
         self.assertEqual(manifest["coverage"]["examples_dropped"], 0)
@@ -199,6 +207,57 @@ class BuildListwiseGeometryBatchesTest(unittest.TestCase):
         self.assertEqual(manifest["coverage"]["missing_doc_vector"], 1)
         self.assertEqual(manifest["missing_samples"][0]["kind"], "doc_vector")
         self.assertFalse(manifest["quality_claim"])
+
+    def test_duplicate_query_starts_new_batch_before_batch_size_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = base_fixture(Path(tmp))
+            rows = read_jsonl(paths["hard"])
+            rows.append(
+                {
+                    "row_id": "row-3",
+                    "source": "fixture-c",
+                    "query_id": "q1",
+                    "positive_doc_id": "d1",
+                    "negative_doc_ids": ["d3"],
+                }
+            )
+            write_jsonl(paths["hard"], rows)
+
+            completed = run_builder(paths, "--batch-size", "3")
+            batches = read_jsonl(paths["output"])
+            manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+
+        self.assertIn("examples_written=3", completed.stdout)
+        self.assertEqual(len(batches), 2)
+        self.assertEqual([query["id"] for query in batches[0]["queries"]], ["q1", "q2"])
+        self.assertEqual([query["id"] for query in batches[1]["queries"]], ["q1"])
+        self.assertEqual(batches[1]["examples"][0]["row_id"], "row-3")
+        self.assertEqual(manifest["coverage"]["batches_written"], 2)
+        self.assertEqual(manifest["coverage"]["queries_written"], 3)
+        self.assertEqual(manifest["source_counts"], {"fixture-a": 1, "fixture-b": 1, "fixture-c": 1})
+
+    def test_missing_source_uses_deterministic_unknown_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = base_fixture(Path(tmp))
+            write_jsonl(
+                paths["hard"],
+                [
+                    {
+                        "query_id": "q1",
+                        "positive_doc_id": "d1",
+                        "negative_doc_ids": ["d2"],
+                    }
+                ],
+            )
+
+            run_builder(paths)
+            rows = read_jsonl(paths["output"])
+            manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+
+        self.assertEqual(rows[0]["examples"][0]["row_id"], "source-line-000000")
+        self.assertEqual(rows[0]["examples"][0]["source"], "unknown")
+        self.assertEqual(rows[0]["source_counts"], {"unknown": 1})
+        self.assertEqual(manifest["source_counts"], {"unknown": 1})
 
 
 if __name__ == "__main__":

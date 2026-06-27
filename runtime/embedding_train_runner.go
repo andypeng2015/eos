@@ -1245,11 +1245,15 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 	if !validTrainSelectionMetric(cfg.SelectMetric) {
 		return EmbeddingTrainRunSummary{}, fmt.Errorf("unsupported select_metric %q", cfg.SelectMetric)
 	}
+	if err := validateListwiseGeometryRunConfig(cfg); err != nil {
+		return EmbeddingTrainRunSummary{}, err
+	}
 	t.configureRetrievalEval(cfg.RetrievalEvalRuntime, cfg.RetrievalEval, cfg.RetrievalEvalTokenizer)
 	if err := t.applyTrainRunOverrides(cfg); err != nil {
 		return EmbeddingTrainRunSummary{}, err
 	}
 	cfg = t.syncTrainRunObjectiveConfig(cfg)
+	cfg = t.isolateListwiseGeometryObjectiveConfig(cfg)
 	if err := validateListwiseGeometryRunConfig(cfg); err != nil {
 		return EmbeddingTrainRunSummary{}, err
 	}
@@ -3053,6 +3057,22 @@ func (t *EmbeddingTrainer) isolateScoreSpectrumObjectiveConfig(cfg EmbeddingTrai
 	t.scoreSpectrumLineage.AutoClearedObjectives = mergeScoreSpectrumObjectiveNames(t.scoreSpectrumLineage.AutoClearedObjectives, cleared)
 	t.scoreSpectrumLineage.IsolatedInheritedObjectives = mergeScoreSpectrumObjectiveNames(t.scoreSpectrumLineage.IsolatedInheritedObjectives, cleared)
 	t.scoreSpectrumLineage.ScoreSpectrumTrain = true
+	return cfg
+}
+
+func (t *EmbeddingTrainer) isolateListwiseGeometryObjectiveConfig(cfg EmbeddingTrainRunConfig) EmbeddingTrainRunConfig {
+	if t == nil {
+		return cfg
+	}
+	cleared := scoreSpectrumIncompatibleObjectiveNames(t.config)
+	if len(cleared) == 0 {
+		return cfg
+	}
+	t.config = clearScoreSpectrumIncompatibleTrainConfig(t.config)
+	cfg = clearScoreSpectrumIncompatibleRunConfig(cfg)
+	t.listwiseGeometryLineage.AutoClearedObjectives = mergeScoreSpectrumObjectiveNames(t.listwiseGeometryLineage.AutoClearedObjectives, cleared)
+	t.listwiseGeometryLineage.IsolatedInheritedObjectives = mergeScoreSpectrumObjectiveNames(t.listwiseGeometryLineage.IsolatedInheritedObjectives, cleared)
+	t.listwiseGeometryLineage.ListwiseGeometryTrain = true
 	return cfg
 }
 

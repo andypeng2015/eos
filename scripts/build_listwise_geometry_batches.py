@@ -228,6 +228,10 @@ def provenance(row: dict[str, Any], resolved: dict[str, Any]) -> dict[str, Any]:
     for key in ("row_id", "source"):
         if row.get(key) not in (None, ""):
             out[key] = row[key]
+    if "row_id" not in out:
+        out["row_id"] = f"source-line-{resolved['example_index']:06d}"
+    if "source" not in out:
+        out["source"] = source_label(row)
     out["query_id"] = resolved["query_id"]
     out["positive_doc_id"] = resolved["positive_doc_id"]
     out["negative_doc_ids"] = resolved["negative_doc_ids"]
@@ -277,6 +281,9 @@ def finalize_batch(
         "teacher_similarity": teacher_similarity,
         "score": score,
         "normalized": score == "cosine",
+        "release_train_allowed": False,
+        "commercial_use_allowed": False,
+        "train_allowed_for_research": True,
     }
     if model_id:
         row["teacher_model_id"] = model_id
@@ -454,10 +461,24 @@ def main() -> int:
 
             positive_doc_id = resolved_docs[0][0]
             negative_doc_ids = [doc_id for doc_id, _, role in resolved_docs if role == "negative"]
+            if any(item["query_id"] == query_id for item in batch_examples):
+                batch_row = finalize_batch(
+                    batch_examples=batch_examples,
+                    batch_index=batches_written,
+                    model_id=args.model_id,
+                    score=args.score,
+                )
+                out_handle.write(json.dumps(batch_row, ensure_ascii=False) + "\n")
+                batches_written += 1
+                queries_written += len(batch_row["queries"])
+                documents_written += len(batch_row["documents"])
+                batch_examples = []
+
             source_counts[source_label(row)] += 1
             batch_examples.append(
                 {
                     "raw": row,
+                    "example_index": example_index,
                     "query_id": query_id,
                     "query_text": resolved_query_text,
                     "query_vector": query_vector,
@@ -502,6 +523,9 @@ def main() -> int:
         "teacher_model_id": args.model_id,
         "score": args.score,
         "normalized": normalize_vectors,
+        "release_train_allowed": False,
+        "commercial_use_allowed": False,
+        "train_allowed_for_research": True,
         "batch_size": args.batch_size,
         "max_examples": args.max_examples,
         "allow_missing": args.allow_missing,

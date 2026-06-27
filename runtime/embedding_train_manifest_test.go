@@ -62,6 +62,11 @@ func TestEmbeddingTrainManifestRoundTrip(t *testing.T) {
 			CommercialUseAllowed:         false,
 			SourceArtifactHashes:         []string{"lg-bbb", "lg-aaa"},
 			ListwiseGeometryBatchCount:   4,
+			AutoClearedObjectives:        []string{"turboquant_prefix_seed", "matryoshka"},
+			IsolatedInheritedObjectives: []string{
+				"turboquant_prefix_seed",
+				"matryoshka",
+			},
 		},
 	}
 	if err := want.WriteFile(path); err != nil {
@@ -106,6 +111,12 @@ func TestEmbeddingTrainManifestRoundTrip(t *testing.T) {
 	}
 	if got.ListwiseGeometry.ListwiseGeometryBatchCount != 4 || len(got.ListwiseGeometry.SourceArtifactHashes) != 2 || got.ListwiseGeometry.SourceArtifactHashes[0] != "lg-aaa" || got.ListwiseGeometry.SourceArtifactHashes[1] != "lg-bbb" {
 		t.Fatalf("listwise geometry provenance mismatch: %+v", got.ListwiseGeometry)
+	}
+	if len(got.ListwiseGeometry.AutoClearedObjectives) != 2 || got.ListwiseGeometry.AutoClearedObjectives[0] != "matryoshka" || got.ListwiseGeometry.AutoClearedObjectives[1] != "turboquant_prefix_seed" {
+		t.Fatalf("listwise auto-cleared objectives = %v", got.ListwiseGeometry.AutoClearedObjectives)
+	}
+	if len(got.ListwiseGeometry.IsolatedInheritedObjectives) != 2 || got.ListwiseGeometry.IsolatedInheritedObjectives[0] != "matryoshka" || got.ListwiseGeometry.IsolatedInheritedObjectives[1] != "turboquant_prefix_seed" {
+		t.Fatalf("listwise isolated inherited objectives = %v", got.ListwiseGeometry.IsolatedInheritedObjectives)
 	}
 }
 

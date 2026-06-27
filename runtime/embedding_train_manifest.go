@@ -44,6 +44,8 @@ type EmbeddingListwiseGeometryPolicy struct {
 	CommercialUseAllowed         bool     `json:"commercial_use_allowed,omitempty"`
 	SourceArtifactHashes         []string `json:"source_artifact_hashes,omitempty"`
 	ListwiseGeometryBatchCount   int      `json:"listwise_geometry_batch_count,omitempty"`
+	AutoClearedObjectives        []string `json:"auto_cleared_objectives,omitempty"`
+	IsolatedInheritedObjectives  []string `json:"isolated_inherited_objectives,omitempty"`
 }
 
 // DefaultEmbeddingTrainManifestPath returns the conventional sibling train-manifest path for an .mll artifact.
@@ -183,6 +185,8 @@ func (m EmbeddingTrainManifest) mllValues() map[string]authoredManifestValue {
 		"listwise_geometry.commercial_use_allowed":          authoredBool(m.ListwiseGeometry.CommercialUseAllowed),
 		"listwise_geometry.source_artifact_hashes":          authoredString(formatScoreSpectrumSourceHashes(m.ListwiseGeometry.SourceArtifactHashes)),
 		"listwise_geometry.listwise_geometry_batch_count":   authoredInt(int64(m.ListwiseGeometry.ListwiseGeometryBatchCount)),
+		"listwise_geometry.auto_cleared_objectives":         authoredString(formatScoreSpectrumObjectiveNames(m.ListwiseGeometry.AutoClearedObjectives)),
+		"listwise_geometry.isolated_inherited_objectives":   authoredString(formatScoreSpectrumObjectiveNames(m.ListwiseGeometry.IsolatedInheritedObjectives)),
 	}
 	for key, value := range m.Embedding.mllValues() {
 		values["embedding."+key] = value
@@ -457,6 +461,16 @@ func listwiseGeometryPolicyFromAuthoredDoc(doc authoredManifestDoc, prefix strin
 	} else {
 		policy.ListwiseGeometryBatchCount = int(value)
 	}
+	if value, _, err := doc.string(prefix + "auto_cleared_objectives"); err != nil {
+		return EmbeddingListwiseGeometryPolicy{}, err
+	} else {
+		policy.AutoClearedObjectives = parseScoreSpectrumObjectiveNames(value)
+	}
+	if value, _, err := doc.string(prefix + "isolated_inherited_objectives"); err != nil {
+		return EmbeddingListwiseGeometryPolicy{}, err
+	} else {
+		policy.IsolatedInheritedObjectives = parseScoreSpectrumObjectiveNames(value)
+	}
 	return policy, nil
 }
 
@@ -469,6 +483,8 @@ func packageListwiseGeometryPolicy(policy EmbeddingListwiseGeometryPolicy) Embed
 		CommercialUseAllowed:         policy.CommercialUseAllowed,
 		SourceArtifactHashes:         normalizeScoreSpectrumSourceHashes(policy.SourceArtifactHashes),
 		ListwiseGeometryBatchCount:   policy.ListwiseGeometryBatchCount,
+		AutoClearedObjectives:        normalizeScoreSpectrumObjectiveNames(policy.AutoClearedObjectives),
+		IsolatedInheritedObjectives:  normalizeScoreSpectrumObjectiveNames(policy.IsolatedInheritedObjectives),
 	}
 }
 
