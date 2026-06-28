@@ -144,6 +144,34 @@ func TrainTokenizerFromCorpus(cfg TokenizerTrainConfig) (TokenizerFile, error) {
 	return file, file.Validate()
 }
 
+func PadTokenizerFileVocab(file TokenizerFile, vocabSize int) (TokenizerFile, error) {
+	if vocabSize <= 0 {
+		return TokenizerFile{}, fmt.Errorf("tokenizer vocab size must be positive")
+	}
+	if err := file.Validate(); err != nil {
+		return TokenizerFile{}, err
+	}
+	if len(file.Tokens) > vocabSize {
+		return TokenizerFile{}, fmt.Errorf("tokenizer has %d tokens, cannot pad down to vocab size %d", len(file.Tokens), vocabSize)
+	}
+	if len(file.Tokens) == vocabSize {
+		return file, nil
+	}
+	seen := make(map[string]bool, len(file.Tokens))
+	for _, token := range file.Tokens {
+		seen[token] = true
+	}
+	for i := 0; len(file.Tokens) < vocabSize; i++ {
+		token := fmt.Sprintf("[UNUSED_%06d]", i)
+		if seen[token] {
+			continue
+		}
+		file.Tokens = append(file.Tokens, token)
+		seen[token] = true
+	}
+	return file, file.Validate()
+}
+
 func loadCorpusWords(path string) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {

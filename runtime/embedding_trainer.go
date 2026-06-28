@@ -183,63 +183,64 @@ type EmbeddingTrainer struct {
 	// eval also embeds a held-out BEIR-style corpus with the current in-training
 	// weights and computes nDCG@10 — the deployment metric — so training can
 	// select/restore-best on it instead of the saturated pairwise gate.
-	retrievalEvalRuntime   *Runtime
-	retrievalEvalConfig    RetrievalEvalConfig
-	retrievalEvalTokenizer *TokenizerFile
-	retrievalEvalEnabled   bool
-	step                   int
-	tokenParam             eosartifact.Param
-	roleParam              eosartifact.Param
-	attnQParam             eosartifact.Param
-	attnKParam             eosartifact.Param
-	attnVParam             eosartifact.Param
-	attnOParam             eosartifact.Param
-	hiddenParam            eosartifact.Param
-	projParam              eosartifact.Param
-	tokenEmbed             *backend.Tensor
-	roleEmbed              *backend.Tensor
-	attentionQuery         *backend.Tensor
-	attentionKey           *backend.Tensor
-	attentionValue         *backend.Tensor
-	attentionOutput        *backend.Tensor
-	hiddenProjection       *backend.Tensor
-	projection             *backend.Tensor
-	tokenMom1              *backend.Tensor
-	tokenMom2              *backend.Tensor
-	roleMom1               *backend.Tensor
-	roleMom2               *backend.Tensor
-	attnQMom1              *backend.Tensor
-	attnQMom2              *backend.Tensor
-	attnKMom1              *backend.Tensor
-	attnKMom2              *backend.Tensor
-	attnVMom1              *backend.Tensor
-	attnVMom2              *backend.Tensor
-	attnOMom1              *backend.Tensor
-	attnOMom2              *backend.Tensor
-	hiddenMom1             *backend.Tensor
-	hiddenMom2             *backend.Tensor
-	projMom1               *backend.Tensor
-	projMom2               *backend.Tensor
-	forwardMatMul          backend.MatMulAccelerator
-	forwardBackend         eosartifact.BackendKind
-	optimizerAccel         backend.OptimizerAccelerator
-	optimizerBackend       eosartifact.BackendKind
-	activationAccel        backend.ActivationAccelerator
-	activationBackend      eosartifact.BackendKind
-	activationAccelFull    bool
-	softmaxBackwardAccel   bool
-	contrastiveAccel       backend.ContrastiveAccelerator
-	contrastiveBackend     eosartifact.BackendKind
-	sequenceBindingID      int
-	momentsDirty           bool
-	forwardCache           *embeddingForwardWeights
-	compactState           *CompactEmbeddingTrainState
-	compactForwardCache    *compactEmbeddingForwardWeights
-	boundForward           embeddingForwardWeights
-	forwardDirty           bool
-	forwardNeedsBind       bool
-	forwardBindSkips       int64
-	scratchF32             [][]float32
+	retrievalEvalRuntime    *Runtime
+	retrievalEvalConfig     RetrievalEvalConfig
+	retrievalEvalTokenizer  *TokenizerFile
+	retrievalEvalEnabled    bool
+	step                    int
+	tokenParam              eosartifact.Param
+	roleParam               eosartifact.Param
+	attnQParam              eosartifact.Param
+	attnKParam              eosartifact.Param
+	attnVParam              eosartifact.Param
+	attnOParam              eosartifact.Param
+	hiddenParam             eosartifact.Param
+	projParam               eosartifact.Param
+	tokenEmbed              *backend.Tensor
+	roleEmbed               *backend.Tensor
+	attentionQuery          *backend.Tensor
+	attentionKey            *backend.Tensor
+	attentionValue          *backend.Tensor
+	attentionOutput         *backend.Tensor
+	hiddenProjection        *backend.Tensor
+	projection              *backend.Tensor
+	tokenMom1               *backend.Tensor
+	tokenMom2               *backend.Tensor
+	roleMom1                *backend.Tensor
+	roleMom2                *backend.Tensor
+	attnQMom1               *backend.Tensor
+	attnQMom2               *backend.Tensor
+	attnKMom1               *backend.Tensor
+	attnKMom2               *backend.Tensor
+	attnVMom1               *backend.Tensor
+	attnVMom2               *backend.Tensor
+	attnOMom1               *backend.Tensor
+	attnOMom2               *backend.Tensor
+	hiddenMom1              *backend.Tensor
+	hiddenMom2              *backend.Tensor
+	projMom1                *backend.Tensor
+	projMom2                *backend.Tensor
+	forwardMatMul           backend.MatMulAccelerator
+	forwardBackend          eosartifact.BackendKind
+	optimizerAccel          backend.OptimizerAccelerator
+	optimizerBackend        eosartifact.BackendKind
+	activationAccel         backend.ActivationAccelerator
+	activationBackend       eosartifact.BackendKind
+	activationAccelFull     bool
+	softmaxBackwardAccel    bool
+	contrastiveAccel        backend.ContrastiveAccelerator
+	contrastiveBackend      eosartifact.BackendKind
+	sequenceBindingID       int
+	momentsDirty            bool
+	compactOptimizerUpdates int64
+	forwardCache            *embeddingForwardWeights
+	compactState            *CompactEmbeddingTrainState
+	compactForwardCache     *compactEmbeddingForwardWeights
+	boundForward            embeddingForwardWeights
+	forwardDirty            bool
+	forwardNeedsBind        bool
+	forwardBindSkips        int64
+	scratchF32              [][]float32
 }
 
 // SetScoreSpectrumLineage records score-spectrum provenance that must follow
@@ -855,6 +856,7 @@ func (t *EmbeddingTrainer) TrainProfile() EmbeddingTrainProfile {
 	if t.optimizerAccel != nil {
 		profile.Optimizer = t.optimizerAccel.Stats()
 	}
+	profile.Optimizer.UpdateCalls += t.compactOptimizerUpdates
 	if t.activationAccel != nil {
 		profile.Activation = t.activationAccel.Stats()
 	}
@@ -3234,6 +3236,7 @@ func (t *EmbeddingTrainer) applyCompactOptimizerUpdates(grads *compactEmbeddingG
 	}
 	t.step++
 	t.compactState.Step = t.step
+	t.compactOptimizerUpdates++
 	apply := func(item *CompactEmbeddingTrainTensor, grad []float32) {
 		if item == nil || item.Tensor == nil {
 			return

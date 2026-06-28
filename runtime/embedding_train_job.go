@@ -473,6 +473,9 @@ func TrainEmbeddingPackageFromCorpusFile(artifactPath, corpusPath string, cfg Em
 	if vocabSize <= 0 {
 		return EmbeddingTrainRunSummary{}, EmbeddingCorpusTrainPaths{}, fmt.Errorf("tokenizer vocab size must be set via config or embedding manifest")
 	}
+	if manifestVocabSize := trainer.manifest.Tokenizer.VocabSize; manifestVocabSize > 0 && vocabSize < manifestVocabSize {
+		return EmbeddingTrainRunSummary{}, EmbeddingCorpusTrainPaths{}, fmt.Errorf("tokenizer vocab size %d would shrink package vocab contract %d; checkpoint tensor resize is not supported by corpus tokenizer training", vocabSize, manifestVocabSize)
+	}
 	minFreq := cfg.TokenizerMinFreq
 	if minFreq <= 0 {
 		minFreq = 2
@@ -485,10 +488,14 @@ func TrainEmbeddingPackageFromCorpusFile(artifactPath, corpusPath string, cfg Em
 	if err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingCorpusTrainPaths{}, err
 	}
+	tokenizer, err = PadTokenizerFileVocab(tokenizer, vocabSize)
+	if err != nil {
+		return EmbeddingTrainRunSummary{}, EmbeddingCorpusTrainPaths{}, err
+	}
 	if err := tokenizer.WriteFile(tokenizerPath); err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingCorpusTrainPaths{}, err
 	}
-	if err := SyncEmbeddingTokenizerVocab(artifactPath, len(tokenizer.Tokens)); err != nil {
+	if err := SyncEmbeddingTokenizerVocab(artifactPath, vocabSize); err != nil {
 		return EmbeddingTrainRunSummary{}, EmbeddingCorpusTrainPaths{}, err
 	}
 	trainPairs, evalPairs, err := MineEmbeddingTextDatasetsFromCorpusFile(corpusPath, cfg.Mining)

@@ -5901,6 +5901,62 @@ func TestRunTrainEmbedFitsTextHardNegativePackage(t *testing.T) {
 	}
 }
 
+func TestRunTrainEmbedCompactHardNegativeMetricsProfileOptimizerUpdates(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "compact.mll")
+	if err := run([]string{
+		"init-model",
+		"--architecture", eosruntime.EmbeddingArchitectureCompactTransformerV1,
+		"--vocab-size", "32",
+		"--max-seq", "12",
+		"--model-dim", "8",
+		"--output-dim", "4",
+		"--hidden-dim", "16",
+		"--attention-heads", "2",
+		"--encoder-repeats", "1",
+		"--contrastive-loss", "grouped_infonce",
+		"--temperature", "0.05",
+		path,
+	}); err != nil {
+		t.Fatalf("run init-model compact: %v", err)
+	}
+	corpusPath := filepath.Join(dir, "corpus.txt")
+	if err := os.WriteFile(corpusPath, []byte("alpha beta positive negative gamma delta\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := run([]string{"train-tokenizer", "--vocab-size", "32", "--min-freq", "1", path, corpusPath}); err != nil {
+		t.Fatalf("run train-tokenizer: %v", err)
+	}
+	trainPath := filepath.Join(dir, "hard-negatives.jsonl")
+	trainData := "" +
+		"{\"query\":\"alpha beta\",\"positive\":\"alpha beta positive\",\"negatives\":[\"gamma delta negative\"]}\n" +
+		"{\"query\":\"gamma delta\",\"positive\":\"gamma delta positive\",\"negatives\":[\"alpha beta negative\"]}\n"
+	if err := os.WriteFile(trainPath, []byte(trainData), 0o644); err != nil {
+		t.Fatalf("write hard-negative train data: %v", err)
+	}
+
+	evalMetricsPath := filepath.Join(dir, "eval.metrics.json")
+	if err := run([]string{"train-embed", "--eval-only", "--hard-negative-train", "--hard-negatives-per-query", "1", "--metrics-json", evalMetricsPath, path, trainPath}); err != nil {
+		t.Fatalf("run compact eval-only hard-negative train-embed: %v", err)
+	}
+	evalMetrics := readTrainMetricsProfileForTest(t, evalMetricsPath)
+	if evalMetrics.Summary.StepsRun != 0 || evalMetrics.ProfileDelta.OptimizerUpdates != 0 {
+		t.Fatalf("compact eval-only metrics steps=%d optimizer_updates=%d, want zero updates", evalMetrics.Summary.StepsRun, evalMetrics.ProfileDelta.OptimizerUpdates)
+	}
+
+	trainMetricsPath := filepath.Join(dir, "train.metrics.json")
+	if err := run([]string{"train-embed", "--hard-negative-train", "--hard-negatives-per-query", "1", "--epochs", "1", "--batch-size", "2", "--shuffle=false", "--contrastive-loss", "grouped_infonce", "--temperature", "0.05", "--metrics-json", trainMetricsPath, path, trainPath}); err != nil {
+		t.Fatalf("run compact hard-negative train-embed: %v", err)
+	}
+	trainMetrics := readTrainMetricsProfileForTest(t, trainMetricsPath)
+	if trainMetrics.Summary.StepsRun != 1 {
+		t.Fatalf("compact train steps_run = %d, want 1", trainMetrics.Summary.StepsRun)
+	}
+	if trainMetrics.ProfileDelta.OptimizerUpdates <= 0 {
+		t.Fatalf("compact train optimizer_updates = %d, want positive", trainMetrics.ProfileDelta.OptimizerUpdates)
+	}
+}
+
 func TestRunTrainEmbedPlanOnlyCountsGroupedTextHardNegativeEvalPairs(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
@@ -6416,8 +6472,54 @@ func TestRunTrainTokenizerWritesSiblingTokenizer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
-	if manifest.Tokenizer.VocabSize != 11 {
-		t.Fatalf("expected manifest vocab size to track tokenizer, got %d", manifest.Tokenizer.VocabSize)
+	if manifest.Tokenizer.VocabSize != 12 {
+		t.Fatalf("expected manifest vocab size to preserve requested contract, got %d", manifest.Tokenizer.VocabSize)
+	}
+}
+
+func TestRunTrainTokenizerPreservesCompactPackageVocabContract(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "compact.mll")
+	if err := run([]string{
+		"init-model",
+		"--architecture", eosruntime.EmbeddingArchitectureCompactTransformerV1,
+		"--vocab-size", "32",
+		"--max-seq", "12",
+		"--model-dim", "8",
+		"--output-dim", "4",
+		"--hidden-dim", "16",
+		"--attention-heads", "2",
+		"--encoder-repeats", "1",
+		path,
+	}); err != nil {
+		t.Fatalf("run init-model compact: %v", err)
+	}
+	corpusPath := filepath.Join(t.TempDir(), "corpus.txt")
+	if err := os.WriteFile(corpusPath, []byte("alpha beta alpha beta gamma\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := run([]string{"train-tokenizer", "--vocab-size", "32", "--min-freq", "1", path, corpusPath}); err != nil {
+		t.Fatalf("run train-tokenizer: %v", err)
+	}
+	tokenizer, err := eosruntime.ReadTokenizerFile(eosruntime.DefaultTokenizerPath(path))
+	if err != nil {
+		t.Fatalf("read tokenizer: %v", err)
+	}
+	if len(tokenizer.Tokens) != 32 {
+		t.Fatalf("tokenizer tokens = %d, want compact package vocab contract 32", len(tokenizer.Tokens))
+	}
+	manifest, err := eosruntime.ReadEmbeddingManifestFile(eosruntime.DefaultEmbeddingManifestPath(path))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if manifest.Tokenizer.VocabSize != 32 {
+		t.Fatalf("manifest vocab size = %d, want 32", manifest.Tokenizer.VocabSize)
+	}
+	state, err := eosruntime.LoadCompactEmbeddingTrainStateFromPackage(path)
+	if err != nil {
+		t.Fatalf("load compact train state after tokenizer sync: %v", err)
+	}
+	if got := state.TokenEmbedding.Tensor.Shape[0]; got != 32 {
+		t.Fatalf("compact token embedding rows = %d, want 32", got)
 	}
 }
 
@@ -6697,6 +6799,28 @@ pipeline embed_pooled_batch(tokens: i32[B, T]) -> q8[B, E] {
 	if _, err := eosruntime.LoadEmbeddingTrainerPackage(artifactPath); err != nil {
 		t.Fatalf("reload trained package: %v", err)
 	}
+}
+
+type trainMetricsProfileForTest struct {
+	Summary struct {
+		StepsRun int `json:"steps_run"`
+	} `json:"summary"`
+	ProfileDelta struct {
+		OptimizerUpdates int64 `json:"optimizer_updates"`
+	} `json:"profile_delta"`
+}
+
+func readTrainMetricsProfileForTest(t *testing.T, path string) trainMetricsProfileForTest {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read train metrics %q: %v", path, err)
+	}
+	var got trainMetricsProfileForTest
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("decode train metrics %q: %v\n%s", path, err, string(data))
+	}
+	return got
 }
 
 func writeTrainableArtifact(t *testing.T) string {

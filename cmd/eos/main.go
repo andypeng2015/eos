@@ -8071,15 +8071,20 @@ func runTrainTokenizer(args []string) error {
 	if manifestPath == "" {
 		manifestPath = eosruntime.DefaultEmbeddingManifestPath(artifactPath)
 	}
+	manifestVocabSize := 0
+	if manifest, err := eosruntime.ReadEmbeddingManifestFile(manifestPath); err == nil {
+		manifestVocabSize = manifest.Tokenizer.VocabSize
+	} else if vocabSize == 0 {
+		return fmt.Errorf("read embedding manifest for vocab size: %w", err)
+	}
 	if vocabSize == 0 {
-		manifest, err := eosruntime.ReadEmbeddingManifestFile(manifestPath)
-		if err != nil {
-			return fmt.Errorf("read embedding manifest for vocab size: %w", err)
-		}
-		vocabSize = manifest.Tokenizer.VocabSize
+		vocabSize = manifestVocabSize
 	}
 	if vocabSize <= 0 {
 		return fmt.Errorf("tokenizer vocab size must be set via --vocab-size or embedding manifest")
+	}
+	if manifestVocabSize > 0 && vocabSize < manifestVocabSize {
+		return fmt.Errorf("tokenizer vocab size %d would shrink package vocab contract %d; checkpoint tensor resize is not supported by train-tokenizer", vocabSize, manifestVocabSize)
 	}
 	tokenizer, err := eosruntime.TrainTokenizerFromCorpus(eosruntime.TokenizerTrainConfig{
 		CorpusPath: corpusPath,
@@ -8089,10 +8094,14 @@ func runTrainTokenizer(args []string) error {
 	if err != nil {
 		return err
 	}
+	tokenizer, err = eosruntime.PadTokenizerFileVocab(tokenizer, vocabSize)
+	if err != nil {
+		return err
+	}
 	if err := tokenizer.WriteFile(outputPath); err != nil {
 		return err
 	}
-	if err := eosruntime.SyncEmbeddingTokenizerVocab(artifactPath, len(tokenizer.Tokens)); err != nil {
+	if err := eosruntime.SyncEmbeddingTokenizerVocab(artifactPath, vocabSize); err != nil {
 		return fmt.Errorf("sync tokenizer vocab through Eos package: %w", err)
 	}
 	fmt.Printf("trained tokenizer %q\n", outputPath)

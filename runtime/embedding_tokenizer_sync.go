@@ -14,42 +14,70 @@ func SyncEmbeddingTokenizerVocab(artifactPath string, vocabSize int) error {
 		return fmt.Errorf("tokenizer vocab size must be positive")
 	}
 	var tokenParam string
+	var embeddingManifest *EmbeddingManifest
 	if manifestPath := ResolveEmbeddingManifestPath(artifactPath); fileExists(manifestPath) {
 		manifest, err := ReadEmbeddingManifestFile(manifestPath)
 		if err != nil {
 			return err
 		}
-		manifest.Tokenizer.VocabSize = vocabSize
+		embeddingManifest = &manifest
 		tokenParam = manifest.TokenEmbeddingParam
-		if err := manifest.WriteFile(manifestPath); err != nil {
-			return err
-		}
 	}
+	var trainManifest *EmbeddingTrainManifest
 	if trainManifestPath := ResolveEmbeddingTrainManifestPath(artifactPath); fileExists(trainManifestPath) {
 		manifest, err := ReadEmbeddingTrainManifestFile(trainManifestPath)
 		if err != nil {
 			return err
 		}
-		manifest.Embedding.Tokenizer.VocabSize = vocabSize
+		trainManifest = &manifest
 		if tokenParam == "" {
 			tokenParam = manifest.Embedding.TokenEmbeddingParam
-		}
-		if err := manifest.WriteFile(trainManifestPath); err != nil {
-			return err
 		}
 	}
 	if tokenParam == "" {
 		return fmt.Errorf("token embedding param is not available for tokenizer sync")
 	}
+	var weights *WeightFile
 	if weightPath := DefaultWeightFilePath(artifactPath); fileExists(weightPath) {
-		weights, err := ReadWeightFile(weightPath)
+		readWeights, err := ReadWeightFile(weightPath)
 		if err != nil {
 			return err
 		}
-		tensor, ok := weights.Weights[tokenParam]
+		weights = &readWeights
+		tensor, ok := readWeights.Weights[tokenParam]
 		if !ok {
 			return fmt.Errorf("weight file missing token embedding %q", tokenParam)
 		}
+		if rows := tensorLeadingRows(tensor); rows > vocabSize {
+			return fmt.Errorf("tokenizer vocab size %d would shrink weight token embedding rows %d; tensor resize is not supported by tokenizer sync", vocabSize, rows)
+		}
+	}
+	var checkpoint *EmbeddingTrainCheckpoint
+	if checkpointPath := DefaultEmbeddingCheckpointPath(artifactPath); fileExists(checkpointPath) {
+		readCheckpoint, err := ReadEmbeddingTrainCheckpointFile(checkpointPath)
+		if err != nil {
+			return err
+		}
+		checkpoint = &readCheckpoint
+		if rows := tensorLeadingRows(readCheckpoint.TokenEmbedding); rows > vocabSize {
+			return fmt.Errorf("tokenizer vocab size %d would shrink checkpoint token embedding rows %d; tensor resize is not supported by tokenizer sync", vocabSize, rows)
+		}
+	}
+	if embeddingManifest != nil {
+		embeddingManifest.Tokenizer.VocabSize = vocabSize
+		if err := embeddingManifest.WriteFile(ResolveEmbeddingManifestPath(artifactPath)); err != nil {
+			return err
+		}
+	}
+	if trainManifest != nil {
+		trainManifest.Embedding.Tokenizer.VocabSize = vocabSize
+		if err := trainManifest.WriteFile(ResolveEmbeddingTrainManifestPath(artifactPath)); err != nil {
+			return err
+		}
+	}
+	if weights != nil {
+		weightPath := DefaultWeightFilePath(artifactPath)
+		tensor := weights.Weights[tokenParam]
 		weights.Weights[tokenParam] = expandTensorLeadingRows(tensor, vocabSize, false)
 		if err := weights.WriteFile(weightPath); err != nil {
 			return err
@@ -65,11 +93,8 @@ func SyncEmbeddingTokenizerVocab(artifactPath string, vocabSize int) error {
 			}
 		}
 	}
-	if checkpointPath := DefaultEmbeddingCheckpointPath(artifactPath); fileExists(checkpointPath) {
-		checkpoint, err := ReadEmbeddingTrainCheckpointFile(checkpointPath)
-		if err != nil {
-			return err
-		}
+	if checkpoint != nil {
+		checkpointPath := DefaultEmbeddingCheckpointPath(artifactPath)
 		checkpoint.Manifest.Tokenizer.VocabSize = vocabSize
 		checkpoint.TokenEmbedding = expandTensorLeadingRows(checkpoint.TokenEmbedding, vocabSize, false)
 		checkpoint.TokenMoment1 = expandTensorLeadingRows(checkpoint.TokenMoment1, vocabSize, true)
@@ -84,6 +109,13 @@ func SyncEmbeddingTokenizerVocab(artifactPath string, vocabSize int) error {
 		}
 	}
 	return nil
+}
+
+func tensorLeadingRows(t *backend.Tensor) int {
+	if t == nil || len(t.Shape) == 0 {
+		return 0
+	}
+	return t.Shape[0]
 }
 
 func fileExists(path string) bool {

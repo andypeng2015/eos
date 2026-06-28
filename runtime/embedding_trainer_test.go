@@ -1442,7 +1442,8 @@ func TestCompactEmbeddingTrainerTrainHardNegativeContrastiveStepMovesState(t *te
 	trainer.config.ContrastiveLoss = "grouped_infonce"
 	trainer.config.Temperature = 0.05
 	batch := compactHardNegativeBatchForTest()
-	beforeStep := trainer.TrainProfile().Step
+	beforeProfile := trainer.TrainProfile()
+	beforeStep := beforeProfile.Step
 	snapshots := snapshotCompactTrainStateTensors(trainer.compactState)
 	metrics, err := trainer.TrainHardNegativeContrastiveStep(batch)
 	if err != nil {
@@ -1453,6 +1454,9 @@ func TestCompactEmbeddingTrainerTrainHardNegativeContrastiveStepMovesState(t *te
 	}
 	if got := trainer.TrainProfile().Step; got != beforeStep+1 {
 		t.Fatalf("compact hard-negative step = %d, want %d", got, beforeStep+1)
+	}
+	if got := trainer.TrainProfile().Optimizer.UpdateCalls - beforeProfile.Optimizer.UpdateCalls; got != 1 {
+		t.Fatalf("compact hard-negative optimizer updates delta = %d, want 1", got)
 	}
 	delta := aggregateParameterDeltaStats(snapshots)
 	if delta.NonzeroCount == 0 || delta.L2Norm == 0 {
@@ -2078,10 +2082,14 @@ func TestCompactEmbeddingTrainerFitEvalOnlyDoesNotTrain(t *testing.T) {
 	if summary.StepsRun != 0 || summary.StepsCompleted != checkpoint.Step || trainer.TrainProfile().Step != checkpoint.Step {
 		t.Fatalf("compact eval-only steps summary=%d/%d trainer=%d want unchanged %d", summary.StepsRun, summary.StepsCompleted, trainer.TrainProfile().Step, checkpoint.Step)
 	}
+	if summary.DeltaProfile.Optimizer.UpdateCalls != 0 || trainer.TrainProfile().Optimizer.UpdateCalls != 0 {
+		t.Fatalf("compact eval-only optimizer updates summary=%d trainer=%d, want zero", summary.DeltaProfile.Optimizer.UpdateCalls, trainer.TrainProfile().Optimizer.UpdateCalls)
+	}
 	if summary.FinalEval == nil || !compactTestFinite(summary.FinalEval.Loss) {
 		t.Fatalf("compact eval-only final eval = %+v, want finite metrics", summary.FinalEval)
 	}
 	beforeTrainStep := trainer.TrainProfile().Step
+	beforeTrainUpdates := trainer.TrainProfile().Optimizer.UpdateCalls
 	snapshots := snapshotCompactTrainStateTensors(trainer.compactState)
 	trainSummary, err := trainer.Fit(evalSet, nil, EmbeddingTrainRunConfig{Epochs: 1, BatchSize: len(evalSet), Shuffle: false})
 	if err != nil {
@@ -2089,6 +2097,9 @@ func TestCompactEmbeddingTrainerFitEvalOnlyDoesNotTrain(t *testing.T) {
 	}
 	if trainSummary.StepsRun != 1 || trainer.TrainProfile().Step != beforeTrainStep+1 {
 		t.Fatalf("compact Fit steps summary=%d trainer=%d want one update from %d", trainSummary.StepsRun, trainer.TrainProfile().Step, beforeTrainStep)
+	}
+	if trainSummary.DeltaProfile.Optimizer.UpdateCalls != 1 || trainer.TrainProfile().Optimizer.UpdateCalls != beforeTrainUpdates+1 {
+		t.Fatalf("compact Fit optimizer updates summary=%d trainer=%d want one update from %d", trainSummary.DeltaProfile.Optimizer.UpdateCalls, trainer.TrainProfile().Optimizer.UpdateCalls, beforeTrainUpdates)
 	}
 	if !compactTestFinite(trainSummary.FinalTrain.Loss) {
 		t.Fatalf("compact Fit final train = %+v, want finite metrics", trainSummary.FinalTrain)

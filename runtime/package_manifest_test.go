@@ -371,6 +371,29 @@ func TestSyncEmbeddingTokenizerVocabUpdatesTrainingPackageState(t *testing.T) {
 	}
 }
 
+func TestSyncEmbeddingTokenizerVocabRejectsCheckpointShrink(t *testing.T) {
+	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
+	artifactPath := filepath.Join(t.TempDir(), "tiny_train_embed_q8.mll")
+	if _, err := trainer.WriteTrainingPackage(artifactPath); err != nil {
+		t.Fatalf("write training package: %v", err)
+	}
+	before, err := ReadEmbeddingManifestFile(DefaultEmbeddingManifestPath(artifactPath))
+	if err != nil {
+		t.Fatalf("read embedding manifest before shrink: %v", err)
+	}
+	err = SyncEmbeddingTokenizerVocab(artifactPath, before.Tokenizer.VocabSize-1)
+	if err == nil || !strings.Contains(err.Error(), "would shrink") {
+		t.Fatalf("sync tokenizer shrink error = %v, want would shrink", err)
+	}
+	after, err := ReadEmbeddingManifestFile(DefaultEmbeddingManifestPath(artifactPath))
+	if err != nil {
+		t.Fatalf("read embedding manifest after shrink: %v", err)
+	}
+	if after.Tokenizer.VocabSize != before.Tokenizer.VocabSize {
+		t.Fatalf("manifest vocab size after failed shrink = %d, want unchanged %d", after.Tokenizer.VocabSize, before.Tokenizer.VocabSize)
+	}
+}
+
 func TestLoadEmbeddingPackageRejectsTamperedWeightFile(t *testing.T) {
 	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
 	packagePath := filepath.Join(t.TempDir(), "tiny_train_embed_q8.mll")
