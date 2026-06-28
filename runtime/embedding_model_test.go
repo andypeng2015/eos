@@ -133,25 +133,72 @@ func TestLoadEmbeddingValidatesManifest(t *testing.T) {
 	}
 }
 
-func TestLoadEmbeddingRejectsCompactMultiHeadServingGraph(t *testing.T) {
-	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_embed_pooled", Preset: compiler.PresetTinyEmbedPooled})
+func TestLoadEmbeddingAcceptsCompactMultiHeadServingGraph(t *testing.T) {
+	src := []byte(`
+param token_embedding: f16[V, D] @weight("weights/token_embedding")
+param attn_q: f16[D, D] @weight("weights/attn_q")
+param attn_k: f16[D, D] @weight("weights/attn_k")
+param attn_v: f16[D, D] @weight("weights/attn_v")
+param attn_o: f16[D, D] @weight("weights/attn_o")
+param projection: f16[D, D] @weight("weights/projection")
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[D] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let q = @matmul(hidden, attn_q)
+    let k = @matmul(hidden, attn_k)
+    let v = @matmul(hidden, attn_v)
+    let mixed = compact_multihead_attention_h2(q, k, v, attention_mask)
+    let attended = @matmul(mixed, attn_o)
+    let normalized = normalize(attended)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, D] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let q = @matmul(hidden, attn_q)
+    let k = @matmul(hidden, attn_k)
+    let v = @matmul(hidden, attn_v)
+    let mixed = compact_multihead_attention_h2(q, k, v, attention_mask)
+    let attended = @matmul(mixed, attn_o)
+    let normalized = normalize(attended)
+    return mean_pool(normalized, attention_mask)
+}
+`)
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "tiny_compact_multihead_embed"})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
 	manifest := tinyEmbeddingManifest()
+	manifest.Name = "tiny_compact_multihead_embed"
+	manifest.MaskInput = "attention_mask"
 	manifest.ArchitectureVersion = EmbeddingArchitectureCompactTransformerV1
 	manifest.ParameterTying = EmbeddingParameterTyingUntied
 	manifest.ModelDim = 4
 	manifest.OutputDim = 4
 	manifest.AttentionHeads = 2
 	manifest.HeadDim = 2
+	manifest.AttentionQueryParam = "attn_q"
+	manifest.AttentionKeyParam = "attn_k"
+	manifest.AttentionValueParam = "attn_v"
+	manifest.AttentionOutputParam = "attn_o"
+	manifest.AttentionMaskMode = EmbeddingAttentionMaskModeKey
+	manifest.AttentionScoreScale = EmbeddingAttentionScoreScaleKeyDimRSQ
+	manifest.Tokenizer.VocabSize = 4
+	manifest.Tokenizer.MaxSequence = 3
 
 	rt := New(cuda.New(), metal.New())
-	_, err = rt.LoadEmbedding(context.Background(), bundle.Artifact, manifest, tinyEmbedWeights()...)
-	if err == nil ||
-		!strings.Contains(err.Error(), "serving graph does not support attention_heads=2") ||
-		!strings.Contains(err.Error(), "fused-head attention") {
-		t.Fatalf("LoadEmbedding error = %v, want compact multi-head serving graph gate", err)
+	model, err := rt.LoadEmbedding(context.Background(), bundle.Artifact, manifest, tinyCompactMultiHeadWeights()...)
+	if err != nil {
+		t.Fatalf("LoadEmbedding compact multi-head: %v", err)
+	}
+	result, err := model.Embed(context.Background(), []int32{1, 2, 3})
+	if err != nil {
+		t.Fatalf("embed compact multi-head: %v", err)
+	}
+	if result.Embeddings == nil || len(result.Embeddings.Shape) != 1 || result.Embeddings.Shape[0] != 4 {
+		t.Fatalf("compact multi-head embedding shape = %v, want [4]", result.Embeddings.Shape)
 	}
 }
 
@@ -552,6 +599,28 @@ func tinyEmbeddingManifest() EmbeddingManifest {
 			MaxSequence: 2,
 			PadID:       0,
 		},
+	}
+}
+
+func tinyCompactMultiHeadWeights() []LoadOption {
+	identity4 := backend.NewTensorF16([]int{4, 4}, []float32{
+		1, 0, 0, 0,
+		0, 1, 0, 0,
+		0, 0, 1, 0,
+		0, 0, 0, 1,
+	})
+	return []LoadOption{
+		WithWeight("token_embedding", backend.NewTensorF16([]int{4, 4}, []float32{
+			0, 0, 0, 0,
+			1, 0, 0, 0,
+			0, 1, 1, 0,
+			0, 0, 0, 1,
+		})),
+		WithWeight("attn_q", identity4.Clone()),
+		WithWeight("attn_k", identity4.Clone()),
+		WithWeight("attn_v", identity4.Clone()),
+		WithWeight("attn_o", identity4.Clone()),
+		WithWeight("projection", identity4.Clone()),
 	}
 }
 

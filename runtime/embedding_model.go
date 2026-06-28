@@ -155,9 +155,6 @@ func (rt *Runtime) LoadEmbeddingBundleWithManifest(ctx context.Context, artifact
 }
 
 func (m EmbeddingManifest) validateServingGraphSupported() error {
-	if m.ArchitectureVersion == EmbeddingArchitectureCompactTransformerV1 && m.AttentionHeads > 1 {
-		return fmt.Errorf("%s serving graph does not support attention_heads=%d yet; generated compact serving graph uses fused-head attention and is only valid for attention_heads=1 until per-head serving parity is implemented", m.ArchitectureVersion, m.AttentionHeads)
-	}
 	return nil
 }
 
@@ -1029,8 +1026,8 @@ func (m EmbeddingManifest) ValidateModule(mod *eosartifact.Module) error {
 		if m.MaskInput == "" {
 			return fmt.Errorf("attention_mask_mode=%q requires mask_input", m.AttentionMaskMode)
 		}
-		if !moduleHasKernelOp(mod, "masked_softmax") {
-			return fmt.Errorf("attention_mask_mode=%q requires masked_softmax in serving graph", m.AttentionMaskMode)
+		if !moduleHasKernelOp(mod, "masked_softmax") && !moduleHasKernelOp(mod, "compact_multihead_attention") {
+			return fmt.Errorf("attention_mask_mode=%q requires masked_softmax or compact_multihead_attention in serving graph", m.AttentionMaskMode)
 		}
 	default:
 		return fmt.Errorf("unsupported attention_mask_mode %q", m.AttentionMaskMode)
@@ -1038,8 +1035,8 @@ func (m EmbeddingManifest) ValidateModule(mod *eosartifact.Module) error {
 	switch m.AttentionScoreScale {
 	case "", EmbeddingAttentionScoreScaleNone:
 	case EmbeddingAttentionScoreScaleKeyDimRSQ:
-		if !moduleHasScaledAttentionMatMul(mod) {
-			return fmt.Errorf("attention_score_scale=%q requires scaled attention score matmul in serving graph", m.AttentionScoreScale)
+		if !moduleHasScaledAttentionMatMul(mod) && !moduleHasKernelOp(mod, "compact_multihead_attention") {
+			return fmt.Errorf("attention_score_scale=%q requires scaled attention score matmul or compact_multihead_attention in serving graph", m.AttentionScoreScale)
 		}
 	default:
 		return fmt.Errorf("unsupported attention_score_scale %q", m.AttentionScoreScale)

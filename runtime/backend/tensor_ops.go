@@ -702,6 +702,24 @@ func executeKernelOp(op eosartifact.KernelOp, locals map[string]*Tensor) (*Tenso
 			return nil, err
 		}
 		return maskedSoftmaxRows(in, mask)
+	case "compact_multihead_attention":
+		q, err := tensorByName(locals, op.Inputs, 0)
+		if err != nil {
+			return nil, err
+		}
+		k, err := tensorByName(locals, op.Inputs, 1)
+		if err != nil {
+			return nil, err
+		}
+		v, err := tensorByName(locals, op.Inputs, 2)
+		if err != nil {
+			return nil, err
+		}
+		mask, err := tensorByName(locals, op.Inputs, 3)
+		if err != nil {
+			return nil, err
+		}
+		return compactMultiheadAttentionTensor(q, k, v, mask, op.Attributes)
 	case "gelu":
 		in, err := tensorByName(locals, op.Inputs, 0)
 		if err != nil {
@@ -1844,6 +1862,65 @@ func maskedSoftmaxRowsF32(out, in []float32, rows, cols int, active func(row, co
 			}
 		}
 	}
+}
+
+func compactMultiheadAttentionTensor(q, k, v, mask *Tensor, attrs map[string]string) (*Tensor, error) {
+	if q == nil || k == nil || v == nil || mask == nil {
+		return nil, fmt.Errorf("compact_multihead_attention expects non-nil q, k, v, and attention_mask")
+	}
+	if q.DType != "f32" && q.DType != "f16" {
+		return nil, fmt.Errorf("compact_multihead_attention q dtype %q is not f32-compatible", q.DType)
+	}
+	if k.DType != q.DType || v.DType != q.DType {
+		return nil, fmt.Errorf("compact_multihead_attention q/k/v dtypes must match, got %q/%q/%q", q.DType, k.DType, v.DType)
+	}
+	if mask.DType != "i32" {
+		return nil, fmt.Errorf("compact_multihead_attention attention_mask dtype %q is not i32", mask.DType)
+	}
+	heads := 1
+	if attrs != nil && attrs["num_attention_heads"] != "" {
+		parsed, err := strconv.Atoi(attrs["num_attention_heads"])
+		if err != nil || parsed <= 0 {
+			return nil, fmt.Errorf("compact_multihead_attention num_attention_heads %q is invalid", attrs["num_attention_heads"])
+		}
+		heads = parsed
+	}
+	if !slices.Equal(q.Shape, k.Shape) || !slices.Equal(q.Shape, v.Shape) {
+		return nil, fmt.Errorf("compact_multihead_attention q/k/v shapes must match, got %v/%v/%v", q.Shape, k.Shape, v.Shape)
+	}
+	if q.Elements() != len(q.F32) || k.Elements() != len(k.F32) || v.Elements() != len(v.F32) {
+		return nil, fmt.Errorf("compact_multihead_attention q/k/v backing data does not match tensor shape")
+	}
+	if mask.Elements() != len(mask.I32) {
+		return nil, fmt.Errorf("compact_multihead_attention attention_mask backing data does not match tensor shape")
+	}
+	var batch, tokens, hidden int
+	switch len(q.Shape) {
+	case 2:
+		batch, tokens, hidden = 1, q.Shape[0], q.Shape[1]
+		if len(mask.Shape) != 1 || mask.Shape[0] != tokens {
+			return nil, fmt.Errorf("compact_multihead_attention mask shape %v does not match q shape %v", mask.Shape, q.Shape)
+		}
+	case 3:
+		batch, tokens, hidden = q.Shape[0], q.Shape[1], q.Shape[2]
+		if len(mask.Shape) != 2 || mask.Shape[0] != batch || mask.Shape[1] != tokens {
+			return nil, fmt.Errorf("compact_multihead_attention mask shape %v does not match q shape %v", mask.Shape, q.Shape)
+		}
+	default:
+		return nil, fmt.Errorf("compact_multihead_attention expects q/k/v rank 2 or 3, got %v", q.Shape)
+	}
+	if batch <= 0 || tokens <= 0 || hidden <= 0 {
+		return nil, fmt.Errorf("compact_multihead_attention q shape must be positive, got %v", q.Shape)
+	}
+	if hidden%heads != 0 {
+		return nil, fmt.Errorf("compact_multihead_attention hidden size %d must be divisible by num_attention_heads %d", hidden, heads)
+	}
+	context := bertSelfAttentionContext(q.F32, k.F32, v.F32, mask.I32, batch, tokens, hidden, heads, hidden/heads)
+	return &Tensor{
+		DType: q.DType,
+		Shape: append([]int(nil), q.Shape...),
+		F32:   context,
+	}, nil
 }
 
 func geluTensor(in *Tensor) *Tensor {

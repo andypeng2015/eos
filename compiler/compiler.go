@@ -2169,6 +2169,17 @@ func inferExprType(expr syntax.Expr, env map[string]hir.Type) (hir.Type, error) 
 			}
 			argTypes = append(argTypes, typ)
 		}
+		if !e.Intrinsic {
+			if _, ok := compactMultiheadAttentionHeads(e.Callee); ok {
+				if len(argTypes) != 4 {
+					return hir.Type{}, fmt.Errorf("%s expects q, k, v, and attention_mask arguments", e.Callee)
+				}
+				if !isRank2HIRTensor(argTypes[0]) && !isRank3HIRTensor(argTypes[0]) {
+					return hir.Type{}, fmt.Errorf("%s q must be rank-2 or rank-3", e.Callee)
+				}
+				return argTypes[0], nil
+			}
+		}
 		if e.Intrinsic && (e.Callee == "matmul" || e.Callee == "scaled_attention_scores") && len(argTypes) == 2 {
 			intrinsic := "@" + e.Callee
 			if isRank2HIRTensor(argTypes[0]) {
@@ -2548,6 +2559,13 @@ func lowerKernelExpr(expr syntax.Expr, output string, kernels map[string]bool) (
 
 func kernelOpForCall(call *syntax.CallExpr, output string, kernels map[string]bool) lir.KernelOp {
 	kind := lir.KernelOpPointwise
+	opName := call.Callee
+	attrs := map[string]string{}
+	if heads, ok := compactMultiheadAttentionHeads(call.Callee); ok {
+		kind = lir.KernelOpReduce
+		opName = "compact_multihead_attention"
+		attrs["num_attention_heads"] = fmt.Sprintf("%d", heads)
+	}
 	switch call.Callee {
 	case "normalize", "rmsnorm", "layernorm", "softmax", "masked_softmax", "dot", "cosine", "l2_distance", "mean_pool":
 		kind = lir.KernelOpReduce
@@ -2558,7 +2576,6 @@ func kernelOpForCall(call *syntax.CallExpr, output string, kernels map[string]bo
 			kind = lir.KernelOpBuiltin
 		}
 	}
-	attrs := map[string]string{}
 	if call.Intrinsic {
 		attrs["intrinsic"] = "true"
 	}
@@ -2568,7 +2585,7 @@ func kernelOpForCall(call *syntax.CallExpr, output string, kernels map[string]bo
 	return lir.KernelOp{
 		Kind:       kind,
 		Name:       output,
-		Op:         call.Callee,
+		Op:         opName,
 		Inputs:     exprArgNames(call.Args),
 		Outputs:    maybeOutput(output),
 		Attributes: attrs,
@@ -2644,7 +2661,7 @@ func scheduleHintsForKernel(name string, ops []lir.KernelOp) lir.ScheduleHints {
 	}
 	for _, op := range ops {
 		switch op.Op {
-		case "softmax", "masked_softmax":
+		case "softmax", "masked_softmax", "compact_multihead_attention":
 			hints.Tile = []int{64}
 			hints.VectorWidth = 1
 			hints.Subgroup = true
@@ -2713,6 +2730,18 @@ func topKLiteralExpr(expr syntax.Expr) (int, bool) {
 		return 0, false
 	}
 	return value, true
+}
+
+func compactMultiheadAttentionHeads(callee string) (int, bool) {
+	const prefix = "compact_multihead_attention_h"
+	if !strings.HasPrefix(callee, prefix) {
+		return 0, false
+	}
+	heads, err := strconv.Atoi(strings.TrimPrefix(callee, prefix))
+	if err != nil || heads <= 0 {
+		return 0, false
+	}
+	return heads, true
 }
 
 func isRank1HIRTensor(typ hir.Type) bool {

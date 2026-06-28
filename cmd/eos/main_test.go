@@ -1097,21 +1097,38 @@ func TestRunInitModelCreatesCompactBootstrapPackage(t *testing.T) {
 	}
 }
 
-func TestRunInitModelRejectsCompactMultiHeadServingGraph(t *testing.T) {
-	err := run([]string{
+func TestRunInitModelCreatesCompactMultiHeadServingGraph(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "compact-multihead.mll")
+	if err := run([]string{
 		"init-model",
 		"--architecture", eosruntime.EmbeddingArchitectureCompactTransformerV1,
 		"--model-dim", "8",
 		"--output-dim", "4",
 		"--hidden-dim", "16",
 		"--attention-heads", "2",
-		filepath.Join(t.TempDir(), "compact-multihead.mll"),
-	})
-	if err == nil ||
-		!strings.Contains(err.Error(), "generated serving graph does not support attention_heads=2") ||
-		!strings.Contains(err.Error(), "per-head compact serving parity") {
-		t.Fatalf("run init-model error = %v, want compact multi-head serving graph gate", err)
+		path,
+	}); err != nil {
+		t.Fatalf("run init-model compact multi-head: %v", err)
 	}
+	manifest, err := eosruntime.ReadEmbeddingManifestFile(eosruntime.DefaultEmbeddingManifestPath(path))
+	if err != nil {
+		t.Fatalf("read compact multi-head manifest: %v", err)
+	}
+	if manifest.AttentionHeads != 2 || manifest.HeadDim != 4 {
+		t.Fatalf("compact multi-head manifest heads/head_dim = %d/%d, want 2/4", manifest.AttentionHeads, manifest.HeadDim)
+	}
+	mod, err := eosartifact.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read compact multi-head artifact: %v", err)
+	}
+	for _, kernel := range mod.Kernels {
+		for _, op := range kernel.Body {
+			if op.Op == "compact_multihead_attention" && op.Attributes["num_attention_heads"] == "2" {
+				return
+			}
+		}
+	}
+	t.Fatal("compact multi-head artifact missing compact_multihead_attention num_attention_heads=2")
 }
 
 func TestRunInitModelRejectsInvalidHeadConfig(t *testing.T) {

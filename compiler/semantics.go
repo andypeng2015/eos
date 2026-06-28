@@ -181,6 +181,11 @@ func inferSemanticCallType(call *syntax.CallExpr, callable *syntax.CallableDecl,
 	if !call.Intrinsic && call.Callee == "turbo_sparse_attention" {
 		return inferSemanticTurboSparseAttentionCallType(call, callable, locals, env)
 	}
+	if !call.Intrinsic {
+		if heads, ok := compactMultiheadAttentionHeads(call.Callee); ok {
+			return inferSemanticCompactMultiheadAttentionCallType(call, callable, locals, env, heads)
+		}
+	}
 
 	diags := []syntax.Diagnostic{}
 	args := make([]hir.Type, 0, len(call.Args))
@@ -598,6 +603,67 @@ func inferSemanticCallType(call *syntax.CallExpr, callable *syntax.CallableDecl,
 		}
 	}
 	return primaryCallableResultType(target), diags
+}
+
+func inferSemanticCompactMultiheadAttentionCallType(call *syntax.CallExpr, callable *syntax.CallableDecl, locals map[string]hir.Type, env moduleTypeEnv, heads int) (hir.Type, []syntax.Diagnostic) {
+	diags := []syntax.Diagnostic{}
+	args := make([]hir.Type, 0, len(call.Args))
+	for _, arg := range call.Args {
+		typ, argDiags := inferSemanticExprType(arg, callable, locals, env)
+		diags = append(diags, argDiags...)
+		args = append(args, typ)
+	}
+	if callable.Kind == syntax.CallableKernel {
+		diags = append(diags, diagnosticError(call.Span, "%s is only supported in pipeline bodies", call.Callee))
+	}
+	if heads <= 0 {
+		diags = append(diags, diagnosticError(call.Span, "%s num_attention_heads must be positive", call.Callee))
+		return hir.Type{}, diags
+	}
+	if len(args) != 4 {
+		diags = append(diags, diagnosticError(call.Span, "%s expects q, k, v, and attention_mask arguments, got %d", call.Callee, len(args)))
+		return hir.Type{}, diags
+	}
+	for i, name := range []string{"q", "k", "v"} {
+		if args[i].Kind != hir.TypeTensor || args[i].Tensor == nil {
+			diags = append(diags, diagnosticError(call.Args[i].ExprSpan(), "%s %s must be a tensor", call.Callee, name))
+			return hir.Type{}, diags
+		}
+		if !isRank2Tensor(args[i]) && !isRank3Tensor(args[i]) {
+			diags = append(diags, diagnosticError(call.Args[i].ExprSpan(), "%s %s must be f*[T, D] or f*[B, T, D]", call.Callee, name))
+			return hir.Type{}, diags
+		}
+	}
+	q, k, v := args[0].Tensor, args[1].Tensor, args[2].Tensor
+	if !sameTensorShape(args[0].Tensor, args[1].Tensor) || !sameTensorShape(args[0].Tensor, args[2].Tensor) {
+		diags = append(diags, diagnosticError(call.Span, "%s q, k, and v must have identical shapes", call.Callee))
+	}
+	if q.DType != k.DType || q.DType != v.DType {
+		diags = append(diags, diagnosticError(call.Span, "%s q, k, and v dtypes must match", call.Callee))
+	}
+	if args[3].Kind != hir.TypeTensor || args[3].Tensor == nil || args[3].Tensor.DType != "i32" {
+		diags = append(diags, diagnosticError(call.Args[3].ExprSpan(), "%s attention_mask must be i32[T] or i32[B, T]", call.Callee))
+		return hir.Type{}, diags
+	}
+	if isRank2Tensor(args[0]) {
+		if !isRank1Tensor(args[3]) {
+			diags = append(diags, diagnosticError(call.Args[3].ExprSpan(), "%s attention_mask rank must be 1 for rank-2 q/k/v", call.Callee))
+		} else if q.Shape[0].Name != args[3].Tensor.Shape[0].Name {
+			diags = append(diags, diagnosticError(call.Span, "%s token dimension mismatch: q %s vs mask %s", call.Callee, q.Shape[0].Name, args[3].Tensor.Shape[0].Name))
+		}
+		return args[0], diags
+	}
+	if !isRank2Tensor(args[3]) {
+		diags = append(diags, diagnosticError(call.Args[3].ExprSpan(), "%s attention_mask rank must be 2 for rank-3 q/k/v", call.Callee))
+		return args[0], diags
+	}
+	if q.Shape[0].Name != args[3].Tensor.Shape[0].Name {
+		diags = append(diags, diagnosticError(call.Span, "%s batch dimension mismatch: q %s vs mask %s", call.Callee, q.Shape[0].Name, args[3].Tensor.Shape[0].Name))
+	}
+	if q.Shape[1].Name != args[3].Tensor.Shape[1].Name {
+		diags = append(diags, diagnosticError(call.Span, "%s token dimension mismatch: q %s vs mask %s", call.Callee, q.Shape[1].Name, args[3].Tensor.Shape[1].Name))
+	}
+	return args[0], diags
 }
 
 func exprHasEffect(expr syntax.Expr) bool {

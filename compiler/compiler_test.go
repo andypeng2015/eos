@@ -323,6 +323,33 @@ func TestBuildEncoderTrainableQ8x2Preset(t *testing.T) {
 	}
 }
 
+func TestBuildCompactMultiheadAttentionBuiltin(t *testing.T) {
+	src := []byte(`
+param q: f16[T, D] @weight("weights/q")
+param k: f16[T, D] @weight("weights/k")
+param v: f16[T, D] @weight("weights/v")
+
+pipeline compact_attention(attention_mask: i32[T]) -> f16[T, D] {
+    return compact_multihead_attention_h2(q, k, v, attention_mask)
+}
+`)
+	bundle, err := Build(src, Options{ModuleName: "compact_attention"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	for _, kernel := range bundle.Artifact.Kernels {
+		for _, op := range kernel.Body {
+			if op.Op == "compact_multihead_attention" {
+				if got := op.Attributes["num_attention_heads"]; got != "2" {
+					t.Fatalf("num_attention_heads = %q, want 2", got)
+				}
+				return
+			}
+		}
+	}
+	t.Fatal("compiled artifact missing compact_multihead_attention op")
+}
+
 func TestBuildEncoderTrainableQ4x2Preset(t *testing.T) {
 	bundle, err := Build(nil, Options{ModuleName: "encoder_trainable_q4x2", Preset: PresetEncoderTrainableQ4x2})
 	if err != nil {

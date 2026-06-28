@@ -251,9 +251,6 @@ func (cfg DefaultEmbeddingPackageConfig) validate() error {
 	if cfg.ModelDim%cfg.AttentionHeads != 0 {
 		return fmt.Errorf("model_dim %d must be divisible by attention_heads %d", cfg.ModelDim, cfg.AttentionHeads)
 	}
-	if cfg.Architecture == eosruntime.EmbeddingArchitectureCompactTransformerV1 && cfg.AttentionHeads > 1 {
-		return fmt.Errorf("%s generated serving graph does not support attention_heads=%d yet; use attention_heads=1 until per-head compact serving parity is implemented", cfg.Architecture, cfg.AttentionHeads)
-	}
 	if cfg.Architecture == eosruntime.EmbeddingArchitectureLegacyV1 && cfg.AttentionHeads != 1 {
 		return fmt.Errorf("%s with attention_heads=%d is not supported by trainable package initialization yet", cfg.Architecture, cfg.AttentionHeads)
 	}
@@ -371,10 +368,14 @@ func compactTransformerPipelineBody(cfg DefaultEmbeddingPackageConfig) string {
 		fmt.Fprintf(&b, "    let %s_q = @matmul(%s, %s_wq)\n", prefix, prev, prefix)
 		fmt.Fprintf(&b, "    let %s_k = @matmul(%s, %s_wk)\n", prefix, prev, prefix)
 		fmt.Fprintf(&b, "    let %s_v = @matmul(%s, %s_wv)\n", prefix, prev, prefix)
-		fmt.Fprintf(&b, "    let %s_kt = transpose(%s_k)\n", prefix, prefix)
-		fmt.Fprintf(&b, "    let %s_scores = @scaled_attention_scores(%s_q, %s_kt)\n", prefix, prefix, prefix)
-		fmt.Fprintf(&b, "    let %s_probs = masked_softmax(%s_scores, attention_mask)\n", prefix, prefix)
-		fmt.Fprintf(&b, "    let %s_mixed = @matmul(%s_probs, %s_v)\n", prefix, prefix, prefix)
+		if cfg.AttentionHeads > 1 {
+			fmt.Fprintf(&b, "    let %s_mixed = compact_multihead_attention_h%d(%s_q, %s_k, %s_v, attention_mask)\n", prefix, cfg.AttentionHeads, prefix, prefix, prefix)
+		} else {
+			fmt.Fprintf(&b, "    let %s_kt = transpose(%s_k)\n", prefix, prefix)
+			fmt.Fprintf(&b, "    let %s_scores = @scaled_attention_scores(%s_q, %s_kt)\n", prefix, prefix, prefix)
+			fmt.Fprintf(&b, "    let %s_probs = masked_softmax(%s_scores, attention_mask)\n", prefix, prefix)
+			fmt.Fprintf(&b, "    let %s_mixed = @matmul(%s_probs, %s_v)\n", prefix, prefix, prefix)
+		}
 		fmt.Fprintf(&b, "    let %s_attended = @matmul(%s_mixed, %s_wo)\n", prefix, prefix, prefix)
 		fmt.Fprintf(&b, "    let %s_attn_hidden = layernorm(%s_attended + %s)\n", prefix, prefix, prev)
 		fmt.Fprintf(&b, "    let %s_ffn_hidden = @matmul(%s_attn_hidden, %s_ffn_up_f)\n", prefix, prefix, prefix)

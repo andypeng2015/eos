@@ -374,22 +374,43 @@ func TestInitDefaultEmbeddingPackageCompactParamContract(t *testing.T) {
 	}
 }
 
-func TestInitDefaultEmbeddingPackageRejectsCompactMultiHeadServingGraph(t *testing.T) {
+func TestInitDefaultEmbeddingPackageCreatesCompactMultiHeadServingGraph(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "compact-multihead.mll")
-	_, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
+	paths, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
 		Architecture:   eosruntime.EmbeddingArchitectureCompactTransformerV1,
-		ModelDim:       8,
+		VocabSize:      12,
+		MaxSequence:    6,
+		ModelDim:       4,
 		OutputDim:      4,
-		HiddenDim:      16,
+		HiddenDim:      8,
 		AttentionHeads: 2,
+		EncoderRepeats: 1,
 	})
-	if err == nil ||
-		!strings.Contains(err.Error(), "generated serving graph does not support attention_heads=2") ||
-		!strings.Contains(err.Error(), "per-head compact serving parity") {
-		t.Fatalf("InitDefaultEmbeddingPackage error = %v, want compact multi-head serving graph gate", err)
+	if err != nil {
+		t.Fatalf("init compact multi-head package: %v", err)
 	}
-	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
-		t.Fatalf("multi-head compact init wrote artifact despite serving gate: stat err=%v", statErr)
+	mod, err := eosartifact.ReadFile(paths.ArtifactPath)
+	if err != nil {
+		t.Fatalf("read compact multi-head artifact: %v", err)
+	}
+	if got := compactMultiheadAttentionHeadsForTest(mod); got != "2" {
+		t.Fatalf("compact_multihead_attention num_attention_heads = %q, want 2", got)
+	}
+	manifest, err := eosruntime.ReadEmbeddingManifestFile(paths.EmbeddingManifestPath)
+	if err != nil {
+		t.Fatalf("read compact multi-head manifest: %v", err)
+	}
+	rt := eosruntime.New(vulkan.New())
+	model, err := rt.LoadEmbeddingPackage(context.Background(), path)
+	if err != nil {
+		t.Fatalf("load compact multi-head embedding package: %v", err)
+	}
+	result, err := model.Embed(context.Background(), []int32{1, 4, 5})
+	if err != nil {
+		t.Fatalf("embed compact multi-head package: %v", err)
+	}
+	if result.Embeddings == nil || len(result.Embeddings.Shape) != 1 || result.Embeddings.Shape[0] != manifest.OutputDim {
+		t.Fatalf("compact multi-head embedding shape = %v, want [%d]", result.Embeddings.Shape, manifest.OutputDim)
 	}
 }
 
@@ -581,6 +602,20 @@ func moduleHasKernelOpForTest(mod *eosartifact.Module, op string) bool {
 		}
 	}
 	return false
+}
+
+func compactMultiheadAttentionHeadsForTest(mod *eosartifact.Module) string {
+	if mod == nil {
+		return ""
+	}
+	for _, kernel := range mod.Kernels {
+		for _, bodyOp := range kernel.Body {
+			if bodyOp.Op == "compact_multihead_attention" {
+				return bodyOp.Attributes["num_attention_heads"]
+			}
+		}
+	}
+	return ""
 }
 
 func moduleRequiresCapabilityForTest(mod *eosartifact.Module, capability string) bool {
