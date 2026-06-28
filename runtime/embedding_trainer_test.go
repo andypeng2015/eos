@@ -1437,6 +1437,149 @@ func TestCompactEmbeddingTrainerTrainContrastiveStepSupportsInfoNCE(t *testing.T
 	}
 }
 
+func TestCompactEmbeddingTrainerTrainHardNegativeContrastiveStepMovesState(t *testing.T) {
+	trainer := newCompactEmbeddingTrainerForTest(t, 3)
+	trainer.config.ContrastiveLoss = "grouped_infonce"
+	trainer.config.Temperature = 0.05
+	batch := compactHardNegativeBatchForTest()
+	beforeStep := trainer.TrainProfile().Step
+	snapshots := snapshotCompactTrainStateTensors(trainer.compactState)
+	metrics, err := trainer.TrainHardNegativeContrastiveStep(batch)
+	if err != nil {
+		t.Fatalf("compact TrainHardNegativeContrastiveStep: %v", err)
+	}
+	if !compactTestFinite(metrics.Loss) || !compactTestFinite(metrics.AverageScore) || metrics.BatchSize != 4 {
+		t.Fatalf("compact hard-negative metrics = %+v, want finite grouped metrics", metrics)
+	}
+	if got := trainer.TrainProfile().Step; got != beforeStep+1 {
+		t.Fatalf("compact hard-negative step = %d, want %d", got, beforeStep+1)
+	}
+	delta := aggregateParameterDeltaStats(snapshots)
+	if delta.NonzeroCount == 0 || delta.L2Norm == 0 {
+		t.Fatalf("compact TrainHardNegativeContrastiveStep did not move train tensors: %+v", delta)
+	}
+}
+
+func TestCompactEmbeddingTrainerTrainHardNegativeContrastiveStepSupportsInfoNCE(t *testing.T) {
+	trainer := newCompactEmbeddingTrainerForTest(t, 3)
+	trainer.config.ContrastiveLoss = "infonce"
+	trainer.config.Temperature = 0.05
+	batch := compactHardNegativeBatchForTest()
+	metrics, err := trainer.TrainHardNegativeContrastiveStep(batch)
+	if err != nil {
+		t.Fatalf("compact TrainHardNegativeContrastiveStep InfoNCE: %v", err)
+	}
+	if !compactTestFinite(metrics.Loss) || !compactTestFinite(metrics.AverageScore) || metrics.BatchSize != 8 {
+		t.Fatalf("compact hard-negative InfoNCE metrics = %+v, want finite rectangular metrics", metrics)
+	}
+	if got := trainer.TrainProfile().Step; got != 1 {
+		t.Fatalf("compact hard-negative InfoNCE step = %d, want 1", got)
+	}
+}
+
+func TestCompactEmbeddingTrainerTrainHardNegativeContrastiveStepSupportsDefaultLoss(t *testing.T) {
+	trainer := newCompactEmbeddingTrainerForTest(t, 3)
+	trainer.config.Temperature = 0.05
+	metrics, err := trainer.TrainHardNegativeContrastiveStep(compactHardNegativeBatchForTest())
+	if err != nil {
+		t.Fatalf("compact TrainHardNegativeContrastiveStep default loss: %v", err)
+	}
+	if !compactTestFinite(metrics.Loss) || !compactTestFinite(metrics.AverageScore) || metrics.BatchSize != 8 {
+		t.Fatalf("compact hard-negative default metrics = %+v, want finite rectangular metrics", metrics)
+	}
+	if got := trainer.TrainProfile().Step; got != 1 {
+		t.Fatalf("compact hard-negative default step = %d, want 1", got)
+	}
+}
+
+func TestCompactEmbeddingTrainerHardNegativeCheckpointRestoreParity(t *testing.T) {
+	checkpoint := compactTrainStateTestCheckpoint(3)
+	checkpoint.Step = 13
+	mod := compactTrainStateTestModule(checkpoint)
+	state, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
+	if err != nil {
+		t.Fatalf("load compact state: %v", err)
+	}
+	trainer, err := newCompactEmbeddingTrainerFromTrainState(mod, state)
+	if err != nil {
+		t.Fatalf("new compact trainer: %v", err)
+	}
+	trainer.config.ContrastiveLoss = "grouped_infonce"
+	trainer.config.Temperature = 0.05
+	batch := compactHardNegativeBatchForTest()
+	if _, err := trainer.TrainHardNegativeContrastiveStep(batch); err != nil {
+		t.Fatalf("train compact hard-negative before checkpoint: %v", err)
+	}
+	evalPairs, err := BuildEmbeddingHardNegativeEvalPairs(batch, 1)
+	if err != nil {
+		t.Fatalf("build hard-negative eval pairs: %v", err)
+	}
+	before, err := trainer.EvaluatePairs(evalPairs)
+	if err != nil {
+		t.Fatalf("evaluate compact hard-negative pairs before checkpoint: %v", err)
+	}
+	saved, err := trainer.Checkpoint()
+	if err != nil {
+		t.Fatalf("checkpoint compact hard-negative trainer: %v", err)
+	}
+	if saved.Step != checkpoint.Step+1 {
+		t.Fatalf("checkpoint step = %d, want %d", saved.Step, checkpoint.Step+1)
+	}
+	restored, err := NewEmbeddingTrainerFromCheckpoint(mod, saved)
+	if err != nil {
+		t.Fatalf("restore compact hard-negative trainer: %v", err)
+	}
+	after, err := restored.EvaluatePairs(evalPairs)
+	if err != nil {
+		t.Fatalf("evaluate restored compact hard-negative pairs: %v", err)
+	}
+	assertClose(t, before.Loss, after.Loss, 0.000001)
+	assertClose(t, before.AverageScore, after.AverageScore, 0.000001)
+	if got := restored.TrainProfile().Step; got != checkpoint.Step+1 {
+		t.Fatalf("restored compact hard-negative step = %d, want %d", got, checkpoint.Step+1)
+	}
+}
+
+func TestCompactEmbeddingTrainerHardNegativeUnsupportedModes(t *testing.T) {
+	for name, tc := range map[string]struct {
+		configure func(*EmbeddingTrainer, []EmbeddingHardNegativeExample) []EmbeddingHardNegativeExample
+		want      string
+	}{
+		"hybrid_loss": {
+			configure: func(trainer *EmbeddingTrainer, batch []EmbeddingHardNegativeExample) []EmbeddingHardNegativeExample {
+				trainer.config.ContrastiveLoss = "hybrid_infonce"
+				return batch
+			},
+			want: `does not support contrastive_loss "hybrid_infonce"`,
+		},
+		"teacher_weight": {
+			configure: func(trainer *EmbeddingTrainer, batch []EmbeddingHardNegativeExample) []EmbeddingHardNegativeExample {
+				trainer.config.TeacherLossWeight = 0.5
+				return batch
+			},
+			want: "supports InfoNCE and grouped InfoNCE only",
+		},
+		"teacher_scores": {
+			configure: func(trainer *EmbeddingTrainer, batch []EmbeddingHardNegativeExample) []EmbeddingHardNegativeExample {
+				batch[0].TeacherScores = []float32{0.9, 0.1}
+				return batch
+			},
+			want: "does not support teacher_scores",
+		},
+	} {
+		trainer := newCompactEmbeddingTrainerForTest(t, 3)
+		beforeStep := trainer.TrainProfile().Step
+		batch := tc.configure(trainer, compactHardNegativeBatchForTest())
+		_, err := trainer.TrainHardNegativeContrastiveStep(batch)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s compact hard-negative error = %v, want %q", name, err, tc.want)
+		}
+		if got := trainer.TrainProfile().Step; got != beforeStep {
+			t.Fatalf("%s compact unsupported hard-negative mutated step = %d, want %d", name, got, beforeStep)
+		}
+	}
+}
+
 func TestCompactEmbeddingTrainerContrastiveCheckpointRestoreParity(t *testing.T) {
 	checkpoint := compactTrainStateTestCheckpoint(3)
 	checkpoint.Step = 11
@@ -1513,14 +1656,17 @@ func compactContrastiveBatchForTest() []EmbeddingContrastiveExample {
 	}
 }
 
+func compactHardNegativeBatchForTest() []EmbeddingHardNegativeExample {
+	return []EmbeddingHardNegativeExample{
+		{QueryTokens: []int32{1, 2, 3}, PositiveTokens: []int32{1, 2, 3}, NegativeTokens: [][]int32{{3, 2, 1}}, QueryMask: []int32{1, 1, 1}, PositiveMask: []int32{1, 1, 1}, NegativeMasks: [][]int32{{1, 1, 1}}},
+		{QueryTokens: []int32{3, 2, 1}, PositiveTokens: []int32{3, 1, 2}, NegativeTokens: [][]int32{{1, 3, 2}}, QueryMask: []int32{1, 1, 1}, PositiveMask: []int32{1, 1, 1}, NegativeMasks: [][]int32{{1, 1, 1}}},
+	}
+}
+
 func TestCompactEmbeddingTrainerAdvancedTrainingRemainsUnsupported(t *testing.T) {
 	trainer := newCompactEmbeddingTrainerForTest(t, 3)
 	beforeStep := trainer.TrainProfile().Step
 	for name, run := range map[string]func() error{
-		"hard_negative": func() error {
-			_, err := trainer.TrainHardNegativeContrastiveStep(nil)
-			return err
-		},
 		"score_spectrum": func() error {
 			_, err := trainer.TrainScoreSpectrumStep(nil)
 			return err

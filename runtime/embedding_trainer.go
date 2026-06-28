@@ -1533,7 +1533,7 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 		return EmbeddingTrainMetrics{}, fmt.Errorf("embedding trainer is not initialized")
 	}
 	if t.isCompactTrainer() {
-		return EmbeddingTrainMetrics{}, compactTrainingUnsupportedError()
+		return t.runCompactHardNegativeContrastiveBatchUpdate(batch)
 	}
 	if len(batch) == 0 {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("hard-negative training batch is empty")
@@ -1731,6 +1731,122 @@ func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHar
 	t.applyOptimizerUpdate(t.attnOParam.Name, t.attentionOutput, t.attnOMom1, t.attnOMom2, gradAttnO, batchScale)
 	t.applyOptimizerUpdate(t.hiddenParam.Name, t.hiddenProjection, t.hiddenMom1, t.hiddenMom2, gradHidden, batchScale)
 	t.applyOptimizerUpdate(t.projParam.Name, t.projection, t.projMom1, t.projMom2, gradProj, batchScale)
+	return EmbeddingTrainMetrics{
+		Loss:         totalLoss * batchScale,
+		AverageScore: totalScore / float32(pairCount),
+		BatchSize:    pairCount,
+	}, nil
+}
+
+func (t *EmbeddingTrainer) runCompactHardNegativeContrastiveBatchUpdate(batch []EmbeddingHardNegativeExample) (EmbeddingTrainMetrics, error) {
+	if t == nil || t.compactState == nil {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("compact embedding trainer is not initialized")
+	}
+	if len(batch) == 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("hard-negative training batch is empty")
+	}
+	if t.config.TeacherLossWeight > 0 ||
+		len(t.config.MatryoshkaDims) > 0 ||
+		len(t.config.TurboQuantPrefixBits) > 0 ||
+		len(t.config.TurboQuantPrefixObjectives) > 0 ||
+		len(t.config.TurboQuantCompactObjectives) > 0 ||
+		len(t.config.TurboQuantRankMarginObjectives) > 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("compact_transformer_v1 hard-negative training supports InfoNCE and grouped InfoNCE only")
+	}
+	queryInputs := make([]embeddingSequenceInput, len(batch))
+	candidateInputs := make([]embeddingSequenceInput, 0, len(batch)*2)
+	targetIndexes := make([]int, len(batch))
+	candidateSpans := make([]embeddingCandidateSpan, len(batch))
+	for i, example := range batch {
+		if len(example.TeacherScores) > 0 {
+			return EmbeddingTrainMetrics{}, fmt.Errorf("compact_transformer_v1 hard-negative training does not support teacher_scores")
+		}
+		queryInputs[i] = embeddingSequenceInput{
+			tokens: example.QueryTokens,
+			mask:   example.QueryMask,
+			role:   t.queryRoleIndex(),
+			label:  fmt.Sprintf("batch %d query", i),
+		}
+		targetIndexes[i] = len(candidateInputs)
+		candidateSpans[i].Start = len(candidateInputs)
+		candidateInputs = append(candidateInputs, embeddingSequenceInput{
+			tokens: example.PositiveTokens,
+			mask:   example.PositiveMask,
+			role:   t.documentRoleIndex(),
+			label:  fmt.Sprintf("batch %d positive", i),
+		})
+		for j, tokens := range example.NegativeTokens {
+			var mask []int32
+			if j < len(example.NegativeMasks) {
+				mask = example.NegativeMasks[j]
+			}
+			candidateInputs = append(candidateInputs, embeddingSequenceInput{
+				tokens: tokens,
+				mask:   mask,
+				role:   t.documentRoleIndex(),
+				label:  fmt.Sprintf("batch %d negative %d", i, j),
+			})
+		}
+		candidateSpans[i].End = len(candidateInputs)
+	}
+	if len(candidateInputs) < 2 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("hard-negative training batch needs at least two candidate documents")
+	}
+	for _, target := range targetIndexes {
+		if target < 0 || target >= len(candidateInputs) {
+			return EmbeddingTrainMetrics{}, fmt.Errorf("hard-negative target index %d is outside %d candidates", target, len(candidateInputs))
+		}
+	}
+
+	forward := t.prepareForwardWeights()
+	if forward == nil || forward.compact == nil {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("missing compact forward weights")
+	}
+	allInputs := make([]embeddingSequenceInput, 0, len(queryInputs)+len(candidateInputs))
+	allInputs = append(allInputs, queryInputs...)
+	allInputs = append(allInputs, candidateInputs...)
+	encoded, err := t.encodeSequenceInputs(allInputs, forward, true)
+	if err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	defer t.releaseEncodedSequences(encoded)
+	queries := encoded[:len(queryInputs)]
+	candidates := encoded[len(queryInputs):]
+
+	grads := newCompactEmbeddingGradState(t.compactState)
+	queryGrads := make([][]float32, len(queries))
+	candidateGrads := make([][]float32, len(candidates))
+	for i := range queries {
+		queryGrads[i] = make([]float32, len(queries[i].pooled))
+	}
+	for i := range candidates {
+		candidateGrads[i] = make([]float32, len(candidates[i].pooled))
+	}
+
+	var totalLoss, totalScore float32
+	switch t.config.ContrastiveLoss {
+	case "grouped_infonce":
+		totalLoss, totalScore = accumulateGroupedInfoNCEHardNegativeGrads(queries, candidates, candidateSpans, t.config.Temperature, queryGrads, candidateGrads)
+	case "", "pair_mse", "infonce":
+		totalLoss, totalScore = accumulateInfoNCEHardNegativeGrads(queries, candidates, targetIndexes, t.config.Temperature, queryGrads, candidateGrads)
+	default:
+		return EmbeddingTrainMetrics{}, fmt.Errorf("compact_transformer_v1 hard-negative training does not support contrastive_loss %q", t.config.ContrastiveLoss)
+	}
+
+	for i, query := range queries {
+		if err := t.backpropCompactEncodedSequence(query, queryGrads[i], forward.compact, grads); err != nil {
+			return EmbeddingTrainMetrics{}, fmt.Errorf("query %d: %w", i, err)
+		}
+	}
+	for i, candidate := range candidates {
+		if err := t.backpropCompactEncodedSequence(candidate, candidateGrads[i], forward.compact, grads); err != nil {
+			return EmbeddingTrainMetrics{}, fmt.Errorf("candidate %d: %w", i, err)
+		}
+	}
+
+	batchScale := float32(1) / float32(len(queries))
+	t.applyCompactOptimizerUpdates(grads, batchScale)
+	pairCount := hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, t.config.ContrastiveLoss)
 	return EmbeddingTrainMetrics{
 		Loss:         totalLoss * batchScale,
 		AverageScore: totalScore / float32(pairCount),
