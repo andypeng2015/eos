@@ -1334,6 +1334,137 @@ func compactTrainStateTestModule(checkpoint EmbeddingTrainCheckpoint) *eosartifa
 	return &eosartifact.Module{Name: checkpoint.Manifest.Name, Params: params}
 }
 
+func TestCompactEmbeddingTrainerServingPackageVectorParity(t *testing.T) {
+	checkpoint := compactTrainStateTestCheckpoint(3)
+	checkpoint.Manifest.MaskInput = "attention_mask"
+	bundle, err := compiler.Build(compactTrainStateServingSourceForTest(checkpoint.Manifest), compiler.Options{ModuleName: checkpoint.Manifest.Name})
+	if err != nil {
+		t.Fatalf("build compact serving module: %v", err)
+	}
+	state, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
+	if err != nil {
+		t.Fatalf("load compact state: %v", err)
+	}
+	trainer, err := newCompactEmbeddingTrainerFromTrainState(bundle.Artifact, state)
+	if err != nil {
+		t.Fatalf("new compact trainer: %v", err)
+	}
+	t.Cleanup(trainer.Close)
+
+	packagePath := filepath.Join(t.TempDir(), "compact_parity.mll")
+	if _, err := trainer.WriteEmbeddingPackage(packagePath); err != nil {
+		t.Fatalf("write compact embedding package: %v", err)
+	}
+	model, err := New(cuda.New(), metal.New()).LoadEmbeddingPackage(context.Background(), packagePath)
+	if err != nil {
+		t.Fatalf("load compact embedding package: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		tokens []int32
+		mask   []int32
+		role   string
+	}{
+		{
+			name:   "raw padded",
+			tokens: []int32{1, 2, 0},
+			mask:   []int32{1, 1, 0},
+			role:   EmbeddingRoleRaw,
+		},
+		{
+			name:   "query unpadded",
+			tokens: []int32{1, 2, 3},
+			mask:   []int32{1, 1, 1},
+			role:   EmbeddingRoleQuery,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			roleIndex, err := checkpoint.Manifest.normalized().roleIndex(tt.role)
+			if err != nil {
+				t.Fatalf("role index: %v", err)
+			}
+			trainerSeq, err := trainer.encodeCompactSequence(tt.tokens, tt.mask, roleIndex, trainer.prepareCompactForwardWeights())
+			if err != nil {
+				t.Fatalf("trainer encode compact sequence: %v", err)
+			}
+			result, err := model.EmbedWithRole(context.Background(), tt.tokens, tt.role)
+			if err != nil {
+				t.Fatalf("serving embed: %v", err)
+			}
+			// The package path exports checkpoint master weights through f16 tensors,
+			// so serving observes one f16 round-trip that the trainer eval path does not.
+			assertFloat32SlicesClose(t, result.Embeddings.F32, trainerSeq.pooled, 3e-4)
+		})
+	}
+}
+
+func compactTrainStateServingSourceForTest(manifest EmbeddingManifest) []byte {
+	var b strings.Builder
+	b.WriteString("param token_embedding: f16[V, D] @weight(\"weights/token_embedding\") @trainable\n")
+	b.WriteString("param role_embedding: f16[3, D] @weight(\"weights/role_embedding\") @trainable\n")
+	for i := 0; i < manifest.EncoderRepeats; i++ {
+		prefix := fmt.Sprintf("layer%d", i)
+		fmt.Fprintf(&b, "param %s_attn_q: f16[D, D] @weight(\"weights/%s_attn_q\") @trainable\n", prefix, prefix)
+		fmt.Fprintf(&b, "param %s_attn_k: f16[D, D] @weight(\"weights/%s_attn_k\") @trainable\n", prefix, prefix)
+		fmt.Fprintf(&b, "param %s_attn_v: f16[D, D] @weight(\"weights/%s_attn_v\") @trainable\n", prefix, prefix)
+		fmt.Fprintf(&b, "param %s_attn_o: f16[D, D] @weight(\"weights/%s_attn_o\") @trainable\n", prefix, prefix)
+		fmt.Fprintf(&b, "param %s_ffn_up: f16[D, H] @weight(\"weights/%s_ffn_up\") @trainable\n", prefix, prefix)
+		fmt.Fprintf(&b, "param %s_ffn_down: f16[H, D] @weight(\"weights/%s_ffn_down\") @trainable\n", prefix, prefix)
+	}
+	if manifest.OutputDim != manifest.ModelDim {
+		b.WriteString("param output_projection: f16[D, O] @weight(\"weights/output_projection\") @trainable\n")
+	}
+	b.WriteString("\n")
+	b.WriteString("pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T], role_ids: i32[T]) -> f16[O] {\n")
+	b.WriteString(compactTrainStateServingPipelineBodyForTest(manifest))
+	b.WriteString("}\n\n")
+	b.WriteString("pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T], role_ids: i32[B, T]) -> f16[B, O] {\n")
+	b.WriteString(compactTrainStateServingPipelineBodyForTest(manifest))
+	b.WriteString("}\n")
+	return []byte(b.String())
+}
+
+func compactTrainStateServingPipelineBodyForTest(manifest EmbeddingManifest) string {
+	var b strings.Builder
+	b.WriteString("    let hidden_q = gather(token_embedding, tokens)\n")
+	b.WriteString("    let role_hidden_q = gather(role_embedding, role_ids)\n")
+	b.WriteString("    let hidden_f = dequant(hidden_q)\n")
+	b.WriteString("    let role_hidden_f = dequant(role_hidden_q)\n")
+	b.WriteString("    let hidden = rope(hidden_f + role_hidden_f)\n")
+	prev := "hidden"
+	for i := 0; i < manifest.EncoderRepeats; i++ {
+		prefix := fmt.Sprintf("layer%d", i)
+		fmt.Fprintf(&b, "    let %s_wq = dequant(%s_attn_q)\n", prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_wk = dequant(%s_attn_k)\n", prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_wv = dequant(%s_attn_v)\n", prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_wo = dequant(%s_attn_o)\n", prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_ffn_up_f = dequant(%s_ffn_up)\n", prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_ffn_down_f = dequant(%s_ffn_down)\n", prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_q = @matmul(%s, %s_wq)\n", prefix, prev, prefix)
+		fmt.Fprintf(&b, "    let %s_k = @matmul(%s, %s_wk)\n", prefix, prev, prefix)
+		fmt.Fprintf(&b, "    let %s_v = @matmul(%s, %s_wv)\n", prefix, prev, prefix)
+		fmt.Fprintf(&b, "    let %s_mixed = compact_multihead_attention_h%d(%s_q, %s_k, %s_v, attention_mask)\n", prefix, manifest.AttentionHeads, prefix, prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_attended = @matmul(%s_mixed, %s_wo)\n", prefix, prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_attn_hidden = layernorm(%s_attended + %s)\n", prefix, prefix, prev)
+		fmt.Fprintf(&b, "    let %s_ffn_hidden = @matmul(%s_attn_hidden, %s_ffn_up_f)\n", prefix, prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_activated = gelu(%s_ffn_hidden)\n", prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_projected = @matmul(%s_activated, %s_ffn_down_f)\n", prefix, prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_encoded = layernorm(%s_projected + %s_attn_hidden)\n", prefix, prefix, prefix)
+		prev = prefix + "_encoded"
+	}
+	fmt.Fprintf(&b, "    let normalized = normalize(%s)\n", prev)
+	if manifest.OutputDim != manifest.ModelDim {
+		b.WriteString("    let output_projection_f = dequant(output_projection)\n")
+		b.WriteString("    let output_projected = @matmul(normalized, output_projection_f)\n")
+		b.WriteString("    return mean_pool(output_projected, attention_mask)\n")
+		return b.String()
+	}
+	b.WriteString("    return mean_pool(normalized, attention_mask)\n")
+	return b.String()
+}
+
 func TestCompactEmbeddingTrainerTrainStepMovesState(t *testing.T) {
 	checkpoint := compactTrainStateTestCheckpoint(3)
 	state, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
