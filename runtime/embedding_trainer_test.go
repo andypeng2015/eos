@@ -1141,6 +1141,146 @@ func TestEmbeddingTrainCheckpointRetainsCompactGenericTensorsAndMoments(t *testi
 	}
 }
 
+func TestLoadCompactEmbeddingTrainStateFromCheckpointValidatesStructuredState(t *testing.T) {
+	checkpoint := compactTrainStateTestCheckpoint(3)
+	state, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
+	if err != nil {
+		t.Fatalf("load compact train state: %v", err)
+	}
+	if len(state.Layers) != 2 {
+		t.Fatalf("layer count = %d, want 2", len(state.Layers))
+	}
+	assertTensorClose(t, state.TokenEmbedding.Tensor, []int{5, 4}, checkpoint.Tensors["token_embedding"].F32)
+	assertTensorClose(t, state.RoleEmbedding.Tensor, []int{3, 4}, checkpoint.Tensors["role_embedding"].F32)
+	assertTensorClose(t, state.Layers[1].FFNDown.Tensor, []int{6, 4}, checkpoint.Tensors["layer1_ffn_down"].F32)
+	assertTensorClose(t, state.OutputProjection.Tensor, []int{4, 3}, checkpoint.Tensors["output_projection"].F32)
+	if state.TokenEmbedding.Moment1 == nil || state.Layers[0].AttentionQuery.Moment2 == nil {
+		t.Fatalf("expected typed moments: token=%+v layer0q=%+v", state.TokenEmbedding, state.Layers[0].AttentionQuery)
+	}
+}
+
+func TestLoadCompactEmbeddingTrainStateFromCheckpointRejectsMissingTensor(t *testing.T) {
+	checkpoint := compactTrainStateTestCheckpoint(3)
+	delete(checkpoint.Tensors, "layer1_attn_v")
+	delete(checkpoint.MomentTensors, "layer1_attn_v_moment_1")
+	delete(checkpoint.MomentTensors, "layer1_attn_v_moment_2")
+	_, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
+	if err == nil || !strings.Contains(err.Error(), `tensor "layer1_attn_v" is required`) {
+		t.Fatalf("LoadCompactEmbeddingTrainStateFromCheckpoint error = %v, want missing layer1_attn_v", err)
+	}
+}
+
+func TestLoadCompactEmbeddingTrainStateFromCheckpointRejectsWrongShape(t *testing.T) {
+	checkpoint := compactTrainStateTestCheckpoint(3)
+	checkpoint.Tensors["layer1_ffn_down"] = backend.NewTensorF32([]int{4, 6}, make([]float32, 24))
+	delete(checkpoint.MomentTensors, "layer1_ffn_down_moment_1")
+	delete(checkpoint.MomentTensors, "layer1_ffn_down_moment_2")
+	_, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
+	if err == nil || !strings.Contains(err.Error(), `tensor "layer1_ffn_down" shape [4 6], want [6 4]`) {
+		t.Fatalf("LoadCompactEmbeddingTrainStateFromCheckpoint error = %v, want layer1_ffn_down shape error", err)
+	}
+}
+
+func TestLoadCompactEmbeddingTrainStateFromCheckpointRejectsLegacyCheckpoint(t *testing.T) {
+	checkpoint := EmbeddingTrainCheckpoint{
+		Version: EmbeddingTrainCheckpointVersion,
+		Manifest: EmbeddingManifest{
+			Name:                "legacy",
+			TokenEmbeddingParam: "token_embedding",
+			ProjectionParam:     "projection",
+			Tokenizer:           TokenizerManifest{VocabSize: 5},
+		},
+		TokenEmbedding: backend.NewTensorF32([]int{5, 4}, make([]float32, 20)),
+		Projection:     backend.NewTensorF32([]int{4, 4}, make([]float32, 16)),
+	}
+	_, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
+	if err == nil || !strings.Contains(err.Error(), `compact train state requires architecture_version="compact_transformer_v1"`) {
+		t.Fatalf("LoadCompactEmbeddingTrainStateFromCheckpoint error = %v, want compact architecture rejection", err)
+	}
+}
+
+func TestLoadCompactEmbeddingTrainStateFromCheckpointOutputProjectionContract(t *testing.T) {
+	withProjection := compactTrainStateTestCheckpoint(3)
+	delete(withProjection.Tensors, "output_projection")
+	delete(withProjection.MomentTensors, "output_projection_moment_1")
+	delete(withProjection.MomentTensors, "output_projection_moment_2")
+	_, err := LoadCompactEmbeddingTrainStateFromCheckpoint(withProjection, withProjection.Manifest)
+	if err == nil || !strings.Contains(err.Error(), `tensor "output_projection" is required`) {
+		t.Fatalf("LoadCompactEmbeddingTrainStateFromCheckpoint error = %v, want required output_projection", err)
+	}
+
+	withoutProjection := compactTrainStateTestCheckpoint(4)
+	state, err := LoadCompactEmbeddingTrainStateFromCheckpoint(withoutProjection, withoutProjection.Manifest)
+	if err != nil {
+		t.Fatalf("load compact train state without projection: %v", err)
+	}
+	if state.OutputProjection != nil {
+		t.Fatalf("output projection = %+v, want nil when output_dim == model_dim", state.OutputProjection)
+	}
+	withoutProjection.Tensors["output_projection"] = backend.NewTensorF32([]int{4, 4}, make([]float32, 16))
+	_, err = LoadCompactEmbeddingTrainStateFromCheckpoint(withoutProjection, withoutProjection.Manifest)
+	if err == nil || !strings.Contains(err.Error(), `tensor "output_projection" is present but output_dim (4) equals model_dim (4)`) {
+		t.Fatalf("LoadCompactEmbeddingTrainStateFromCheckpoint error = %v, want unexpected output_projection error", err)
+	}
+}
+
+func compactTrainStateTestCheckpoint(outputDim int) EmbeddingTrainCheckpoint {
+	manifest := EmbeddingManifest{
+		Name:                  "compact",
+		ArchitectureVersion:   EmbeddingArchitectureCompactTransformerV1,
+		EncoderRepeats:        2,
+		ModelDim:              4,
+		OutputDim:             outputDim,
+		AttentionHeads:        2,
+		HeadDim:               2,
+		FFNDim:                6,
+		ParameterTying:        EmbeddingParameterTyingUntied,
+		TokenEmbeddingParam:   "token_embedding",
+		RoleConditioning:      EmbeddingRoleConditioningAdditiveV1,
+		RoleEmbeddingParam:    "role_embedding",
+		AttentionMaskMode:     EmbeddingAttentionMaskModeKey,
+		AttentionScoreScale:   EmbeddingAttentionScoreScaleKeyDimRSQ,
+		PositionEncoding:      EmbeddingPositionEncodingRoPE,
+		AttentionQueryParam:   "layer0_attn_q",
+		AttentionKeyParam:     "layer0_attn_k",
+		AttentionValueParam:   "layer0_attn_v",
+		AttentionOutputParam:  "layer0_attn_o",
+		HiddenProjectionParam: "layer0_ffn_up",
+		ProjectionParam:       "layer0_ffn_down",
+		Tokenizer:             TokenizerManifest{VocabSize: 5, MaxSequence: 8},
+	}
+	if outputDim != manifest.ModelDim {
+		manifest.OutputProjectionParam = "output_projection"
+	}
+	tensors := map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF32([]int{5, 4}, make([]float32, 20)),
+		"role_embedding":  backend.NewTensorF32([]int{3, 4}, make([]float32, 12)),
+	}
+	for i := 0; i < manifest.EncoderRepeats; i++ {
+		tensors[compactLayerTensorName(i, "attn_q")] = backend.NewTensorF32([]int{4, 4}, make([]float32, 16))
+		tensors[compactLayerTensorName(i, "attn_k")] = backend.NewTensorF32([]int{4, 4}, make([]float32, 16))
+		tensors[compactLayerTensorName(i, "attn_v")] = backend.NewTensorF32([]int{4, 4}, make([]float32, 16))
+		tensors[compactLayerTensorName(i, "attn_o")] = backend.NewTensorF32([]int{4, 4}, make([]float32, 16))
+		tensors[compactLayerTensorName(i, "ffn_up")] = backend.NewTensorF32([]int{4, 6}, make([]float32, 24))
+		tensors[compactLayerTensorName(i, "ffn_down")] = backend.NewTensorF32([]int{6, 4}, make([]float32, 24))
+	}
+	if manifest.OutputProjectionParam != "" {
+		tensors[manifest.OutputProjectionParam] = backend.NewTensorF32([]int{4, outputDim}, make([]float32, 4*outputDim))
+	}
+	moments := make(map[string]*backend.Tensor, len(tensors)*2)
+	for name, tensor := range tensors {
+		moments[name+"_moment_1"] = zeroLikeMaster(tensor)
+		moments[name+"_moment_2"] = zeroLikeMaster(tensor)
+	}
+	return EmbeddingTrainCheckpoint{
+		Version:       EmbeddingTrainCheckpointVersion,
+		Manifest:      manifest,
+		Config:        EmbeddingTrainConfig{Optimizer: "adamw"},
+		Tensors:       tensors,
+		MomentTensors: moments,
+	}
+}
+
 func TestEmbeddingTrainerFFNCheckpointRoundTrip(t *testing.T) {
 	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
 	batch := tinyEmbeddingPairDataset()

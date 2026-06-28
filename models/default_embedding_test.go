@@ -87,6 +87,9 @@ func TestInitDefaultEmbeddingPackageCreatesTrainablePackage(t *testing.T) {
 	if _, err := eosruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("load training package: %v", err)
 	}
+	if _, err := eosruntime.LoadCompactEmbeddingTrainStateFromPackage(path); err == nil || !strings.Contains(err.Error(), `compact train state requires architecture_version="compact_transformer_v1"`) {
+		t.Fatalf("LoadCompactEmbeddingTrainStateFromPackage error = %v, want legacy package rejection", err)
+	}
 }
 
 func TestInitDefaultEmbeddingPackageDefaultsOutputDimToModelDim(t *testing.T) {
@@ -160,6 +163,25 @@ func TestInitDefaultEmbeddingPackageCreatesCompactBootstrapPackage(t *testing.T)
 		if checkpoint.MomentTensors[name+"_moment_1"] == nil || checkpoint.MomentTensors[name+"_moment_2"] == nil {
 			t.Fatalf("checkpoint missing generic moments for %q", name)
 		}
+	}
+	state, err := eosruntime.LoadCompactEmbeddingTrainStateFromPackage(path)
+	if err != nil {
+		t.Fatalf("load compact train state: %v", err)
+	}
+	if len(state.Layers) != 3 {
+		t.Fatalf("compact state layer count = %d, want 3", len(state.Layers))
+	}
+	if got := state.TokenEmbedding.Tensor.Shape; len(got) != 2 || got[0] != 16 || got[1] != 8 {
+		t.Fatalf("compact state token shape = %v, want [16 8]", got)
+	}
+	if got := state.Layers[2].FFNDown.Tensor.Shape; len(got) != 2 || got[0] != 16 || got[1] != 8 {
+		t.Fatalf("compact state layer2 ffn_down shape = %v, want [16 8]", got)
+	}
+	if state.OutputProjection == nil {
+		t.Fatal("compact state missing output projection")
+	}
+	if got := state.OutputProjection.Tensor.Shape; len(got) != 2 || got[0] != 8 || got[1] != 4 {
+		t.Fatalf("compact state output projection shape = %v, want [8 4]", got)
 	}
 	if _, err := eosruntime.LoadEmbeddingTrainerPackage(path); err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 is not supported by trainable package initialization yet") {
 		t.Fatalf("LoadEmbeddingTrainerPackage error = %v, want unsupported compact error", err)
