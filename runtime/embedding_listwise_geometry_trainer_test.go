@@ -173,6 +173,58 @@ func TestEmbeddingTrainerFitListwiseGeometryEvalOnlyRecordsMetricsAndDoesNotUpda
 	}
 }
 
+func TestEmbeddingTrainerFitListwiseGeometryRejectsWorkloadLimit(t *testing.T) {
+	_, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitListwiseGeometry(tinyTokenizedListwiseGeometryBatches(false), nil, EmbeddingTrainRunConfig{
+		Epochs:                        1,
+		BatchSize:                     1,
+		Temperature:                   0.05,
+		MaxListwiseGeometryTrainPairs: 3,
+	})
+	if err == nil || !strings.Contains(err.Error(), "train_pairs/epoch 4 exceeds max_listwise_geometry_train_pairs 3") {
+		t.Fatalf("train workload limit error = %v, want train pair cap rejection", err)
+	}
+
+	_, err = newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitListwiseGeometry(nil, nil, EmbeddingTrainRunConfig{
+		EvalOnly:                     true,
+		BatchSize:                    1,
+		Temperature:                  0.05,
+		ListwiseGeometryEval:         tinyTokenizedListwiseGeometryBatches(false),
+		MaxListwiseGeometryEvalPairs: 3,
+	})
+	if err == nil || !strings.Contains(err.Error(), "eval_pairs/pass 4 exceeds max_listwise_geometry_eval_pairs 3") {
+		t.Fatalf("eval workload limit error = %v, want eval pair cap rejection", err)
+	}
+}
+
+func TestEmbeddingTrainerFitListwiseGeometryReportsPreStepProgress(t *testing.T) {
+	trainer := newTinyTrainable3DEmbeddingTrainer(t, 0.05)
+	var reports []EmbeddingTrainProgress
+	summary, err := trainer.FitListwiseGeometry(tinyTokenizedListwiseGeometryBatches(false), nil, EmbeddingTrainRunConfig{
+		Epochs:             1,
+		BatchSize:          1,
+		Temperature:        0.05,
+		ProgressEverySteps: 1,
+		Progress: func(progress EmbeddingTrainProgress) {
+			reports = append(reports, progress)
+		},
+	})
+	if err != nil {
+		t.Fatalf("fit listwise geometry: %v", err)
+	}
+	if summary.StepsRun != 1 {
+		t.Fatalf("steps run = %d, want 1", summary.StepsRun)
+	}
+	if len(reports) != 2 {
+		t.Fatalf("progress reports = %d, want train_start and train", len(reports))
+	}
+	if reports[0].Phase != "train_start" || reports[0].Batch != 1 || reports[0].Batches != 1 || reports[0].Step != 0 || reports[0].BatchPairs != 4 {
+		t.Fatalf("pre-step progress = %+v, want train_start for first 4-pair batch before optimizer step", reports[0])
+	}
+	if reports[1].Phase != "train" || reports[1].Step != 1 || reports[1].BatchPairs != 4 || reports[1].EpochTrainPairs != 4 {
+		t.Fatalf("post-step progress = %+v, want completed first 4-pair batch", reports[1])
+	}
+}
+
 func TestEmbeddingTrainerFitListwiseGeometrySmokeAndResearchGate(t *testing.T) {
 	_, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitListwiseGeometry(tinyTokenizedListwiseGeometryBatches(true), nil, EmbeddingTrainRunConfig{
 		Epochs:         1,

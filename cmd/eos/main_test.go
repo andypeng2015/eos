@@ -4209,6 +4209,35 @@ func TestRunTrainEmbedFitsContrastivePackage(t *testing.T) {
 	}
 }
 
+func TestValidateTrainEmbedListwiseGeometryWorkloadGuard(t *testing.T) {
+	workload := eosruntime.EmbeddingTrainWorkload{
+		TrainMode:          "listwise_geometry",
+		TrainPairsPerEpoch: 101,
+		EvalPairsPerPass:   99,
+	}
+	err := validateTrainEmbedListwiseGeometryWorkload(workload, eosruntime.EmbeddingTrainRunConfig{
+		MaxListwiseGeometryTrainPairs: 100,
+		MaxListwiseGeometryEvalPairs:  100,
+	})
+	if err == nil || !strings.Contains(err.Error(), "--max-listwise-train-pairs 100") {
+		t.Fatalf("train guard error = %v, want max train pairs rejection", err)
+	}
+
+	workload.TrainPairsPerEpoch = 100
+	workload.EvalPairsPerPass = 101
+	err = validateTrainEmbedListwiseGeometryWorkload(workload, eosruntime.EmbeddingTrainRunConfig{
+		MaxListwiseGeometryTrainPairs: 100,
+		MaxListwiseGeometryEvalPairs:  100,
+	})
+	if err == nil || !strings.Contains(err.Error(), "--max-listwise-eval-pairs 100") {
+		t.Fatalf("eval guard error = %v, want max eval pairs rejection", err)
+	}
+
+	if err := validateTrainEmbedListwiseGeometryWorkload(workload, eosruntime.EmbeddingTrainRunConfig{}); err != nil {
+		t.Fatalf("disabled guard error = %v, want nil", err)
+	}
+}
+
 func TestRunTrainEmbedExplicitZeroTeacherLossOverridesCheckpoint(t *testing.T) {
 	path := writeTrainableArtifact(t)
 	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", "--teacher-loss-weight", "0.1", "--teacher-temperature", "2", path}); err != nil {

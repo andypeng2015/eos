@@ -5167,6 +5167,8 @@ func runTrainEmbed(args []string) error {
 	var restoreBest bool
 	var lengthBucketBatches bool
 	var progressEvery int
+	var maxListwiseTrainPairs int64
+	var maxListwiseEvalPairs int64
 	var tokenizerPath string
 	var noTokenizer bool
 	var planOnly bool
@@ -5227,6 +5229,8 @@ func runTrainEmbed(args []string) error {
 	fs.BoolVar(&restoreBest, "restore-best", true, "restore best checkpoint at end")
 	fs.BoolVar(&lengthBucketBatches, "length-bucket-batches", true, "cluster contrastive batches by token length to improve batched GPU training")
 	fs.IntVar(&progressEvery, "progress-every", 0, "print training progress every N optimizer steps (0 disables)")
+	fs.Int64Var(&maxListwiseTrainPairs, "max-listwise-train-pairs", 100000, "maximum listwise geometry train query-document pairs per epoch (0 disables)")
+	fs.Int64Var(&maxListwiseEvalPairs, "max-listwise-eval-pairs", 100000, "maximum listwise geometry eval query-document pairs per pass (0 disables)")
 	fs.StringVar(&tokenizerPath, "tokenizer", "", "path to tokenizer JSON for text-pair datasets")
 	fs.BoolVar(&noTokenizer, "no-tokenizer", false, "disable sibling tokenizer discovery and treat JSONL as tokenized")
 	fs.BoolVar(&planOnly, "plan-only", false, "print planned workload and exit without training")
@@ -5278,6 +5282,7 @@ func runTrainEmbed(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	progressEveryProvided := flagWasProvided(fs, "progress-every")
 	teacherLossWeightSet := flagWasProvided(fs, "teacher-loss-weight")
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
 		return fmt.Errorf("usage: eos train-embed [flags] <artifact.mll> <train.jsonl> [eval.jsonl]\n       eos train-embed --eval-only [flags] <artifact.mll> <eval.jsonl>")
@@ -5305,6 +5310,12 @@ func runTrainEmbed(args []string) error {
 	}
 	if progressEvery < 0 {
 		return fmt.Errorf("progress-every must be non-negative")
+	}
+	if maxListwiseTrainPairs < 0 {
+		return fmt.Errorf("max-listwise-train-pairs must be non-negative")
+	}
+	if maxListwiseEvalPairs < 0 {
+		return fmt.Errorf("max-listwise-eval-pairs must be non-negative")
 	}
 	if evalEverySteps < 0 {
 		return fmt.Errorf("eval-every-steps must be non-negative")
@@ -5460,6 +5471,9 @@ func runTrainEmbed(args []string) error {
 		}
 	}
 	if listwiseGeometryTrain {
+		if !progressEveryProvided && progressEvery == 0 {
+			progressEvery = 1
+		}
 		if len(parsedMatryoshkaDims) > 0 {
 			return fmt.Errorf("--listwise-geometry-train does not support --matryoshka-dims")
 		}
@@ -5475,6 +5489,9 @@ func runTrainEmbed(args []string) error {
 		if noTokenizer {
 			return fmt.Errorf("--listwise-geometry-train requires text tokenization; remove --no-tokenizer or set --tokenizer")
 		}
+	} else {
+		maxListwiseTrainPairs = 0
+		maxListwiseEvalPairs = 0
 	}
 	path := fs.Arg(0)
 	trainPath := fs.Arg(1)
@@ -5539,6 +5556,8 @@ func runTrainEmbed(args []string) error {
 		AllowResearchOnlyScoreSpectrum:    allowResearchOnlyScoreSpectrum,
 		AllowResearchOnlyListwiseGeometry: allowResearchOnlyListwiseGeometry,
 		ScoreSpectrumEvalPath:             scoreSpectrumEvalPath,
+		MaxListwiseGeometryTrainPairs:     maxListwiseTrainPairs,
+		MaxListwiseGeometryEvalPairs:      maxListwiseEvalPairs,
 		ScoreSpectrumLossMode:             parsedScoreSpectrumLossMode,
 		ScoreSpectrumRecoveryWeight:       float32(scoreSpectrumRecoveryWeight),
 		ScoreSpectrumRecoveryMargin:       float32(scoreSpectrumRecoveryMargin),
@@ -5583,6 +5602,9 @@ func runTrainEmbed(args []string) error {
 	workload, workloadErr := estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath, runConfig)
 	if workloadErr == nil {
 		fmt.Printf("planned workload: %s\n", formatTrainWorkload(workload))
+		if err := validateTrainEmbedListwiseGeometryWorkload(workload, runConfig); err != nil {
+			return err
+		}
 	}
 	if planOnly {
 		if workloadErr != nil {
@@ -6154,6 +6176,19 @@ func formatTrainWorkload(workload eosruntime.EmbeddingTrainWorkload) string {
 	return strings.Join(parts, " ")
 }
 
+func validateTrainEmbedListwiseGeometryWorkload(workload eosruntime.EmbeddingTrainWorkload, cfg eosruntime.EmbeddingTrainRunConfig) error {
+	if workload.TrainMode != "listwise_geometry" && workload.EvalMode != "listwise_geometry" && workload.EvalMode != "mixed" {
+		return nil
+	}
+	if cfg.MaxListwiseGeometryTrainPairs > 0 && workload.TrainPairsPerEpoch > cfg.MaxListwiseGeometryTrainPairs {
+		return fmt.Errorf("planned listwise geometry train_pairs/epoch %d exceeds --max-listwise-train-pairs %d; pass a smaller split or set --max-listwise-train-pairs=0 to allow this research workload", workload.TrainPairsPerEpoch, cfg.MaxListwiseGeometryTrainPairs)
+	}
+	if cfg.MaxListwiseGeometryEvalPairs > 0 && workload.EvalPairsPerPass > cfg.MaxListwiseGeometryEvalPairs {
+		return fmt.Errorf("planned listwise geometry eval_pairs/pass %d exceeds --max-listwise-eval-pairs %d; pass a smaller eval split or set --max-listwise-eval-pairs=0 to allow this research workload", workload.EvalPairsPerPass, cfg.MaxListwiseGeometryEvalPairs)
+	}
+	return nil
+}
+
 func formatTrainThroughput(summary eosruntime.EmbeddingTrainRunSummary) string {
 	parts := []string{fmt.Sprintf("elapsed=%s", summary.Elapsed.Round(time.Millisecond))}
 	if rate := itemsPerSecond(summary.Workload.ActualTotalExamples, summary.Elapsed); rate > 0 {
@@ -6568,6 +6603,8 @@ type trainRunConfigJSON struct {
 	ListwiseGeometryTrain             bool                                   `json:"listwise_geometry_train"`
 	MovementDiagnostics               bool                                   `json:"movement_diagnostics"`
 	AllowResearchOnlyListwiseGeometry bool                                   `json:"allow_research_only_listwise_geometry,omitempty"`
+	MaxListwiseGeometryTrainPairs     int64                                  `json:"max_listwise_geometry_train_pairs,omitempty"`
+	MaxListwiseGeometryEvalPairs      int64                                  `json:"max_listwise_geometry_eval_pairs,omitempty"`
 	ScoreSpectrumEvalPath             string                                 `json:"score_spectrum_eval_path,omitempty"`
 	ScoreSpectrumLossMode             string                                 `json:"score_spectrum_loss_mode,omitempty"`
 	ScoreSpectrumRecoveryWeight       float32                                `json:"score_spectrum_recovery_weight,omitempty"`
@@ -6808,6 +6845,8 @@ func trainRunConfigPayload(cfg eosruntime.EmbeddingTrainRunConfig, effectiveLear
 		ListwiseGeometryTrain:             cfg.ListwiseGeometryTrain,
 		MovementDiagnostics:               cfg.MovementDiagnostics,
 		AllowResearchOnlyListwiseGeometry: cfg.AllowResearchOnlyListwiseGeometry,
+		MaxListwiseGeometryTrainPairs:     cfg.MaxListwiseGeometryTrainPairs,
+		MaxListwiseGeometryEvalPairs:      cfg.MaxListwiseGeometryEvalPairs,
 		ScoreSpectrumEvalPath:             cfg.ScoreSpectrumEvalPath,
 		ScoreSpectrumLossMode:             cfg.ScoreSpectrumLossMode,
 		ScoreSpectrumRecoveryWeight:       cfg.ScoreSpectrumRecoveryWeight,

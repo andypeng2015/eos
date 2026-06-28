@@ -59,6 +59,8 @@ type EmbeddingTrainRunConfig struct {
 	ScoreSpectrumEval                 []EmbeddingScoreSpectrumExample
 	ScoreSpectrumEvalPath             string
 	ListwiseGeometryEval              []EmbeddingTokenizedListwiseGeometryBatch
+	MaxListwiseGeometryTrainPairs     int64
+	MaxListwiseGeometryEvalPairs      int64
 	ScoreSpectrumLossMode             string
 	ScoreSpectrumRecoveryWeight       float32
 	ScoreSpectrumRecoveryMargin       float32
@@ -1280,6 +1282,9 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 		EffectiveLearningRate: t.config.LearningRate,
 		StartProfile:          t.TrainProfile(),
 		Workload:              estimateListwiseGeometryTrainWorkload(trainSet, len(evalSet), listwiseGeometryQueryCount(listwiseEvalSet), len(evalSet)+listwiseGeometryQueryCount(listwiseEvalSet), len(evalSet)+listwiseGeometryCellCount(listwiseEvalSet), cfg),
+	}
+	if err := validateListwiseGeometryWorkloadLimits(summary.Workload, cfg); err != nil {
+		return EmbeddingTrainRunSummary{}, err
 	}
 	if cfg.EvalOnly {
 		evalStart := time.Now()
@@ -2750,14 +2755,29 @@ func (t *EmbeddingTrainer) runListwiseGeometryEpoch(trainSet []EmbeddingTokenize
 		for _, idx := range order[start:end] {
 			batch = append(batch, trainSet[idx])
 		}
-		if listwiseGeometryBatchPairCount(batch) <= 0 {
+		batchPairs := listwiseGeometryBatchPairCount(batch)
+		if batchPairs <= 0 {
 			break
 		}
+		batchQueries := listwiseGeometryBatchQueryCount(batch)
+		nextBatchIndex := batchIndex + 1
+		maybeReportTrainProgress(cfg, EmbeddingTrainProgress{
+			Phase:              "train_start",
+			Epoch:              epoch,
+			Batch:              nextBatchIndex,
+			Batches:            totalBatches,
+			Step:               t.step,
+			BatchExamples:      end - start,
+			BatchPairs:         batchPairs,
+			EpochTrainExamples: int64(totalTrainExamples),
+			EpochTrainPairs:    totalPairs,
+			PlannedEpochPairs:  plannedEpochPairs,
+			Elapsed:            time.Since(runStart),
+		})
 		metrics, err := t.TrainListwiseGeometryStepWithDiagnostics(batch, cfg.MovementDiagnostics)
 		if err != nil {
 			return EmbeddingTrainMetrics{}, err
 		}
-		batchQueries := listwiseGeometryBatchQueryCount(batch)
 		totalLoss += metrics.Loss * float32(batchQueries)
 		totalScore += metrics.AverageScore * float32(metrics.BatchSize)
 		totalTrainExamples += end - start
@@ -3136,6 +3156,12 @@ func validateScoreSpectrumRunConfig(cfg EmbeddingTrainRunConfig) error {
 }
 
 func validateListwiseGeometryRunConfig(cfg EmbeddingTrainRunConfig) error {
+	if cfg.MaxListwiseGeometryTrainPairs < 0 {
+		return fmt.Errorf("max_listwise_geometry_train_pairs must be non-negative")
+	}
+	if cfg.MaxListwiseGeometryEvalPairs < 0 {
+		return fmt.Errorf("max_listwise_geometry_eval_pairs must be non-negative")
+	}
 	if len(cfg.MatryoshkaDims) > 0 {
 		return fmt.Errorf("listwise geometry training does not support matryoshka objectives in v1")
 	}
@@ -3147,6 +3173,16 @@ func validateListwiseGeometryRunConfig(cfg EmbeddingTrainRunConfig) error {
 	}
 	if len(cfg.TurboQuantRankMarginObjectives) > 0 {
 		return fmt.Errorf("listwise geometry training does not support turboquant rank-margin objectives in v1")
+	}
+	return nil
+}
+
+func validateListwiseGeometryWorkloadLimits(workload EmbeddingTrainWorkload, cfg EmbeddingTrainRunConfig) error {
+	if cfg.MaxListwiseGeometryTrainPairs > 0 && workload.TrainPairsPerEpoch > cfg.MaxListwiseGeometryTrainPairs {
+		return fmt.Errorf("listwise geometry train_pairs/epoch %d exceeds max_listwise_geometry_train_pairs %d", workload.TrainPairsPerEpoch, cfg.MaxListwiseGeometryTrainPairs)
+	}
+	if cfg.MaxListwiseGeometryEvalPairs > 0 && workload.EvalPairsPerPass > cfg.MaxListwiseGeometryEvalPairs {
+		return fmt.Errorf("listwise geometry eval_pairs/pass %d exceeds max_listwise_geometry_eval_pairs %d", workload.EvalPairsPerPass, cfg.MaxListwiseGeometryEvalPairs)
 	}
 	return nil
 }
