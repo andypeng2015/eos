@@ -355,6 +355,9 @@ func NewEmbeddingTrainer(mod *eosartifact.Module, manifest EmbeddingManifest, we
 	if err := manifest.ValidateModule(mod); err != nil {
 		return nil, err
 	}
+	if err := manifest.ValidateLegacyEmbeddingTrainerSupported(); err != nil {
+		return nil, err
+	}
 	params, err := resolveEmbeddingTrainerParams(mod, manifest)
 	if err != nil {
 		return nil, err

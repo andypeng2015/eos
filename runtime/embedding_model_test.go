@@ -40,6 +40,7 @@ func TestEmbeddingManifestArchitectureMetadataRoundTrip(t *testing.T) {
 	want.HeadDim = 4
 	want.FFNDim = 32
 	want.ParameterTying = EmbeddingParameterTyingUntied
+	want.OutputProjectionParam = "output_projection"
 	if err := want.WriteFile(path); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
@@ -53,7 +54,8 @@ func TestEmbeddingManifestArchitectureMetadataRoundTrip(t *testing.T) {
 		got.AttentionHeads != want.AttentionHeads ||
 		got.HeadDim != want.HeadDim ||
 		got.FFNDim != want.FFNDim ||
-		got.ParameterTying != want.ParameterTying {
+		got.ParameterTying != want.ParameterTying ||
+		got.OutputProjectionParam != want.OutputProjectionParam {
 		t.Fatalf("architecture metadata mismatch:\nwant: %+v\ngot:  %+v", want, got)
 	}
 	data, err := json.Marshal(want)
@@ -70,7 +72,8 @@ func TestEmbeddingManifestArchitectureMetadataRoundTrip(t *testing.T) {
 		decoded.AttentionHeads != want.AttentionHeads ||
 		decoded.HeadDim != want.HeadDim ||
 		decoded.FFNDim != want.FFNDim ||
-		decoded.ParameterTying != want.ParameterTying {
+		decoded.ParameterTying != want.ParameterTying ||
+		decoded.OutputProjectionParam != want.OutputProjectionParam {
 		t.Fatalf("json architecture metadata mismatch:\nwant: %+v\ngot:  %+v", want, decoded)
 	}
 }
@@ -87,6 +90,23 @@ func TestEmbeddingManifestRejectsInvalidArchitectureMetadata(t *testing.T) {
 	manifest.HeadDim = 3
 	if err := manifest.ValidateModule(bundle.Artifact); err == nil || !strings.Contains(err.Error(), "must be divisible") {
 		t.Fatalf("ValidateModule error = %v, want divisibility error", err)
+	}
+}
+
+func TestEmbeddingManifestRejectsCompactOutputProjectionMissing(t *testing.T) {
+	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_embed_pooled", Preset: compiler.PresetTinyEmbedPooled})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	manifest := tinyEmbeddingManifest()
+	manifest.ArchitectureVersion = EmbeddingArchitectureCompactTransformerV1
+	manifest.ModelDim = 2
+	manifest.OutputDim = 1
+	manifest.AttentionHeads = 1
+	manifest.HeadDim = 2
+	manifest.ParameterTying = EmbeddingParameterTyingUntied
+	if err := manifest.ValidateModule(bundle.Artifact); err == nil || !strings.Contains(err.Error(), "output_projection_param is required") {
+		t.Fatalf("ValidateModule error = %v, want output projection error", err)
 	}
 }
 

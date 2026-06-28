@@ -86,6 +86,9 @@ func (m EmbeddingTrainManifest) ValidateModule(mod *eosartifact.Module) error {
 	if err := m.Embedding.ValidateModule(mod); err != nil {
 		return err
 	}
+	if err := m.Embedding.ValidateLegacyEmbeddingTrainerSupported(); err != nil {
+		return err
+	}
 	if _, err := requireTrainableEmbeddingParam(mod, m.Embedding.TokenEmbeddingParam); err != nil {
 		return err
 	}

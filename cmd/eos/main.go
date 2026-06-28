@@ -4819,8 +4819,12 @@ func runInitModel(args []string) error {
 	var name string
 	var vocabSize int
 	var maxSequence int
+	var architecture string
+	var modelDim int
+	var outputDim int
 	var embeddingDim int
 	var hiddenDim int
+	var attentionHeads int
 	var encoderRepeats int
 	var seed int64
 	var learningRate float64
@@ -4837,8 +4841,12 @@ func runInitModel(args []string) error {
 	fs.StringVar(&name, "name", "", "model name")
 	fs.IntVar(&vocabSize, "vocab-size", 0, "tokenizer vocab size")
 	fs.IntVar(&maxSequence, "max-seq", 0, "maximum token sequence length")
+	fs.StringVar(&architecture, "architecture", "", "embedding architecture: legacy_tied_v1 or compact_transformer_v1")
+	fs.IntVar(&modelDim, "model-dim", 0, "internal model dimension")
+	fs.IntVar(&outputDim, "output-dim", 0, "embedding output dimension")
 	fs.IntVar(&embeddingDim, "embedding-dim", 0, "embedding/model dimension")
 	fs.IntVar(&hiddenDim, "hidden-dim", 0, "FFN hidden dimension")
+	fs.IntVar(&attentionHeads, "attention-heads", 0, "attention head count")
 	fs.IntVar(&encoderRepeats, "encoder-repeats", 0, "number of encoder layer repeats (weights are tied; default 2)")
 	fs.Int64Var(&seed, "seed", 0, "initialization seed")
 	fs.Float64Var(&learningRate, "lr", 0, "trainer learning rate")
@@ -4876,13 +4884,20 @@ func runInitModel(args []string) error {
 	if teacherTemperature < 0 {
 		return fmt.Errorf("teacher-temperature must be non-negative")
 	}
+	if embeddingDim > 0 && modelDim > 0 && embeddingDim != modelDim {
+		return fmt.Errorf("embedding-dim %d conflicts with model-dim %d", embeddingDim, modelDim)
+	}
 	path := fs.Arg(0)
 	paths, err := models.InitDefaultEmbeddingPackage(path, models.DefaultEmbeddingPackageConfig{
 		Name:               name,
 		VocabSize:          vocabSize,
 		MaxSequence:        maxSequence,
+		Architecture:       architecture,
+		ModelDim:           modelDim,
+		OutputDim:          outputDim,
 		EmbeddingDim:       embeddingDim,
 		HiddenDim:          hiddenDim,
+		AttentionHeads:     attentionHeads,
 		EncoderRepeats:     encoderRepeats,
 		Seed:               seed,
 		LearningRate:       float32(learningRate),

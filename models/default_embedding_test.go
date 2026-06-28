@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	eosartifact "m31labs.dev/eos/artifact/eos"
@@ -85,6 +86,44 @@ func TestInitDefaultEmbeddingPackageCreatesTrainablePackage(t *testing.T) {
 	}
 	if _, err := eosruntime.LoadEmbeddingTrainerPackage(path); err != nil {
 		t.Fatalf("load training package: %v", err)
+	}
+}
+
+func TestInitDefaultEmbeddingPackageDefaultsOutputDimToModelDim(t *testing.T) {
+	manifest := DefaultEmbeddingManifest(DefaultEmbeddingPackageConfig{
+		ModelDim:  6,
+		HiddenDim: 12,
+	})
+	if manifest.ModelDim != 6 || manifest.OutputDim != 6 {
+		t.Fatalf("manifest dims = model:%d output:%d, want 6/6", manifest.ModelDim, manifest.OutputDim)
+	}
+}
+
+func TestInitDefaultEmbeddingPackageRejectsUnsupportedCompactArchitecture(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "compact.mll")
+	_, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
+		Architecture:   eosruntime.EmbeddingArchitectureCompactTransformerV1,
+		ModelDim:       8,
+		OutputDim:      4,
+		HiddenDim:      16,
+		AttentionHeads: 2,
+	})
+	if err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 is not supported by trainable package initialization yet") {
+		t.Fatalf("InitDefaultEmbeddingPackage error = %v, want unsupported compact error", err)
+	}
+}
+
+func TestInitDefaultEmbeddingPackageRejectsInvalidHeadConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad-heads.mll")
+	_, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
+		Architecture:   eosruntime.EmbeddingArchitectureCompactTransformerV1,
+		ModelDim:       7,
+		OutputDim:      7,
+		HiddenDim:      14,
+		AttentionHeads: 2,
+	})
+	if err == nil || !strings.Contains(err.Error(), "model_dim 7 must be divisible by attention_heads 2") {
+		t.Fatalf("InitDefaultEmbeddingPackage error = %v, want head divisibility error", err)
 	}
 }
 

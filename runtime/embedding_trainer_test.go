@@ -545,6 +545,57 @@ pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16
 	}
 }
 
+func TestEmbeddingTrainerRejectsUnsupportedCompactArchitecture(t *testing.T) {
+	src := []byte(`
+param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable
+param projection: q8[D, E] @weight("weights/projection") @trainable
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let projection_f = dequant(projection)
+    let projected = @matmul(hidden, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, E] {
+    let hidden_q = gather(token_embedding, tokens)
+    let hidden = dequant(hidden_q)
+    let projection_f = dequant(projection)
+    let projected = @matmul(hidden, projection_f)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+`)
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "tiny_train_embed_q8"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	manifest := tinyMaskedEmbeddingManifest()
+	manifest.Name = "tiny_train_embed_q8"
+	manifest.ArchitectureVersion = EmbeddingArchitectureCompactTransformerV1
+	manifest.ModelDim = 2
+	manifest.OutputDim = 2
+	manifest.AttentionHeads = 1
+	manifest.HeadDim = 2
+	manifest.ParameterTying = EmbeddingParameterTyingUntied
+	_, err = NewEmbeddingTrainer(bundle.Artifact, manifest, map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF32([]int{3, 2}, []float32{
+			1, 0,
+			0, 1,
+			1, 1,
+		}),
+		"projection": backend.NewTensorF32([]int{2, 2}, []float32{
+			1, 0,
+			0, 1,
+		}),
+	}, EmbeddingTrainConfig{LearningRate: 0.2})
+	if err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 is not supported by trainable package initialization yet") {
+		t.Fatalf("NewEmbeddingTrainer error = %v, want unsupported compact error", err)
+	}
+}
+
 func TestEmbeddingTrainerTrainStepSupportsFFNGELUAndExportsQuantizedWeights(t *testing.T) {
 	src := []byte(`
 param token_embedding: q8[V, D] @weight("weights/token_embedding") @trainable

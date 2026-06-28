@@ -2,6 +2,7 @@ package eosruntime
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"m31labs.dev/eos/compiler"
@@ -273,5 +274,16 @@ pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16
 	}
 	if err := manifest.ValidateModule(bundle.Artifact); err != nil {
 		t.Fatalf("validate train manifest: %v", err)
+	}
+
+	unsupported := manifest
+	unsupported.Embedding.ArchitectureVersion = EmbeddingArchitectureCompactTransformerV1
+	unsupported.Embedding.ModelDim = 2
+	unsupported.Embedding.OutputDim = 2
+	unsupported.Embedding.AttentionHeads = 1
+	unsupported.Embedding.HeadDim = 2
+	unsupported.Embedding.ParameterTying = EmbeddingParameterTyingUntied
+	if err := unsupported.ValidateModule(bundle.Artifact); err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 is not supported by trainable package initialization yet") {
+		t.Fatalf("compact ValidateModule error = %v, want unsupported compact error", err)
 	}
 }

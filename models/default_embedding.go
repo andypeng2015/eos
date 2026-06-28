@@ -19,8 +19,12 @@ type DefaultEmbeddingPackageConfig struct {
 	Name               string
 	VocabSize          int
 	MaxSequence        int
+	Architecture       string
+	ModelDim           int
+	OutputDim          int
 	EmbeddingDim       int
 	HiddenDim          int
+	AttentionHeads     int
 	EncoderRepeats     int
 	Seed               int64
 	LearningRate       float32
@@ -70,7 +74,7 @@ func InitDefaultEmbeddingPackage(path string, cfg DefaultEmbeddingPackageConfig)
 		Seed:                  cfg.Seed,
 		BootstrapArtifactPath: cfg.BootstrapFrom,
 		ShapeSizes: map[string]int{
-			"D": cfg.EmbeddingDim,
+			"D": cfg.ModelDim,
 			"H": cfg.HiddenDim,
 		},
 	})
@@ -89,11 +93,11 @@ func DefaultEmbeddingManifest(cfg DefaultEmbeddingPackageConfig) eosruntime.Embe
 		MaskInput:             "attention_mask",
 		OutputName:            "result",
 		OutputDType:           "f16",
-		ArchitectureVersion:   eosruntime.EmbeddingArchitectureLegacyV1,
-		ModelDim:              cfg.EmbeddingDim,
-		OutputDim:             cfg.EmbeddingDim,
-		AttentionHeads:        1,
-		HeadDim:               cfg.EmbeddingDim,
+		ArchitectureVersion:   cfg.Architecture,
+		ModelDim:              cfg.ModelDim,
+		OutputDim:             cfg.OutputDim,
+		AttentionHeads:        cfg.AttentionHeads,
+		HeadDim:               cfg.ModelDim / cfg.AttentionHeads,
 		FFNDim:                cfg.HiddenDim,
 		ParameterTying:        eosruntime.EmbeddingParameterTyingLegacyTied,
 		TokenEmbeddingParam:   "token_embedding",
@@ -138,11 +142,27 @@ func (cfg DefaultEmbeddingPackageConfig) normalized() DefaultEmbeddingPackageCon
 	if cfg.MaxSequence == 0 {
 		cfg.MaxSequence = 256
 	}
+	if cfg.Architecture == "" {
+		cfg.Architecture = eosruntime.EmbeddingArchitectureLegacyV1
+	}
+	if cfg.ModelDim == 0 {
+		cfg.ModelDim = cfg.EmbeddingDim
+	}
 	if cfg.EmbeddingDim == 0 {
+		cfg.EmbeddingDim = cfg.ModelDim
+	}
+	if cfg.ModelDim == 0 {
+		cfg.ModelDim = 128
 		cfg.EmbeddingDim = 128
 	}
+	if cfg.OutputDim == 0 {
+		cfg.OutputDim = cfg.ModelDim
+	}
 	if cfg.HiddenDim == 0 {
-		cfg.HiddenDim = cfg.EmbeddingDim * 2
+		cfg.HiddenDim = cfg.ModelDim * 2
+	}
+	if cfg.AttentionHeads == 0 {
+		cfg.AttentionHeads = 1
 	}
 	if cfg.EncoderRepeats <= 0 {
 		cfg.EncoderRepeats = 2
@@ -187,8 +207,36 @@ func (cfg DefaultEmbeddingPackageConfig) validate() error {
 	if cfg.MaxSequence <= 0 {
 		return fmt.Errorf("max sequence must be positive")
 	}
-	if cfg.EmbeddingDim <= 0 {
-		return fmt.Errorf("embedding dim must be positive")
+	switch cfg.Architecture {
+	case eosruntime.EmbeddingArchitectureLegacyV1:
+	case eosruntime.EmbeddingArchitectureCompactTransformerV1:
+		if err := validateDefaultEmbeddingArchitectureDims(cfg); err != nil {
+			return err
+		}
+		return fmt.Errorf("%s is not supported by trainable package initialization yet", cfg.Architecture)
+	default:
+		return fmt.Errorf("unsupported architecture %q", cfg.Architecture)
+	}
+	if cfg.ModelDim <= 0 {
+		return fmt.Errorf("model dim must be positive")
+	}
+	if cfg.OutputDim <= 0 {
+		return fmt.Errorf("output dim must be positive")
+	}
+	if cfg.EmbeddingDim > 0 && cfg.EmbeddingDim != cfg.ModelDim {
+		return fmt.Errorf("embedding dim %d conflicts with model dim %d", cfg.EmbeddingDim, cfg.ModelDim)
+	}
+	if cfg.AttentionHeads <= 0 {
+		return fmt.Errorf("attention heads must be positive")
+	}
+	if cfg.ModelDim%cfg.AttentionHeads != 0 {
+		return fmt.Errorf("model_dim %d must be divisible by attention_heads %d", cfg.ModelDim, cfg.AttentionHeads)
+	}
+	if cfg.AttentionHeads != 1 {
+		return fmt.Errorf("%s with attention_heads=%d is not supported by trainable package initialization yet", cfg.Architecture, cfg.AttentionHeads)
+	}
+	if cfg.OutputDim != cfg.ModelDim {
+		return fmt.Errorf("%s with output_dim=%d is not supported by trainable package initialization yet", cfg.Architecture, cfg.OutputDim)
 	}
 	if cfg.HiddenDim <= 0 {
 		return fmt.Errorf("hidden dim must be positive")
@@ -213,6 +261,22 @@ func (cfg DefaultEmbeddingPackageConfig) validate() error {
 	}
 	if cfg.TeacherTemperature <= 0 {
 		return fmt.Errorf("teacher temperature must be positive")
+	}
+	return nil
+}
+
+func validateDefaultEmbeddingArchitectureDims(cfg DefaultEmbeddingPackageConfig) error {
+	if cfg.ModelDim <= 0 {
+		return fmt.Errorf("model dim must be positive")
+	}
+	if cfg.OutputDim <= 0 {
+		return fmt.Errorf("output dim must be positive")
+	}
+	if cfg.AttentionHeads <= 0 {
+		return fmt.Errorf("attention heads must be positive")
+	}
+	if cfg.ModelDim%cfg.AttentionHeads != 0 {
+		return fmt.Errorf("model_dim %d must be divisible by attention_heads %d", cfg.ModelDim, cfg.AttentionHeads)
 	}
 	return nil
 }

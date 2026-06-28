@@ -14,20 +14,21 @@ import (
 const EmbeddingManifestVersion = "manta/embedding-manifest/v0alpha1"
 
 const (
-	EmbeddingAttentionMaskModeNone        = "none"
-	EmbeddingAttentionMaskModeKey         = "key"
-	EmbeddingPositionEncodingNone         = "none"
-	EmbeddingPositionEncodingRoPE         = "rope"
-	EmbeddingAttentionScoreScaleNone      = "none"
-	EmbeddingAttentionScoreScaleKeyDimRSQ = "key_dim_rsqrt"
-	EmbeddingArchitectureLegacyV1         = "legacy_tied_v1"
-	EmbeddingParameterTyingLegacyTied     = "legacy_tied"
-	EmbeddingParameterTyingUntied         = "untied"
-	EmbeddingRoleConditioningNone         = "none"
-	EmbeddingRoleConditioningAdditiveV1   = "additive_token_embedding_v1"
-	EmbeddingRoleRaw                      = "raw"
-	EmbeddingRoleQuery                    = "query"
-	EmbeddingRoleDocument                 = "document"
+	EmbeddingAttentionMaskModeNone            = "none"
+	EmbeddingAttentionMaskModeKey             = "key"
+	EmbeddingPositionEncodingNone             = "none"
+	EmbeddingPositionEncodingRoPE             = "rope"
+	EmbeddingAttentionScoreScaleNone          = "none"
+	EmbeddingAttentionScoreScaleKeyDimRSQ     = "key_dim_rsqrt"
+	EmbeddingArchitectureLegacyV1             = "legacy_tied_v1"
+	EmbeddingArchitectureCompactTransformerV1 = "compact_transformer_v1"
+	EmbeddingParameterTyingLegacyTied         = "legacy_tied"
+	EmbeddingParameterTyingUntied             = "untied"
+	EmbeddingRoleConditioningNone             = "none"
+	EmbeddingRoleConditioningAdditiveV1       = "additive_token_embedding_v1"
+	EmbeddingRoleRaw                          = "raw"
+	EmbeddingRoleQuery                        = "query"
+	EmbeddingRoleDocument                     = "document"
 )
 
 // TokenizerManifest carries embedding-model tokenization limits and ids.
@@ -78,6 +79,7 @@ type EmbeddingManifest struct {
 	FFNResidual           bool              `json:"ffn_residual,omitempty"`
 	FFNLayerNorm          bool              `json:"ffn_layernorm,omitempty"`
 	ProjectionParam       string            `json:"projection_param,omitempty"`
+	OutputProjectionParam string            `json:"output_projection_param,omitempty"`
 	Tokenizer             TokenizerManifest `json:"tokenizer,omitempty"`
 }
 
@@ -194,6 +196,7 @@ func (m EmbeddingManifest) mllValues() map[string]authoredManifestValue {
 		"ffn_residual":            authoredBool(m.FFNResidual),
 		"ffn_layernorm":           authoredBool(m.FFNLayerNorm),
 		"projection_param":        authoredString(m.ProjectionParam),
+		"output_projection_param": authoredString(m.OutputProjectionParam),
 		"tokenizer.vocab_size":    authoredInt(int64(m.Tokenizer.VocabSize)),
 		"tokenizer.max_sequence":  authoredInt(int64(m.Tokenizer.MaxSequence)),
 		"tokenizer.pad_id":        authoredInt(int64(m.Tokenizer.PadID)),
@@ -384,6 +387,11 @@ func embeddingManifestFromDoc(doc authoredManifestDoc) (EmbeddingManifest, error
 		return EmbeddingManifest{}, err
 	} else {
 		manifest.ProjectionParam = value
+	}
+	if value, _, err := doc.string("output_projection_param"); err != nil {
+		return EmbeddingManifest{}, err
+	} else {
+		manifest.OutputProjectionParam = value
 	}
 	if value, _, err := doc.int("tokenizer.vocab_size"); err != nil {
 		return EmbeddingManifest{}, err
@@ -1079,6 +1087,11 @@ func (m EmbeddingManifest) validateArchitectureMetadata() error {
 	if !m.hasArchitectureMetadata() {
 		return nil
 	}
+	switch m.ArchitectureVersion {
+	case "", EmbeddingArchitectureLegacyV1, EmbeddingArchitectureCompactTransformerV1:
+	default:
+		return fmt.Errorf("unsupported architecture_version %q", m.ArchitectureVersion)
+	}
 	if m.ModelDim <= 0 {
 		return fmt.Errorf("model_dim must be positive when architecture metadata is declared")
 	}
@@ -1104,6 +1117,33 @@ func (m EmbeddingManifest) validateArchitectureMetadata() error {
 	case "", EmbeddingParameterTyingLegacyTied, EmbeddingParameterTyingUntied:
 	default:
 		return fmt.Errorf("unsupported parameter_tying %q", m.ParameterTying)
+	}
+	if m.OutputProjectionParam != "" {
+		if strings.TrimSpace(m.OutputProjectionParam) == "" {
+			return fmt.Errorf("output_projection_param must not be blank")
+		}
+	} else if m.ArchitectureVersion == EmbeddingArchitectureCompactTransformerV1 && m.OutputDim != m.ModelDim {
+		return fmt.Errorf("output_projection_param is required when architecture_version=%q and output_dim (%d) differs from model_dim (%d)", m.ArchitectureVersion, m.OutputDim, m.ModelDim)
+	}
+	return nil
+}
+
+// ValidateLegacyEmbeddingTrainerSupported rejects manifests that need
+// architecture execution paths the current tied trainer has not implemented.
+func (m EmbeddingManifest) ValidateLegacyEmbeddingTrainerSupported() error {
+	m = m.normalized()
+	arch := m.ArchitectureVersion
+	if arch == "" {
+		arch = EmbeddingArchitectureLegacyV1
+	}
+	if arch != EmbeddingArchitectureLegacyV1 {
+		return fmt.Errorf("%s is not supported by trainable package initialization yet", arch)
+	}
+	if m.ParameterTying != "" && m.ParameterTying != EmbeddingParameterTyingLegacyTied {
+		return fmt.Errorf("%s with parameter_tying=%q is not supported by trainable package initialization yet", arch, m.ParameterTying)
+	}
+	if m.OutputProjectionParam != "" {
+		return fmt.Errorf("%s with output_projection_param=%q is not supported by trainable package initialization yet", arch, m.OutputProjectionParam)
 	}
 	return nil
 }

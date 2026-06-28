@@ -1024,6 +1024,57 @@ func TestRunInitModelHonorsEncoderRepeats(t *testing.T) {
 	}
 }
 
+func TestRunInitModelHonorsModelDimAliasAndDefaultsOutputDim(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "eos-embed-v1.mll")
+	if err := run([]string{
+		"init-model",
+		"--vocab-size", "16",
+		"--max-seq", "8",
+		"--model-dim", "4",
+		"--hidden-dim", "8",
+		path,
+	}); err != nil {
+		t.Fatalf("run init-model: %v", err)
+	}
+	manifest, err := eosruntime.ReadEmbeddingManifestFile(eosruntime.DefaultEmbeddingManifestPath(path))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if manifest.ModelDim != 4 || manifest.OutputDim != 4 {
+		t.Fatalf("manifest dims = model:%d output:%d, want 4/4", manifest.ModelDim, manifest.OutputDim)
+	}
+}
+
+func TestRunInitModelRejectsUnsupportedCompactArchitecture(t *testing.T) {
+	err := run([]string{
+		"init-model",
+		"--architecture", eosruntime.EmbeddingArchitectureCompactTransformerV1,
+		"--model-dim", "8",
+		"--output-dim", "4",
+		"--hidden-dim", "16",
+		"--attention-heads", "2",
+		filepath.Join(t.TempDir(), "compact.mll"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 is not supported by trainable package initialization yet") {
+		t.Fatalf("run init-model error = %v, want unsupported compact error", err)
+	}
+}
+
+func TestRunInitModelRejectsInvalidHeadConfig(t *testing.T) {
+	err := run([]string{
+		"init-model",
+		"--architecture", eosruntime.EmbeddingArchitectureCompactTransformerV1,
+		"--model-dim", "7",
+		"--output-dim", "7",
+		"--hidden-dim", "14",
+		"--attention-heads", "2",
+		filepath.Join(t.TempDir(), "bad-heads.mll"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "model_dim 7 must be divisible by attention_heads 2") {
+		t.Fatalf("run init-model error = %v, want head divisibility error", err)
+	}
+}
+
 func TestRunInitModelBootstrapFromCopiesOverlap(t *testing.T) {
 	dir := t.TempDir()
 	sourcePath := filepath.Join(dir, "source.mll")
