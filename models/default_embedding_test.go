@@ -111,7 +111,7 @@ func TestInitDefaultEmbeddingPackageCreatesCompactBootstrapPackage(t *testing.T)
 		ModelDim:       8,
 		OutputDim:      4,
 		HiddenDim:      16,
-		AttentionHeads: 2,
+		AttentionHeads: 1,
 		EncoderRepeats: 3,
 	})
 	if err != nil {
@@ -140,8 +140,8 @@ func TestInitDefaultEmbeddingPackageCreatesCompactBootstrapPackage(t *testing.T)
 		manifest.ModelDim != 8 ||
 		manifest.OutputDim != 4 ||
 		manifest.FFNDim != 16 ||
-		manifest.AttentionHeads != 2 ||
-		manifest.HeadDim != 4 ||
+		manifest.AttentionHeads != 1 ||
+		manifest.HeadDim != 8 ||
 		manifest.EncoderRepeats != 3 ||
 		manifest.OutputProjectionParam != "output_projection" {
 		t.Fatalf("unexpected compact metadata: %+v", manifest)
@@ -294,7 +294,7 @@ func TestInitDefaultEmbeddingPackageCompactParamContract(t *testing.T) {
 		ModelDim:       8,
 		OutputDim:      5,
 		HiddenDim:      24,
-		AttentionHeads: 2,
+		AttentionHeads: 1,
 		EncoderRepeats: 2,
 		WeightDType:    "q4",
 	})
@@ -371,6 +371,25 @@ func TestInitDefaultEmbeddingPackageCompactParamContract(t *testing.T) {
 			checkpoint.MomentTensors[spec.name+"_moment_2"] == nil {
 			t.Fatalf("checkpoint missing compact moments for %q", spec.name)
 		}
+	}
+}
+
+func TestInitDefaultEmbeddingPackageRejectsCompactMultiHeadServingGraph(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "compact-multihead.mll")
+	_, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
+		Architecture:   eosruntime.EmbeddingArchitectureCompactTransformerV1,
+		ModelDim:       8,
+		OutputDim:      4,
+		HiddenDim:      16,
+		AttentionHeads: 2,
+	})
+	if err == nil ||
+		!strings.Contains(err.Error(), "generated serving graph does not support attention_heads=2") ||
+		!strings.Contains(err.Error(), "per-head compact serving parity") {
+		t.Fatalf("InitDefaultEmbeddingPackage error = %v, want compact multi-head serving graph gate", err)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("multi-head compact init wrote artifact despite serving gate: stat err=%v", statErr)
 	}
 }
 

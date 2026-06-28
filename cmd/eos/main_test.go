@@ -1053,7 +1053,7 @@ func TestRunInitModelCreatesCompactBootstrapPackage(t *testing.T) {
 		"--model-dim", "8",
 		"--output-dim", "4",
 		"--hidden-dim", "16",
-		"--attention-heads", "2",
+		"--attention-heads", "1",
 		"--encoder-repeats", "4",
 		path,
 	}); err != nil {
@@ -1068,8 +1068,8 @@ func TestRunInitModelCreatesCompactBootstrapPackage(t *testing.T) {
 		manifest.ModelDim != 8 ||
 		manifest.OutputDim != 4 ||
 		manifest.FFNDim != 16 ||
-		manifest.AttentionHeads != 2 ||
-		manifest.HeadDim != 4 ||
+		manifest.AttentionHeads != 1 ||
+		manifest.HeadDim != 8 ||
 		manifest.EncoderRepeats != 4 ||
 		manifest.OutputProjectionParam != "output_projection" {
 		t.Fatalf("unexpected compact manifest: %+v", manifest)
@@ -1094,6 +1094,23 @@ func TestRunInitModelCreatesCompactBootstrapPackage(t *testing.T) {
 	}
 	if math.IsNaN(float64(metrics.Loss)) || math.IsInf(float64(metrics.Loss), 0) || metrics.PairCount != 2 {
 		t.Fatalf("compact trainer metrics = %+v, want finite 2-pair evaluation", metrics)
+	}
+}
+
+func TestRunInitModelRejectsCompactMultiHeadServingGraph(t *testing.T) {
+	err := run([]string{
+		"init-model",
+		"--architecture", eosruntime.EmbeddingArchitectureCompactTransformerV1,
+		"--model-dim", "8",
+		"--output-dim", "4",
+		"--hidden-dim", "16",
+		"--attention-heads", "2",
+		filepath.Join(t.TempDir(), "compact-multihead.mll"),
+	})
+	if err == nil ||
+		!strings.Contains(err.Error(), "generated serving graph does not support attention_heads=2") ||
+		!strings.Contains(err.Error(), "per-head compact serving parity") {
+		t.Fatalf("run init-model error = %v, want compact multi-head serving graph gate", err)
 	}
 }
 
@@ -5952,7 +5969,7 @@ func TestRunTrainEmbedCompactHardNegativeMetricsProfileOptimizerUpdates(t *testi
 		"--model-dim", "8",
 		"--output-dim", "4",
 		"--hidden-dim", "16",
-		"--attention-heads", "2",
+		"--attention-heads", "1",
 		"--encoder-repeats", "1",
 		"--contrastive-loss", "grouped_infonce",
 		"--temperature", "0.05",
@@ -6527,7 +6544,7 @@ func TestRunTrainTokenizerPreservesCompactPackageVocabContract(t *testing.T) {
 		"--model-dim", "8",
 		"--output-dim", "4",
 		"--hidden-dim", "16",
-		"--attention-heads", "2",
+		"--attention-heads", "1",
 		"--encoder-repeats", "1",
 		path,
 	}); err != nil {

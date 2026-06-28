@@ -251,6 +251,9 @@ func (cfg DefaultEmbeddingPackageConfig) validate() error {
 	if cfg.ModelDim%cfg.AttentionHeads != 0 {
 		return fmt.Errorf("model_dim %d must be divisible by attention_heads %d", cfg.ModelDim, cfg.AttentionHeads)
 	}
+	if cfg.Architecture == eosruntime.EmbeddingArchitectureCompactTransformerV1 && cfg.AttentionHeads > 1 {
+		return fmt.Errorf("%s generated serving graph does not support attention_heads=%d yet; use attention_heads=1 until per-head compact serving parity is implemented", cfg.Architecture, cfg.AttentionHeads)
+	}
 	if cfg.Architecture == eosruntime.EmbeddingArchitectureLegacyV1 && cfg.AttentionHeads != 1 {
 		return fmt.Errorf("%s with attention_heads=%d is not supported by trainable package initialization yet", cfg.Architecture, cfg.AttentionHeads)
 	}

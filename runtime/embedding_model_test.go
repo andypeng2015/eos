@@ -133,6 +133,28 @@ func TestLoadEmbeddingValidatesManifest(t *testing.T) {
 	}
 }
 
+func TestLoadEmbeddingRejectsCompactMultiHeadServingGraph(t *testing.T) {
+	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_embed_pooled", Preset: compiler.PresetTinyEmbedPooled})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	manifest := tinyEmbeddingManifest()
+	manifest.ArchitectureVersion = EmbeddingArchitectureCompactTransformerV1
+	manifest.ParameterTying = EmbeddingParameterTyingUntied
+	manifest.ModelDim = 4
+	manifest.OutputDim = 4
+	manifest.AttentionHeads = 2
+	manifest.HeadDim = 2
+
+	rt := New(cuda.New(), metal.New())
+	_, err = rt.LoadEmbedding(context.Background(), bundle.Artifact, manifest, tinyEmbedWeights()...)
+	if err == nil ||
+		!strings.Contains(err.Error(), "serving graph does not support attention_heads=2") ||
+		!strings.Contains(err.Error(), "fused-head attention") {
+		t.Fatalf("LoadEmbedding error = %v, want compact multi-head serving graph gate", err)
+	}
+}
+
 func TestEmbeddingModelEmbed(t *testing.T) {
 	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_embed_pooled", Preset: compiler.PresetTinyEmbedPooled})
 	if err != nil {

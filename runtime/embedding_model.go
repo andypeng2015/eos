@@ -118,6 +118,9 @@ func (m EmbeddingManifest) WriteFile(path string) error {
 // LoadEmbedding loads an embedding module with a validated serving manifest.
 func (rt *Runtime) LoadEmbedding(ctx context.Context, mod *eosartifact.Module, manifest EmbeddingManifest, opts ...LoadOption) (*EmbeddingModel, error) {
 	manifest = manifest.normalizedForModule(mod)
+	if err := manifest.validateServingGraphSupported(); err != nil {
+		return nil, err
+	}
 	if err := manifest.ValidateModule(mod); err != nil {
 		return nil, err
 	}
@@ -149,6 +152,13 @@ func (rt *Runtime) LoadEmbeddingBundleWithManifest(ctx context.Context, artifact
 		return nil, err
 	}
 	return rt.LoadEmbeddingFile(ctx, artifactPath, manifest, opts...)
+}
+
+func (m EmbeddingManifest) validateServingGraphSupported() error {
+	if m.ArchitectureVersion == EmbeddingArchitectureCompactTransformerV1 && m.AttentionHeads > 1 {
+		return fmt.Errorf("%s serving graph does not support attention_heads=%d yet; generated compact serving graph uses fused-head attention and is only valid for attention_heads=1 until per-head serving parity is implemented", m.ArchitectureVersion, m.AttentionHeads)
+	}
+	return nil
 }
 
 func (m EmbeddingManifest) nameOrDefault() string {
