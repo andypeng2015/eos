@@ -1860,7 +1860,7 @@ func (t *EmbeddingTrainer) TrainScoreSpectrumStep(batch []EmbeddingScoreSpectrum
 		return EmbeddingTrainMetrics{}, fmt.Errorf("embedding trainer is not initialized")
 	}
 	if t.isCompactTrainer() {
-		return EmbeddingTrainMetrics{}, compactTrainingUnsupportedError()
+		return t.runCompactScoreSpectrumBatchUpdate(batch)
 	}
 	if len(batch) == 0 {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("score-spectrum training batch is empty")
@@ -1979,6 +1979,89 @@ func (t *EmbeddingTrainer) TrainScoreSpectrumStep(batch []EmbeddingScoreSpectrum
 	t.applyOptimizerUpdate(t.attnOParam.Name, t.attentionOutput, t.attnOMom1, t.attnOMom2, gradAttnO, batchScale)
 	t.applyOptimizerUpdate(t.hiddenParam.Name, t.hiddenProjection, t.hiddenMom1, t.hiddenMom2, gradHidden, batchScale)
 	t.applyOptimizerUpdate(t.projParam.Name, t.projection, t.projMom1, t.projMom2, gradProj, batchScale)
+	return EmbeddingTrainMetrics{
+		Loss:         totalLoss * batchScale,
+		AverageScore: totalScore / float32(pairCount),
+		BatchSize:    pairCount,
+	}, nil
+}
+
+func (t *EmbeddingTrainer) runCompactScoreSpectrumBatchUpdate(batch []EmbeddingScoreSpectrumExample) (EmbeddingTrainMetrics, error) {
+	if t == nil || t.compactState == nil {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("compact embedding trainer is not initialized")
+	}
+	if len(batch) == 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("score-spectrum training batch is empty")
+	}
+	if len(t.config.MatryoshkaDims) > 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("compact_transformer_v1 score-spectrum training does not support matryoshka objectives")
+	}
+	if len(t.config.TurboQuantPrefixBits) > 0 || len(t.config.TurboQuantPrefixObjectives) > 0 || len(turboQuantPrefixObjectivesForConfig(t.config)) > 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("compact_transformer_v1 score-spectrum training does not support turboquant prefix objectives")
+	}
+	if len(t.config.TurboQuantCompactObjectives) > 0 || len(turboQuantCompactObjectivesForConfig(t.config)) > 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("compact_transformer_v1 score-spectrum training does not support turboquant compact objectives")
+	}
+	if len(t.config.TurboQuantRankMarginObjectives) > 0 || len(turboQuantRankMarginObjectivesForConfig(t.config)) > 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("compact_transformer_v1 score-spectrum training does not support turboquant rank-margin objectives")
+	}
+	if err := validateScoreSpectrumTrainerConfig(t.config); err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	canonicalBatch, err := canonicalizeTokenizedScoreSpectrumExamples(batch)
+	if err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	queryInputs, candidateInputs, candidateSpans, err := scoreSpectrumSequenceInputs(canonicalBatch, t.queryRoleIndex(), t.documentRoleIndex())
+	if err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+
+	forward := t.prepareForwardWeights()
+	if forward == nil || forward.compact == nil {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("missing compact forward weights")
+	}
+	allInputs := make([]embeddingSequenceInput, 0, len(queryInputs)+len(candidateInputs))
+	allInputs = append(allInputs, queryInputs...)
+	allInputs = append(allInputs, candidateInputs...)
+	encoded, err := t.encodeSequenceInputs(allInputs, forward, true)
+	if err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	defer t.releaseEncodedSequences(encoded)
+	queries := encoded[:len(queryInputs)]
+	candidates := encoded[len(queryInputs):]
+
+	grads := newCompactEmbeddingGradState(t.compactState)
+	queryGrads := make([][]float32, len(queries))
+	candidateGrads := make([][]float32, len(candidates))
+	for i := range queries {
+		queryGrads[i] = make([]float32, len(queries[i].pooled))
+	}
+	for i := range candidates {
+		candidateGrads[i] = make([]float32, len(candidates[i].pooled))
+	}
+
+	totalLoss, totalScore, pairCount, err := accumulateScoreSpectrumGrads(queries, candidates, candidateSpans, canonicalBatch, t.config, queryGrads, candidateGrads)
+	if err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	if pairCount == 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("score-spectrum training batch has no usable candidates")
+	}
+	for i, query := range queries {
+		if err := t.backpropCompactEncodedSequence(query, queryGrads[i], forward.compact, grads); err != nil {
+			return EmbeddingTrainMetrics{}, fmt.Errorf("query %d: %w", i, err)
+		}
+	}
+	for i, candidate := range candidates {
+		if err := t.backpropCompactEncodedSequence(candidate, candidateGrads[i], forward.compact, grads); err != nil {
+			return EmbeddingTrainMetrics{}, fmt.Errorf("candidate %d: %w", i, err)
+		}
+	}
+
+	batchScale := float32(1) / float32(len(queries))
+	t.applyCompactOptimizerUpdates(grads, batchScale)
 	return EmbeddingTrainMetrics{
 		Loss:         totalLoss * batchScale,
 		AverageScore: totalScore / float32(pairCount),

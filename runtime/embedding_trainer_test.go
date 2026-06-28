@@ -1540,6 +1540,77 @@ func TestCompactEmbeddingTrainerHardNegativeCheckpointRestoreParity(t *testing.T
 	}
 }
 
+func TestCompactEmbeddingTrainerTrainScoreSpectrumStepMovesState(t *testing.T) {
+	trainer := newCompactEmbeddingTrainerForTest(t, 3)
+	trainer.config.Temperature = 0.05
+	batch := tinyEmbeddingScoreSpectrumDataset()
+	beforeStep := trainer.TrainProfile().Step
+	snapshots := snapshotCompactTrainStateTensors(trainer.compactState)
+	metrics, err := trainer.TrainScoreSpectrumStep(batch)
+	if err != nil {
+		t.Fatalf("compact TrainScoreSpectrumStep: %v", err)
+	}
+	if !compactTestFinite(metrics.Loss) || !compactTestFinite(metrics.AverageScore) || metrics.BatchSize != 4 {
+		t.Fatalf("compact score-spectrum metrics = %+v, want finite row-local metrics", metrics)
+	}
+	if got := trainer.TrainProfile().Step; got != beforeStep+1 {
+		t.Fatalf("compact score-spectrum step = %d, want %d", got, beforeStep+1)
+	}
+	delta := aggregateParameterDeltaStats(snapshots)
+	if delta.NonzeroCount == 0 || delta.L2Norm == 0 {
+		t.Fatalf("compact TrainScoreSpectrumStep did not move train tensors: %+v", delta)
+	}
+	eval, err := trainer.EvaluateScoreSpectrum(batch)
+	if err != nil {
+		t.Fatalf("evaluate compact score-spectrum after train: %v", err)
+	}
+	if !compactTestFinite(eval.Loss) || !compactTestFinite(eval.AverageScore) || eval.CandidateCount != 4 {
+		t.Fatalf("compact score-spectrum eval = %+v, want finite eval metrics", eval)
+	}
+}
+
+func TestCompactEmbeddingTrainerScoreSpectrumCheckpointRestoreParity(t *testing.T) {
+	checkpoint := compactTrainStateTestCheckpoint(3)
+	checkpoint.Step = 17
+	mod := compactTrainStateTestModule(checkpoint)
+	state, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
+	if err != nil {
+		t.Fatalf("load compact state: %v", err)
+	}
+	trainer, err := newCompactEmbeddingTrainerFromTrainState(mod, state)
+	if err != nil {
+		t.Fatalf("new compact trainer: %v", err)
+	}
+	trainer.config.Temperature = 0.05
+	batch := tinyEmbeddingScoreSpectrumDataset()
+	if _, err := trainer.TrainScoreSpectrumStep(batch); err != nil {
+		t.Fatalf("train compact score-spectrum before checkpoint: %v", err)
+	}
+	before, err := trainer.EvaluateScoreSpectrum(batch)
+	if err != nil {
+		t.Fatalf("evaluate compact score-spectrum before checkpoint: %v", err)
+	}
+	saved, err := trainer.Checkpoint()
+	if err != nil {
+		t.Fatalf("checkpoint compact score-spectrum trainer: %v", err)
+	}
+	if saved.Step != checkpoint.Step+1 {
+		t.Fatalf("checkpoint step = %d, want %d", saved.Step, checkpoint.Step+1)
+	}
+	restored, err := NewEmbeddingTrainerFromCheckpoint(mod, saved)
+	if err != nil {
+		t.Fatalf("restore compact score-spectrum trainer: %v", err)
+	}
+	after, err := restored.EvaluateScoreSpectrum(batch)
+	if err != nil {
+		t.Fatalf("evaluate restored compact score-spectrum: %v", err)
+	}
+	assertScoreSpectrumEvalMetricsClose(t, after, before)
+	if got := restored.TrainProfile().Step; got != checkpoint.Step+1 {
+		t.Fatalf("restored compact score-spectrum step = %d, want %d", got, checkpoint.Step+1)
+	}
+}
+
 func TestCompactEmbeddingTrainerHardNegativeUnsupportedModes(t *testing.T) {
 	for name, tc := range map[string]struct {
 		configure func(*EmbeddingTrainer, []EmbeddingHardNegativeExample) []EmbeddingHardNegativeExample
@@ -1576,6 +1647,57 @@ func TestCompactEmbeddingTrainerHardNegativeUnsupportedModes(t *testing.T) {
 		}
 		if got := trainer.TrainProfile().Step; got != beforeStep {
 			t.Fatalf("%s compact unsupported hard-negative mutated step = %d, want %d", name, got, beforeStep)
+		}
+	}
+}
+
+func TestCompactEmbeddingTrainerScoreSpectrumUnsupportedModes(t *testing.T) {
+	for name, tc := range map[string]struct {
+		configure func(*EmbeddingTrainer)
+		want      string
+	}{
+		"matryoshka": {
+			configure: func(trainer *EmbeddingTrainer) {
+				trainer.config.MatryoshkaDims = []int{2}
+				trainer.config.MatryoshkaWeights = []float32{0.5}
+			},
+			want: "does not support matryoshka objectives",
+		},
+		"turboquant_prefix_bits": {
+			configure: func(trainer *EmbeddingTrainer) {
+				trainer.config.TurboQuantPrefixBits = []int{2}
+			},
+			want: "does not support turboquant prefix objectives",
+		},
+		"turboquant_prefix_objectives": {
+			configure: func(trainer *EmbeddingTrainer) {
+				trainer.config.TurboQuantPrefixObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 2, Weight: 0.25}}
+			},
+			want: "does not support turboquant prefix objectives",
+		},
+		"turboquant_compact": {
+			configure: func(trainer *EmbeddingTrainer) {
+				trainer.config.TurboQuantCompactObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 2, Weight: 0.25}}
+			},
+			want: "does not support turboquant compact objectives",
+		},
+		"turboquant_rank_margin": {
+			configure: func(trainer *EmbeddingTrainer) {
+				trainer.config.TurboQuantRankMarginObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 2, Weight: 0.25}}
+			},
+			want: "does not support turboquant rank-margin objectives",
+		},
+	} {
+		trainer := newCompactEmbeddingTrainerForTest(t, 3)
+		trainer.config.Temperature = 0.05
+		tc.configure(trainer)
+		beforeStep := trainer.TrainProfile().Step
+		_, err := trainer.TrainScoreSpectrumStep(tinyEmbeddingScoreSpectrumDataset())
+		if err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 score-spectrum training") || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s compact score-spectrum error = %v, want %q", name, err, tc.want)
+		}
+		if got := trainer.TrainProfile().Step; got != beforeStep {
+			t.Fatalf("%s compact unsupported score-spectrum mutated step = %d, want %d", name, got, beforeStep)
 		}
 	}
 }
@@ -1667,10 +1789,6 @@ func TestCompactEmbeddingTrainerAdvancedTrainingRemainsUnsupported(t *testing.T)
 	trainer := newCompactEmbeddingTrainerForTest(t, 3)
 	beforeStep := trainer.TrainProfile().Step
 	for name, run := range map[string]func() error{
-		"score_spectrum": func() error {
-			_, err := trainer.TrainScoreSpectrumStep(nil)
-			return err
-		},
 		"listwise_geometry": func() error {
 			_, err := trainer.TrainListwiseGeometryStepWithDiagnostics(nil, true)
 			return err
