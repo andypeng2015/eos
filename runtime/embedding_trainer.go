@@ -1361,7 +1361,7 @@ func (t *EmbeddingTrainer) TrainContrastiveStep(batch []EmbeddingContrastiveExam
 		return EmbeddingTrainMetrics{}, fmt.Errorf("embedding trainer is not initialized")
 	}
 	if t.isCompactTrainer() {
-		return EmbeddingTrainMetrics{}, compactTrainingUnsupportedError()
+		return t.runCompactContrastiveBatchUpdate(batch)
 	}
 	if len(batch) < 2 {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("contrastive training batch needs at least 2 examples")
@@ -1460,6 +1460,66 @@ func (t *EmbeddingTrainer) TrainContrastiveStep(batch []EmbeddingContrastiveExam
 	t.applyOptimizerUpdate(t.attnOParam.Name, t.attentionOutput, t.attnOMom1, t.attnOMom2, gradAttnO, batchScale)
 	t.applyOptimizerUpdate(t.hiddenParam.Name, t.hiddenProjection, t.hiddenMom1, t.hiddenMom2, gradHidden, batchScale)
 	t.applyOptimizerUpdate(t.projParam.Name, t.projection, t.projMom1, t.projMom2, gradProj, batchScale)
+	return EmbeddingTrainMetrics{
+		Loss:         totalLoss * lossScale,
+		AverageScore: totalScore / float32(pairCount),
+		BatchSize:    pairCount,
+	}, nil
+}
+
+func (t *EmbeddingTrainer) runCompactContrastiveBatchUpdate(batch []EmbeddingContrastiveExample) (EmbeddingTrainMetrics, error) {
+	if t == nil || t.compactState == nil {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("compact embedding trainer is not initialized")
+	}
+	if len(batch) < 2 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("contrastive training batch needs at least 2 examples")
+	}
+	if len(t.config.MatryoshkaDims) > 0 ||
+		len(t.config.TurboQuantPrefixBits) > 0 ||
+		len(t.config.TurboQuantPrefixObjectives) > 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("compact_transformer_v1 contrastive training supports pair-MSE and InfoNCE only")
+	}
+	forward := t.prepareForwardWeights()
+	if forward == nil || forward.compact == nil {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("missing compact forward weights")
+	}
+	queries, positives, err := t.encodeContrastiveBatch(batch, forward, false)
+	if err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	defer t.releaseEncodedSequences(queries)
+	defer t.releaseEncodedSequences(positives)
+
+	grads := newCompactEmbeddingGradState(t.compactState)
+	queryGrads := make([][]float32, len(queries))
+	positiveGrads := make([][]float32, len(positives))
+	for i := range queries {
+		queryGrads[i] = make([]float32, len(queries[i].pooled))
+		positiveGrads[i] = make([]float32, len(positives[i].pooled))
+	}
+
+	pairCount := len(batch) * len(batch)
+	batchScale := float32(1) / float32(pairCount)
+	lossScale := batchScale
+	var totalLoss, totalScore float32
+	if embeddingUsesInfoNCELoss(t.config.ContrastiveLoss) {
+		totalLoss, totalScore = accumulateInfoNCEContrastiveGrads(queries, positives, t.config.Temperature, queryGrads, positiveGrads)
+		batchScale = float32(1) / float32(len(batch))
+		lossScale = batchScale
+	} else {
+		totalLoss, totalScore = accumulatePairMSEContrastiveGrads(queries, positives, queryGrads, positiveGrads)
+	}
+	for i, query := range queries {
+		if err := t.backpropCompactEncodedSequence(query, queryGrads[i], forward.compact, grads); err != nil {
+			return EmbeddingTrainMetrics{}, fmt.Errorf("query %d: %w", i, err)
+		}
+	}
+	for i, positive := range positives {
+		if err := t.backpropCompactEncodedSequence(positive, positiveGrads[i], forward.compact, grads); err != nil {
+			return EmbeddingTrainMetrics{}, fmt.Errorf("positive %d: %w", i, err)
+		}
+	}
+	t.applyCompactOptimizerUpdates(grads, batchScale)
 	return EmbeddingTrainMetrics{
 		Loss:         totalLoss * lossScale,
 		AverageScore: totalScore / float32(pairCount),

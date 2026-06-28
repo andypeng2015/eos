@@ -1386,14 +1386,137 @@ func TestCompactEmbeddingTrainerTrainStepMovesState(t *testing.T) {
 	}
 }
 
-func TestCompactEmbeddingTrainerNonPairwiseTrainingRemainsUnsupported(t *testing.T) {
+func TestCompactEmbeddingTrainerTrainContrastiveStepMovesState(t *testing.T) {
+	trainer := newCompactEmbeddingTrainerForTest(t, 3)
+	batch := compactContrastiveBatchForTest()
+	beforeStep := trainer.TrainProfile().Step
+	snapshots := snapshotCompactTrainStateTensors(trainer.compactState)
+	metrics, err := trainer.TrainContrastiveStep(batch)
+	if err != nil {
+		t.Fatalf("compact TrainContrastiveStep: %v", err)
+	}
+	if !compactTestFinite(metrics.Loss) || !compactTestFinite(metrics.AverageScore) || metrics.BatchSize != len(batch)*len(batch) {
+		t.Fatalf("compact contrastive metrics = %+v, want finite contrastive metrics", metrics)
+	}
+	if got := trainer.TrainProfile().Step; got != beforeStep+1 {
+		t.Fatalf("compact contrastive step = %d, want %d", got, beforeStep+1)
+	}
+	delta := aggregateParameterDeltaStats(snapshots)
+	if delta.NonzeroCount == 0 || delta.L2Norm == 0 {
+		t.Fatalf("compact TrainContrastiveStep did not move train tensors: %+v", delta)
+	}
+	eval, err := trainer.EvaluateContrastive(batch)
+	if err != nil {
+		t.Fatalf("evaluate compact contrastive after train: %v", err)
+	}
+	if !compactTestFinite(eval.Loss) || !compactTestFinite(eval.PositiveMeanScore) || eval.PairCount != len(batch)*len(batch) {
+		t.Fatalf("compact contrastive eval = %+v, want finite eval metrics", eval)
+	}
+}
+
+func TestCompactEmbeddingTrainerTrainContrastiveStepSupportsInfoNCE(t *testing.T) {
+	trainer := newCompactEmbeddingTrainerForTest(t, 3)
+	trainer.config.ContrastiveLoss = "infonce"
+	trainer.config.Temperature = 0.05
+	batch := compactContrastiveBatchForTest()
+	beforeStep := trainer.TrainProfile().Step
+	snapshots := snapshotCompactTrainStateTensors(trainer.compactState)
+	metrics, err := trainer.TrainContrastiveStep(batch)
+	if err != nil {
+		t.Fatalf("compact TrainContrastiveStep InfoNCE: %v", err)
+	}
+	if !compactTestFinite(metrics.Loss) || !compactTestFinite(metrics.AverageScore) || metrics.BatchSize != len(batch)*len(batch) {
+		t.Fatalf("compact InfoNCE metrics = %+v, want finite contrastive metrics", metrics)
+	}
+	if got := trainer.TrainProfile().Step; got != beforeStep+1 {
+		t.Fatalf("compact InfoNCE step = %d, want %d", got, beforeStep+1)
+	}
+	delta := aggregateParameterDeltaStats(snapshots)
+	if delta.NonzeroCount == 0 || delta.L2Norm == 0 {
+		t.Fatalf("compact InfoNCE TrainContrastiveStep did not move train tensors: %+v", delta)
+	}
+}
+
+func TestCompactEmbeddingTrainerContrastiveCheckpointRestoreParity(t *testing.T) {
+	checkpoint := compactTrainStateTestCheckpoint(3)
+	checkpoint.Step = 11
+	mod := compactTrainStateTestModule(checkpoint)
+	state, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
+	if err != nil {
+		t.Fatalf("load compact state: %v", err)
+	}
+	trainer, err := newCompactEmbeddingTrainerFromTrainState(mod, state)
+	if err != nil {
+		t.Fatalf("new compact trainer: %v", err)
+	}
+	batch := compactContrastiveBatchForTest()
+	if _, err := trainer.TrainContrastiveStep(batch); err != nil {
+		t.Fatalf("train compact contrastive before checkpoint: %v", err)
+	}
+	before, err := trainer.EvaluateContrastive(batch)
+	if err != nil {
+		t.Fatalf("evaluate compact contrastive before checkpoint: %v", err)
+	}
+	saved, err := trainer.Checkpoint()
+	if err != nil {
+		t.Fatalf("checkpoint compact contrastive trainer: %v", err)
+	}
+	if saved.Step != checkpoint.Step+1 {
+		t.Fatalf("checkpoint step = %d, want %d", saved.Step, checkpoint.Step+1)
+	}
+	restored, err := NewEmbeddingTrainerFromCheckpoint(mod, saved)
+	if err != nil {
+		t.Fatalf("restore compact contrastive trainer: %v", err)
+	}
+	after, err := restored.EvaluateContrastive(batch)
+	if err != nil {
+		t.Fatalf("evaluate restored compact contrastive: %v", err)
+	}
+	assertClose(t, before.Loss, after.Loss, 0.000001)
+	assertClose(t, before.PositiveMeanScore, after.PositiveMeanScore, 0.000001)
+	assertClose(t, before.ScoreMargin, after.ScoreMargin, 0.000001)
+	if got := restored.TrainProfile().Step; got != checkpoint.Step+1 {
+		t.Fatalf("restored compact step = %d, want %d", got, checkpoint.Step+1)
+	}
+}
+
+func TestCompactEmbeddingTrainerContrastivePrefixObjectivesRemainUnsupported(t *testing.T) {
+	for name, configure := range map[string]func(*EmbeddingTrainer){
+		"matryoshka": func(trainer *EmbeddingTrainer) {
+			trainer.config.MatryoshkaDims = []int{2}
+			trainer.config.MatryoshkaWeights = []float32{0.5}
+		},
+		"turboquant_prefix_bits": func(trainer *EmbeddingTrainer) {
+			trainer.config.TurboQuantPrefixBits = []int{2}
+		},
+		"turboquant_prefix_objectives": func(trainer *EmbeddingTrainer) {
+			trainer.config.TurboQuantPrefixObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 2, Weight: 0.25}}
+		},
+	} {
+		trainer := newCompactEmbeddingTrainerForTest(t, 3)
+		configure(trainer)
+		beforeStep := trainer.TrainProfile().Step
+		_, err := trainer.TrainContrastiveStep(compactContrastiveBatchForTest())
+		if err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 contrastive training supports pair-MSE and InfoNCE only") {
+			t.Fatalf("%s compact contrastive error = %v, want explicit unsupported", name, err)
+		}
+		if got := trainer.TrainProfile().Step; got != beforeStep {
+			t.Fatalf("%s compact unsupported contrastive mutated step = %d, want %d", name, got, beforeStep)
+		}
+	}
+}
+
+func compactContrastiveBatchForTest() []EmbeddingContrastiveExample {
+	return []EmbeddingContrastiveExample{
+		{QueryTokens: []int32{1, 2, 3}, PositiveTokens: []int32{1, 2, 3}, QueryMask: []int32{1, 1, 1}, PositiveMask: []int32{1, 1, 1}},
+		{QueryTokens: []int32{3, 2, 1}, PositiveTokens: []int32{3, 1, 2}, QueryMask: []int32{1, 1, 1}, PositiveMask: []int32{1, 1, 1}},
+	}
+}
+
+func TestCompactEmbeddingTrainerAdvancedTrainingRemainsUnsupported(t *testing.T) {
 	trainer := newCompactEmbeddingTrainerForTest(t, 3)
 	beforeStep := trainer.TrainProfile().Step
 	for name, run := range map[string]func() error{
-		"contrastive": func() error {
-			_, err := trainer.TrainContrastiveStep(nil)
-			return err
-		},
 		"hard_negative": func() error {
 			_, err := trainer.TrainHardNegativeContrastiveStep(nil)
 			return err
