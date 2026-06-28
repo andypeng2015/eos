@@ -208,8 +208,21 @@ func TestInitDefaultEmbeddingPackageCreatesCompactBootstrapPackage(t *testing.T)
 	if summary.StepsRun != 0 || trainer.TrainProfile().Step != beforeStep {
 		t.Fatalf("compact eval-only steps run=%d trainer step=%d want unchanged %d", summary.StepsRun, trainer.TrainProfile().Step, beforeStep)
 	}
-	if _, err := trainer.TrainStep(evalSet); err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 training updates are not supported yet") {
-		t.Fatalf("compact TrainStep error = %v, want explicit unsupported", err)
+	trainMetrics, err := trainer.TrainStep(evalSet)
+	if err != nil {
+		t.Fatalf("compact TrainStep: %v", err)
+	}
+	if math.IsNaN(float64(trainMetrics.Loss)) || math.IsInf(float64(trainMetrics.Loss), 0) ||
+		math.IsNaN(float64(trainMetrics.AverageScore)) || math.IsInf(float64(trainMetrics.AverageScore), 0) ||
+		trainMetrics.BatchSize != len(evalSet) {
+		t.Fatalf("compact train metrics = %+v, want finite pair metrics", trainMetrics)
+	}
+	if got := trainer.TrainProfile().Step; got != beforeStep+1 {
+		t.Fatalf("compact train step = %d, want %d", got, beforeStep+1)
+	}
+	metrics, err = trainer.EvaluatePairs(evalSet)
+	if err != nil {
+		t.Fatalf("evaluate compact trainer package after train: %v", err)
 	}
 	outPath := filepath.Join(t.TempDir(), "compact-roundtrip.mll")
 	outPaths, err := trainer.WriteTrainingPackage(outPath)
@@ -231,6 +244,9 @@ func TestInitDefaultEmbeddingPackageCreatesCompactBootstrapPackage(t *testing.T)
 	}
 	if reloadedCheckpoint.TokenEmbedding != nil || reloadedCheckpoint.Projection != nil {
 		t.Fatalf("round-trip compact checkpoint populated legacy fields: token=%v projection=%v", reloadedCheckpoint.TokenEmbedding, reloadedCheckpoint.Projection)
+	}
+	if reloadedCheckpoint.Step != beforeStep+1 {
+		t.Fatalf("round-trip compact checkpoint step = %d, want %d", reloadedCheckpoint.Step, beforeStep+1)
 	}
 	for _, name := range []string{"token_embedding", "role_embedding", "layer0_attn_q", "layer2_ffn_down", "output_projection"} {
 		if reloadedCheckpoint.Tensors[name] == nil {
@@ -260,8 +276,12 @@ func TestInitDefaultEmbeddingPackageCreatesCompactBootstrapPackage(t *testing.T)
 		reloadedMetrics.PairCount != metrics.PairCount {
 		t.Fatalf("round-trip compact metrics = %+v, want %+v", reloadedMetrics, metrics)
 	}
-	if _, err := reloadedTrainer.TrainStep(evalSet); err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 training updates are not supported yet") {
-		t.Fatalf("round-trip compact TrainStep error = %v, want explicit unsupported", err)
+	reloadedStep := reloadedTrainer.TrainProfile().Step
+	if _, err := reloadedTrainer.TrainStep(evalSet); err != nil {
+		t.Fatalf("round-trip compact TrainStep: %v", err)
+	}
+	if got := reloadedTrainer.TrainProfile().Step; got != reloadedStep+1 {
+		t.Fatalf("round-trip compact train step = %d, want %d", got, reloadedStep+1)
 	}
 }
 

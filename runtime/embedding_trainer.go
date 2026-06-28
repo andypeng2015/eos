@@ -344,6 +344,22 @@ type compactEmbeddingForwardWeights struct {
 	outputProjection *backend.Tensor
 }
 
+type compactEmbeddingGradLayer struct {
+	attnQ   []float32
+	attnK   []float32
+	attnV   []float32
+	attnO   []float32
+	ffnUp   []float32
+	ffnDown []float32
+}
+
+type compactEmbeddingGradState struct {
+	token            []float32
+	role             []float32
+	layers           []compactEmbeddingGradLayer
+	outputProjection []float32
+}
+
 type embeddingTrainerParams struct {
 	token         eosartifact.Param
 	role          eosartifact.Param
@@ -489,12 +505,7 @@ func newCompactEmbeddingTrainerFromTrainState(mod *eosartifact.Module, state *Co
 		return nil, fmt.Errorf("compact trainer requires architecture_version=%q", EmbeddingArchitectureCompactTransformerV1)
 	}
 	cfg := state.Config
-	if cfg.Optimizer == "" {
-		cfg.Optimizer = "adamw"
-	}
-	if cfg.Temperature == 0 {
-		cfg.Temperature = 0.05
-	}
+	cfg = normalizedTrainConfig(cfg)
 	return &EmbeddingTrainer{
 		module:           mod,
 		manifest:         manifest,
@@ -2438,12 +2449,12 @@ func (t *EmbeddingTrainer) runBatch(batch []EmbeddingPairExample, update bool) (
 	if len(batch) == 0 {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("training batch is empty")
 	}
-	if t.isCompactTrainer() && update {
-		return EmbeddingTrainMetrics{}, compactTrainingUnsupportedError()
-	}
 	forward := t.prepareForwardWeights()
 	t.primeForwardWeightResidency(forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj)
 	if t.isCompactTrainer() {
+		if update {
+			return t.runCompactPairBatchUpdate(batch, forward)
+		}
 		totalLoss := float32(0)
 		totalScore := float32(0)
 		for i, example := range batch {
@@ -2515,6 +2526,351 @@ func (t *EmbeddingTrainer) runBatch(batch []EmbeddingPairExample, update bool) (
 		AverageScore: totalScore * batchScale,
 		BatchSize:    len(batch),
 	}, nil
+}
+
+func (t *EmbeddingTrainer) runCompactPairBatchUpdate(batch []EmbeddingPairExample, forward *embeddingForwardWeights) (EmbeddingTrainMetrics, error) {
+	if t == nil || t.compactState == nil {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("compact embedding trainer is not initialized")
+	}
+	if forward == nil || forward.compact == nil {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("missing compact forward weights")
+	}
+	grads := newCompactEmbeddingGradState(t.compactState)
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	for i, example := range batch {
+		left, right, err := t.encodeExamplePair(example, nil, nil, nil, nil, nil, nil, nil, nil, false)
+		if err != nil {
+			return EmbeddingTrainMetrics{}, fmt.Errorf("batch %d: %w", i, err)
+		}
+		score, gradLeft, gradRight := cosineGrad(left.pooled, right.pooled)
+		scale := score - example.Target
+		totalLoss += 0.5 * scale * scale
+		totalScore += score
+		for j := range gradLeft {
+			gradLeft[j] *= scale
+			gradRight[j] *= scale
+		}
+		if err := t.backpropCompactEncodedSequence(left, gradLeft, forward.compact, grads); err != nil {
+			return EmbeddingTrainMetrics{}, fmt.Errorf("batch %d left: %w", i, err)
+		}
+		if err := t.backpropCompactEncodedSequence(right, gradRight, forward.compact, grads); err != nil {
+			return EmbeddingTrainMetrics{}, fmt.Errorf("batch %d right: %w", i, err)
+		}
+	}
+
+	batchScale := float32(1) / float32(len(batch))
+	t.applyCompactOptimizerUpdates(grads, batchScale)
+	return EmbeddingTrainMetrics{
+		Loss:         totalLoss * batchScale,
+		AverageScore: totalScore * batchScale,
+		BatchSize:    len(batch),
+	}, nil
+}
+
+func newCompactEmbeddingGradState(state *CompactEmbeddingTrainState) *compactEmbeddingGradState {
+	if state == nil {
+		return &compactEmbeddingGradState{}
+	}
+	grads := &compactEmbeddingGradState{
+		token:  make([]float32, tensorDataLen(state.TokenEmbedding.Tensor)),
+		layers: make([]compactEmbeddingGradLayer, len(state.Layers)),
+	}
+	if state.RoleEmbedding != nil {
+		grads.role = make([]float32, tensorDataLen(state.RoleEmbedding.Tensor))
+	}
+	for i, layer := range state.Layers {
+		grads.layers[i] = compactEmbeddingGradLayer{
+			attnQ:   make([]float32, tensorDataLen(layer.AttentionQuery.Tensor)),
+			attnK:   make([]float32, tensorDataLen(layer.AttentionKey.Tensor)),
+			attnV:   make([]float32, tensorDataLen(layer.AttentionValue.Tensor)),
+			attnO:   make([]float32, tensorDataLen(layer.AttentionOutput.Tensor)),
+			ffnUp:   make([]float32, tensorDataLen(layer.FFNUp.Tensor)),
+			ffnDown: make([]float32, tensorDataLen(layer.FFNDown.Tensor)),
+		}
+	}
+	if state.OutputProjection != nil {
+		grads.outputProjection = make([]float32, tensorDataLen(state.OutputProjection.Tensor))
+	}
+	return grads
+}
+
+func (t *EmbeddingTrainer) backpropCompactEncodedSequence(seq *embeddingEncodedSequence, gradPooled []float32, forward *compactEmbeddingForwardWeights, grads *compactEmbeddingGradState) error {
+	if seq == nil || len(seq.layers) == 0 {
+		return fmt.Errorf("compact encoded sequence has no layers")
+	}
+	if forward == nil || len(forward.layers) != len(seq.layers) {
+		return fmt.Errorf("compact forward layer count %d does not match encoded layer count %d", compactForwardLayerCount(forward), len(seq.layers))
+	}
+	gradHidden, err := backpropCompactFinalOutput(seq, gradPooled, forward.outputProjection, grads.outputProjection)
+	if err != nil {
+		return err
+	}
+	for layerIndex := len(seq.layers) - 1; layerIndex >= 0; layerIndex-- {
+		gradHidden = backpropCompactLayer(seq.layers[layerIndex], gradHidden, forward.layers[layerIndex], &grads.layers[layerIndex])
+	}
+	t.accumulateCompactInputGrads(seq.tokens, seq.role, gradHidden, grads)
+	return nil
+}
+
+func compactForwardLayerCount(forward *compactEmbeddingForwardWeights) int {
+	if forward == nil {
+		return 0
+	}
+	return len(forward.layers)
+}
+
+func backpropCompactFinalOutput(seq *embeddingEncodedSequence, gradPooled []float32, outputProjection *backend.Tensor, gradOutputProjection []float32) ([]float32, error) {
+	last := seq.finalLayer()
+	if last == nil || len(last.tokens) == 0 {
+		return nil, fmt.Errorf("compact final output requires a non-empty final layer")
+	}
+	seqLen := len(last.tokens)
+	if len(last.projected)%seqLen != 0 {
+		return nil, fmt.Errorf("compact final hidden size %d does not divide sequence length %d", len(last.projected), seqLen)
+	}
+	modelDim := len(last.projected) / seqLen
+	outDim := modelDim
+	if outputProjection != nil {
+		if len(outputProjection.Shape) != 2 || outputProjection.Shape[0] != modelDim {
+			return nil, fmt.Errorf("output_projection shape %v, want [%d O]", outputProjection.Shape, modelDim)
+		}
+		outDim = outputProjection.Shape[1]
+	}
+	if len(gradPooled) != outDim {
+		return nil, fmt.Errorf("compact pooled gradient width %d does not match output width %d", len(gradPooled), outDim)
+	}
+	if last.activeCount <= 0 {
+		return nil, fmt.Errorf("compact final output has zero active rows")
+	}
+
+	normalized := make([]float32, len(last.projected))
+	norms := make([]float32, seqLen)
+	for row := 0; row < seqLen; row++ {
+		base := row * modelDim
+		norm := vectorNorm(last.projected[base : base+modelDim])
+		norms[row] = norm
+		if norm == 0 {
+			continue
+		}
+		for col := 0; col < modelDim; col++ {
+			normalized[base+col] = last.projected[base+col] / norm
+		}
+	}
+
+	gradOutputRows := make([]float32, seqLen*outDim)
+	invActive := 1 / float32(last.activeCount)
+	for row := 0; row < seqLen; row++ {
+		if last.mask[row] == 0 {
+			continue
+		}
+		base := row * outDim
+		for col := 0; col < outDim; col++ {
+			gradOutputRows[base+col] = gradPooled[col] * invActive
+		}
+	}
+
+	gradNormalized := gradOutputRows
+	if outputProjection != nil {
+		gradProjStep := make([]float32, modelDim*outDim)
+		fillHostMatMulTranspose(normalized, seqLen, modelDim, gradOutputRows, seqLen, outDim, true, false, gradProjStep)
+		addFloat32Slice(gradOutputProjection, gradProjStep)
+		gradNormalized = make([]float32, seqLen*modelDim)
+		fillHostMatMulTranspose(gradOutputRows, seqLen, outDim, outputProjection.F32, modelDim, outDim, false, true, gradNormalized)
+	}
+
+	gradHidden := make([]float32, seqLen*modelDim)
+	for row := 0; row < seqLen; row++ {
+		norm := norms[row]
+		if norm == 0 {
+			continue
+		}
+		base := row * modelDim
+		dotNG := float32(0)
+		for col := 0; col < modelDim; col++ {
+			dotNG += normalized[base+col] * gradNormalized[base+col]
+		}
+		for col := 0; col < modelDim; col++ {
+			gradHidden[base+col] = (gradNormalized[base+col] - normalized[base+col]*dotNG) / norm
+		}
+	}
+	return gradHidden, nil
+}
+
+func backpropCompactLayer(state *embeddingSequenceState, gradProjected []float32, layer compactEmbeddingForwardLayer, gradLayer *compactEmbeddingGradLayer) []float32 {
+	if state == nil || len(state.tokens) == 0 {
+		return nil
+	}
+	seqLen := len(state.tokens)
+	d := compactLayerModelDim(layer)
+	h := compactLayerFFNDim(layer)
+	if d <= 0 || h <= 0 || len(gradProjected) != seqLen*d {
+		return make([]float32, len(state.input))
+	}
+
+	gradFFNResidual := make([]float32, seqLen*d)
+	for row := 0; row < seqLen; row++ {
+		base := row * d
+		backwardLayerNormRow(
+			gradFFNResidual[base:base+d],
+			gradProjected[base:base+d],
+			state.projected[base:base+d],
+			state.ffnResidual[base:base+d],
+		)
+	}
+	gradFFNOutput := gradFFNResidual
+	gradHidden := append([]float32(nil), gradFFNResidual...)
+
+	gradFFNDownStep := make([]float32, h*d)
+	fillHostMatMulTranspose(state.activated, seqLen, h, gradFFNOutput, seqLen, d, true, false, gradFFNDownStep)
+	addFloat32Slice(gradLayer.ffnDown, gradFFNDownStep)
+	gradActivatedPre := make([]float32, seqLen*h)
+	fillHostMatMulTranspose(gradFFNOutput, seqLen, d, forwardMatMulHostData(layer.ffnDown), h, d, false, true, gradActivatedPre)
+	gradActivated := make([]float32, seqLen*h)
+	for row := 0; row < seqLen; row++ {
+		base := row * h
+		fillGELUBackwardMul(gradActivated[base:base+h], gradActivatedPre[base:base+h], state.ffnHidden[base:base+h], fastGELUEnabled())
+	}
+	gradFFNUpStep := make([]float32, d*h)
+	fillHostMatMulTranspose(state.hidden, seqLen, d, gradActivated, seqLen, h, true, false, gradFFNUpStep)
+	addFloat32Slice(gradLayer.ffnUp, gradFFNUpStep)
+	gradHiddenFromFFN := make([]float32, seqLen*d)
+	fillHostMatMulTranspose(gradActivated, seqLen, h, forwardMatMulHostData(layer.ffnUp), d, h, false, true, gradHiddenFromFFN)
+	addFloat32Slice(gradHidden, gradHiddenFromFFN)
+
+	gradAttnResidual := make([]float32, seqLen*d)
+	for row := 0; row < seqLen; row++ {
+		base := row * d
+		backwardLayerNormRow(
+			gradAttnResidual[base:base+d],
+			gradHidden[base:base+d],
+			state.hidden[base:base+d],
+			state.attnResidual[base:base+d],
+		)
+	}
+	gradAttnOutput := gradAttnResidual
+	gradInput := append([]float32(nil), gradAttnResidual...)
+
+	gradAttnOStep := make([]float32, d*d)
+	fillHostMatMulTranspose(state.attnMixed, seqLen, d, gradAttnOutput, seqLen, d, true, false, gradAttnOStep)
+	addFloat32Slice(gradLayer.attnO, gradAttnOStep)
+	gradMixed := make([]float32, seqLen*d)
+	fillHostMatMulTranspose(gradAttnOutput, seqLen, d, forwardMatMulHostData(layer.attnO), d, d, false, true, gradMixed)
+
+	gradScores := make([]float32, seqLen*seqLen)
+	fillHostMatMulTranspose(gradMixed, seqLen, d, state.attnV, seqLen, d, false, true, gradScores)
+	gradPreSoftmax := make([]float32, seqLen*seqLen)
+	for row := 0; row < seqLen; row++ {
+		base := row * seqLen
+		backwardSoftmaxRow(gradPreSoftmax[base:base+seqLen], gradScores[base:base+seqLen], state.attnScores[base:base+seqLen])
+	}
+	scaleFloat32Slice(gradPreSoftmax, 1/float32(math.Sqrt(float64(d))))
+
+	gradV := make([]float32, seqLen*d)
+	fillHostMatMulTranspose(state.attnScores, seqLen, seqLen, gradMixed, seqLen, d, true, false, gradV)
+	gradQ := make([]float32, seqLen*d)
+	fillHostMatMulTranspose(gradPreSoftmax, seqLen, seqLen, state.attnK, seqLen, d, false, false, gradQ)
+	gradK := make([]float32, seqLen*d)
+	fillHostMatMulTranspose(gradPreSoftmax, seqLen, seqLen, state.attnQ, seqLen, d, true, false, gradK)
+
+	gradAttnQStep := make([]float32, d*d)
+	fillHostMatMulTranspose(state.input, seqLen, d, gradQ, seqLen, d, true, false, gradAttnQStep)
+	addFloat32Slice(gradLayer.attnQ, gradAttnQStep)
+	gradAttnKStep := make([]float32, d*d)
+	fillHostMatMulTranspose(state.input, seqLen, d, gradK, seqLen, d, true, false, gradAttnKStep)
+	addFloat32Slice(gradLayer.attnK, gradAttnKStep)
+	gradAttnVStep := make([]float32, d*d)
+	fillHostMatMulTranspose(state.input, seqLen, d, gradV, seqLen, d, true, false, gradAttnVStep)
+	addFloat32Slice(gradLayer.attnV, gradAttnVStep)
+
+	gradInputStep := make([]float32, seqLen*d)
+	fillHostMatMulTranspose(gradQ, seqLen, d, forwardMatMulHostData(layer.attnQ), d, d, false, true, gradInputStep)
+	addFloat32Slice(gradInput, gradInputStep)
+	for i := range gradInputStep {
+		gradInputStep[i] = 0
+	}
+	fillHostMatMulTranspose(gradK, seqLen, d, forwardMatMulHostData(layer.attnK), d, d, false, true, gradInputStep)
+	addFloat32Slice(gradInput, gradInputStep)
+	for i := range gradInputStep {
+		gradInputStep[i] = 0
+	}
+	fillHostMatMulTranspose(gradV, seqLen, d, forwardMatMulHostData(layer.attnV), d, d, false, true, gradInputStep)
+	addFloat32Slice(gradInput, gradInputStep)
+	return gradInput
+}
+
+func (t *EmbeddingTrainer) accumulateCompactInputGrads(tokens []int32, role int32, gradInput []float32, grads *compactEmbeddingGradState) {
+	if t == nil || t.compactState == nil || grads == nil || t.compactState.TokenEmbedding.Tensor == nil || len(t.compactState.TokenEmbedding.Tensor.Shape) != 2 {
+		return
+	}
+	d := t.compactState.TokenEmbedding.Tensor.Shape[1]
+	vocab := t.compactState.TokenEmbedding.Tensor.Shape[0]
+	if d == 0 || vocab == 0 || len(gradInput) != len(tokens)*d {
+		return
+	}
+	if t.manifest.PositionEncoding == EmbeddingPositionEncodingRoPE {
+		gradInput = append([]float32(nil), gradInput...)
+		applyRoPETransposeToRowsInPlace(gradInput, len(tokens), d)
+	}
+	accumulateTokenGrad(tokens, gradInput, grads.token, d, vocab)
+	if t.compactState.RoleEmbedding == nil || t.compactState.RoleEmbedding.Tensor == nil || len(grads.role) == 0 || len(t.compactState.RoleEmbedding.Tensor.Shape) != 2 {
+		return
+	}
+	rows := t.compactState.RoleEmbedding.Tensor.Shape[0]
+	if role < 0 || int(role) >= rows {
+		return
+	}
+	roleBase := int(role) * d
+	if roleBase+d > len(grads.role) {
+		return
+	}
+	for row := range tokens {
+		inputBase := row * d
+		for col := 0; col < d; col++ {
+			grads.role[roleBase+col] += gradInput[inputBase+col]
+		}
+	}
+}
+
+func (t *EmbeddingTrainer) applyCompactOptimizerUpdates(grads *compactEmbeddingGradState, scale float32) {
+	if t == nil || t.compactState == nil || grads == nil {
+		return
+	}
+	t.step++
+	t.compactState.Step = t.step
+	apply := func(item *CompactEmbeddingTrainTensor, grad []float32) {
+		if item == nil || item.Tensor == nil {
+			return
+		}
+		if len(grad) != len(item.Tensor.F32) {
+			return
+		}
+		if item.Moment1 == nil {
+			item.Moment1 = zeroLikeMaster(item.Tensor)
+		}
+		if item.Moment2 == nil {
+			item.Moment2 = zeroLikeMaster(item.Tensor)
+		}
+		t.applyOptimizerUpdate(item.Name, item.Tensor, item.Moment1, item.Moment2, grad, scale)
+	}
+	apply(&t.compactState.TokenEmbedding, grads.token)
+	if t.compactState.RoleEmbedding != nil {
+		apply(t.compactState.RoleEmbedding, grads.role)
+	}
+	for i := range t.compactState.Layers {
+		layer := &t.compactState.Layers[i]
+		gradLayer := grads.layers[i]
+		apply(&layer.AttentionQuery, gradLayer.attnQ)
+		apply(&layer.AttentionKey, gradLayer.attnK)
+		apply(&layer.AttentionValue, gradLayer.attnV)
+		apply(&layer.AttentionOutput, gradLayer.attnO)
+		apply(&layer.FFNUp, gradLayer.ffnUp)
+		apply(&layer.FFNDown, gradLayer.ffnDown)
+	}
+	if t.compactState.OutputProjection != nil {
+		apply(t.compactState.OutputProjection, grads.outputProjection)
+	}
+	t.compactState.Config = t.config
 }
 
 func (t *EmbeddingTrainer) tryRunPairBatchBatched(batch []EmbeddingPairExample, forward *embeddingForwardWeights, update bool) (EmbeddingTrainMetrics, bool, error) {

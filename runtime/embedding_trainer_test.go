@@ -1334,7 +1334,7 @@ func compactTrainStateTestModule(checkpoint EmbeddingTrainCheckpoint) *eosartifa
 	return &eosartifact.Module{Name: checkpoint.Manifest.Name, Params: params}
 }
 
-func TestCompactEmbeddingTrainerEvaluatePairsAndRejectsTraining(t *testing.T) {
+func TestCompactEmbeddingTrainerTrainStepMovesState(t *testing.T) {
 	checkpoint := compactTrainStateTestCheckpoint(3)
 	state, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
 	if err != nil {
@@ -1359,11 +1359,61 @@ func TestCompactEmbeddingTrainerEvaluatePairsAndRejectsTraining(t *testing.T) {
 	if got := trainer.TrainProfile().Step; got != beforeStep {
 		t.Fatalf("compact eval step = %d, want unchanged %d", got, beforeStep)
 	}
-	if _, err := trainer.TrainStep(batch); err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 training updates are not supported yet") {
-		t.Fatalf("compact TrainStep error = %v, want explicit unsupported", err)
+	snapshots := snapshotCompactTrainStateTensors(trainer.compactState)
+	trainMetrics, err := trainer.TrainStep(batch)
+	if err != nil {
+		t.Fatalf("compact TrainStep: %v", err)
 	}
-	if got := trainer.TrainProfile().Step; got != beforeStep {
-		t.Fatalf("compact failed train step mutated step = %d, want %d", got, beforeStep)
+	if !compactTestFinite(trainMetrics.Loss) || !compactTestFinite(trainMetrics.AverageScore) || trainMetrics.BatchSize != len(batch) {
+		t.Fatalf("compact train metrics = %+v, want finite pair metrics", trainMetrics)
+	}
+	if got := trainer.TrainProfile().Step; got != beforeStep+1 {
+		t.Fatalf("compact train step = %d, want %d", got, beforeStep+1)
+	}
+	delta := aggregateParameterDeltaStats(snapshots)
+	if delta.NonzeroCount == 0 || delta.L2Norm == 0 {
+		t.Fatalf("compact TrainStep did not move train tensors: %+v", delta)
+	}
+	after, err := trainer.EvaluatePairs(batch)
+	if err != nil {
+		t.Fatalf("evaluate compact pairs after train: %v", err)
+	}
+	if !compactTestFinite(after.Loss) || !compactTestFinite(after.AverageScore) {
+		t.Fatalf("compact post-train eval metrics = %+v, want finite metrics", after)
+	}
+	if got := trainer.TrainProfile().Step; got != beforeStep+1 {
+		t.Fatalf("compact eval after train step = %d, want %d", got, beforeStep+1)
+	}
+}
+
+func TestCompactEmbeddingTrainerNonPairwiseTrainingRemainsUnsupported(t *testing.T) {
+	trainer := newCompactEmbeddingTrainerForTest(t, 3)
+	beforeStep := trainer.TrainProfile().Step
+	for name, run := range map[string]func() error{
+		"contrastive": func() error {
+			_, err := trainer.TrainContrastiveStep(nil)
+			return err
+		},
+		"hard_negative": func() error {
+			_, err := trainer.TrainHardNegativeContrastiveStep(nil)
+			return err
+		},
+		"score_spectrum": func() error {
+			_, err := trainer.TrainScoreSpectrumStep(nil)
+			return err
+		},
+		"listwise_geometry": func() error {
+			_, err := trainer.TrainListwiseGeometryStepWithDiagnostics(nil, true)
+			return err
+		},
+	} {
+		err := run()
+		if err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 training updates are not supported yet") {
+			t.Fatalf("%s compact training error = %v, want explicit unsupported", name, err)
+		}
+		if got := trainer.TrainProfile().Step; got != beforeStep {
+			t.Fatalf("%s compact unsupported training mutated step = %d, want %d", name, got, beforeStep)
+		}
 	}
 }
 
@@ -1384,6 +1434,14 @@ func TestCompactEmbeddingTrainerCheckpointRestoreAndExportRoundTrip(t *testing.T
 		{LeftTokens: []int32{1, 2, 3}, RightTokens: []int32{1, 2, 3}, Target: 1},
 		{LeftTokens: []int32{1, 2, 3}, RightTokens: []int32{3, 2, 1}, Target: -1},
 	}
+	snapshots := snapshotCompactTrainStateTensors(trainer.compactState)
+	if _, err := trainer.TrainStep(batch); err != nil {
+		t.Fatalf("train compact before checkpoint: %v", err)
+	}
+	delta := aggregateParameterDeltaStats(snapshots)
+	if delta.NonzeroCount == 0 || delta.L2Norm == 0 {
+		t.Fatalf("compact TrainStep before checkpoint did not move tensors: %+v", delta)
+	}
 	before, err := trainer.EvaluatePairs(batch)
 	if err != nil {
 		t.Fatalf("evaluate compact before checkpoint: %v", err)
@@ -1395,8 +1453,8 @@ func TestCompactEmbeddingTrainerCheckpointRestoreAndExportRoundTrip(t *testing.T
 	if saved.TokenEmbedding != nil || saved.Projection != nil {
 		t.Fatalf("compact checkpoint populated legacy fields: token=%v projection=%v", saved.TokenEmbedding, saved.Projection)
 	}
-	if saved.Step != checkpoint.Step {
-		t.Fatalf("checkpoint step = %d, want %d", saved.Step, checkpoint.Step)
+	if saved.Step != checkpoint.Step+1 {
+		t.Fatalf("checkpoint step = %d, want %d", saved.Step, checkpoint.Step+1)
 	}
 	if saved.Config.LearningRate != checkpoint.Config.LearningRate || saved.Config.Temperature != checkpoint.Config.Temperature {
 		t.Fatalf("checkpoint config = %+v, want %+v", saved.Config, checkpoint.Config)
@@ -1407,7 +1465,9 @@ func TestCompactEmbeddingTrainerCheckpointRestoreAndExportRoundTrip(t *testing.T
 		t.Fatalf("checkpoint compact manifest not preserved: %+v", saved.Manifest)
 	}
 	for _, name := range []string{"token_embedding", "role_embedding", "layer0_attn_q", "layer1_ffn_down", "output_projection"} {
-		assertTensorClose(t, saved.Tensors[name], checkpoint.Tensors[name].Shape, checkpoint.Tensors[name].F32)
+		if saved.Tensors[name] == nil || !tensorShapeEquals(saved.Tensors[name], checkpoint.Tensors[name].Shape) {
+			t.Fatalf("checkpoint tensor %q shape = %v, want %v", name, tensorShapeForError(saved.Tensors[name]), checkpoint.Tensors[name].Shape)
+		}
 		if saved.MomentTensors[name+"_moment_1"] == nil || saved.MomentTensors[name+"_moment_2"] == nil {
 			t.Fatalf("checkpoint missing compact moments for %q: %+v", name, saved.MomentTensors)
 		}
@@ -1431,11 +1491,8 @@ func TestCompactEmbeddingTrainerCheckpointRestoreAndExportRoundTrip(t *testing.T
 	}
 	assertClose(t, before.Loss, after.Loss, 0.000001)
 	assertClose(t, before.AverageScore, after.AverageScore, 0.000001)
-	if got := restored.TrainProfile().Step; got != checkpoint.Step {
-		t.Fatalf("restored compact step = %d, want %d", got, checkpoint.Step)
-	}
-	if _, err := restored.TrainStep(batch); err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 training updates are not supported yet") {
-		t.Fatalf("restored compact TrainStep error = %v, want explicit unsupported", err)
+	if got := restored.TrainProfile().Step; got != checkpoint.Step+1 {
+		t.Fatalf("restored compact step = %d, want %d", got, checkpoint.Step+1)
 	}
 
 	exportA, err := trainer.ExportInferenceWeights()
@@ -1525,8 +1582,21 @@ func TestCompactEmbeddingTrainerFitEvalOnlyDoesNotTrain(t *testing.T) {
 	if summary.FinalEval == nil || !compactTestFinite(summary.FinalEval.Loss) {
 		t.Fatalf("compact eval-only final eval = %+v, want finite metrics", summary.FinalEval)
 	}
-	if _, err := trainer.Fit(evalSet, nil, EmbeddingTrainRunConfig{Epochs: 1, BatchSize: 1}); err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 training updates are not supported yet") {
-		t.Fatalf("compact non-eval Fit error = %v, want explicit unsupported", err)
+	beforeTrainStep := trainer.TrainProfile().Step
+	snapshots := snapshotCompactTrainStateTensors(trainer.compactState)
+	trainSummary, err := trainer.Fit(evalSet, nil, EmbeddingTrainRunConfig{Epochs: 1, BatchSize: len(evalSet), Shuffle: false})
+	if err != nil {
+		t.Fatalf("compact pairwise Fit: %v", err)
+	}
+	if trainSummary.StepsRun != 1 || trainer.TrainProfile().Step != beforeTrainStep+1 {
+		t.Fatalf("compact Fit steps summary=%d trainer=%d want one update from %d", trainSummary.StepsRun, trainer.TrainProfile().Step, beforeTrainStep)
+	}
+	if !compactTestFinite(trainSummary.FinalTrain.Loss) {
+		t.Fatalf("compact Fit final train = %+v, want finite metrics", trainSummary.FinalTrain)
+	}
+	delta := aggregateParameterDeltaStats(snapshots)
+	if delta.NonzeroCount == 0 || delta.L2Norm == 0 {
+		t.Fatalf("compact Fit did not move train tensors: %+v", delta)
 	}
 }
 
@@ -1598,6 +1668,32 @@ func TestCompactEmbeddingTrainerMaskAndTokenOrderSensitivity(t *testing.T) {
 
 func compactTestFinite(v float32) bool {
 	return !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0)
+}
+
+func snapshotCompactTrainStateTensors(state *CompactEmbeddingTrainState) []embeddingTrainTensorSnapshot {
+	if state == nil {
+		return nil
+	}
+	tensors := []*backend.Tensor{state.TokenEmbedding.Tensor}
+	if state.RoleEmbedding != nil {
+		tensors = append(tensors, state.RoleEmbedding.Tensor)
+	}
+	for i := range state.Layers {
+		layer := state.Layers[i]
+		tensors = append(
+			tensors,
+			layer.AttentionQuery.Tensor,
+			layer.AttentionKey.Tensor,
+			layer.AttentionValue.Tensor,
+			layer.AttentionOutput.Tensor,
+			layer.FFNUp.Tensor,
+			layer.FFNDown.Tensor,
+		)
+	}
+	if state.OutputProjection != nil {
+		tensors = append(tensors, state.OutputProjection.Tensor)
+	}
+	return snapshotEmbeddingTrainTensors(tensors...)
 }
 
 func float32SlicesClose(a, b []float32, tol float32) bool {
