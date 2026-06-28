@@ -99,17 +99,70 @@ func TestInitDefaultEmbeddingPackageDefaultsOutputDimToModelDim(t *testing.T) {
 	}
 }
 
-func TestInitDefaultEmbeddingPackageRejectsUnsupportedCompactArchitecture(t *testing.T) {
+func TestInitDefaultEmbeddingPackageCreatesCompactBootstrapPackage(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "compact.mll")
-	_, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
+	paths, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
 		Architecture:   eosruntime.EmbeddingArchitectureCompactTransformerV1,
+		VocabSize:      16,
+		MaxSequence:    8,
 		ModelDim:       8,
 		OutputDim:      4,
 		HiddenDim:      16,
 		AttentionHeads: 2,
+		EncoderRepeats: 3,
 	})
-	if err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 is not supported by trainable package initialization yet") {
-		t.Fatalf("InitDefaultEmbeddingPackage error = %v, want unsupported compact error", err)
+	if err != nil {
+		t.Fatalf("init compact default embedding package: %v", err)
+	}
+	for _, candidate := range []string{
+		paths.ArtifactPath,
+		paths.EmbeddingManifestPath,
+		paths.WeightFilePath,
+		paths.MemoryPlanPath,
+		paths.TrainManifestPath,
+		paths.CheckpointPath,
+		paths.TrainProfilePath,
+		paths.PackageManifestPath,
+	} {
+		if _, err := os.Stat(candidate); err != nil {
+			t.Fatalf("expected package file %q: %v", candidate, err)
+		}
+	}
+	manifest, err := eosruntime.ReadEmbeddingManifestFile(paths.EmbeddingManifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if manifest.ArchitectureVersion != eosruntime.EmbeddingArchitectureCompactTransformerV1 ||
+		manifest.ParameterTying != eosruntime.EmbeddingParameterTyingUntied ||
+		manifest.ModelDim != 8 ||
+		manifest.OutputDim != 4 ||
+		manifest.FFNDim != 16 ||
+		manifest.AttentionHeads != 2 ||
+		manifest.HeadDim != 4 ||
+		manifest.EncoderRepeats != 3 ||
+		manifest.OutputProjectionParam != "output_projection" {
+		t.Fatalf("unexpected compact metadata: %+v", manifest)
+	}
+	if manifest.RoleConditioning != eosruntime.EmbeddingRoleConditioningAdditiveV1 ||
+		manifest.PositionEncoding != eosruntime.EmbeddingPositionEncodingRoPE ||
+		manifest.AttentionMaskMode != eosruntime.EmbeddingAttentionMaskModeKey ||
+		manifest.AttentionScoreScale != eosruntime.EmbeddingAttentionScoreScaleKeyDimRSQ {
+		t.Fatalf("unexpected compact conditioning/attention metadata: %+v", manifest)
+	}
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(paths.CheckpointPath)
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	for _, name := range []string{"token_embedding", "role_embedding", "layer0_attn_q", "layer2_ffn_down", "output_projection"} {
+		if checkpoint.Tensors[name] == nil {
+			t.Fatalf("checkpoint missing generic tensor %q; tensors=%v", name, checkpoint.Tensors)
+		}
+		if checkpoint.MomentTensors[name+"_moment_1"] == nil || checkpoint.MomentTensors[name+"_moment_2"] == nil {
+			t.Fatalf("checkpoint missing generic moments for %q", name)
+		}
+	}
+	if _, err := eosruntime.LoadEmbeddingTrainerPackage(path); err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 is not supported by trainable package initialization yet") {
+		t.Fatalf("LoadEmbeddingTrainerPackage error = %v, want unsupported compact error", err)
 	}
 }
 

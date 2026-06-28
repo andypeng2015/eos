@@ -37,6 +37,9 @@ func InitializeEmbeddingTrainerPackageWithManifest(artifactPath string, manifest
 		return EmbeddingTrainPackagePaths{}, err
 	}
 	manifest = manifest.normalized()
+	if manifest.ArchitectureVersion == EmbeddingArchitectureCompactTransformerV1 {
+		return initializeGenericEmbeddingTrainerPackage(artifactPath, mod, manifest, cfg, opts)
+	}
 	trainManifest := EmbeddingTrainManifest{
 		Name:      manifest.Name,
 		Embedding: manifest,
@@ -59,6 +62,142 @@ func InitializeEmbeddingTrainerPackageWithManifest(artifactPath string, manifest
 		return EmbeddingTrainPackagePaths{}, err
 	}
 	return trainer.WriteTrainingPackage(artifactPath)
+}
+
+func initializeGenericEmbeddingTrainerPackage(artifactPath string, mod *eosartifact.Module, manifest EmbeddingManifest, cfg EmbeddingTrainConfig, opts EmbeddingTrainInitOptions) (EmbeddingTrainPackagePaths, error) {
+	manifest = manifest.normalizedForModule(mod)
+	if err := manifest.ValidateModule(mod); err != nil {
+		return EmbeddingTrainPackagePaths{}, err
+	}
+	if err := validateGenericTrainableEmbeddingModule(mod, manifest); err != nil {
+		return EmbeddingTrainPackagePaths{}, err
+	}
+	weights, err := initializedTrainingWeights(mod, manifest, opts)
+	if err != nil {
+		return EmbeddingTrainPackagePaths{}, err
+	}
+	if opts.BootstrapArtifactPath != "" || opts.BootstrapCheckpointPath != "" {
+		if err := bootstrapTrainingWeights(weights, manifest, opts); err != nil {
+			return EmbeddingTrainPackagePaths{}, err
+		}
+	}
+	return writeGenericEmbeddingTrainingPackage(artifactPath, mod, manifest, cfg, weights)
+}
+
+func validateGenericTrainableEmbeddingModule(mod *eosartifact.Module, manifest EmbeddingManifest) error {
+	if mod == nil {
+		return fmt.Errorf("nil module")
+	}
+	if manifest.ArchitectureVersion != EmbeddingArchitectureCompactTransformerV1 {
+		return fmt.Errorf("generic embedding package initialization requires architecture_version=%q", EmbeddingArchitectureCompactTransformerV1)
+	}
+	if manifest.ParameterTying != EmbeddingParameterTyingUntied {
+		return fmt.Errorf("%s package initialization requires parameter_tying=%q", manifest.ArchitectureVersion, EmbeddingParameterTyingUntied)
+	}
+	for _, param := range mod.Params {
+		if param.Type.Kind != eosartifact.ValueTensor || param.Type.Tensor == nil {
+			return fmt.Errorf("param %q is not a tensor weight", param.Name)
+		}
+		if !param.Trainable {
+			return fmt.Errorf("param %q is not trainable", param.Name)
+		}
+	}
+	if manifest.OutputProjectionParam != "" {
+		if err := validateEmbeddingParam(mod, manifest.OutputProjectionParam); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeGenericEmbeddingTrainingPackage(artifactPath string, mod *eosartifact.Module, manifest EmbeddingManifest, cfg EmbeddingTrainConfig, weights map[string]*backend.Tensor) (EmbeddingTrainPackagePaths, error) {
+	if err := eosartifact.WriteFile(artifactPath, mod); err != nil {
+		return EmbeddingTrainPackagePaths{}, err
+	}
+	embeddingManifestPath := DefaultEmbeddingManifestPath(artifactPath)
+	if err := manifest.WriteFile(embeddingManifestPath); err != nil {
+		return EmbeddingTrainPackagePaths{}, err
+	}
+	weightPath := DefaultWeightFilePath(artifactPath)
+	if err := NewWeightFile(weights).WriteFile(weightPath); err != nil {
+		return EmbeddingTrainPackagePaths{}, err
+	}
+	memoryPlan := NewMemoryPlan(mod, weights, MemoryPlanOptions{})
+	memoryPlanPath := DefaultMemoryPlanPath(artifactPath)
+	if err := memoryPlan.WriteFile(memoryPlanPath); err != nil {
+		return EmbeddingTrainPackagePaths{}, err
+	}
+	trainManifest := EmbeddingTrainManifest{
+		Name:      manifest.Name,
+		Embedding: manifest,
+		Config:    cfg,
+	}
+	trainManifestPath := DefaultEmbeddingTrainManifestPath(artifactPath)
+	if err := trainManifest.WriteFile(trainManifestPath); err != nil {
+		return EmbeddingTrainPackagePaths{}, err
+	}
+	checkpoint := genericEmbeddingTrainCheckpoint(manifest, cfg, weights)
+	checkpointPath := DefaultEmbeddingCheckpointPath(artifactPath)
+	if err := checkpoint.WriteFile(checkpointPath); err != nil {
+		return EmbeddingTrainPackagePaths{}, err
+	}
+	trainProfilePath := DefaultEmbeddingTrainProfilePath(artifactPath)
+	if err := (EmbeddingTrainProfile{Version: EmbeddingTrainProfileVersion}).WriteFile(trainProfilePath); err != nil {
+		return EmbeddingTrainPackagePaths{}, err
+	}
+	packageFiles := map[string]string{
+		"artifact":           artifactPath,
+		"embedding_manifest": embeddingManifestPath,
+		"weights":            weightPath,
+		"memory_plan":        memoryPlanPath,
+		"train_manifest":     trainManifestPath,
+		"checkpoint":         checkpointPath,
+		"train_profile":      trainProfilePath,
+	}
+	tokenizerPath := DefaultTokenizerPath(artifactPath)
+	if _, err := os.Stat(tokenizerPath); err == nil {
+		packageFiles["tokenizer"] = tokenizerPath
+	}
+	packageManifest, err := BuildPackageManifest(PackageTraining, mod, packageFiles)
+	if err != nil {
+		return EmbeddingTrainPackagePaths{}, err
+	}
+	packageManifestPath := DefaultPackageManifestPath(artifactPath)
+	if err := packageManifest.WriteFile(packageManifestPath); err != nil {
+		return EmbeddingTrainPackagePaths{}, err
+	}
+	return EmbeddingTrainPackagePaths{
+		ArtifactPath:          artifactPath,
+		EmbeddingManifestPath: embeddingManifestPath,
+		TokenizerPath:         tokenizerPath,
+		WeightFilePath:        weightPath,
+		MemoryPlanPath:        memoryPlanPath,
+		TrainManifestPath:     trainManifestPath,
+		CheckpointPath:        checkpointPath,
+		TrainProfilePath:      trainProfilePath,
+		PackageManifestPath:   packageManifestPath,
+	}, nil
+}
+
+func genericEmbeddingTrainCheckpoint(manifest EmbeddingManifest, cfg EmbeddingTrainConfig, weights map[string]*backend.Tensor) EmbeddingTrainCheckpoint {
+	tensors := make(map[string]*backend.Tensor, len(weights))
+	moments := make(map[string]*backend.Tensor, len(weights)*2)
+	for name, tensor := range weights {
+		if tensor == nil {
+			continue
+		}
+		master := tensorAsMasterF32(tensor)
+		tensors[name] = master
+		moments[name+"_moment_1"] = zeroLikeMaster(master)
+		moments[name+"_moment_2"] = zeroLikeMaster(master)
+	}
+	return EmbeddingTrainCheckpoint{
+		Version:       EmbeddingTrainCheckpointVersion,
+		Manifest:      manifest,
+		Config:        cfg,
+		Tensors:       tensors,
+		MomentTensors: moments,
+	}
 }
 
 func initializedTrainingWeights(mod *eosartifact.Module, manifest EmbeddingManifest, opts EmbeddingTrainInitOptions) (map[string]*backend.Tensor, error) {

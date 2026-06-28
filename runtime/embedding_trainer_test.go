@@ -1089,6 +1089,58 @@ func TestEmbeddingTrainCheckpointRetainsUnknownTensorsAndMoments(t *testing.T) {
 	assertTensorClose(t, gotMoment, []int{2, 2}, []float32{0.01, 0.02, 0.03, 0.04})
 }
 
+func TestEmbeddingTrainCheckpointRetainsCompactGenericTensorsAndMoments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "compact.embed-train.mll")
+	checkpoint := EmbeddingTrainCheckpoint{
+		Version: EmbeddingTrainCheckpointVersion,
+		Manifest: EmbeddingManifest{
+			Name:                  "compact",
+			ArchitectureVersion:   EmbeddingArchitectureCompactTransformerV1,
+			ModelDim:              4,
+			OutputDim:             3,
+			AttentionHeads:        2,
+			HeadDim:               2,
+			FFNDim:                8,
+			ParameterTying:        EmbeddingParameterTyingUntied,
+			TokenEmbeddingParam:   "token_embedding",
+			RoleConditioning:      EmbeddingRoleConditioningAdditiveV1,
+			RoleEmbeddingParam:    "role_embedding",
+			AttentionMaskMode:     EmbeddingAttentionMaskModeKey,
+			AttentionScoreScale:   EmbeddingAttentionScoreScaleKeyDimRSQ,
+			PositionEncoding:      EmbeddingPositionEncodingRoPE,
+			ProjectionParam:       "layer0_ffn_down",
+			OutputProjectionParam: "output_projection",
+			Tokenizer:             TokenizerManifest{VocabSize: 3, MaxSequence: 2},
+		},
+		Config: EmbeddingTrainConfig{Optimizer: "adamw"},
+		Tensors: map[string]*backend.Tensor{
+			"token_embedding":   backend.NewTensorF32([]int{3, 4}, []float32{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}),
+			"layer0_attn_q":     backend.NewTensorF32([]int{4, 4}, make([]float32, 16)),
+			"output_projection": backend.NewTensorF32([]int{4, 3}, make([]float32, 12)),
+		},
+		MomentTensors: map[string]*backend.Tensor{
+			"token_embedding_moment_1":   backend.NewTensorF32([]int{3, 4}, make([]float32, 12)),
+			"layer0_attn_q_moment_1":     backend.NewTensorF32([]int{4, 4}, make([]float32, 16)),
+			"output_projection_moment_2": backend.NewTensorF32([]int{4, 3}, make([]float32, 12)),
+		},
+	}
+	if err := checkpoint.WriteFile(path); err != nil {
+		t.Fatalf("write checkpoint: %v", err)
+	}
+	loaded, err := ReadEmbeddingTrainCheckpointFile(path)
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if loaded.TokenEmbedding != nil || loaded.Projection != nil {
+		t.Fatalf("compact checkpoint populated legacy fields: token=%v projection=%v", loaded.TokenEmbedding, loaded.Projection)
+	}
+	assertTensorClose(t, loaded.Tensors["token_embedding"], []int{3, 4}, checkpoint.Tensors["token_embedding"].F32)
+	assertTensorClose(t, loaded.Tensors["output_projection"], []int{4, 3}, checkpoint.Tensors["output_projection"].F32)
+	if loaded.MomentTensors["token_embedding_moment_1"] == nil || loaded.MomentTensors["output_projection_moment_2"] == nil {
+		t.Fatalf("missing compact generic moments: %+v", loaded.MomentTensors)
+	}
+}
+
 func TestEmbeddingTrainerFFNCheckpointRoundTrip(t *testing.T) {
 	trainer := newTinyTrainableFFNEmbeddingTrainer(t, 0.05)
 	batch := tinyEmbeddingPairDataset()

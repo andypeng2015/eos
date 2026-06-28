@@ -1077,6 +1077,11 @@ func (m EmbeddingManifest) ValidateModule(mod *eosartifact.Module) error {
 			return err
 		}
 	}
+	if m.OutputProjectionParam != "" {
+		if err := validateEmbeddingParam(mod, m.OutputProjectionParam); err != nil {
+			return err
+		}
+	}
 	if err := validateEmbeddingParam(mod, m.ProjectionParam); err != nil {
 		return err
 	}

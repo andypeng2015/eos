@@ -55,9 +55,15 @@ func InitDefaultEmbeddingPackage(path string, cfg DefaultEmbeddingPackageConfig)
 	}
 
 	moduleName := moduleNameForModel(cfg.Name)
-	bundle, err := compiler.Build(nil, compiler.Options{
+	var src []byte
+	preset := cfg.preset()
+	if cfg.Architecture == eosruntime.EmbeddingArchitectureCompactTransformerV1 {
+		src = []byte(compactTransformerSource(cfg))
+		preset = ""
+	}
+	bundle, err := compiler.Build(src, compiler.Options{
 		ModuleName: moduleName,
-		Preset:     cfg.preset(),
+		Preset:     preset,
 	})
 	if err != nil {
 		return eosruntime.EmbeddingTrainPackagePaths{}, err
@@ -76,6 +82,7 @@ func InitDefaultEmbeddingPackage(path string, cfg DefaultEmbeddingPackageConfig)
 		ShapeSizes: map[string]int{
 			"D": cfg.ModelDim,
 			"H": cfg.HiddenDim,
+			"O": cfg.OutputDim,
 		},
 	})
 }
@@ -84,7 +91,7 @@ func InitDefaultEmbeddingPackage(path string, cfg DefaultEmbeddingPackageConfig)
 // built-in default embedding model shape.
 func DefaultEmbeddingManifest(cfg DefaultEmbeddingPackageConfig) eosruntime.EmbeddingManifest {
 	cfg = cfg.normalized()
-	return eosruntime.EmbeddingManifest{
+	manifest := eosruntime.EmbeddingManifest{
 		Name:                  cfg.Name,
 		PooledEntry:           "embed_pooled",
 		BatchEntry:            "embed_pooled_batch",
@@ -130,6 +137,19 @@ func DefaultEmbeddingManifest(cfg DefaultEmbeddingPackageConfig) eosruntime.Embe
 			UnknownID:   3,
 		},
 	}
+	if cfg.Architecture == eosruntime.EmbeddingArchitectureCompactTransformerV1 {
+		manifest.ParameterTying = eosruntime.EmbeddingParameterTyingUntied
+		manifest.AttentionQueryParam = "layer0_attn_q"
+		manifest.AttentionKeyParam = "layer0_attn_k"
+		manifest.AttentionValueParam = "layer0_attn_v"
+		manifest.AttentionOutputParam = "layer0_attn_o"
+		manifest.HiddenProjectionParam = "layer0_ffn_up"
+		manifest.ProjectionParam = "layer0_ffn_down"
+		if cfg.OutputDim != cfg.ModelDim {
+			manifest.OutputProjectionParam = "output_projection"
+		}
+	}
+	return manifest
 }
 
 func (cfg DefaultEmbeddingPackageConfig) normalized() DefaultEmbeddingPackageConfig {
@@ -213,7 +233,6 @@ func (cfg DefaultEmbeddingPackageConfig) validate() error {
 		if err := validateDefaultEmbeddingArchitectureDims(cfg); err != nil {
 			return err
 		}
-		return fmt.Errorf("%s is not supported by trainable package initialization yet", cfg.Architecture)
 	default:
 		return fmt.Errorf("unsupported architecture %q", cfg.Architecture)
 	}
@@ -232,10 +251,10 @@ func (cfg DefaultEmbeddingPackageConfig) validate() error {
 	if cfg.ModelDim%cfg.AttentionHeads != 0 {
 		return fmt.Errorf("model_dim %d must be divisible by attention_heads %d", cfg.ModelDim, cfg.AttentionHeads)
 	}
-	if cfg.AttentionHeads != 1 {
+	if cfg.Architecture == eosruntime.EmbeddingArchitectureLegacyV1 && cfg.AttentionHeads != 1 {
 		return fmt.Errorf("%s with attention_heads=%d is not supported by trainable package initialization yet", cfg.Architecture, cfg.AttentionHeads)
 	}
-	if cfg.OutputDim != cfg.ModelDim {
+	if cfg.Architecture == eosruntime.EmbeddingArchitectureLegacyV1 && cfg.OutputDim != cfg.ModelDim {
 		return fmt.Errorf("%s with output_dim=%d is not supported by trainable package initialization yet", cfg.Architecture, cfg.OutputDim)
 	}
 	if cfg.HiddenDim <= 0 {
@@ -286,6 +305,90 @@ func (cfg DefaultEmbeddingPackageConfig) preset() compiler.Preset {
 		return compiler.PresetEncoderTrainableQ4x2
 	}
 	return compiler.PresetEncoderTrainableQ8x2
+}
+
+func compactTransformerSource(cfg DefaultEmbeddingPackageConfig) string {
+	var b strings.Builder
+	dtype := cfg.WeightDType
+	if dtype == "" {
+		dtype = "q8"
+	}
+	fmt.Fprintf(&b, "param token_embedding: %s[V, D] @weight(\"weights/token_embedding\") @trainable\n", dtype)
+	fmt.Fprintf(&b, "param role_embedding: %s[3, D] @weight(\"weights/role_embedding\") @trainable\n", dtype)
+	for i := 0; i < cfg.EncoderRepeats; i++ {
+		prefix := fmt.Sprintf("layer%d", i)
+		fmt.Fprintf(&b, "param %s_attn_q: %s[D, D] @weight(\"weights/%s_attn_q\") @trainable\n", prefix, dtype, prefix)
+		fmt.Fprintf(&b, "param %s_attn_k: %s[D, D] @weight(\"weights/%s_attn_k\") @trainable\n", prefix, dtype, prefix)
+		fmt.Fprintf(&b, "param %s_attn_v: %s[D, D] @weight(\"weights/%s_attn_v\") @trainable\n", prefix, dtype, prefix)
+		fmt.Fprintf(&b, "param %s_attn_o: %s[D, D] @weight(\"weights/%s_attn_o\") @trainable\n", prefix, dtype, prefix)
+		fmt.Fprintf(&b, "param %s_ffn_up: %s[D, H] @weight(\"weights/%s_ffn_up\") @trainable\n", prefix, dtype, prefix)
+		fmt.Fprintf(&b, "param %s_ffn_down: %s[H, D] @weight(\"weights/%s_ffn_down\") @trainable\n", prefix, dtype, prefix)
+	}
+	if cfg.OutputDim != cfg.ModelDim {
+		fmt.Fprintf(&b, "param output_projection: %s[D, O] @weight(\"weights/output_projection\") @trainable\n", dtype)
+	}
+	b.WriteString("\n")
+	b.WriteString("pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T], role_ids: i32[T]) -> f16[")
+	if cfg.OutputDim != cfg.ModelDim {
+		b.WriteString("O")
+	} else {
+		b.WriteString("D")
+	}
+	b.WriteString("] {\n")
+	b.WriteString(compactTransformerPipelineBody(cfg))
+	b.WriteString("}\n\n")
+	b.WriteString("pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T], role_ids: i32[B, T]) -> f16[")
+	if cfg.OutputDim != cfg.ModelDim {
+		b.WriteString("B, O")
+	} else {
+		b.WriteString("B, D")
+	}
+	b.WriteString("] {\n")
+	b.WriteString(compactTransformerPipelineBody(cfg))
+	b.WriteString("}\n")
+	return b.String()
+}
+
+func compactTransformerPipelineBody(cfg DefaultEmbeddingPackageConfig) string {
+	var b strings.Builder
+	b.WriteString("    let hidden_q = gather(token_embedding, tokens)\n")
+	b.WriteString("    let role_hidden_q = gather(role_embedding, role_ids)\n")
+	b.WriteString("    let hidden_f = dequant(hidden_q)\n")
+	b.WriteString("    let role_hidden_f = dequant(role_hidden_q)\n")
+	b.WriteString("    let hidden = rope(hidden_f + role_hidden_f)\n")
+	prev := "hidden"
+	for i := 0; i < cfg.EncoderRepeats; i++ {
+		prefix := fmt.Sprintf("layer%d", i)
+		fmt.Fprintf(&b, "    let %s_wq = dequant(%s_attn_q)\n", prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_wk = dequant(%s_attn_k)\n", prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_wv = dequant(%s_attn_v)\n", prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_wo = dequant(%s_attn_o)\n", prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_ffn_up_f = dequant(%s_ffn_up)\n", prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_ffn_down_f = dequant(%s_ffn_down)\n", prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_q = @matmul(%s, %s_wq)\n", prefix, prev, prefix)
+		fmt.Fprintf(&b, "    let %s_k = @matmul(%s, %s_wk)\n", prefix, prev, prefix)
+		fmt.Fprintf(&b, "    let %s_v = @matmul(%s, %s_wv)\n", prefix, prev, prefix)
+		fmt.Fprintf(&b, "    let %s_kt = transpose(%s_k)\n", prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_scores = @scaled_attention_scores(%s_q, %s_kt)\n", prefix, prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_probs = masked_softmax(%s_scores, attention_mask)\n", prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_mixed = @matmul(%s_probs, %s_v)\n", prefix, prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_attended = @matmul(%s_mixed, %s_wo)\n", prefix, prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_attn_hidden = layernorm(%s_attended + %s)\n", prefix, prefix, prev)
+		fmt.Fprintf(&b, "    let %s_ffn_hidden = @matmul(%s_attn_hidden, %s_ffn_up_f)\n", prefix, prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_activated = gelu(%s_ffn_hidden)\n", prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_projected = @matmul(%s_activated, %s_ffn_down_f)\n", prefix, prefix, prefix)
+		fmt.Fprintf(&b, "    let %s_encoded = layernorm(%s_projected + %s_attn_hidden)\n", prefix, prefix, prefix)
+		prev = prefix + "_encoded"
+	}
+	fmt.Fprintf(&b, "    let normalized = normalize(%s)\n", prev)
+	if cfg.OutputDim != cfg.ModelDim {
+		b.WriteString("    let output_projection_f = dequant(output_projection)\n")
+		b.WriteString("    let output_projected = @matmul(normalized, output_projection_f)\n")
+		b.WriteString("    return mean_pool(output_projected, attention_mask)\n")
+		return b.String()
+	}
+	b.WriteString("    return mean_pool(normalized, attention_mask)\n")
+	return b.String()
 }
 
 func (cfg DefaultEmbeddingPackageConfig) trainConfig() eosruntime.EmbeddingTrainConfig {

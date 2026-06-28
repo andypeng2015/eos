@@ -1045,18 +1045,44 @@ func TestRunInitModelHonorsModelDimAliasAndDefaultsOutputDim(t *testing.T) {
 	}
 }
 
-func TestRunInitModelRejectsUnsupportedCompactArchitecture(t *testing.T) {
-	err := run([]string{
+func TestRunInitModelCreatesCompactBootstrapPackage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "compact.mll")
+	if err := run([]string{
 		"init-model",
 		"--architecture", eosruntime.EmbeddingArchitectureCompactTransformerV1,
 		"--model-dim", "8",
 		"--output-dim", "4",
 		"--hidden-dim", "16",
 		"--attention-heads", "2",
-		filepath.Join(t.TempDir(), "compact.mll"),
-	})
-	if err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 is not supported by trainable package initialization yet") {
-		t.Fatalf("run init-model error = %v, want unsupported compact error", err)
+		"--encoder-repeats", "4",
+		path,
+	}); err != nil {
+		t.Fatalf("run init-model compact: %v", err)
+	}
+	manifest, err := eosruntime.ReadEmbeddingManifestFile(eosruntime.DefaultEmbeddingManifestPath(path))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if manifest.ArchitectureVersion != eosruntime.EmbeddingArchitectureCompactTransformerV1 ||
+		manifest.ParameterTying != eosruntime.EmbeddingParameterTyingUntied ||
+		manifest.ModelDim != 8 ||
+		manifest.OutputDim != 4 ||
+		manifest.FFNDim != 16 ||
+		manifest.AttentionHeads != 2 ||
+		manifest.HeadDim != 4 ||
+		manifest.EncoderRepeats != 4 ||
+		manifest.OutputProjectionParam != "output_projection" {
+		t.Fatalf("unexpected compact manifest: %+v", manifest)
+	}
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(eosruntime.DefaultEmbeddingCheckpointPath(path))
+	if err != nil {
+		t.Fatalf("read checkpoint: %v", err)
+	}
+	if checkpoint.Tensors["layer3_attn_q"] == nil || checkpoint.MomentTensors["layer3_attn_q_moment_1"] == nil {
+		t.Fatalf("checkpoint missing layer3 generic tensors: tensors=%v moments=%v", checkpoint.Tensors, checkpoint.MomentTensors)
+	}
+	if _, err := eosruntime.LoadEmbeddingTrainerPackage(path); err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 is not supported by trainable package initialization yet") {
+		t.Fatalf("LoadEmbeddingTrainerPackage error = %v, want unsupported compact error", err)
 	}
 }
 

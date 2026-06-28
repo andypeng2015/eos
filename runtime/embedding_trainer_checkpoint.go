@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	eosartifact "m31labs.dev/eos/artifact/eos"
 	"m31labs.dev/eos/runtime/backend"
@@ -378,7 +379,35 @@ func decodeEmbeddingCheckpointMLL(data []byte) (EmbeddingTrainCheckpoint, error)
 		ProjMoment1:       cloneTensorOrNil(tensors["projection_moment_1"]),
 		ProjMoment2:       cloneTensorOrNil(tensors["projection_moment_2"]),
 	}
-	checkpoint.Tensors, checkpoint.MomentTensors = genericCheckpointTensorMaps(tensors, momentNames)
+	if checkpoint.Manifest.normalized().ArchitectureVersion == EmbeddingArchitectureCompactTransformerV1 {
+		checkpoint.TokenEmbedding = nil
+		checkpoint.RoleEmbedding = nil
+		checkpoint.AttentionQuery = nil
+		checkpoint.AttentionKey = nil
+		checkpoint.AttentionValue = nil
+		checkpoint.AttentionOutput = nil
+		checkpoint.HiddenProjection = nil
+		checkpoint.Projection = nil
+		checkpoint.TokenMoment1 = nil
+		checkpoint.TokenMoment2 = nil
+		checkpoint.RoleMoment1 = nil
+		checkpoint.RoleMoment2 = nil
+		checkpoint.AttentionQMoment1 = nil
+		checkpoint.AttentionQMoment2 = nil
+		checkpoint.AttentionKMoment1 = nil
+		checkpoint.AttentionKMoment2 = nil
+		checkpoint.AttentionVMoment1 = nil
+		checkpoint.AttentionVMoment2 = nil
+		checkpoint.AttentionOMoment1 = nil
+		checkpoint.AttentionOMoment2 = nil
+		checkpoint.HiddenMoment1 = nil
+		checkpoint.HiddenMoment2 = nil
+		checkpoint.ProjMoment1 = nil
+		checkpoint.ProjMoment2 = nil
+		checkpoint.Tensors, checkpoint.MomentTensors = genericCheckpointTensorMapsIncludingLegacy(tensors, momentNames)
+	} else {
+		checkpoint.Tensors, checkpoint.MomentTensors = genericCheckpointTensorMaps(tensors, momentNames)
+	}
 	if err := checkpoint.Validate(); err != nil {
 		return EmbeddingTrainCheckpoint{}, err
 	}
@@ -412,14 +441,15 @@ func checkpointTensorMap(c EmbeddingTrainCheckpoint) map[string]*backend.Tensor 
 		"projection_moment_1":        c.ProjMoment1,
 		"projection_moment_2":        c.ProjMoment2,
 	}
+	includeLegacyGeneric := c.Manifest.normalized().ArchitectureVersion == EmbeddingArchitectureCompactTransformerV1
 	for name, tensor := range c.Tensors {
-		if _, legacy := tensors[name]; legacy {
+		if _, legacy := tensors[name]; legacy && !includeLegacyGeneric {
 			continue
 		}
 		tensors[name] = tensor
 	}
 	for name, tensor := range c.MomentTensors {
-		if _, legacy := tensors[name]; legacy {
+		if _, legacy := tensors[name]; legacy && !includeLegacyGeneric {
 			continue
 		}
 		tensors[name] = tensor
@@ -465,6 +495,28 @@ func genericCheckpointTensorMaps(tensors map[string]*backend.Tensor, momentNames
 	moments := map[string]*backend.Tensor{}
 	for name, tensor := range tensors {
 		if tensor == nil || isLegacyCheckpointTensorName(name) {
+			continue
+		}
+		if momentNames[name] {
+			moments[name] = tensor.Clone()
+		} else {
+			generic[name] = tensor.Clone()
+		}
+	}
+	if len(generic) == 0 {
+		generic = nil
+	}
+	if len(moments) == 0 {
+		moments = nil
+	}
+	return generic, moments
+}
+
+func genericCheckpointTensorMapsIncludingLegacy(tensors map[string]*backend.Tensor, momentNames map[string]bool) (map[string]*backend.Tensor, map[string]*backend.Tensor) {
+	generic := map[string]*backend.Tensor{}
+	moments := map[string]*backend.Tensor{}
+	for name, tensor := range tensors {
+		if tensor == nil {
 			continue
 		}
 		if momentNames[name] {
@@ -549,6 +601,9 @@ func (c EmbeddingTrainCheckpoint) Validate() error {
 	}
 	if c.Version != EmbeddingTrainCheckpointVersion {
 		return fmt.Errorf("checkpoint version %q is not supported, want %q", c.Version, EmbeddingTrainCheckpointVersion)
+	}
+	if c.Manifest.normalized().ArchitectureVersion == EmbeddingArchitectureCompactTransformerV1 {
+		return validateGenericEmbeddingTrainCheckpoint(c)
 	}
 	if c.TokenEmbedding == nil {
 		return fmt.Errorf("checkpoint token_embedding is required")
@@ -641,6 +696,62 @@ func (c EmbeddingTrainCheckpoint) Validate() error {
 	}
 	if c.ProjMoment2 != nil && !sameTensorShape(c.Projection, c.ProjMoment2) {
 		return fmt.Errorf("checkpoint projection_moment_2 shape %v does not match projection %v", c.ProjMoment2.Shape, c.Projection.Shape)
+	}
+	return nil
+}
+
+func validateGenericEmbeddingTrainCheckpoint(c EmbeddingTrainCheckpoint) error {
+	manifest := c.Manifest.normalized()
+	if manifest.ArchitectureVersion != EmbeddingArchitectureCompactTransformerV1 {
+		return fmt.Errorf("generic checkpoint validation requires architecture_version=%q", EmbeddingArchitectureCompactTransformerV1)
+	}
+	if len(c.Tensors) == 0 {
+		return fmt.Errorf("checkpoint generic tensors are required for architecture_version=%q", manifest.ArchitectureVersion)
+	}
+	if c.TokenEmbedding != nil || c.Projection != nil {
+		return fmt.Errorf("checkpoint for architecture_version=%q must use generic tensors, not legacy token/projection fields", manifest.ArchitectureVersion)
+	}
+	for name, tensor := range c.Tensors {
+		if err := validateCheckpointGenericTensor("tensor", name, tensor); err != nil {
+			return err
+		}
+	}
+	for name, tensor := range c.MomentTensors {
+		if err := validateCheckpointGenericTensor("moment tensor", name, tensor); err != nil {
+			return err
+		}
+		baseName, ok := strings.CutSuffix(name, "_moment_1")
+		if !ok {
+			baseName, ok = strings.CutSuffix(name, "_moment_2")
+		}
+		if ok {
+			base := c.Tensors[baseName]
+			if base == nil {
+				return fmt.Errorf("checkpoint moment tensor %q has no base tensor %q", name, baseName)
+			}
+			if !sameTensorShape(base, tensor) {
+				return fmt.Errorf("checkpoint moment tensor %q shape %v does not match base tensor %q shape %v", name, tensor.Shape, baseName, base.Shape)
+			}
+		}
+	}
+	return nil
+}
+
+func validateCheckpointGenericTensor(kind, name string, tensor *backend.Tensor) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("checkpoint generic %s name is required", kind)
+	}
+	if tensor == nil {
+		return fmt.Errorf("checkpoint generic %s %q is nil", kind, name)
+	}
+	if tensor.DType == "" {
+		return fmt.Errorf("checkpoint generic %s %q dtype is required", kind, name)
+	}
+	if len(tensor.Shape) == 0 {
+		return fmt.Errorf("checkpoint generic %s %q shape is required", kind, name)
+	}
+	if len(tensor.F32) != tensor.Elements() {
+		return fmt.Errorf("checkpoint generic %s %q shape %v has %d f32 values, want %d", kind, name, tensor.Shape, len(tensor.F32), tensor.Elements())
 	}
 	return nil
 }
