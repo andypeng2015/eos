@@ -1081,8 +1081,19 @@ func TestRunInitModelCreatesCompactBootstrapPackage(t *testing.T) {
 	if checkpoint.Tensors["layer3_attn_q"] == nil || checkpoint.MomentTensors["layer3_attn_q_moment_1"] == nil {
 		t.Fatalf("checkpoint missing layer3 generic tensors: tensors=%v moments=%v", checkpoint.Tensors, checkpoint.MomentTensors)
 	}
-	if _, err := eosruntime.LoadEmbeddingTrainerPackage(path); err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 is not supported by trainable package initialization yet") {
-		t.Fatalf("LoadEmbeddingTrainerPackage error = %v, want unsupported compact error", err)
+	trainer, err := eosruntime.LoadEmbeddingTrainerPackage(path)
+	if err != nil {
+		t.Fatalf("load compact trainer package: %v", err)
+	}
+	metrics, err := trainer.EvaluatePairs([]eosruntime.EmbeddingPairExample{
+		{LeftTokens: []int32{1, 4, 5}, RightTokens: []int32{1, 4, 5}, Target: 1},
+		{LeftTokens: []int32{1, 4, 5}, RightTokens: []int32{5, 4, 1}, Target: -1},
+	})
+	if err != nil {
+		t.Fatalf("evaluate compact trainer package: %v", err)
+	}
+	if math.IsNaN(float64(metrics.Loss)) || math.IsInf(float64(metrics.Loss), 0) || metrics.PairCount != 2 {
+		t.Fatalf("compact trainer metrics = %+v, want finite 2-pair evaluation", metrics)
 	}
 }
 

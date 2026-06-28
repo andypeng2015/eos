@@ -285,6 +285,95 @@ func TestInitDefaultEmbeddingPackageCreatesCompactBootstrapPackage(t *testing.T)
 	}
 }
 
+func TestInitDefaultEmbeddingPackageCompactParamContract(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "compact-contract.mll")
+	paths, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
+		Architecture:   eosruntime.EmbeddingArchitectureCompactTransformerV1,
+		VocabSize:      19,
+		MaxSequence:    7,
+		ModelDim:       8,
+		OutputDim:      5,
+		HiddenDim:      24,
+		AttentionHeads: 2,
+		EncoderRepeats: 2,
+		WeightDType:    "q4",
+	})
+	if err != nil {
+		t.Fatalf("init compact default embedding package: %v", err)
+	}
+	mod, err := eosartifact.ReadFile(paths.ArtifactPath)
+	if err != nil {
+		t.Fatalf("read compact artifact: %v", err)
+	}
+	want := []struct {
+		name  string
+		shape []string
+	}{
+		{name: "token_embedding", shape: []string{"V", "D"}},
+		{name: "role_embedding", shape: []string{"3", "D"}},
+		{name: "layer0_attn_q", shape: []string{"D", "D"}},
+		{name: "layer0_attn_k", shape: []string{"D", "D"}},
+		{name: "layer0_attn_v", shape: []string{"D", "D"}},
+		{name: "layer0_attn_o", shape: []string{"D", "D"}},
+		{name: "layer0_ffn_up", shape: []string{"D", "H"}},
+		{name: "layer0_ffn_down", shape: []string{"H", "D"}},
+		{name: "layer1_attn_q", shape: []string{"D", "D"}},
+		{name: "layer1_attn_k", shape: []string{"D", "D"}},
+		{name: "layer1_attn_v", shape: []string{"D", "D"}},
+		{name: "layer1_attn_o", shape: []string{"D", "D"}},
+		{name: "layer1_ffn_up", shape: []string{"D", "H"}},
+		{name: "layer1_ffn_down", shape: []string{"H", "D"}},
+		{name: "output_projection", shape: []string{"D", "O"}},
+	}
+	if got := len(mod.Params); got != len(want) {
+		t.Fatalf("compact param count = %d, want %d", got, len(want))
+	}
+	for i, spec := range want {
+		param := mod.Params[i]
+		if param.Name != spec.name {
+			t.Fatalf("param[%d] name = %q, want %q", i, param.Name, spec.name)
+		}
+		if !param.Trainable {
+			t.Fatalf("param %q is not trainable", param.Name)
+		}
+		if param.Type.Tensor == nil {
+			t.Fatalf("param %q is not a tensor", param.Name)
+		}
+		if param.Type.Tensor.DType != "q4" {
+			t.Fatalf("param %q dtype = %q, want q4", param.Name, param.Type.Tensor.DType)
+		}
+		if strings.Join(param.Type.Tensor.Shape, ",") != strings.Join(spec.shape, ",") {
+			t.Fatalf("param %q shape = %v, want %v", param.Name, param.Type.Tensor.Shape, spec.shape)
+		}
+	}
+	manifest, err := eosruntime.ReadEmbeddingManifestFile(paths.EmbeddingManifestPath)
+	if err != nil {
+		t.Fatalf("read compact manifest: %v", err)
+	}
+	if manifest.AttentionQueryParam != "layer0_attn_q" ||
+		manifest.AttentionKeyParam != "layer0_attn_k" ||
+		manifest.AttentionValueParam != "layer0_attn_v" ||
+		manifest.AttentionOutputParam != "layer0_attn_o" ||
+		manifest.HiddenProjectionParam != "layer0_ffn_up" ||
+		manifest.ProjectionParam != "layer0_ffn_down" ||
+		manifest.OutputProjectionParam != "output_projection" {
+		t.Fatalf("compact manifest params drifted from artifact contract: %+v", manifest)
+	}
+	checkpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(paths.CheckpointPath)
+	if err != nil {
+		t.Fatalf("read compact checkpoint: %v", err)
+	}
+	for _, spec := range want {
+		if checkpoint.Tensors[spec.name] == nil {
+			t.Fatalf("checkpoint missing compact tensor %q", spec.name)
+		}
+		if checkpoint.MomentTensors[spec.name+"_moment_1"] == nil ||
+			checkpoint.MomentTensors[spec.name+"_moment_2"] == nil {
+			t.Fatalf("checkpoint missing compact moments for %q", spec.name)
+		}
+	}
+}
+
 func TestInitDefaultEmbeddingPackageRejectsInvalidHeadConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bad-heads.mll")
 	_, err := InitDefaultEmbeddingPackage(path, DefaultEmbeddingPackageConfig{
