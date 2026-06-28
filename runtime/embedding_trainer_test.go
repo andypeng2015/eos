@@ -1666,6 +1666,205 @@ func TestCompactEmbeddingTrainerMaskAndTokenOrderSensitivity(t *testing.T) {
 	}
 }
 
+func TestCompactEmbeddingTrainerFiniteDifferenceOutputProjectionAndAttentionGradients(t *testing.T) {
+	trainer := newCompactEmbeddingTrainerForTest(t, 3)
+	batch := compactFiniteDiffPairBatch()
+	metrics, grads := compactPairBatchAnalyticGradForTest(t, trainer, batch)
+	if !compactTestFinite(metrics.Loss) || metrics.BatchSize != len(batch) {
+		t.Fatalf("compact analytic metrics = %+v, want finite batch metrics", metrics)
+	}
+	if grads.outputProjection == nil {
+		t.Fatal("missing output_projection analytic gradients")
+	}
+	outputIndex := compactFiniteDiffMaxAbsIndex(grads.outputProjection, 1e-6)
+	if outputIndex < 0 {
+		t.Fatalf("output_projection gradients are all near zero: %v", grads.outputProjection)
+	}
+	compactAssertFiniteDiffGrad(t, "output_projection", grads.outputProjection[outputIndex], func(delta float32) {
+		trainer.compactState.OutputProjection.Tensor.F32[outputIndex] += delta
+	}, func() float32 {
+		return compactPairBatchLossForTest(t, trainer, batch)
+	})
+
+	attentionGrad := grads.layers[0].attnK
+	attentionIndex := compactFiniteDiffMaxAbsIndex(attentionGrad, 1e-6)
+	if attentionIndex < 0 {
+		t.Fatalf("layer0_attn_k gradients are all near zero: %v", attentionGrad)
+	}
+	compactAssertFiniteDiffGrad(t, "layer0_attn_k", attentionGrad[attentionIndex], func(delta float32) {
+		trainer.compactState.Layers[0].AttentionKey.Tensor.F32[attentionIndex] += delta
+	}, func() float32 {
+		return compactPairBatchLossForTest(t, trainer, batch)
+	})
+}
+
+func TestCompactEmbeddingTrainerFiniteDifferenceTokenEmbeddingRoPEAndMaskGradients(t *testing.T) {
+	trainer := newCompactEmbeddingTrainerForTest(t, 3)
+	if trainer.manifest.PositionEncoding != EmbeddingPositionEncodingRoPE {
+		t.Fatalf("compact test fixture position encoding = %q, want RoPE", trainer.manifest.PositionEncoding)
+	}
+	batch := compactFiniteDiffMaskedPairBatch()
+	_, grads := compactPairBatchAnalyticGradForTest(t, trainer, batch)
+	d := trainer.compactState.TokenEmbedding.Tensor.Shape[1]
+	activeBase := 1 * d
+	activeIndex := activeBase + compactFiniteDiffMaxAbsIndex(grads.token[activeBase:activeBase+d], 1e-6)
+	if activeIndex < activeBase {
+		t.Fatalf("active token row gradients are all near zero: %v", grads.token[activeBase:activeBase+d])
+	}
+	compactAssertFiniteDiffGrad(t, "token_embedding_rope_active", grads.token[activeIndex], func(delta float32) {
+		trainer.compactState.TokenEmbedding.Tensor.F32[activeIndex] += delta
+	}, func() float32 {
+		return compactPairBatchLossForTest(t, trainer, batch)
+	})
+
+	maskedBase := 4 * d
+	for col, got := range grads.token[maskedBase : maskedBase+d] {
+		if abs := float32(math.Abs(float64(got))); abs > 1e-6 {
+			t.Fatalf("masked padding token grad[%d] = %.9g, want zero", col, got)
+		}
+	}
+	maskedIndex := maskedBase + 1
+	compactAssertFiniteDiffGrad(t, "token_embedding_masked_padding", grads.token[maskedIndex], func(delta float32) {
+		trainer.compactState.TokenEmbedding.Tensor.F32[maskedIndex] += delta
+	}, func() float32 {
+		return compactPairBatchLossForTest(t, trainer, batch)
+	})
+}
+
+func compactFiniteDiffPairBatch() []EmbeddingPairExample {
+	return []EmbeddingPairExample{
+		{LeftTokens: []int32{1, 2, 3}, RightTokens: []int32{3, 1, 2}, Target: 0.35},
+	}
+}
+
+func compactFiniteDiffMaskedPairBatch() []EmbeddingPairExample {
+	return []EmbeddingPairExample{
+		{
+			LeftTokens:  []int32{1, 2, 4},
+			LeftMask:    []int32{1, 1, 0},
+			RightTokens: []int32{2, 3, 4},
+			RightMask:   []int32{1, 1, 0},
+			Target:      0.2,
+		},
+	}
+}
+
+func compactPairBatchAnalyticGradForTest(t *testing.T, trainer *EmbeddingTrainer, batch []EmbeddingPairExample) (EmbeddingTrainMetrics, *compactEmbeddingGradState) {
+	t.Helper()
+	if trainer == nil || trainer.compactState == nil {
+		t.Fatal("compact trainer is not initialized")
+	}
+	trainer.invalidateForwardWeights()
+	forward := trainer.prepareForwardWeights()
+	if forward == nil || forward.compact == nil {
+		t.Fatal("missing compact forward weights")
+	}
+	grads := newCompactEmbeddingGradState(trainer.compactState)
+	totalLoss := float32(0)
+	totalScore := float32(0)
+	for i, example := range batch {
+		left, right, err := trainer.encodeExamplePair(example, nil, nil, nil, nil, nil, nil, nil, nil, false)
+		if err != nil {
+			t.Fatalf("encode compact finite-diff pair %d: %v", i, err)
+		}
+		score, gradLeft, gradRight := cosineGrad(left.pooled, right.pooled)
+		scale := score - example.Target
+		totalLoss += 0.5 * scale * scale
+		totalScore += score
+		for j := range gradLeft {
+			gradLeft[j] *= scale
+			gradRight[j] *= scale
+		}
+		if err := trainer.backpropCompactEncodedSequence(left, gradLeft, forward.compact, grads); err != nil {
+			t.Fatalf("backprop compact finite-diff pair %d left: %v", i, err)
+		}
+		if err := trainer.backpropCompactEncodedSequence(right, gradRight, forward.compact, grads); err != nil {
+			t.Fatalf("backprop compact finite-diff pair %d right: %v", i, err)
+		}
+	}
+	batchScale := float32(1) / float32(len(batch))
+	compactScaleGradState(grads, batchScale)
+	return EmbeddingTrainMetrics{
+		Loss:         totalLoss * batchScale,
+		AverageScore: totalScore * batchScale,
+		BatchSize:    len(batch),
+	}, grads
+}
+
+func compactPairBatchLossForTest(t *testing.T, trainer *EmbeddingTrainer, batch []EmbeddingPairExample) float32 {
+	t.Helper()
+	trainer.invalidateForwardWeights()
+	metrics, err := trainer.runBatch(batch, false)
+	if err != nil {
+		t.Fatalf("compact finite-diff loss eval: %v", err)
+	}
+	if !compactTestFinite(metrics.Loss) {
+		t.Fatalf("compact finite-diff loss = %v, want finite", metrics.Loss)
+	}
+	return metrics.Loss
+}
+
+func compactAssertFiniteDiffGrad(t *testing.T, name string, analytic float32, mutate func(float32), loss func() float32) {
+	t.Helper()
+	const eps = float32(1e-3)
+	base := loss()
+	mutate(eps)
+	plus := loss()
+	mutate(-2 * eps)
+	minus := loss()
+	mutate(eps)
+	restored := loss()
+	if diff := float32(math.Abs(float64(restored - base))); diff > 2e-6 {
+		t.Fatalf("%s parameter restore changed loss by %.9g (base %.9g restored %.9g)", name, diff, base, restored)
+	}
+	numeric := (plus - minus) / (2 * eps)
+	if !compactGradClose(analytic, numeric, 2e-3, 0.12) {
+		t.Fatalf("%s analytic grad %.9g finite-diff %.9g (plus %.9g minus %.9g base %.9g)", name, analytic, numeric, plus, minus, base)
+	}
+}
+
+func compactGradClose(a, b, absTol, relTol float32) bool {
+	diff := float32(math.Abs(float64(a - b)))
+	if diff <= absTol {
+		return true
+	}
+	scale := float32(math.Max(math.Abs(float64(a)), math.Abs(float64(b))))
+	if scale == 0 {
+		return diff <= absTol
+	}
+	return diff/scale <= relTol
+}
+
+func compactFiniteDiffMaxAbsIndex(values []float32, minAbs float32) int {
+	bestIndex := -1
+	bestAbs := minAbs
+	for i, value := range values {
+		abs := float32(math.Abs(float64(value)))
+		if abs > bestAbs {
+			bestAbs = abs
+			bestIndex = i
+		}
+	}
+	return bestIndex
+}
+
+func compactScaleGradState(grads *compactEmbeddingGradState, scale float32) {
+	if grads == nil {
+		return
+	}
+	scaleFloat32Slice(grads.token, scale)
+	scaleFloat32Slice(grads.role, scale)
+	for i := range grads.layers {
+		scaleFloat32Slice(grads.layers[i].attnQ, scale)
+		scaleFloat32Slice(grads.layers[i].attnK, scale)
+		scaleFloat32Slice(grads.layers[i].attnV, scale)
+		scaleFloat32Slice(grads.layers[i].attnO, scale)
+		scaleFloat32Slice(grads.layers[i].ffnUp, scale)
+		scaleFloat32Slice(grads.layers[i].ffnDown, scale)
+	}
+	scaleFloat32Slice(grads.outputProjection, scale)
+}
+
 func compactTestFinite(v float32) bool {
 	return !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0)
 }
