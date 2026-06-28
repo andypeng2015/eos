@@ -2079,7 +2079,7 @@ func (t *EmbeddingTrainer) TrainListwiseGeometryStepWithDiagnostics(batch []Embe
 		return EmbeddingTrainMetrics{}, fmt.Errorf("embedding trainer is not initialized")
 	}
 	if t.isCompactTrainer() {
-		return EmbeddingTrainMetrics{}, compactTrainingUnsupportedError()
+		return t.runCompactListwiseGeometryBatchUpdate(batch, diagnostics)
 	}
 	if len(batch) == 0 {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("listwise geometry training batch is empty")
@@ -2180,6 +2180,99 @@ func (t *EmbeddingTrainer) TrainListwiseGeometryStepWithDiagnostics(batch []Embe
 	t.applyOptimizerUpdate(t.attnOParam.Name, t.attentionOutput, t.attnOMom1, t.attnOMom2, gradAttnO, batchScale)
 	t.applyOptimizerUpdate(t.hiddenParam.Name, t.hiddenProjection, t.hiddenMom1, t.hiddenMom2, gradHidden, batchScale)
 	t.applyOptimizerUpdate(t.projParam.Name, t.projection, t.projMom1, t.projMom2, gradProj, batchScale)
+	if movement != nil {
+		movement.ParameterDelta = aggregateParameterDeltaStats(beforeUpdate)
+	}
+	return EmbeddingTrainMetrics{
+		Loss:         totalLoss * batchScale,
+		AverageScore: totalScore / float32(pairCount),
+		BatchSize:    pairCount,
+		Movement:     movement,
+	}, nil
+}
+
+func (t *EmbeddingTrainer) runCompactListwiseGeometryBatchUpdate(batch []EmbeddingTokenizedListwiseGeometryBatch, diagnostics bool) (EmbeddingTrainMetrics, error) {
+	if t == nil || t.compactState == nil {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("compact embedding trainer is not initialized")
+	}
+	if len(batch) == 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("listwise geometry training batch is empty")
+	}
+	if len(t.config.MatryoshkaDims) > 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("compact_transformer_v1 listwise geometry training does not support matryoshka objectives")
+	}
+	if len(t.config.TurboQuantPrefixBits) > 0 || len(t.config.TurboQuantPrefixObjectives) > 0 || len(turboQuantPrefixObjectivesForConfig(t.config)) > 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("compact_transformer_v1 listwise geometry training does not support turboquant prefix objectives")
+	}
+	if len(t.config.TurboQuantCompactObjectives) > 0 || len(turboQuantCompactObjectivesForConfig(t.config)) > 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("compact_transformer_v1 listwise geometry training does not support turboquant compact objectives")
+	}
+	if len(t.config.TurboQuantRankMarginObjectives) > 0 || len(turboQuantRankMarginObjectivesForConfig(t.config)) > 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("compact_transformer_v1 listwise geometry training does not support turboquant rank-margin objectives")
+	}
+	if err := validateListwiseGeometryTrainerConfig(t.config); err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	queryInputs, documentInputs, spans, err := listwiseGeometrySequenceInputs(batch, t.queryRoleIndex(), t.documentRoleIndex())
+	if err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	forward := t.prepareForwardWeights()
+	if forward == nil || forward.compact == nil {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("missing compact forward weights")
+	}
+	allInputs := make([]embeddingSequenceInput, 0, len(queryInputs)+len(documentInputs))
+	allInputs = append(allInputs, queryInputs...)
+	allInputs = append(allInputs, documentInputs...)
+	encoded, err := t.encodeSequenceInputs(allInputs, forward, true)
+	if err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	defer t.releaseEncodedSequences(encoded)
+	queries := encoded[:len(queryInputs)]
+	documents := encoded[len(queryInputs):]
+
+	grads := newCompactEmbeddingGradState(t.compactState)
+	queryGrads := make([][]float32, len(queries))
+	documentGrads := make([][]float32, len(documents))
+	for i := range queries {
+		queryGrads[i] = make([]float32, len(queries[i].pooled))
+	}
+	for i := range documents {
+		documentGrads[i] = make([]float32, len(documents[i].pooled))
+	}
+
+	totalLoss, totalScore, pairCount, queryCount, err := accumulateListwiseGeometryGrads(queries, documents, spans, batch, t.config.Temperature, queryGrads, documentGrads)
+	if err != nil {
+		return EmbeddingTrainMetrics{}, err
+	}
+	if pairCount == 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("listwise geometry training batch has no usable query-document pairs")
+	}
+	if queryCount == 0 {
+		return EmbeddingTrainMetrics{}, fmt.Errorf("listwise geometry training batch has no usable queries")
+	}
+	for i, query := range queries {
+		if err := t.backpropCompactEncodedSequence(query, queryGrads[i], forward.compact, grads); err != nil {
+			return EmbeddingTrainMetrics{}, fmt.Errorf("query %d: %w", i, err)
+		}
+	}
+	for i, document := range documents {
+		if err := t.backpropCompactEncodedSequence(document, documentGrads[i], forward.compact, grads); err != nil {
+			return EmbeddingTrainMetrics{}, fmt.Errorf("document %d: %w", i, err)
+		}
+	}
+
+	batchScale := float32(1) / float32(queryCount)
+	var movement *EmbeddingTrainMovementMetrics
+	var beforeUpdate []embeddingTrainTensorSnapshot
+	if diagnostics {
+		movement = &EmbeddingTrainMovementMetrics{
+			Gradient: aggregateScaledGradientStats(batchScale, compactEmbeddingGradSlices(grads)...),
+		}
+		beforeUpdate = snapshotCompactEmbeddingTrainTensors(t.compactState)
+	}
+	t.applyCompactOptimizerUpdates(grads, batchScale)
 	if movement != nil {
 		movement.ParameterDelta = aggregateParameterDeltaStats(beforeUpdate)
 	}
@@ -2852,6 +2945,50 @@ func newCompactEmbeddingGradState(state *CompactEmbeddingTrainState) *compactEmb
 		grads.outputProjection = make([]float32, tensorDataLen(state.OutputProjection.Tensor))
 	}
 	return grads
+}
+
+func compactEmbeddingGradSlices(grads *compactEmbeddingGradState) [][]float32 {
+	if grads == nil {
+		return nil
+	}
+	slices := [][]float32{grads.token}
+	if len(grads.role) > 0 {
+		slices = append(slices, grads.role)
+	}
+	for i := range grads.layers {
+		layer := grads.layers[i]
+		slices = append(slices, layer.attnQ, layer.attnK, layer.attnV, layer.attnO, layer.ffnUp, layer.ffnDown)
+	}
+	if len(grads.outputProjection) > 0 {
+		slices = append(slices, grads.outputProjection)
+	}
+	return slices
+}
+
+func snapshotCompactEmbeddingTrainTensors(state *CompactEmbeddingTrainState) []embeddingTrainTensorSnapshot {
+	if state == nil {
+		return nil
+	}
+	tensors := []*backend.Tensor{state.TokenEmbedding.Tensor}
+	if state.RoleEmbedding != nil {
+		tensors = append(tensors, state.RoleEmbedding.Tensor)
+	}
+	for i := range state.Layers {
+		layer := state.Layers[i]
+		tensors = append(
+			tensors,
+			layer.AttentionQuery.Tensor,
+			layer.AttentionKey.Tensor,
+			layer.AttentionValue.Tensor,
+			layer.AttentionOutput.Tensor,
+			layer.FFNUp.Tensor,
+			layer.FFNDown.Tensor,
+		)
+	}
+	if state.OutputProjection != nil {
+		tensors = append(tensors, state.OutputProjection.Tensor)
+	}
+	return snapshotEmbeddingTrainTensors(tensors...)
 }
 
 func (t *EmbeddingTrainer) backpropCompactEncodedSequence(seq *embeddingEncodedSequence, gradPooled []float32, forward *compactEmbeddingForwardWeights, grads *compactEmbeddingGradState) error {

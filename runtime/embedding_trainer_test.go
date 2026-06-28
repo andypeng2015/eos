@@ -1611,6 +1611,137 @@ func TestCompactEmbeddingTrainerScoreSpectrumCheckpointRestoreParity(t *testing.
 	}
 }
 
+func TestCompactEmbeddingTrainerTrainListwiseGeometryStepMovesState(t *testing.T) {
+	trainer := newCompactEmbeddingTrainerForTest(t, 3)
+	trainer.config.Temperature = 0.05
+	batch := tinyTokenizedListwiseGeometryBatches(false)
+	beforeStep := trainer.TrainProfile().Step
+	snapshots := snapshotCompactTrainStateTensors(trainer.compactState)
+	metrics, err := trainer.TrainListwiseGeometryStepWithDiagnostics(batch, true)
+	if err != nil {
+		t.Fatalf("compact TrainListwiseGeometryStepWithDiagnostics: %v", err)
+	}
+	if !compactTestFinite(metrics.Loss) || !compactTestFinite(metrics.AverageScore) || metrics.BatchSize != 4 {
+		t.Fatalf("compact listwise metrics = %+v, want finite row-local metrics", metrics)
+	}
+	if metrics.Movement == nil {
+		t.Fatalf("compact listwise diagnostics missing")
+	}
+	if !compactTestFinite(metrics.Movement.Gradient.L2Norm) || metrics.Movement.Gradient.L2Norm <= 0 || metrics.Movement.Gradient.NonzeroCount <= 0 {
+		t.Fatalf("compact listwise gradient movement = %+v, want finite nonzero aggregate", metrics.Movement.Gradient)
+	}
+	if !compactTestFinite(metrics.Movement.ParameterDelta.L2Norm) || metrics.Movement.ParameterDelta.L2Norm <= 0 || metrics.Movement.ParameterDelta.NonzeroCount <= 0 {
+		t.Fatalf("compact listwise parameter delta = %+v, want finite nonzero aggregate", metrics.Movement.ParameterDelta)
+	}
+	if got := trainer.TrainProfile().Step; got != beforeStep+1 {
+		t.Fatalf("compact listwise step = %d, want %d", got, beforeStep+1)
+	}
+	delta := aggregateParameterDeltaStats(snapshots)
+	if delta.NonzeroCount == 0 || delta.L2Norm == 0 {
+		t.Fatalf("compact TrainListwiseGeometryStepWithDiagnostics did not move train tensors: %+v", delta)
+	}
+	eval, err := trainer.EvaluateListwiseGeometry(batch)
+	if err != nil {
+		t.Fatalf("evaluate compact listwise after train: %v", err)
+	}
+	if !compactTestFinite(eval.Loss) || !compactTestFinite(eval.AverageScore) || eval.QueryCount != 2 || eval.DocumentCellCount != 4 {
+		t.Fatalf("compact listwise eval = %+v, want finite eval metrics", eval)
+	}
+}
+
+func TestCompactEmbeddingTrainerListwiseGeometryCheckpointRestoreParity(t *testing.T) {
+	checkpoint := compactTrainStateTestCheckpoint(3)
+	checkpoint.Step = 19
+	mod := compactTrainStateTestModule(checkpoint)
+	state, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
+	if err != nil {
+		t.Fatalf("load compact state: %v", err)
+	}
+	trainer, err := newCompactEmbeddingTrainerFromTrainState(mod, state)
+	if err != nil {
+		t.Fatalf("new compact trainer: %v", err)
+	}
+	trainer.config.Temperature = 0.05
+	batch := tinyTokenizedListwiseGeometryBatches(false)
+	if _, err := trainer.TrainListwiseGeometryStep(batch); err != nil {
+		t.Fatalf("train compact listwise before checkpoint: %v", err)
+	}
+	before, err := trainer.EvaluateListwiseGeometry(batch)
+	if err != nil {
+		t.Fatalf("evaluate compact listwise before checkpoint: %v", err)
+	}
+	saved, err := trainer.Checkpoint()
+	if err != nil {
+		t.Fatalf("checkpoint compact listwise trainer: %v", err)
+	}
+	if saved.Step != checkpoint.Step+1 {
+		t.Fatalf("checkpoint step = %d, want %d", saved.Step, checkpoint.Step+1)
+	}
+	restored, err := NewEmbeddingTrainerFromCheckpoint(mod, saved)
+	if err != nil {
+		t.Fatalf("restore compact listwise trainer: %v", err)
+	}
+	after, err := restored.EvaluateListwiseGeometry(batch)
+	if err != nil {
+		t.Fatalf("evaluate restored compact listwise: %v", err)
+	}
+	assertListwiseGeometryEvalMetricsClose(t, after, before)
+	if got := restored.TrainProfile().Step; got != checkpoint.Step+1 {
+		t.Fatalf("restored compact listwise step = %d, want %d", got, checkpoint.Step+1)
+	}
+}
+
+func TestCompactEmbeddingTrainerListwiseGeometryUnsupportedModes(t *testing.T) {
+	for name, tc := range map[string]struct {
+		configure func(*EmbeddingTrainer)
+		want      string
+	}{
+		"matryoshka": {
+			configure: func(trainer *EmbeddingTrainer) {
+				trainer.config.MatryoshkaDims = []int{2}
+				trainer.config.MatryoshkaWeights = []float32{0.5}
+			},
+			want: "does not support matryoshka objectives",
+		},
+		"turboquant_prefix_bits": {
+			configure: func(trainer *EmbeddingTrainer) {
+				trainer.config.TurboQuantPrefixBits = []int{2}
+			},
+			want: "does not support turboquant prefix objectives",
+		},
+		"turboquant_prefix_objectives": {
+			configure: func(trainer *EmbeddingTrainer) {
+				trainer.config.TurboQuantPrefixObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 2, Weight: 0.25}}
+			},
+			want: "does not support turboquant prefix objectives",
+		},
+		"turboquant_compact": {
+			configure: func(trainer *EmbeddingTrainer) {
+				trainer.config.TurboQuantCompactObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 2, Weight: 0.25}}
+			},
+			want: "does not support turboquant compact objectives",
+		},
+		"turboquant_rank_margin": {
+			configure: func(trainer *EmbeddingTrainer) {
+				trainer.config.TurboQuantRankMarginObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 2, Weight: 0.25}}
+			},
+			want: "does not support turboquant rank-margin objectives",
+		},
+	} {
+		trainer := newCompactEmbeddingTrainerForTest(t, 3)
+		trainer.config.Temperature = 0.05
+		tc.configure(trainer)
+		beforeStep := trainer.TrainProfile().Step
+		_, err := trainer.TrainListwiseGeometryStepWithDiagnostics(tinyTokenizedListwiseGeometryBatches(false), true)
+		if err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 listwise geometry training") || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s compact listwise error = %v, want %q", name, err, tc.want)
+		}
+		if got := trainer.TrainProfile().Step; got != beforeStep {
+			t.Fatalf("%s compact unsupported listwise mutated step = %d, want %d", name, got, beforeStep)
+		}
+	}
+}
+
 func TestCompactEmbeddingTrainerHardNegativeUnsupportedModes(t *testing.T) {
 	for name, tc := range map[string]struct {
 		configure func(*EmbeddingTrainer, []EmbeddingHardNegativeExample) []EmbeddingHardNegativeExample
@@ -1782,25 +1913,6 @@ func compactHardNegativeBatchForTest() []EmbeddingHardNegativeExample {
 	return []EmbeddingHardNegativeExample{
 		{QueryTokens: []int32{1, 2, 3}, PositiveTokens: []int32{1, 2, 3}, NegativeTokens: [][]int32{{3, 2, 1}}, QueryMask: []int32{1, 1, 1}, PositiveMask: []int32{1, 1, 1}, NegativeMasks: [][]int32{{1, 1, 1}}},
 		{QueryTokens: []int32{3, 2, 1}, PositiveTokens: []int32{3, 1, 2}, NegativeTokens: [][]int32{{1, 3, 2}}, QueryMask: []int32{1, 1, 1}, PositiveMask: []int32{1, 1, 1}, NegativeMasks: [][]int32{{1, 1, 1}}},
-	}
-}
-
-func TestCompactEmbeddingTrainerAdvancedTrainingRemainsUnsupported(t *testing.T) {
-	trainer := newCompactEmbeddingTrainerForTest(t, 3)
-	beforeStep := trainer.TrainProfile().Step
-	for name, run := range map[string]func() error{
-		"listwise_geometry": func() error {
-			_, err := trainer.TrainListwiseGeometryStepWithDiagnostics(nil, true)
-			return err
-		},
-	} {
-		err := run()
-		if err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 training updates are not supported yet") {
-			t.Fatalf("%s compact training error = %v, want explicit unsupported", name, err)
-		}
-		if got := trainer.TrainProfile().Step; got != beforeStep {
-			t.Fatalf("%s compact unsupported training mutated step = %d, want %d", name, got, beforeStep)
-		}
 	}
 }
 
@@ -2254,6 +2366,22 @@ func compactScaleGradState(grads *compactEmbeddingGradState, scale float32) {
 
 func compactTestFinite(v float32) bool {
 	return !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0)
+}
+
+func assertListwiseGeometryEvalMetricsClose(t *testing.T, got, want EmbeddingListwiseGeometryEvalMetrics) {
+	t.Helper()
+	assertClose(t, got.Loss, want.Loss, 0.000001)
+	assertClose(t, got.AverageScore, want.AverageScore, 0.000001)
+	assertClose(t, got.TeacherCrossEntropy, want.TeacherCrossEntropy, 0.000001)
+	assertClose(t, got.TeacherKL, want.TeacherKL, 0.000001)
+	assertClose(t, got.TeacherTop1Agreement, want.TeacherTop1Agreement, 0.000001)
+	assertClose(t, got.AnyPositiveTop1, want.AnyPositiveTop1, 0.000001)
+	if got.QueryCount != want.QueryCount ||
+		got.DocumentCellCount != want.DocumentCellCount ||
+		got.BatchCount != want.BatchCount ||
+		got.AnyPositiveQueryCount != want.AnyPositiveQueryCount {
+		t.Fatalf("listwise eval counts = %+v, want %+v", got, want)
+	}
 }
 
 func snapshotCompactTrainStateTensors(state *CompactEmbeddingTrainState) []embeddingTrainTensorSnapshot {
