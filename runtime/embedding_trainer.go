@@ -2121,6 +2121,9 @@ func (t *EmbeddingTrainer) ExportInferenceWeights() (map[string]*backend.Tensor,
 	if t == nil {
 		return nil, fmt.Errorf("embedding trainer is not initialized")
 	}
+	if t.isCompactTrainer() {
+		return t.exportCompactInferenceWeights()
+	}
 	out := map[string]*backend.Tensor{}
 	token, err := exportTensorForParam(t.tokenParam, t.tokenEmbed)
 	if err != nil {
@@ -2169,6 +2172,72 @@ func (t *EmbeddingTrainer) ExportInferenceWeights() (map[string]*backend.Tensor,
 	out[t.tokenParam.Name] = token
 	out[t.projParam.Name] = proj
 	return out, nil
+}
+
+func (t *EmbeddingTrainer) exportCompactInferenceWeights() (map[string]*backend.Tensor, error) {
+	if t == nil || t.compactState == nil {
+		return nil, fmt.Errorf("compact embedding trainer is not initialized")
+	}
+	out := map[string]*backend.Tensor{}
+	add := func(item CompactEmbeddingTrainTensor) error {
+		if item.Name == "" || item.Tensor == nil {
+			return nil
+		}
+		param, err := requireModuleTensorParam(t.module, item.Name)
+		if err != nil {
+			return err
+		}
+		tensor, err := exportTensorForParam(param, item.Tensor)
+		if err != nil {
+			return err
+		}
+		out[item.Name] = tensor
+		return nil
+	}
+	if err := add(t.compactState.TokenEmbedding); err != nil {
+		return nil, err
+	}
+	if t.compactState.RoleEmbedding != nil {
+		if err := add(*t.compactState.RoleEmbedding); err != nil {
+			return nil, err
+		}
+	}
+	for _, layer := range t.compactState.Layers {
+		for _, item := range []CompactEmbeddingTrainTensor{
+			layer.AttentionQuery,
+			layer.AttentionKey,
+			layer.AttentionValue,
+			layer.AttentionOutput,
+			layer.FFNUp,
+			layer.FFNDown,
+		} {
+			if err := add(item); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if t.compactState.OutputProjection != nil {
+		if err := add(*t.compactState.OutputProjection); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func requireModuleTensorParam(mod *eosartifact.Module, name string) (eosartifact.Param, error) {
+	if mod == nil {
+		return eosartifact.Param{}, fmt.Errorf("nil module")
+	}
+	for _, param := range mod.Params {
+		if param.Name != name {
+			continue
+		}
+		if param.Type.Kind != eosartifact.ValueTensor || param.Type.Tensor == nil {
+			return eosartifact.Param{}, fmt.Errorf("param %q is not a tensor weight", name)
+		}
+		return param, nil
+	}
+	return eosartifact.Param{}, fmt.Errorf("module is missing tensor param %q", name)
 }
 
 // ExportLoadOptions adapts the current trained weights to runtime load options.

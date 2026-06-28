@@ -211,6 +211,58 @@ func TestInitDefaultEmbeddingPackageCreatesCompactBootstrapPackage(t *testing.T)
 	if _, err := trainer.TrainStep(evalSet); err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 training updates are not supported yet") {
 		t.Fatalf("compact TrainStep error = %v, want explicit unsupported", err)
 	}
+	outPath := filepath.Join(t.TempDir(), "compact-roundtrip.mll")
+	outPaths, err := trainer.WriteTrainingPackage(outPath)
+	if err != nil {
+		t.Fatalf("write compact training package: %v", err)
+	}
+	reloadedManifest, err := eosruntime.ReadEmbeddingManifestFile(outPaths.EmbeddingManifestPath)
+	if err != nil {
+		t.Fatalf("read round-trip compact manifest: %v", err)
+	}
+	if reloadedManifest.ArchitectureVersion != eosruntime.EmbeddingArchitectureCompactTransformerV1 ||
+		reloadedManifest.EncoderRepeats != 3 ||
+		reloadedManifest.OutputProjectionParam != "output_projection" {
+		t.Fatalf("round-trip compact manifest not preserved: %+v", reloadedManifest)
+	}
+	reloadedCheckpoint, err := eosruntime.ReadEmbeddingTrainCheckpointFile(outPaths.CheckpointPath)
+	if err != nil {
+		t.Fatalf("read round-trip compact checkpoint: %v", err)
+	}
+	if reloadedCheckpoint.TokenEmbedding != nil || reloadedCheckpoint.Projection != nil {
+		t.Fatalf("round-trip compact checkpoint populated legacy fields: token=%v projection=%v", reloadedCheckpoint.TokenEmbedding, reloadedCheckpoint.Projection)
+	}
+	for _, name := range []string{"token_embedding", "role_embedding", "layer0_attn_q", "layer2_ffn_down", "output_projection"} {
+		if reloadedCheckpoint.Tensors[name] == nil {
+			t.Fatalf("round-trip checkpoint missing compact tensor %q", name)
+		}
+		if reloadedCheckpoint.MomentTensors[name+"_moment_1"] == nil || reloadedCheckpoint.MomentTensors[name+"_moment_2"] == nil {
+			t.Fatalf("round-trip checkpoint missing compact moments for %q", name)
+		}
+	}
+	reloadedState, err := eosruntime.LoadCompactEmbeddingTrainStateFromPackage(outPath)
+	if err != nil {
+		t.Fatalf("load round-trip compact train state: %v", err)
+	}
+	if len(reloadedState.Layers) != 3 || reloadedState.OutputProjection == nil {
+		t.Fatalf("round-trip compact state = %+v, want 3 layers and output projection", reloadedState)
+	}
+	reloadedTrainer, err := eosruntime.LoadEmbeddingTrainerPackage(outPath)
+	if err != nil {
+		t.Fatalf("load round-trip compact trainer package: %v", err)
+	}
+	reloadedMetrics, err := reloadedTrainer.EvaluatePairs(evalSet)
+	if err != nil {
+		t.Fatalf("evaluate round-trip compact trainer package: %v", err)
+	}
+	if math.Abs(float64(metrics.Loss-reloadedMetrics.Loss)) > 0.000001 ||
+		math.Abs(float64(metrics.AverageScore-reloadedMetrics.AverageScore)) > 0.000001 ||
+		reloadedMetrics.PairCount != metrics.PairCount {
+		t.Fatalf("round-trip compact metrics = %+v, want %+v", reloadedMetrics, metrics)
+	}
+	if _, err := reloadedTrainer.TrainStep(evalSet); err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 training updates are not supported yet") {
+		t.Fatalf("round-trip compact TrainStep error = %v, want explicit unsupported", err)
+	}
 }
 
 func TestInitDefaultEmbeddingPackageRejectsInvalidHeadConfig(t *testing.T) {

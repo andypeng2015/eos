@@ -71,6 +71,17 @@ func (t *EmbeddingTrainer) Checkpoint() (EmbeddingTrainCheckpoint, error) {
 	if err := t.syncOptimizerState(true); err != nil {
 		return EmbeddingTrainCheckpoint{}, err
 	}
+	if t.isCompactTrainer() {
+		tensors, moments := compactTrainStateCheckpointMaps(t.compactState)
+		return EmbeddingTrainCheckpoint{
+			Version:       EmbeddingTrainCheckpointVersion,
+			Manifest:      t.manifest,
+			Config:        t.config,
+			Step:          t.step,
+			Tensors:       tensors,
+			MomentTensors: moments,
+		}, nil
+	}
 	return EmbeddingTrainCheckpoint{
 		Version:           EmbeddingTrainCheckpointVersion,
 		Manifest:          t.manifest,
@@ -762,6 +773,13 @@ func NewEmbeddingTrainerFromCheckpoint(mod *eosartifact.Module, checkpoint Embed
 		return nil, err
 	}
 	checkpoint.Manifest = checkpoint.Manifest.normalized()
+	if checkpoint.Manifest.ArchitectureVersion == EmbeddingArchitectureCompactTransformerV1 {
+		state, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
+		if err != nil {
+			return nil, err
+		}
+		return newCompactEmbeddingTrainerFromTrainState(mod, state)
+	}
 	weights := map[string]*backend.Tensor{
 		checkpoint.Manifest.TokenEmbeddingParam: checkpoint.TokenEmbedding,
 		checkpoint.Manifest.ProjectionParam:     checkpoint.Projection,
@@ -832,6 +850,48 @@ func NewEmbeddingTrainerFromCheckpoint(mod *eosartifact.Module, checkpoint Embed
 		trainer.projMom2 = checkpoint.ProjMoment2.Clone()
 	}
 	return trainer, nil
+}
+
+func compactTrainStateCheckpointMaps(state *CompactEmbeddingTrainState) (map[string]*backend.Tensor, map[string]*backend.Tensor) {
+	if state == nil {
+		return nil, nil
+	}
+	tensors := map[string]*backend.Tensor{}
+	moments := map[string]*backend.Tensor{}
+	add := func(item CompactEmbeddingTrainTensor) {
+		if item.Name == "" || item.Tensor == nil {
+			return
+		}
+		tensors[item.Name] = item.Tensor.Clone()
+		if item.Moment1 != nil {
+			moments[item.Name+"_moment_1"] = item.Moment1.Clone()
+		}
+		if item.Moment2 != nil {
+			moments[item.Name+"_moment_2"] = item.Moment2.Clone()
+		}
+	}
+	add(state.TokenEmbedding)
+	if state.RoleEmbedding != nil {
+		add(*state.RoleEmbedding)
+	}
+	for _, layer := range state.Layers {
+		add(layer.AttentionQuery)
+		add(layer.AttentionKey)
+		add(layer.AttentionValue)
+		add(layer.AttentionOutput)
+		add(layer.FFNUp)
+		add(layer.FFNDown)
+	}
+	if state.OutputProjection != nil {
+		add(*state.OutputProjection)
+	}
+	if len(tensors) == 0 {
+		tensors = nil
+	}
+	if len(moments) == 0 {
+		moments = nil
+	}
+	return tensors, moments
 }
 
 func cloneTensorOrNil(t *backend.Tensor) *backend.Tensor {

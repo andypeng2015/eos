@@ -2,6 +2,7 @@ package eosruntime
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"path/filepath"
 	"strings"
@@ -1312,6 +1313,27 @@ func newCompactEmbeddingTrainerForTest(t *testing.T, outputDim int) *EmbeddingTr
 	return trainer
 }
 
+func compactTrainStateTestModule(checkpoint EmbeddingTrainCheckpoint) *eosartifact.Module {
+	params := make([]eosartifact.Param, 0, len(checkpoint.Tensors))
+	for name, tensor := range checkpoint.Tensors {
+		dtype := "f32"
+		if name == checkpoint.Manifest.OutputProjectionParam {
+			dtype = "f16"
+		}
+		shape := make([]string, len(tensor.Shape))
+		for i, dim := range tensor.Shape {
+			shape[i] = fmt.Sprintf("%d", dim)
+		}
+		params = append(params, eosartifact.Param{
+			Name:      name,
+			Type:      eosartifact.ValueType{Kind: eosartifact.ValueTensor, Tensor: &eosartifact.TensorType{DType: dtype, Shape: shape}},
+			Binding:   "weights/" + name,
+			Trainable: true,
+		})
+	}
+	return &eosartifact.Module{Name: checkpoint.Manifest.Name, Params: params}
+}
+
 func TestCompactEmbeddingTrainerEvaluatePairsAndRejectsTraining(t *testing.T) {
 	checkpoint := compactTrainStateTestCheckpoint(3)
 	state, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
@@ -1342,6 +1364,93 @@ func TestCompactEmbeddingTrainerEvaluatePairsAndRejectsTraining(t *testing.T) {
 	}
 	if got := trainer.TrainProfile().Step; got != beforeStep {
 		t.Fatalf("compact failed train step mutated step = %d, want %d", got, beforeStep)
+	}
+}
+
+func TestCompactEmbeddingTrainerCheckpointRestoreAndExportRoundTrip(t *testing.T) {
+	checkpoint := compactTrainStateTestCheckpoint(3)
+	checkpoint.Step = 7
+	checkpoint.Config = EmbeddingTrainConfig{Optimizer: "adamw", LearningRate: 0.003, Temperature: 0.07}
+	mod := compactTrainStateTestModule(checkpoint)
+	state, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
+	if err != nil {
+		t.Fatalf("load compact state: %v", err)
+	}
+	trainer, err := newCompactEmbeddingTrainerFromTrainState(mod, state)
+	if err != nil {
+		t.Fatalf("new compact trainer: %v", err)
+	}
+	batch := []EmbeddingPairExample{
+		{LeftTokens: []int32{1, 2, 3}, RightTokens: []int32{1, 2, 3}, Target: 1},
+		{LeftTokens: []int32{1, 2, 3}, RightTokens: []int32{3, 2, 1}, Target: -1},
+	}
+	before, err := trainer.EvaluatePairs(batch)
+	if err != nil {
+		t.Fatalf("evaluate compact before checkpoint: %v", err)
+	}
+	saved, err := trainer.Checkpoint()
+	if err != nil {
+		t.Fatalf("checkpoint compact trainer: %v", err)
+	}
+	if saved.TokenEmbedding != nil || saved.Projection != nil {
+		t.Fatalf("compact checkpoint populated legacy fields: token=%v projection=%v", saved.TokenEmbedding, saved.Projection)
+	}
+	if saved.Step != checkpoint.Step {
+		t.Fatalf("checkpoint step = %d, want %d", saved.Step, checkpoint.Step)
+	}
+	if saved.Config.LearningRate != checkpoint.Config.LearningRate || saved.Config.Temperature != checkpoint.Config.Temperature {
+		t.Fatalf("checkpoint config = %+v, want %+v", saved.Config, checkpoint.Config)
+	}
+	if saved.Manifest.ArchitectureVersion != EmbeddingArchitectureCompactTransformerV1 ||
+		saved.Manifest.EncoderRepeats != 2 ||
+		saved.Manifest.OutputProjectionParam != "output_projection" {
+		t.Fatalf("checkpoint compact manifest not preserved: %+v", saved.Manifest)
+	}
+	for _, name := range []string{"token_embedding", "role_embedding", "layer0_attn_q", "layer1_ffn_down", "output_projection"} {
+		assertTensorClose(t, saved.Tensors[name], checkpoint.Tensors[name].Shape, checkpoint.Tensors[name].F32)
+		if saved.MomentTensors[name+"_moment_1"] == nil || saved.MomentTensors[name+"_moment_2"] == nil {
+			t.Fatalf("checkpoint missing compact moments for %q: %+v", name, saved.MomentTensors)
+		}
+	}
+
+	path := filepath.Join(t.TempDir(), "compact.embed-train.mll")
+	if err := saved.WriteFile(path); err != nil {
+		t.Fatalf("write compact checkpoint: %v", err)
+	}
+	loaded, err := ReadEmbeddingTrainCheckpointFile(path)
+	if err != nil {
+		t.Fatalf("read compact checkpoint: %v", err)
+	}
+	restored, err := NewEmbeddingTrainerFromCheckpoint(mod, loaded)
+	if err != nil {
+		t.Fatalf("restore compact trainer: %v", err)
+	}
+	after, err := restored.EvaluatePairs(batch)
+	if err != nil {
+		t.Fatalf("evaluate compact restored: %v", err)
+	}
+	assertClose(t, before.Loss, after.Loss, 0.000001)
+	assertClose(t, before.AverageScore, after.AverageScore, 0.000001)
+	if got := restored.TrainProfile().Step; got != checkpoint.Step {
+		t.Fatalf("restored compact step = %d, want %d", got, checkpoint.Step)
+	}
+	if _, err := restored.TrainStep(batch); err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 training updates are not supported yet") {
+		t.Fatalf("restored compact TrainStep error = %v, want explicit unsupported", err)
+	}
+
+	exportA, err := trainer.ExportInferenceWeights()
+	if err != nil {
+		t.Fatalf("export compact trainer: %v", err)
+	}
+	exportB, err := restored.ExportInferenceWeights()
+	if err != nil {
+		t.Fatalf("export restored compact trainer: %v", err)
+	}
+	if exportA["output_projection"].DType != "f16" {
+		t.Fatalf("output_projection export dtype = %q, want f16", exportA["output_projection"].DType)
+	}
+	for _, name := range []string{"token_embedding", "layer0_attn_q", "layer1_ffn_down", "output_projection"} {
+		assertTensorClose(t, exportA[name], exportB[name].Shape, exportB[name].F32)
 	}
 }
 
