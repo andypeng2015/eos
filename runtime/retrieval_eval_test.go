@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	eosartifact "m31labs.dev/eos/artifact/eos"
 	"m31labs.dev/eos/compiler"
+	"m31labs.dev/eos/runtime/backend"
 	"m31labs.dev/eos/runtime/backends/cuda"
 	"m31labs.dev/eos/runtime/backends/metal"
 )
@@ -2454,4 +2456,159 @@ func TestModelMiningNegativeCandidatesSkipsDuplicatePositiveText(t *testing.T) {
 	if got := scoredTextValues(result.Candidates); len(got) != 2 || got[0] != "hard negative" || got[1] != "easy negative" {
 		t.Fatalf("negatives = %+v", got)
 	}
+}
+
+func TestMineModelTextHardNegativesUsesResolvedRoleMode(t *testing.T) {
+	model := loadTinyRoleRetrievalMiningModel(t)
+	dir := t.TempDir()
+	corpusPath, queriesPath, qrelsPath := writeRoleSensitiveMiningDataset(t, dir)
+
+	autoExamples, autoSummary, err := MineModelTextHardNegatives(context.Background(), model, RetrievalHardNegativeMiningConfig{
+		DatasetName:          "tiny-role",
+		CorpusPath:           corpusPath,
+		QueriesPath:          queriesPath,
+		QrelsPath:            qrelsPath,
+		NegativesPerPositive: 1,
+		CandidateTopK:        2,
+		BatchSize:            2,
+	})
+	if err != nil {
+		t.Fatalf("mine auto role negatives: %v", err)
+	}
+	if autoSummary.RoleMode != EmbeddingRoleModeQueryDocument {
+		t.Fatalf("auto summary role mode = %q, want query-document", autoSummary.RoleMode)
+	}
+	if len(autoExamples) != 1 || len(autoExamples[0].Negatives) != 1 || autoExamples[0].Negatives[0] != "b" {
+		t.Fatalf("auto examples = %+v, want role-conditioned negative b", autoExamples)
+	}
+
+	rawExamples, rawSummary, err := MineModelTextHardNegatives(context.Background(), model, RetrievalHardNegativeMiningConfig{
+		DatasetName:          "tiny-role",
+		CorpusPath:           corpusPath,
+		QueriesPath:          queriesPath,
+		QrelsPath:            qrelsPath,
+		NegativesPerPositive: 1,
+		CandidateTopK:        2,
+		BatchSize:            2,
+		RoleMode:             EmbeddingRoleModeRaw,
+	})
+	if err != nil {
+		t.Fatalf("mine raw role negatives: %v", err)
+	}
+	if rawSummary.RoleMode != EmbeddingRoleModeRaw {
+		t.Fatalf("raw summary role mode = %q, want raw", rawSummary.RoleMode)
+	}
+	if len(rawExamples) != 1 || len(rawExamples[0].Negatives) != 1 || rawExamples[0].Negatives[0] != "a" {
+		t.Fatalf("raw examples = %+v, want raw negative a", rawExamples)
+	}
+}
+
+func TestMineModelTextHardNegativesRejectsQueryDocumentRoleModeForLegacyModel(t *testing.T) {
+	model := loadTinyRetrievalExportModel(t)
+	dir := t.TempDir()
+	datasetDir := writeTinyRetrievalExportDataset(t, dir)
+	corpusPath, queriesPath, qrelsPath := BEIRRetrievalPaths(datasetDir, "test")
+	_, _, err := MineModelTextHardNegatives(context.Background(), model, RetrievalHardNegativeMiningConfig{
+		CorpusPath:           corpusPath,
+		QueriesPath:          queriesPath,
+		QrelsPath:            qrelsPath,
+		NegativesPerPositive: 1,
+		CandidateTopK:        2,
+		RoleMode:             EmbeddingRoleModeQueryDocument,
+	})
+	if err == nil || !strings.Contains(err.Error(), "role-mode query-document requires a role-conditioned embedding model") {
+		t.Fatalf("err = %v, want query-document role-mode rejection", err)
+	}
+}
+
+func loadTinyRoleRetrievalMiningModel(t *testing.T) *EmbeddingModel {
+	t.Helper()
+	model, _ := loadTinyRoleRetrievalMiningModelWithArtifact(t)
+	return model
+}
+
+func loadTinyRoleRetrievalMiningModelWithArtifact(t *testing.T) (*EmbeddingModel, string) {
+	t.Helper()
+	bundle, err := compiler.Build([]byte(tinyRoleEmbeddingSource()), compiler.Options{ModuleName: "role_embed"})
+	if err != nil {
+		t.Fatalf("build role source: %v", err)
+	}
+	dir := t.TempDir()
+	artifactPath := filepath.Join(dir, "role_embed.mll")
+	if err := eosartifact.WriteFile(artifactPath, bundle.Artifact); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	if err := tinyRoleEmbeddingManifest().WriteFile(DefaultEmbeddingManifestPath(artifactPath)); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	weights := NewWeightFile(map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF16([]int{4, 2}, []float32{
+			0, 0,
+			1, 0,
+			0, 1,
+			1, 1,
+		}),
+		"role_embedding": backend.NewTensorF16([]int{3, 2}, []float32{
+			0, 0,
+			-1, 1,
+			0, 0,
+		}),
+		"projection": backend.NewTensorF16([]int{2, 2}, []float32{
+			1, 0,
+			0, 1,
+		}),
+	})
+	if err := weights.WriteFile(DefaultWeightFilePath(artifactPath)); err != nil {
+		t.Fatalf("write weights: %v", err)
+	}
+	tokenizer := TokenizerFile{
+		Version:      TokenizerFileVersion,
+		Tokens:       []string{"[PAD]", "a", "b", "c"},
+		UnknownToken: "[PAD]",
+	}
+	if err := tokenizer.WriteFile(DefaultTokenizerPath(artifactPath)); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	packageManifest, err := BuildPackageManifest(PackageEmbedding, bundle.Artifact, map[string]string{
+		"artifact":           artifactPath,
+		"embedding_manifest": DefaultEmbeddingManifestPath(artifactPath),
+		"weights":            DefaultWeightFilePath(artifactPath),
+		"tokenizer":          DefaultTokenizerPath(artifactPath),
+	})
+	if err != nil {
+		t.Fatalf("build package manifest: %v", err)
+	}
+	if err := packageManifest.WriteFile(DefaultPackageManifestPath(artifactPath)); err != nil {
+		t.Fatalf("write package manifest: %v", err)
+	}
+	rt := New(cuda.New(), metal.New())
+	model, err := rt.LoadEmbeddingPackage(context.Background(), artifactPath)
+	if err != nil {
+		t.Fatalf("load role package: %v", err)
+	}
+	return model, artifactPath
+}
+
+func writeRoleSensitiveMiningDataset(t *testing.T, dir string) (corpusPath, queriesPath, qrelsPath string) {
+	t.Helper()
+	qrelsDir := filepath.Join(dir, "qrels")
+	if err := os.MkdirAll(qrelsDir, 0o755); err != nil {
+		t.Fatalf("mkdir qrels: %v", err)
+	}
+	corpusPath = filepath.Join(dir, "corpus.jsonl")
+	queriesPath = filepath.Join(dir, "queries.jsonl")
+	qrelsPath = filepath.Join(qrelsDir, "train.tsv")
+	if err := os.WriteFile(corpusPath, []byte(
+		`{"_id":"d1","text":"c"}`+"\n"+
+			`{"_id":"d2","text":"a"}`+"\n"+
+			`{"_id":"d3","text":"b"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(queriesPath, []byte(`{"_id":"q1","text":"a"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(qrelsPath, []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	return corpusPath, queriesPath, qrelsPath
 }

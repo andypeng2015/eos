@@ -124,6 +124,99 @@ func TestRetrievalVectorExportWritesChildCachesAndManifest(t *testing.T) {
 	}
 }
 
+func TestRetrievalVectorExportNativeEmbeddingSpaceIdentity(t *testing.T) {
+	model, artifactPath := loadTinyRoleRetrievalMiningModelWithArtifact(t)
+	dir := t.TempDir()
+	corpusPath, queriesPath, qrelsPath := writeRoleSensitiveMiningDataset(t, dir)
+
+	export := func(name, roleMode string, outputDim int) RetrievalVectorExportSummary {
+		t.Helper()
+		summary, err := ExportEmbeddingRetrievalVectors(context.Background(), model, RetrievalVectorExportConfig{
+			DatasetName:      "tiny-role-export",
+			ArtifactPath:     artifactPath,
+			CorpusPath:       corpusPath,
+			QueriesPath:      queriesPath,
+			QrelsPath:        qrelsPath,
+			OutputDir:        filepath.Join(dir, name),
+			BatchSize:        2,
+			OutputDim:        outputDim,
+			RoleMode:         roleMode,
+			ManifestJSONPath: filepath.Join(dir, name+".manifest.json"),
+		})
+		if err != nil {
+			t.Fatalf("export %s: %v", name, err)
+		}
+		return summary
+	}
+
+	raw := export("raw", EmbeddingRoleModeRaw, 0)
+	role := export("role", EmbeddingRoleModeQueryDocument, 0)
+	compact := export("compact", EmbeddingRoleModeQueryDocument, 1)
+	if !isSHA256Hex(raw.ArtifactSHA256) || !isSHA256Hex(raw.WeightsSHA256) || !isSHA256Hex(raw.TokenizerSHA256) || !isSHA256Hex(raw.PackageManifestSHA256) || !isSHA256Hex(raw.PackageCacheKey) || !isSHA256Hex(raw.EmbeddingSpaceID) {
+		t.Fatalf("raw identity fields = artifact:%q weights:%q tokenizer:%q package_manifest:%q package_cache_key:%q space:%q",
+			raw.ArtifactSHA256, raw.WeightsSHA256, raw.TokenizerSHA256, raw.PackageManifestSHA256, raw.PackageCacheKey, raw.EmbeddingSpaceID)
+	}
+	if raw.ArtifactSHA256 != role.ArtifactSHA256 || role.ArtifactSHA256 != compact.ArtifactSHA256 {
+		t.Fatalf("artifact hashes differ across same artifact: raw=%q role=%q compact=%q", raw.ArtifactSHA256, role.ArtifactSHA256, compact.ArtifactSHA256)
+	}
+	if raw.WeightsSHA256 != role.WeightsSHA256 || raw.TokenizerSHA256 != role.TokenizerSHA256 || raw.PackageCacheKey != role.PackageCacheKey {
+		t.Fatalf("sidecar identity fields differ across same package: raw=%+v role=%+v", raw, role)
+	}
+	if raw.EmbeddingSpaceID == role.EmbeddingSpaceID {
+		t.Fatalf("raw and query-document embedding_space_id matched: %q", raw.EmbeddingSpaceID)
+	}
+	if role.EmbeddingSpaceID == compact.EmbeddingSpaceID {
+		t.Fatalf("full and compact embedding_space_id matched: %q", role.EmbeddingSpaceID)
+	}
+	if raw.RoleMode != EmbeddingRoleModeRaw || role.RoleMode != EmbeddingRoleModeQueryDocument || compact.OutputDimension != 1 {
+		t.Fatalf("summaries raw=%+v role=%+v compact=%+v", raw, role, compact)
+	}
+
+	var manifest RetrievalVectorExportSummary
+	data, err := os.ReadFile(filepath.Join(dir, "role.manifest.json"))
+	if err != nil {
+		t.Fatalf("read role manifest: %v", err)
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("decode role manifest: %v", err)
+	}
+	if manifest.EmbeddingSpaceID != role.EmbeddingSpaceID || manifest.ArtifactSHA256 != role.ArtifactSHA256 {
+		t.Fatalf("manifest identity = %+v, summary = %+v", manifest, role)
+	}
+
+	originalArtifactSHA := role.ArtifactSHA256
+	mutatedWeights := NewWeightFile(map[string]*backend.Tensor{
+		"token_embedding": backend.NewTensorF16([]int{4, 2}, []float32{
+			0, 0,
+			1, 0,
+			0, 1,
+			2, 1,
+		}),
+		"role_embedding": backend.NewTensorF16([]int{3, 2}, []float32{
+			0, 0,
+			-1, 1,
+			0, 0,
+		}),
+		"projection": backend.NewTensorF16([]int{2, 2}, []float32{
+			1, 0,
+			0, 1,
+		}),
+	})
+	if err := mutatedWeights.WriteFile(DefaultWeightFilePath(artifactPath)); err != nil {
+		t.Fatalf("mutate weights sidecar: %v", err)
+	}
+	mutated := export("mutated-weights", EmbeddingRoleModeQueryDocument, 0)
+	if mutated.ArtifactSHA256 != originalArtifactSHA {
+		t.Fatalf("artifact hash changed after weights-only mutation: before=%q after=%q", originalArtifactSHA, mutated.ArtifactSHA256)
+	}
+	if mutated.WeightsSHA256 == role.WeightsSHA256 {
+		t.Fatalf("weights hash did not change after weights-only mutation: %q", mutated.WeightsSHA256)
+	}
+	if mutated.EmbeddingSpaceID == role.EmbeddingSpaceID {
+		t.Fatalf("embedding_space_id did not change after weights-only mutation: %q", mutated.EmbeddingSpaceID)
+	}
+}
+
 func TestRetrievalVectorExportRejectsInvalidOutputDim(t *testing.T) {
 	_, err := ExportEmbeddingRetrievalVectors(context.Background(), loadTinyRetrievalExportModel(t), RetrievalVectorExportConfig{
 		CorpusPath:  "corpus.jsonl",

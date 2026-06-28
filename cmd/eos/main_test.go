@@ -2961,9 +2961,10 @@ func TestRunMineRetrievalModelHardNegativesWritesTextJSONL(t *testing.T) {
 	}
 	outputPath := filepath.Join(dir, "model-hard-negatives.jsonl")
 
-	output := captureRunOutput(t, []string{"mine-retrieval-model-hard-negatives", "--dataset", "tiny", "--negatives", "1", "--candidate-top-k", "2", "--batch-size", "2", sealedPath, datasetDir, outputPath})
+	output := captureRunOutput(t, []string{"mine-retrieval-model-hard-negatives", "--dataset", "tiny", "--negatives", "1", "--candidate-top-k", "2", "--batch-size", "2", "--role-mode", "raw", sealedPath, datasetDir, outputPath})
 	for _, want := range []string{
 		"mined model retrieval hard negatives: dataset=tiny",
+		"role_mode=raw",
 		"examples=1 positives=1 negatives=1 queries=1",
 		"output: " + outputPath,
 	} {

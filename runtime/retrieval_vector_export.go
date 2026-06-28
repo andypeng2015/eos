@@ -3,6 +3,8 @@ package eosruntime
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -40,6 +42,12 @@ type RetrievalVectorExportSummary struct {
 	Schema                string    `json:"schema"`
 	Dataset               string    `json:"dataset"`
 	Artifact              string    `json:"artifact,omitempty"`
+	ArtifactSHA256        string    `json:"artifact_sha256,omitempty"`
+	WeightsSHA256         string    `json:"weights_sha256,omitempty"`
+	TokenizerSHA256       string    `json:"tokenizer_sha256,omitempty"`
+	PackageManifestSHA256 string    `json:"package_manifest_sha256,omitempty"`
+	PackageCacheKey       string    `json:"package_cache_key,omitempty"`
+	EmbeddingSpaceID      string    `json:"embedding_space_id,omitempty"`
 	Backend               string    `json:"backend,omitempty"`
 	Documents             int       `json:"documents"`
 	Queries               int       `json:"queries"`
@@ -156,11 +164,23 @@ func ExportEmbeddingRetrievalVectors(ctx context.Context, model *EmbeddingModel,
 	if modelDim != queryModelDim {
 		return RetrievalVectorExportSummary{}, fmt.Errorf("document vectors have encoded dimension %d but query vectors have encoded dimension %d", modelDim, queryModelDim)
 	}
+	documentRoleApplied := cfg.DocumentPrefix != "" || effectiveRoleMode == EmbeddingRoleModeQueryDocument
+	queryRoleApplied := cfg.QueryPrefix != "" || effectiveRoleMode == EmbeddingRoleModeQueryDocument
+	identity, err := buildNativeRetrievalEmbeddingSpaceIdentity(model, cfg, dim, modelDim, effectiveRoleMode, documentRoleApplied, queryRoleApplied)
+	if err != nil {
+		return RetrievalVectorExportSummary{}, err
+	}
 
 	summary := RetrievalVectorExportSummary{
 		Schema:                RetrievalVectorExportManifestSchema,
 		Dataset:               cfg.DatasetName,
 		Artifact:              cfg.ArtifactPath,
+		ArtifactSHA256:        identity.ArtifactSHA256,
+		WeightsSHA256:         identity.WeightsSHA256,
+		TokenizerSHA256:       identity.TokenizerSHA256,
+		PackageManifestSHA256: identity.PackageManifestSHA256,
+		PackageCacheKey:       identity.PackageCacheKey,
+		EmbeddingSpaceID:      identity.EmbeddingSpaceID,
 		Backend:               string(model.Backend()),
 		Documents:             len(corpus),
 		Queries:               len(queries),
@@ -171,8 +191,8 @@ func ExportEmbeddingRetrievalVectors(ctx context.Context, model *EmbeddingModel,
 		DocVectorPath:         docVectorPath,
 		ChildDocVectorPath:    childDocVectorPath,
 		QueryVectorPath:       queryVectorPath,
-		DocumentRoleApplied:   cfg.DocumentPrefix != "" || effectiveRoleMode == EmbeddingRoleModeQueryDocument,
-		QueryRoleApplied:      cfg.QueryPrefix != "" || effectiveRoleMode == EmbeddingRoleModeQueryDocument,
+		DocumentRoleApplied:   documentRoleApplied,
+		QueryRoleApplied:      queryRoleApplied,
 		RoleMode:              effectiveRoleMode,
 		DocumentChunkWords:    cfg.DocumentChunkWords,
 		DocumentChunkOverlap:  cfg.DocumentChunkOverlap,
@@ -221,6 +241,98 @@ func normalizeRetrievalVectorExportConfig(cfg RetrievalVectorExportConfig) Retri
 		cfg.RoleMode = EmbeddingRoleModeAuto
 	}
 	return cfg
+}
+
+type nativeRetrievalEmbeddingSpaceIdentity struct {
+	EmbeddingSpaceID      string `json:"-"`
+	Schema                string `json:"schema"`
+	ExecutionMode         string `json:"execution_mode"`
+	ArtifactSHA256        string `json:"artifact_sha256,omitempty"`
+	WeightsSHA256         string `json:"weights_sha256,omitempty"`
+	TokenizerSHA256       string `json:"tokenizer_sha256,omitempty"`
+	PackageManifestSHA256 string `json:"package_manifest_sha256,omitempty"`
+	PackageCacheKey       string `json:"package_cache_key,omitempty"`
+	ModelName             string `json:"model_name,omitempty"`
+	ArchitectureVersion   string `json:"architecture_version,omitempty"`
+	ManifestModelDim      int    `json:"manifest_model_dim,omitempty"`
+	ManifestOutputDim     int    `json:"manifest_output_dim,omitempty"`
+	NativeDim             int    `json:"native_dim"`
+	RequestedOutputDim    int    `json:"requested_output_dim,omitempty"`
+	EffectiveOutputDim    int    `json:"effective_output_dim"`
+	TokenizerVocabSize    int    `json:"tokenizer_vocab_size,omitempty"`
+	TokenizerMaxSequence  int    `json:"tokenizer_max_sequence,omitempty"`
+	RoleConditioning      string `json:"role_conditioning,omitempty"`
+	RawRoleIndex          int32  `json:"raw_role_index,omitempty"`
+	QueryRoleIndex        int32  `json:"query_role_index,omitempty"`
+	DocumentRoleIndex     int32  `json:"document_role_index,omitempty"`
+	RoleMode              string `json:"role_mode"`
+	DocumentRoleApplied   bool   `json:"document_role_applied"`
+	QueryRoleApplied      bool   `json:"query_role_applied"`
+	DocumentPrefix        string `json:"document_prefix"`
+	QueryPrefix           string `json:"query_prefix"`
+	DocumentChunkWords    int    `json:"document_chunk_words,omitempty"`
+	DocumentChunkOverlap  int    `json:"document_chunk_overlap,omitempty"`
+	DocumentChunkMinWords int    `json:"document_chunk_min_words,omitempty"`
+}
+
+func buildNativeRetrievalEmbeddingSpaceIdentity(model *EmbeddingModel, cfg RetrievalVectorExportConfig, effectiveOutputDim, nativeDim int, effectiveRoleMode string, documentRoleApplied, queryRoleApplied bool) (nativeRetrievalEmbeddingSpaceIdentity, error) {
+	manifest := model.Manifest().normalized()
+	identity := nativeRetrievalEmbeddingSpaceIdentity{
+		Schema:                RetrievalVectorExportManifestSchema,
+		ExecutionMode:         "native_eos_embedding",
+		ModelName:             manifest.Name,
+		ArchitectureVersion:   manifest.ArchitectureVersion,
+		ManifestModelDim:      manifest.ModelDim,
+		ManifestOutputDim:     manifest.OutputDim,
+		NativeDim:             nativeDim,
+		RequestedOutputDim:    cfg.OutputDim,
+		EffectiveOutputDim:    effectiveOutputDim,
+		TokenizerVocabSize:    manifest.Tokenizer.VocabSize,
+		TokenizerMaxSequence:  manifest.Tokenizer.MaxSequence,
+		RoleConditioning:      manifest.RoleConditioning,
+		RawRoleIndex:          manifest.RawRoleIndex,
+		QueryRoleIndex:        manifest.QueryRoleIndex,
+		DocumentRoleIndex:     manifest.DocumentRoleIndex,
+		RoleMode:              effectiveRoleMode,
+		DocumentRoleApplied:   documentRoleApplied,
+		QueryRoleApplied:      queryRoleApplied,
+		DocumentPrefix:        cfg.DocumentPrefix,
+		QueryPrefix:           cfg.QueryPrefix,
+		DocumentChunkWords:    cfg.DocumentChunkWords,
+		DocumentChunkOverlap:  cfg.DocumentChunkOverlap,
+		DocumentChunkMinWords: cfg.DocumentChunkMinWords,
+	}
+	if cfg.ArtifactPath != "" {
+		sum, err := optionalSHA256FileHex(cfg.ArtifactPath)
+		if err != nil {
+			return nativeRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("hash artifact: %w", err)
+		}
+		identity.ArtifactSHA256 = sum
+		if identity.WeightsSHA256, err = optionalSHA256FileHex(DefaultWeightFilePath(cfg.ArtifactPath)); err != nil {
+			return nativeRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("hash weights: %w", err)
+		}
+		if identity.TokenizerSHA256, err = optionalSHA256FileHex(DefaultTokenizerPath(cfg.ArtifactPath)); err != nil {
+			return nativeRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("hash tokenizer: %w", err)
+		}
+		packageManifestPath := ResolvePackageManifestPath(cfg.ArtifactPath)
+		if identity.PackageManifestSHA256, err = optionalSHA256FileHex(packageManifestPath); err != nil {
+			return nativeRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("hash package manifest: %w", err)
+		}
+		if identity.PackageManifestSHA256 != "" {
+			packageManifest, err := ReadPackageManifestFile(packageManifestPath)
+			if err != nil {
+				return nativeRetrievalEmbeddingSpaceIdentity{}, fmt.Errorf("read package manifest: %w", err)
+			}
+			identity.PackageCacheKey = packageManifest.CacheKey()
+		}
+	}
+	data, err := json.Marshal(identity)
+	if err != nil {
+		return nativeRetrievalEmbeddingSpaceIdentity{}, err
+	}
+	sum := sha256.Sum256(data)
+	identity.EmbeddingSpaceID = hex.EncodeToString(sum[:])
+	return identity, nil
 }
 
 func validateRetrievalVectorChunkConfig(cfg RetrievalVectorExportConfig) error {

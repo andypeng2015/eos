@@ -20,10 +20,12 @@ type RetrievalHardNegativeMiningConfig struct {
 	MaxExamples          int
 	MaxDocs              int
 	MaxQueries           int
+	RoleMode             string
 }
 
 type RetrievalHardNegativeMiningSummary struct {
 	DatasetName                           string
+	RoleMode                              string `json:"role_mode,omitempty"`
 	Queries                               int
 	PositivePairs                         int
 	Examples                              int
@@ -89,6 +91,7 @@ func MineBM25TextHardNegatives(ctx context.Context, cfg RetrievalHardNegativeMin
 	}
 	summary := RetrievalHardNegativeMiningSummary{
 		DatasetName:          cfg.DatasetName,
+		RoleMode:             cfg.RoleMode,
 		Queries:              len(queries),
 		SkippedQueriesNoText: skippedQueries,
 	}
@@ -175,11 +178,15 @@ func MineModelTextHardNegatives(ctx context.Context, model *EmbeddingModel, cfg 
 	if len(queries) == 0 {
 		return nil, RetrievalHardNegativeMiningSummary{}, fmt.Errorf("no qrels queries found in queries file")
 	}
-	docVectors, err := embedRetrievalTexts(ctx, model, corpus, cfg.BatchSize, EmbeddingRoleRaw)
+	docRole, queryRole, effectiveRoleMode, err := resolveEmbeddingRetrievalRoles(model, cfg.RoleMode)
+	if err != nil {
+		return nil, RetrievalHardNegativeMiningSummary{}, err
+	}
+	docVectors, err := embedRetrievalTexts(ctx, model, corpus, cfg.BatchSize, docRole)
 	if err != nil {
 		return nil, RetrievalHardNegativeMiningSummary{}, fmt.Errorf("embed corpus: %w", err)
 	}
-	queryVectors, err := embedRetrievalTexts(ctx, model, queries, cfg.BatchSize, EmbeddingRoleRaw)
+	queryVectors, err := embedRetrievalTexts(ctx, model, queries, cfg.BatchSize, queryRole)
 	if err != nil {
 		return nil, RetrievalHardNegativeMiningSummary{}, fmt.Errorf("embed queries: %w", err)
 	}
@@ -197,6 +204,7 @@ func MineModelTextHardNegatives(ctx context.Context, model *EmbeddingModel, cfg 
 	}
 	summary := RetrievalHardNegativeMiningSummary{
 		DatasetName:          cfg.DatasetName,
+		RoleMode:             effectiveRoleMode,
 		Queries:              len(queries),
 		SkippedQueriesNoText: skippedQueries,
 	}
@@ -272,6 +280,9 @@ func normalizeRetrievalHardNegativeMiningConfig(cfg RetrievalHardNegativeMiningC
 	}
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = 64
+	}
+	if cfg.RoleMode == "" {
+		cfg.RoleMode = EmbeddingRoleModeAuto
 	}
 	return cfg
 }

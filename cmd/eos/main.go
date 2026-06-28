@@ -2644,6 +2644,7 @@ func runMineRetrievalModelHardNegatives(args []string) error {
 	maxExamples := fs.Int("max-examples", 0, "limit mined hard-negative examples")
 	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks")
 	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
+	roleMode := fs.String("role-mode", eosruntime.EmbeddingRoleModeAuto, "embedding role mode: auto, raw, or query-document")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2688,6 +2689,7 @@ func runMineRetrievalModelHardNegatives(args []string) error {
 		MaxExamples:          *maxExamples,
 		MaxDocs:              *maxDocs,
 		MaxQueries:           *maxQueries,
+		RoleMode:             *roleMode,
 	})
 	if err != nil {
 		return err
@@ -2695,8 +2697,8 @@ func runMineRetrievalModelHardNegatives(args []string) error {
 	if err := eosruntime.WriteEmbeddingTextHardNegativeExamplesFile(outputPath, examples); err != nil {
 		return err
 	}
-	fmt.Printf("mined model retrieval hard negatives: dataset=%s backend=%s examples=%d positives=%d negatives=%d queries=%d\n",
-		summary.DatasetName, model.Backend(), summary.Examples, summary.PositivePairs, summary.Negatives, summary.Queries)
+	fmt.Printf("mined model retrieval hard negatives: dataset=%s backend=%s role_mode=%s examples=%d positives=%d negatives=%d queries=%d\n",
+		summary.DatasetName, model.Backend(), summary.RoleMode, summary.Examples, summary.PositivePairs, summary.Negatives, summary.Queries)
 	fmt.Printf("skipped: queries_without_text=%d positives_without_text=%d queries_without_negatives=%d duplicate_positive_text_negatives=%d\n",
 		summary.SkippedQueriesNoText, summary.SkippedPositiveDocs, summary.SkippedQueriesNoNegative, summary.DuplicatePositiveTextNegativesSkipped)
 	fmt.Printf("output: %s\n", outputPath)
