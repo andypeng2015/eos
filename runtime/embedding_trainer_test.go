@@ -2176,6 +2176,78 @@ func TestCompactEmbeddingTrainerMaskAndTokenOrderSensitivity(t *testing.T) {
 	}
 }
 
+func TestCompactEmbeddingTrainerMultiHeadAttentionDiffersFromFusedHeadAndGradientsFinite(t *testing.T) {
+	trainer := newCompactEmbeddingTrainerForTest(t, 4)
+	if trainer.manifest.AttentionHeads != 2 || trainer.manifest.HeadDim != 2 {
+		t.Fatalf("compact fixture attention layout = heads %d head_dim %d, want 2/2", trainer.manifest.AttentionHeads, trainer.manifest.HeadDim)
+	}
+	forward := trainer.prepareCompactForwardWeights()
+	if forward == nil || len(forward.layers) == 0 {
+		t.Fatal("missing compact forward layer")
+	}
+	tokens := []int32{1, 2, 3}
+	mask, err := trainer.prepareMask(tokens, nil)
+	if err != nil {
+		t.Fatalf("prepare mask: %v", err)
+	}
+	input, err := embeddingInputForTokens(forward.token, tokens)
+	if err != nil {
+		t.Fatalf("embedding input: %v", err)
+	}
+	if err := addRoleEmbeddingToInput(input, forward.role, trainer.rawRoleIndex(), len(tokens)); err != nil {
+		t.Fatalf("role input: %v", err)
+	}
+	if err := applyEmbeddingPositionEncoding(input, len(tokens), forward.token.Shape[1], trainer.manifest.PositionEncoding); err != nil {
+		t.Fatalf("position encoding: %v", err)
+	}
+	multi, err := trainer.encodeCompactLayer(tokens, mask, append([]float32(nil), input...), forward.layers[0])
+	if err != nil {
+		t.Fatalf("encode multi-head compact layer: %v", err)
+	}
+	fusedLayer := forward.layers[0]
+	fusedLayer.attentionHeads = 1
+	fusedLayer.headDim = trainer.manifest.ModelDim
+	fused, err := trainer.encodeCompactLayer(tokens, mask, append([]float32(nil), input...), fusedLayer)
+	if err != nil {
+		t.Fatalf("encode fused-head compact layer: %v", err)
+	}
+	if len(multi.attnScores) != trainer.manifest.AttentionHeads*len(tokens)*len(tokens) {
+		t.Fatalf("multi-head score len = %d, want heads*T*T", len(multi.attnScores))
+	}
+	if float32SlicesClose(multi.attnMixed, fused.attnMixed, 1e-6) {
+		t.Fatalf("two-head attention mixed output matched fused-head output: %v", multi.attnMixed)
+	}
+
+	batch := compactFiniteDiffPairBatch()
+	metrics, grads := compactPairBatchAnalyticGradForTest(t, trainer, batch)
+	if !compactTestFinite(metrics.Loss) || metrics.BatchSize != len(batch) {
+		t.Fatalf("compact multi-head analytic metrics = %+v, want finite batch metrics", metrics)
+	}
+	gradStats := aggregateScaledGradientStats(1, compactEmbeddingGradSlices(grads)...)
+	if !compactTestFinite(gradStats.L2Norm) || gradStats.L2Norm <= 0 || gradStats.NonzeroCount <= 0 {
+		t.Fatalf("compact multi-head gradient stats = %+v, want finite non-zero gradients", gradStats)
+	}
+	for sliceIndex, grad := range compactEmbeddingGradSlices(grads) {
+		for valueIndex, value := range grad {
+			if !compactTestFinite(value) {
+				t.Fatalf("compact multi-head grad[%d][%d] = %v, want finite", sliceIndex, valueIndex, value)
+			}
+		}
+	}
+	snapshots := snapshotCompactTrainStateTensors(trainer.compactState)
+	trainMetrics, err := trainer.TrainStep(batch)
+	if err != nil {
+		t.Fatalf("compact multi-head TrainStep: %v", err)
+	}
+	if !compactTestFinite(trainMetrics.Loss) || !compactTestFinite(trainMetrics.AverageScore) {
+		t.Fatalf("compact multi-head train metrics = %+v, want finite", trainMetrics)
+	}
+	delta := aggregateParameterDeltaStats(snapshots)
+	if !compactTestFinite(delta.L2Norm) || delta.L2Norm <= 0 || delta.NonzeroCount <= 0 {
+		t.Fatalf("compact multi-head parameter delta = %+v, want finite non-zero update", delta)
+	}
+}
+
 func TestCompactEmbeddingTrainerFiniteDifferenceOutputProjectionAndAttentionGradients(t *testing.T) {
 	trainer := newCompactEmbeddingTrainerForTest(t, 3)
 	batch := compactFiniteDiffPairBatch()

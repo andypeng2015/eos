@@ -330,12 +330,14 @@ type embeddingForwardWeights struct {
 }
 
 type compactEmbeddingForwardLayer struct {
-	attnQ   *backend.Tensor
-	attnK   *backend.Tensor
-	attnV   *backend.Tensor
-	attnO   *backend.Tensor
-	ffnUp   *backend.Tensor
-	ffnDown *backend.Tensor
+	attnQ          *backend.Tensor
+	attnK          *backend.Tensor
+	attnV          *backend.Tensor
+	attnO          *backend.Tensor
+	ffnUp          *backend.Tensor
+	ffnDown        *backend.Tensor
+	attentionHeads int
+	headDim        int
 }
 
 type compactEmbeddingForwardWeights struct {
@@ -3105,6 +3107,13 @@ func backpropCompactLayer(state *embeddingSequenceState, gradProjected []float32
 	if d <= 0 || h <= 0 || len(gradProjected) != seqLen*d {
 		return make([]float32, len(state.input))
 	}
+	heads, headDim, ok := compactLayerAttentionLayout(layer, d)
+	if !ok {
+		return make([]float32, len(state.input))
+	}
+	if len(state.attnScores) != heads*seqLen*seqLen {
+		return make([]float32, len(state.input))
+	}
 
 	gradFFNResidual := make([]float32, seqLen*d)
 	for row := 0; row < seqLen; row++ {
@@ -3155,21 +3164,48 @@ func backpropCompactLayer(state *embeddingSequenceState, gradProjected []float32
 	gradMixed := make([]float32, seqLen*d)
 	fillHostMatMulTranspose(gradAttnOutput, seqLen, d, forwardMatMulHostData(layer.attnO), d, d, false, true, gradMixed)
 
-	gradScores := make([]float32, seqLen*seqLen)
-	fillHostMatMulTranspose(gradMixed, seqLen, d, state.attnV, seqLen, d, false, true, gradScores)
-	gradPreSoftmax := make([]float32, seqLen*seqLen)
-	for row := 0; row < seqLen; row++ {
-		base := row * seqLen
-		backwardSoftmaxRow(gradPreSoftmax[base:base+seqLen], gradScores[base:base+seqLen], state.attnScores[base:base+seqLen])
-	}
-	scaleFloat32Slice(gradPreSoftmax, 1/float32(math.Sqrt(float64(d))))
-
 	gradV := make([]float32, seqLen*d)
-	fillHostMatMulTranspose(state.attnScores, seqLen, seqLen, gradMixed, seqLen, d, true, false, gradV)
 	gradQ := make([]float32, seqLen*d)
-	fillHostMatMulTranspose(gradPreSoftmax, seqLen, seqLen, state.attnK, seqLen, d, false, false, gradQ)
 	gradK := make([]float32, seqLen*d)
-	fillHostMatMulTranspose(gradPreSoftmax, seqLen, seqLen, state.attnQ, seqLen, d, true, false, gradK)
+	scale := float32(1 / math.Sqrt(float64(headDim)))
+	for head := 0; head < heads; head++ {
+		headOffset := head * headDim
+		scoreBase := head * seqLen * seqLen
+		probs := state.attnScores[scoreBase : scoreBase+seqLen*seqLen]
+		gradScores := make([]float32, seqLen*seqLen)
+		for query := 0; query < seqLen; query++ {
+			queryGradBase := query*d + headOffset
+			scoreRowBase := query * seqLen
+			for key := 0; key < seqLen; key++ {
+				keyValueBase := key*d + headOffset
+				sum := float32(0)
+				for col := 0; col < headDim; col++ {
+					sum += gradMixed[queryGradBase+col] * state.attnV[keyValueBase+col]
+				}
+				gradScores[scoreRowBase+key] = sum
+			}
+		}
+		gradPreSoftmax := make([]float32, seqLen*seqLen)
+		for row := 0; row < seqLen; row++ {
+			base := row * seqLen
+			backwardSoftmaxRow(gradPreSoftmax[base:base+seqLen], gradScores[base:base+seqLen], probs[base:base+seqLen])
+		}
+		scaleFloat32Slice(gradPreSoftmax, scale)
+		for query := 0; query < seqLen; query++ {
+			queryBase := query*d + headOffset
+			scoreRowBase := query * seqLen
+			for key := 0; key < seqLen; key++ {
+				keyBase := key*d + headOffset
+				prob := probs[scoreRowBase+key]
+				preGrad := gradPreSoftmax[scoreRowBase+key]
+				for col := 0; col < headDim; col++ {
+					gradV[keyBase+col] += prob * gradMixed[queryBase+col]
+					gradQ[queryBase+col] += preGrad * state.attnK[keyBase+col]
+					gradK[keyBase+col] += preGrad * state.attnQ[queryBase+col]
+				}
+			}
+		}
+	}
 
 	gradAttnQStep := make([]float32, d*d)
 	fillHostMatMulTranspose(state.input, seqLen, d, gradQ, seqLen, d, true, false, gradAttnQStep)
@@ -6496,12 +6532,14 @@ func (t *EmbeddingTrainer) prepareCompactForwardWeights() *compactEmbeddingForwa
 	}
 	for i, layer := range state.Layers {
 		forward.layers[i] = compactEmbeddingForwardLayer{
-			attnQ:   tensorAsMasterF32(layer.AttentionQuery.Tensor),
-			attnK:   tensorAsMasterF32(layer.AttentionKey.Tensor),
-			attnV:   tensorAsMasterF32(layer.AttentionValue.Tensor),
-			attnO:   tensorAsMasterF32(layer.AttentionOutput.Tensor),
-			ffnUp:   tensorAsMasterF32(layer.FFNUp.Tensor),
-			ffnDown: tensorAsMasterF32(layer.FFNDown.Tensor),
+			attnQ:          tensorAsMasterF32(layer.AttentionQuery.Tensor),
+			attnK:          tensorAsMasterF32(layer.AttentionKey.Tensor),
+			attnV:          tensorAsMasterF32(layer.AttentionValue.Tensor),
+			attnO:          tensorAsMasterF32(layer.AttentionOutput.Tensor),
+			ffnUp:          tensorAsMasterF32(layer.FFNUp.Tensor),
+			ffnDown:        tensorAsMasterF32(layer.FFNDown.Tensor),
+			attentionHeads: state.Manifest.AttentionHeads,
+			headDim:        state.Manifest.HeadDim,
 		}
 	}
 	if state.OutputProjection != nil {
@@ -6893,6 +6931,10 @@ func (t *EmbeddingTrainer) encodeCompactLayer(tokens, mask []int32, input []floa
 	if err := validateCompactForwardLayer(layer, d, h); err != nil {
 		return nil, err
 	}
+	heads, headDim, err := validateCompactLayerAttentionLayout(layer, d)
+	if err != nil {
+		return nil, err
+	}
 	state := &embeddingSequenceState{
 		tokens:       append([]int32(nil), tokens...),
 		mask:         append([]int32(nil), mask...),
@@ -6901,7 +6943,7 @@ func (t *EmbeddingTrainer) encodeCompactLayer(tokens, mask []int32, input []floa
 		attnQ:        make([]float32, len(tokens)*d),
 		attnK:        make([]float32, len(tokens)*d),
 		attnV:        make([]float32, len(tokens)*d),
-		attnScores:   make([]float32, len(tokens)*len(tokens)),
+		attnScores:   make([]float32, heads*len(tokens)*len(tokens)),
 		attnMixed:    make([]float32, len(tokens)*d),
 		attnOutput:   make([]float32, len(tokens)*d),
 		attnResidual: make([]float32, len(tokens)*d),
@@ -6916,11 +6958,7 @@ func (t *EmbeddingTrainer) encodeCompactLayer(tokens, mask []int32, input []floa
 	fillHostMatMul(input, len(tokens), d, forwardMatMulHostData(layer.attnQ), d, state.attnQ)
 	fillHostMatMul(input, len(tokens), d, forwardMatMulHostData(layer.attnK), d, state.attnK)
 	fillHostMatMul(input, len(tokens), d, forwardMatMulHostData(layer.attnV), d, state.attnV)
-	kt := transpose2DData(state.attnK, len(tokens), d)
-	fillHostMatMul(state.attnQ, len(tokens), d, kt, len(tokens), state.attnScores)
-	scaleFloat32Slice(state.attnScores, 1/float32(math.Sqrt(float64(d))))
-	softmaxAttentionScoresInPlace(state.attnScores, len(tokens), mask, EmbeddingAttentionMaskModeKey)
-	fillHostMatMul(state.attnScores, len(tokens), len(tokens), state.attnV, d, state.attnMixed)
+	fillCompactMultiHeadAttention(state, len(tokens), d, heads, headDim, mask)
 	fillHostMatMul(state.attnMixed, len(tokens), d, forwardMatMulHostData(layer.attnO), d, state.attnOutput)
 	for i := range state.attnOutput {
 		state.attnResidual[i] = state.attnOutput[i] + input[i]
@@ -6974,6 +7012,59 @@ func validateCompactForwardLayer(layer compactEmbeddingForwardLayer, d, h int) e
 		return fmt.Errorf("ffn_down shape %v, want [%d %d]", tensorShapeForError(layer.ffnDown), h, d)
 	}
 	return nil
+}
+
+func validateCompactLayerAttentionLayout(layer compactEmbeddingForwardLayer, modelDim int) (int, int, error) {
+	heads := layer.attentionHeads
+	if heads <= 0 {
+		heads = 1
+	}
+	headDim := layer.headDim
+	if headDim <= 0 && modelDim%heads == 0 {
+		headDim = modelDim / heads
+	}
+	if heads <= 0 || headDim <= 0 || heads*headDim != modelDim {
+		return 0, 0, fmt.Errorf("attention_heads=%d head_dim=%d do not match model_dim=%d", heads, headDim, modelDim)
+	}
+	return heads, headDim, nil
+}
+
+func compactLayerAttentionLayout(layer compactEmbeddingForwardLayer, modelDim int) (int, int, bool) {
+	heads, headDim, err := validateCompactLayerAttentionLayout(layer, modelDim)
+	return heads, headDim, err == nil
+}
+
+func fillCompactMultiHeadAttention(state *embeddingSequenceState, seqLen, modelDim, heads, headDim int, mask []int32) {
+	scale := float32(1 / math.Sqrt(float64(headDim)))
+	for head := 0; head < heads; head++ {
+		headOffset := head * headDim
+		scoreBase := head * seqLen * seqLen
+		scores := state.attnScores[scoreBase : scoreBase+seqLen*seqLen]
+		for query := 0; query < seqLen; query++ {
+			queryBase := query*modelDim + headOffset
+			scoreRowBase := query * seqLen
+			for key := 0; key < seqLen; key++ {
+				keyBase := key*modelDim + headOffset
+				sum := float32(0)
+				for col := 0; col < headDim; col++ {
+					sum += state.attnQ[queryBase+col] * state.attnK[keyBase+col]
+				}
+				scores[scoreRowBase+key] = sum * scale
+			}
+		}
+		softmaxAttentionScoresInPlace(scores, seqLen, mask, EmbeddingAttentionMaskModeKey)
+		for query := 0; query < seqLen; query++ {
+			queryMixedBase := query*modelDim + headOffset
+			scoreRowBase := query * seqLen
+			for col := 0; col < headDim; col++ {
+				sum := float32(0)
+				for key := 0; key < seqLen; key++ {
+					sum += scores[scoreRowBase+key] * state.attnV[key*modelDim+headOffset+col]
+				}
+				state.attnMixed[queryMixedBase+col] = sum
+			}
+		}
+	}
 }
 
 func tensorShapeForError(t *backend.Tensor) []int {
