@@ -233,6 +233,8 @@ type EmbeddingTrainer struct {
 	sequenceBindingID      int
 	momentsDirty           bool
 	forwardCache           *embeddingForwardWeights
+	compactState           *CompactEmbeddingTrainState
+	compactForwardCache    *compactEmbeddingForwardWeights
 	boundForward           embeddingForwardWeights
 	forwardDirty           bool
 	forwardNeedsBind       bool
@@ -315,14 +317,31 @@ func (s *embeddingEncodedSequence) finalLayer() *embeddingSequenceState {
 }
 
 type embeddingForwardWeights struct {
-	token  *backend.Tensor
-	role   *backend.Tensor
-	attnQ  *backend.Tensor
-	attnK  *backend.Tensor
-	attnV  *backend.Tensor
-	attnO  *backend.Tensor
-	hidden *backend.Tensor
-	proj   *backend.Tensor
+	token   *backend.Tensor
+	role    *backend.Tensor
+	attnQ   *backend.Tensor
+	attnK   *backend.Tensor
+	attnV   *backend.Tensor
+	attnO   *backend.Tensor
+	hidden  *backend.Tensor
+	proj    *backend.Tensor
+	compact *compactEmbeddingForwardWeights
+}
+
+type compactEmbeddingForwardLayer struct {
+	attnQ   *backend.Tensor
+	attnK   *backend.Tensor
+	attnV   *backend.Tensor
+	attnO   *backend.Tensor
+	ffnUp   *backend.Tensor
+	ffnDown *backend.Tensor
+}
+
+type compactEmbeddingForwardWeights struct {
+	token            *backend.Tensor
+	role             *backend.Tensor
+	layers           []compactEmbeddingForwardLayer
+	outputProjection *backend.Tensor
 }
 
 type embeddingTrainerParams struct {
@@ -456,6 +475,43 @@ func NewEmbeddingTrainer(mod *eosartifact.Module, manifest EmbeddingManifest, we
 		contrastiveAccel:     contrastiveAccel,
 		contrastiveBackend:   contrastiveBackend,
 	}, nil
+}
+
+func newCompactEmbeddingTrainerFromTrainState(mod *eosartifact.Module, state *CompactEmbeddingTrainState) (*EmbeddingTrainer, error) {
+	if mod == nil {
+		return nil, fmt.Errorf("nil module")
+	}
+	if state == nil {
+		return nil, fmt.Errorf("compact train state is nil")
+	}
+	manifest := state.Manifest.normalizedForModule(mod)
+	if manifest.ArchitectureVersion != EmbeddingArchitectureCompactTransformerV1 {
+		return nil, fmt.Errorf("compact trainer requires architecture_version=%q", EmbeddingArchitectureCompactTransformerV1)
+	}
+	cfg := state.Config
+	if cfg.Optimizer == "" {
+		cfg.Optimizer = "adamw"
+	}
+	if cfg.Temperature == 0 {
+		cfg.Temperature = 0.05
+	}
+	return &EmbeddingTrainer{
+		module:           mod,
+		manifest:         manifest,
+		config:           cfg,
+		step:             state.Step,
+		compactState:     state,
+		forwardDirty:     true,
+		forwardNeedsBind: true,
+	}, nil
+}
+
+func (t *EmbeddingTrainer) isCompactTrainer() bool {
+	return t != nil && t.compactState != nil
+}
+
+func compactTrainingUnsupportedError() error {
+	return fmt.Errorf("%s training updates are not supported yet", EmbeddingArchitectureCompactTransformerV1)
 }
 
 func resolveEmbeddingTrainerParams(mod *eosartifact.Module, manifest EmbeddingManifest) (embeddingTrainerParams, error) {
@@ -1036,6 +1092,9 @@ func (t *EmbeddingTrainer) EvaluatePairs(batch []EmbeddingPairExample) (Embeddin
 }
 
 func (t *EmbeddingTrainer) evaluatePairsBatchedForward(batch []EmbeddingPairExample, forward *embeddingForwardWeights, metrics *EmbeddingEvalMetrics, scores *[]embeddingEvalScore, rankScores *[]embeddingEvalRankScore) (bool, error) {
+	if t.isCompactTrainer() {
+		return false, nil
+	}
 	if t == nil || t.forwardMatMul == nil || forward == nil || metrics == nil || scores == nil || rankScores == nil || len(batch) == 0 || !batchedPairwiseEvalEnabled() {
 		return false, nil
 	}
@@ -1290,6 +1349,9 @@ func (t *EmbeddingTrainer) TrainContrastiveStep(batch []EmbeddingContrastiveExam
 	if t == nil {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("embedding trainer is not initialized")
 	}
+	if t.isCompactTrainer() {
+		return EmbeddingTrainMetrics{}, compactTrainingUnsupportedError()
+	}
 	if len(batch) < 2 {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("contrastive training batch needs at least 2 examples")
 	}
@@ -1398,6 +1460,9 @@ func (t *EmbeddingTrainer) TrainContrastiveStep(batch []EmbeddingContrastiveExam
 func (t *EmbeddingTrainer) TrainHardNegativeContrastiveStep(batch []EmbeddingHardNegativeExample) (EmbeddingTrainMetrics, error) {
 	if t == nil {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("embedding trainer is not initialized")
+	}
+	if t.isCompactTrainer() {
+		return EmbeddingTrainMetrics{}, compactTrainingUnsupportedError()
 	}
 	if len(batch) == 0 {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("hard-negative training batch is empty")
@@ -1607,6 +1672,9 @@ func (t *EmbeddingTrainer) TrainScoreSpectrumStep(batch []EmbeddingScoreSpectrum
 	if t == nil {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("embedding trainer is not initialized")
 	}
+	if t.isCompactTrainer() {
+		return EmbeddingTrainMetrics{}, compactTrainingUnsupportedError()
+	}
 	if len(batch) == 0 {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("score-spectrum training batch is empty")
 	}
@@ -1739,6 +1807,9 @@ func (t *EmbeddingTrainer) TrainListwiseGeometryStep(batch []EmbeddingTokenizedL
 func (t *EmbeddingTrainer) TrainListwiseGeometryStepWithDiagnostics(batch []EmbeddingTokenizedListwiseGeometryBatch, diagnostics bool) (EmbeddingTrainMetrics, error) {
 	if t == nil {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("embedding trainer is not initialized")
+	}
+	if t.isCompactTrainer() {
+		return EmbeddingTrainMetrics{}, compactTrainingUnsupportedError()
 	}
 	if len(batch) == 0 {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("listwise geometry training batch is empty")
@@ -2298,8 +2369,29 @@ func (t *EmbeddingTrainer) runBatch(batch []EmbeddingPairExample, update bool) (
 	if len(batch) == 0 {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("training batch is empty")
 	}
+	if t.isCompactTrainer() && update {
+		return EmbeddingTrainMetrics{}, compactTrainingUnsupportedError()
+	}
 	forward := t.prepareForwardWeights()
 	t.primeForwardWeightResidency(forward.attnQ, forward.attnK, forward.attnV, forward.attnO, forward.hidden, forward.proj)
+	if t.isCompactTrainer() {
+		totalLoss := float32(0)
+		totalScore := float32(0)
+		for i, example := range batch {
+			score, loss, err := t.scoreExamplePair(example, forward)
+			if err != nil {
+				return EmbeddingTrainMetrics{}, fmt.Errorf("batch %d: %w", i, err)
+			}
+			totalLoss += loss
+			totalScore += score
+		}
+		batchScale := float32(1) / float32(len(batch))
+		return EmbeddingTrainMetrics{
+			Loss:         totalLoss * batchScale,
+			AverageScore: totalScore * batchScale,
+			BatchSize:    len(batch),
+		}, nil
+	}
 	if metrics, ok, err := t.tryRunPairBatchBatched(batch, forward, update); ok || err != nil {
 		return metrics, err
 	}
@@ -2357,6 +2449,9 @@ func (t *EmbeddingTrainer) runBatch(batch []EmbeddingPairExample, update bool) (
 }
 
 func (t *EmbeddingTrainer) tryRunPairBatchBatched(batch []EmbeddingPairExample, forward *embeddingForwardWeights, update bool) (EmbeddingTrainMetrics, bool, error) {
+	if t.isCompactTrainer() {
+		return EmbeddingTrainMetrics{}, false, nil
+	}
 	if t == nil || forward == nil || len(batch) == 0 {
 		return EmbeddingTrainMetrics{}, false, nil
 	}
@@ -2594,6 +2689,9 @@ func (t *EmbeddingTrainer) encodeSequenceInputs(inputs []embeddingSequenceInput,
 }
 
 func (t *EmbeddingTrainer) tryEncodeSequenceInputsBatchedForward(inputs []embeddingSequenceInput, forward *embeddingForwardWeights, captureBindings bool) ([]*embeddingEncodedSequence, bool, error) {
+	if t.isCompactTrainer() {
+		return nil, false, nil
+	}
 	if t == nil || t.forwardMatMul == nil || forward == nil || len(inputs) == 0 || !batchedContrastiveForwardEnabled() {
 		return nil, false, nil
 	}
@@ -2632,6 +2730,9 @@ func embeddingSequenceInputLabel(input embeddingSequenceInput, index int) string
 }
 
 func (t *EmbeddingTrainer) tryEncodeContrastiveBatchBatchedForward(batch []EmbeddingContrastiveExample, forward *embeddingForwardWeights, captureBindings bool) ([]*embeddingEncodedSequence, []*embeddingEncodedSequence, bool, error) {
+	if t.isCompactTrainer() {
+		return nil, nil, false, nil
+	}
 	if t == nil || t.forwardMatMul == nil || forward == nil || len(batch) == 0 || !batchedContrastiveForwardEnabled() {
 		return nil, nil, false, nil
 	}
@@ -2674,6 +2775,9 @@ func (t *EmbeddingTrainer) tryEncodeContrastiveBatchBatchedForward(batch []Embed
 }
 
 func (t *EmbeddingTrainer) tryEncodePairBatchBatchedForward(batch []EmbeddingPairExample, forward *embeddingForwardWeights, captureBindings bool) ([]*embeddingEncodedSequence, []*embeddingEncodedSequence, bool, error) {
+	if t.isCompactTrainer() {
+		return nil, nil, false, nil
+	}
 	if t == nil || t.forwardMatMul == nil || forward == nil || len(batch) == 0 || !batchedContrastiveForwardEnabled() {
 		return nil, nil, false, nil
 	}
@@ -5522,6 +5626,9 @@ func (t *EmbeddingTrainer) prepareForwardWeights() *embeddingForwardWeights {
 	if t == nil {
 		return nil
 	}
+	if t.isCompactTrainer() {
+		return &embeddingForwardWeights{compact: t.prepareCompactForwardWeights()}
+	}
 	if t.forwardCache != nil && !t.forwardDirty {
 		return t.forwardCache
 	}
@@ -5546,6 +5653,39 @@ func (t *EmbeddingTrainer) invalidateForwardWeights() {
 	}
 	t.forwardDirty = true
 	t.forwardNeedsBind = true
+}
+
+func (t *EmbeddingTrainer) prepareCompactForwardWeights() *compactEmbeddingForwardWeights {
+	if t == nil || t.compactState == nil {
+		return nil
+	}
+	if t.compactForwardCache != nil && !t.forwardDirty {
+		return t.compactForwardCache
+	}
+	state := t.compactState
+	forward := &compactEmbeddingForwardWeights{
+		token:  tensorAsMasterF32(state.TokenEmbedding.Tensor),
+		layers: make([]compactEmbeddingForwardLayer, len(state.Layers)),
+	}
+	if state.RoleEmbedding != nil {
+		forward.role = tensorAsMasterF32(state.RoleEmbedding.Tensor)
+	}
+	for i, layer := range state.Layers {
+		forward.layers[i] = compactEmbeddingForwardLayer{
+			attnQ:   tensorAsMasterF32(layer.AttentionQuery.Tensor),
+			attnK:   tensorAsMasterF32(layer.AttentionKey.Tensor),
+			attnV:   tensorAsMasterF32(layer.AttentionValue.Tensor),
+			attnO:   tensorAsMasterF32(layer.AttentionOutput.Tensor),
+			ffnUp:   tensorAsMasterF32(layer.FFNUp.Tensor),
+			ffnDown: tensorAsMasterF32(layer.FFNDown.Tensor),
+		}
+	}
+	if state.OutputProjection != nil {
+		forward.outputProjection = tensorAsMasterF32(state.OutputProjection.Tensor)
+	}
+	t.compactForwardCache = forward
+	t.forwardDirty = false
+	return forward
 }
 
 func (t *EmbeddingTrainer) encodeExamplePair(example EmbeddingPairExample, tokenForward, roleForward, attnQForward, attnKForward, attnVForward, attnOForward, hiddenForward, projForward *backend.Tensor, captureBindings bool) (*embeddingEncodedSequence, *embeddingEncodedSequence, error) {
@@ -5634,6 +5774,9 @@ func (t *EmbeddingTrainer) validateTokenSequence(tokens []int32) error {
 }
 
 func (t *EmbeddingTrainer) encodeSequence(tokens, mask []int32, role int32, tokenEmbed, roleEmbed, attentionQuery, attentionKey, attentionValue, attentionOutput, hiddenProjection, projection *backend.Tensor, captureBindings bool) (*embeddingEncodedSequence, error) {
+	if t.isCompactTrainer() {
+		return t.encodeCompactSequence(tokens, mask, role, t.prepareCompactForwardWeights())
+	}
 	input, err := embeddingInputForTokens(tokenEmbed, tokens)
 	if err != nil {
 		return nil, err
@@ -5862,6 +6005,221 @@ func (t *EmbeddingTrainer) encodeLayer(tokens, mask []int32, input []float32, at
 		state.pooled[i] *= inv
 	}
 	return state, nil
+}
+
+func (t *EmbeddingTrainer) encodeCompactSequence(tokens, mask []int32, role int32, forward *compactEmbeddingForwardWeights) (*embeddingEncodedSequence, error) {
+	if forward == nil {
+		return nil, fmt.Errorf("missing compact forward weights")
+	}
+	if forward.token == nil || len(forward.token.Shape) != 2 {
+		return nil, fmt.Errorf("compact token embedding must be rank-2")
+	}
+	d := forward.token.Shape[1]
+	input, err := embeddingInputForTokens(forward.token, tokens)
+	if err != nil {
+		return nil, err
+	}
+	if err := addRoleEmbeddingToInput(input, forward.role, role, len(tokens)); err != nil {
+		return nil, err
+	}
+	if err := applyEmbeddingPositionEncoding(input, len(tokens), d, t.manifest.PositionEncoding); err != nil {
+		return nil, err
+	}
+	encoded := &embeddingEncodedSequence{
+		layers: make([]*embeddingSequenceState, 0, len(forward.layers)),
+		tokens: append([]int32(nil), tokens...),
+		role:   role,
+	}
+	current := input
+	for i, layer := range forward.layers {
+		state, err := t.encodeCompactLayer(tokens, mask, current, layer)
+		if err != nil {
+			return nil, fmt.Errorf("compact layer %d: %w", i, err)
+		}
+		encoded.layers = append(encoded.layers, state)
+		current = state.projected
+	}
+	if len(encoded.layers) == 0 {
+		return nil, fmt.Errorf("encoder produced zero layers")
+	}
+	outputRows, err := compactFinalOutputRows(current, len(tokens), d, forward.outputProjection)
+	if err != nil {
+		return nil, err
+	}
+	pooled, active, err := meanPoolRows(outputRows, len(tokens), compactOutputWidth(d, forward.outputProjection), mask)
+	if err != nil {
+		return nil, err
+	}
+	last := encoded.layers[len(encoded.layers)-1]
+	last.activeCount = active
+	last.pooled = append(last.pooled[:0], pooled...)
+	encoded.pooled = append([]float32(nil), pooled...)
+	return encoded, nil
+}
+
+func (t *EmbeddingTrainer) encodeCompactLayer(tokens, mask []int32, input []float32, layer compactEmbeddingForwardLayer) (*embeddingSequenceState, error) {
+	d := compactLayerModelDim(layer)
+	h := compactLayerFFNDim(layer)
+	if d <= 0 || h <= 0 {
+		return nil, fmt.Errorf("invalid compact layer dimensions")
+	}
+	if len(input) != len(tokens)*d {
+		return nil, fmt.Errorf("compact layer input size %d does not match tokens=%d width=%d", len(input), len(tokens), d)
+	}
+	if err := validateCompactForwardLayer(layer, d, h); err != nil {
+		return nil, err
+	}
+	state := &embeddingSequenceState{
+		tokens:       append([]int32(nil), tokens...),
+		mask:         append([]int32(nil), mask...),
+		input:        input,
+		hidden:       make([]float32, len(tokens)*d),
+		attnQ:        make([]float32, len(tokens)*d),
+		attnK:        make([]float32, len(tokens)*d),
+		attnV:        make([]float32, len(tokens)*d),
+		attnScores:   make([]float32, len(tokens)*len(tokens)),
+		attnMixed:    make([]float32, len(tokens)*d),
+		attnOutput:   make([]float32, len(tokens)*d),
+		attnResidual: make([]float32, len(tokens)*d),
+		ffnHidden:    make([]float32, len(tokens)*h),
+		activated:    make([]float32, len(tokens)*h),
+		ffnOutput:    make([]float32, len(tokens)*d),
+		ffnResidual:  make([]float32, len(tokens)*d),
+		projected:    make([]float32, len(tokens)*d),
+		normalized:   make([]float32, len(tokens)*d),
+		pooled:       make([]float32, d),
+	}
+	fillHostMatMul(input, len(tokens), d, forwardMatMulHostData(layer.attnQ), d, state.attnQ)
+	fillHostMatMul(input, len(tokens), d, forwardMatMulHostData(layer.attnK), d, state.attnK)
+	fillHostMatMul(input, len(tokens), d, forwardMatMulHostData(layer.attnV), d, state.attnV)
+	kt := transpose2DData(state.attnK, len(tokens), d)
+	fillHostMatMul(state.attnQ, len(tokens), d, kt, len(tokens), state.attnScores)
+	scaleFloat32Slice(state.attnScores, 1/float32(math.Sqrt(float64(d))))
+	softmaxAttentionScoresInPlace(state.attnScores, len(tokens), mask, EmbeddingAttentionMaskModeKey)
+	fillHostMatMul(state.attnScores, len(tokens), len(tokens), state.attnV, d, state.attnMixed)
+	fillHostMatMul(state.attnMixed, len(tokens), d, forwardMatMulHostData(layer.attnO), d, state.attnOutput)
+	for i := range state.attnOutput {
+		state.attnResidual[i] = state.attnOutput[i] + input[i]
+	}
+	for row := range tokens {
+		base := row * d
+		layerNormRow(state.hidden[base:base+d], state.attnResidual[base:base+d])
+	}
+	fillHostMatMul(state.hidden, len(tokens), d, forwardMatMulHostData(layer.ffnUp), h, state.ffnHidden)
+	fillGELUForward(state.activated, state.ffnHidden, fastGELUEnabled())
+	fillHostMatMul(state.activated, len(tokens), h, forwardMatMulHostData(layer.ffnDown), d, state.ffnOutput)
+	for i := range state.ffnOutput {
+		state.ffnResidual[i] = state.ffnOutput[i] + state.hidden[i]
+	}
+	for row := range tokens {
+		base := row * d
+		layerNormRow(state.projected[base:base+d], state.ffnResidual[base:base+d])
+	}
+	return state, nil
+}
+
+func compactLayerModelDim(layer compactEmbeddingForwardLayer) int {
+	if layer.attnQ != nil && len(layer.attnQ.Shape) == 2 {
+		return layer.attnQ.Shape[0]
+	}
+	return 0
+}
+
+func compactLayerFFNDim(layer compactEmbeddingForwardLayer) int {
+	if layer.ffnUp != nil && len(layer.ffnUp.Shape) == 2 {
+		return layer.ffnUp.Shape[1]
+	}
+	return 0
+}
+
+func validateCompactForwardLayer(layer compactEmbeddingForwardLayer, d, h int) error {
+	for name, tensor := range map[string]*backend.Tensor{
+		"attn_q": layer.attnQ,
+		"attn_k": layer.attnK,
+		"attn_v": layer.attnV,
+		"attn_o": layer.attnO,
+	} {
+		if tensor == nil || len(tensor.Shape) != 2 || tensor.Shape[0] != d || tensor.Shape[1] != d {
+			return fmt.Errorf("%s shape %v, want [%d %d]", name, tensorShapeForError(tensor), d, d)
+		}
+	}
+	if layer.ffnUp == nil || len(layer.ffnUp.Shape) != 2 || layer.ffnUp.Shape[0] != d || layer.ffnUp.Shape[1] != h {
+		return fmt.Errorf("ffn_up shape %v, want [%d %d]", tensorShapeForError(layer.ffnUp), d, h)
+	}
+	if layer.ffnDown == nil || len(layer.ffnDown.Shape) != 2 || layer.ffnDown.Shape[0] != h || layer.ffnDown.Shape[1] != d {
+		return fmt.Errorf("ffn_down shape %v, want [%d %d]", tensorShapeForError(layer.ffnDown), h, d)
+	}
+	return nil
+}
+
+func tensorShapeForError(t *backend.Tensor) []int {
+	if t == nil {
+		return nil
+	}
+	return t.Shape
+}
+
+func compactOutputWidth(modelDim int, outputProjection *backend.Tensor) int {
+	if outputProjection != nil && len(outputProjection.Shape) == 2 {
+		return outputProjection.Shape[1]
+	}
+	return modelDim
+}
+
+func compactFinalOutputRows(hidden []float32, rows, modelDim int, outputProjection *backend.Tensor) ([]float32, error) {
+	if len(hidden) != rows*modelDim {
+		return nil, fmt.Errorf("compact final hidden size %d does not match rows=%d width=%d", len(hidden), rows, modelDim)
+	}
+	normalized := make([]float32, len(hidden))
+	for row := 0; row < rows; row++ {
+		base := row * modelDim
+		norm := vectorNorm(hidden[base : base+modelDim])
+		if norm == 0 {
+			copy(normalized[base:base+modelDim], hidden[base:base+modelDim])
+		} else {
+			for col := 0; col < modelDim; col++ {
+				normalized[base+col] = hidden[base+col] / norm
+			}
+		}
+	}
+	if outputProjection == nil {
+		return normalized, nil
+	}
+	if len(outputProjection.Shape) != 2 || outputProjection.Shape[0] != modelDim {
+		return nil, fmt.Errorf("output_projection shape %v, want [%d O]", outputProjection.Shape, modelDim)
+	}
+	out := make([]float32, rows*outputProjection.Shape[1])
+	fillHostMatMul(normalized, rows, modelDim, forwardMatMulHostData(outputProjection), outputProjection.Shape[1], out)
+	return out, nil
+}
+
+func meanPoolRows(rowsData []float32, rows, width int, mask []int32) ([]float32, int, error) {
+	if len(rowsData) != rows*width {
+		return nil, 0, fmt.Errorf("pool rows size %d does not match rows=%d width=%d", len(rowsData), rows, width)
+	}
+	if len(mask) != rows {
+		return nil, 0, fmt.Errorf("mask length %d does not match token length %d", len(mask), rows)
+	}
+	pooled := make([]float32, width)
+	active := 0
+	for row := 0; row < rows; row++ {
+		if mask[row] == 0 {
+			continue
+		}
+		active++
+		base := row * width
+		for col := 0; col < width; col++ {
+			pooled[col] += rowsData[base+col]
+		}
+	}
+	if active == 0 {
+		return nil, 0, fmt.Errorf("sequence mask selects zero tokens")
+	}
+	inv := 1 / float32(active)
+	for i := range pooled {
+		pooled[i] *= inv
+	}
+	return pooled, active, nil
 }
 
 func embeddingInputForTokens(tokenEmbed *backend.Tensor, tokens []int32) ([]float32, error) {

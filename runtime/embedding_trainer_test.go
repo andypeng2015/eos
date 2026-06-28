@@ -1253,19 +1253,20 @@ func compactTrainStateTestCheckpoint(outputDim int) EmbeddingTrainCheckpoint {
 		manifest.OutputProjectionParam = "output_projection"
 	}
 	tensors := map[string]*backend.Tensor{
-		"token_embedding": backend.NewTensorF32([]int{5, 4}, make([]float32, 20)),
-		"role_embedding":  backend.NewTensorF32([]int{3, 4}, make([]float32, 12)),
+		"token_embedding": compactTrainStateTestTensor([]int{5, 4}, 0.03),
+		"role_embedding":  compactTrainStateTestTensor([]int{3, 4}, 0.01),
 	}
 	for i := 0; i < manifest.EncoderRepeats; i++ {
-		tensors[compactLayerTensorName(i, "attn_q")] = backend.NewTensorF32([]int{4, 4}, make([]float32, 16))
-		tensors[compactLayerTensorName(i, "attn_k")] = backend.NewTensorF32([]int{4, 4}, make([]float32, 16))
-		tensors[compactLayerTensorName(i, "attn_v")] = backend.NewTensorF32([]int{4, 4}, make([]float32, 16))
-		tensors[compactLayerTensorName(i, "attn_o")] = backend.NewTensorF32([]int{4, 4}, make([]float32, 16))
-		tensors[compactLayerTensorName(i, "ffn_up")] = backend.NewTensorF32([]int{4, 6}, make([]float32, 24))
-		tensors[compactLayerTensorName(i, "ffn_down")] = backend.NewTensorF32([]int{6, 4}, make([]float32, 24))
+		offset := float32(i+1) * 0.02
+		tensors[compactLayerTensorName(i, "attn_q")] = compactTrainStateTestTensor([]int{4, 4}, 0.04+offset)
+		tensors[compactLayerTensorName(i, "attn_k")] = compactTrainStateTestTensor([]int{4, 4}, 0.05+offset)
+		tensors[compactLayerTensorName(i, "attn_v")] = compactTrainStateTestTensor([]int{4, 4}, 0.06+offset)
+		tensors[compactLayerTensorName(i, "attn_o")] = compactTrainStateTestTensor([]int{4, 4}, 0.07+offset)
+		tensors[compactLayerTensorName(i, "ffn_up")] = compactTrainStateTestTensor([]int{4, 6}, 0.08+offset)
+		tensors[compactLayerTensorName(i, "ffn_down")] = compactTrainStateTestTensor([]int{6, 4}, 0.09+offset)
 	}
 	if manifest.OutputProjectionParam != "" {
-		tensors[manifest.OutputProjectionParam] = backend.NewTensorF32([]int{4, outputDim}, make([]float32, 4*outputDim))
+		tensors[manifest.OutputProjectionParam] = compactTrainStateTestTensor([]int{4, outputDim}, 0.11)
 	}
 	moments := make(map[string]*backend.Tensor, len(tensors)*2)
 	for name, tensor := range tensors {
@@ -1279,6 +1280,231 @@ func compactTrainStateTestCheckpoint(outputDim int) EmbeddingTrainCheckpoint {
 		Tensors:       tensors,
 		MomentTensors: moments,
 	}
+}
+
+func compactTrainStateTestTensor(shape []int, scale float32) *backend.Tensor {
+	n := 1
+	for _, dim := range shape {
+		n *= dim
+	}
+	data := make([]float32, n)
+	for i := range data {
+		sign := float32(1)
+		if i%2 == 1 {
+			sign = -1
+		}
+		data[i] = sign * scale * float32((i%7)+1)
+	}
+	return backend.NewTensorF32(shape, data)
+}
+
+func newCompactEmbeddingTrainerForTest(t *testing.T, outputDim int) *EmbeddingTrainer {
+	t.Helper()
+	checkpoint := compactTrainStateTestCheckpoint(outputDim)
+	state, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
+	if err != nil {
+		t.Fatalf("load compact state: %v", err)
+	}
+	trainer, err := newCompactEmbeddingTrainerFromTrainState(&eosartifact.Module{Name: "compact"}, state)
+	if err != nil {
+		t.Fatalf("new compact trainer: %v", err)
+	}
+	return trainer
+}
+
+func TestCompactEmbeddingTrainerEvaluatePairsAndRejectsTraining(t *testing.T) {
+	checkpoint := compactTrainStateTestCheckpoint(3)
+	state, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
+	if err != nil {
+		t.Fatalf("load compact state: %v", err)
+	}
+	trainer, err := newCompactEmbeddingTrainerFromTrainState(&eosartifact.Module{Name: "compact"}, state)
+	if err != nil {
+		t.Fatalf("new compact trainer: %v", err)
+	}
+	batch := []EmbeddingPairExample{
+		{LeftTokens: []int32{1, 2, 3}, RightTokens: []int32{1, 2, 3}, Target: 1},
+		{LeftTokens: []int32{1, 2, 3}, RightTokens: []int32{3, 2, 1}, Target: -1},
+	}
+	beforeStep := trainer.TrainProfile().Step
+	metrics, err := trainer.EvaluatePairs(batch)
+	if err != nil {
+		t.Fatalf("evaluate compact pairs: %v", err)
+	}
+	if !compactTestFinite(metrics.Loss) || !compactTestFinite(metrics.AverageScore) || metrics.PairCount != len(batch) {
+		t.Fatalf("compact eval metrics = %+v, want finite pair metrics", metrics)
+	}
+	if got := trainer.TrainProfile().Step; got != beforeStep {
+		t.Fatalf("compact eval step = %d, want unchanged %d", got, beforeStep)
+	}
+	if _, err := trainer.TrainStep(batch); err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 training updates are not supported yet") {
+		t.Fatalf("compact TrainStep error = %v, want explicit unsupported", err)
+	}
+	if got := trainer.TrainProfile().Step; got != beforeStep {
+		t.Fatalf("compact failed train step mutated step = %d, want %d", got, beforeStep)
+	}
+}
+
+func TestCompactEmbeddingTrainerEvaluatePairsSkipsLegacyBatchedForwardWithAccelerator(t *testing.T) {
+	t.Setenv("EOS_TRAIN_BATCHED_FORWARD", "1")
+	t.Setenv("EOS_TRAIN_BATCHED_PAIR_EVAL", "1")
+	t.Setenv("EOS_TRAIN_PAIR_EVAL_BATCH_SIZE", "8")
+	trainer := newCompactEmbeddingTrainerForTest(t, 3)
+	fake := &countingMatMulAccelerator{}
+	trainer.forwardMatMul = fake
+	trainer.forwardBackend = eosartifact.BackendCUDA
+	batch := []EmbeddingPairExample{
+		{LeftTokens: []int32{1, 2, 3}, RightTokens: []int32{1, 2, 3}, Target: 1},
+		{LeftTokens: []int32{1, 2, 3}, RightTokens: []int32{3, 2, 1}, Target: -1},
+	}
+	metrics, err := trainer.EvaluatePairs(batch)
+	if err != nil {
+		t.Fatalf("evaluate compact pairs with fake accelerator: %v", err)
+	}
+	if !compactTestFinite(metrics.Loss) || !compactTestFinite(metrics.AverageScore) || metrics.PairCount != len(batch) {
+		t.Fatalf("compact eval metrics = %+v, want finite pair metrics", metrics)
+	}
+	if fake.bindCalls != 0 || fake.runCalls != 0 || fake.boundRightRuns != 0 || fake.multiBoundRuns != 0 || fake.sharedLeftRuns != 0 || fake.accumulatedRuns != 0 {
+		t.Fatalf("compact eval used legacy batched accelerator path: %+v", fake)
+	}
+}
+
+func TestCompactEmbeddingTrainerEncodeSequenceInputsSkipsLegacyBatchedForwardWithAccelerator(t *testing.T) {
+	t.Setenv("EOS_TRAIN_BATCHED_FORWARD", "1")
+	trainer := newCompactEmbeddingTrainerForTest(t, 3)
+	fake := &countingMatMulAccelerator{}
+	trainer.forwardMatMul = fake
+	trainer.forwardBackend = eosartifact.BackendCUDA
+	forward := trainer.prepareForwardWeights()
+	seqs, err := trainer.encodeSequenceInputs([]embeddingSequenceInput{
+		{tokens: []int32{1, 2, 3}, role: trainer.queryRoleIndex(), label: "query"},
+		{tokens: []int32{3, 2, 1}, role: trainer.documentRoleIndex(), label: "doc"},
+	}, forward, false)
+	if err != nil {
+		t.Fatalf("encode compact sequence inputs with fake accelerator: %v", err)
+	}
+	defer trainer.releaseEncodedSequences(seqs)
+	if len(seqs) != 2 || len(seqs[0].pooled) != 3 || len(seqs[1].pooled) != 3 {
+		t.Fatalf("encoded compact sequences = %+v, want two pooled dim-3 sequences", seqs)
+	}
+	if fake.bindCalls != 0 || fake.runCalls != 0 || fake.boundRightRuns != 0 || fake.multiBoundRuns != 0 || fake.sharedLeftRuns != 0 || fake.accumulatedRuns != 0 {
+		t.Fatalf("compact encodeSequenceInputs used legacy batched accelerator path: %+v", fake)
+	}
+}
+
+func TestCompactEmbeddingTrainerFitEvalOnlyDoesNotTrain(t *testing.T) {
+	checkpoint := compactTrainStateTestCheckpoint(3)
+	state, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
+	if err != nil {
+		t.Fatalf("load compact state: %v", err)
+	}
+	trainer, err := newCompactEmbeddingTrainerFromTrainState(&eosartifact.Module{Name: "compact"}, state)
+	if err != nil {
+		t.Fatalf("new compact trainer: %v", err)
+	}
+	evalSet := []EmbeddingPairExample{
+		{LeftTokens: []int32{1, 2}, RightTokens: []int32{1, 2}, Target: 1},
+		{LeftTokens: []int32{1, 2}, RightTokens: []int32{2, 1}, Target: -1},
+	}
+	summary, err := trainer.Fit(nil, evalSet, EmbeddingTrainRunConfig{EvalOnly: true})
+	if err != nil {
+		t.Fatalf("compact eval-only fit: %v", err)
+	}
+	if summary.StepsRun != 0 || summary.StepsCompleted != checkpoint.Step || trainer.TrainProfile().Step != checkpoint.Step {
+		t.Fatalf("compact eval-only steps summary=%d/%d trainer=%d want unchanged %d", summary.StepsRun, summary.StepsCompleted, trainer.TrainProfile().Step, checkpoint.Step)
+	}
+	if summary.FinalEval == nil || !compactTestFinite(summary.FinalEval.Loss) {
+		t.Fatalf("compact eval-only final eval = %+v, want finite metrics", summary.FinalEval)
+	}
+	if _, err := trainer.Fit(evalSet, nil, EmbeddingTrainRunConfig{Epochs: 1, BatchSize: 1}); err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 training updates are not supported yet") {
+		t.Fatalf("compact non-eval Fit error = %v, want explicit unsupported", err)
+	}
+}
+
+func TestCompactEmbeddingTrainerOutputProjectionDimensions(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		outputDim int
+	}{
+		{name: "with_projection", outputDim: 3},
+		{name: "without_projection", outputDim: 4},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			checkpoint := compactTrainStateTestCheckpoint(tt.outputDim)
+			state, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
+			if err != nil {
+				t.Fatalf("load compact state: %v", err)
+			}
+			trainer, err := newCompactEmbeddingTrainerFromTrainState(&eosartifact.Module{Name: "compact"}, state)
+			if err != nil {
+				t.Fatalf("new compact trainer: %v", err)
+			}
+			mask, err := trainer.prepareMask([]int32{1, 2, 3}, nil)
+			if err != nil {
+				t.Fatalf("prepare mask: %v", err)
+			}
+			encoded, err := trainer.encodeSequence([]int32{1, 2, 3}, mask, trainer.rawRoleIndex(), nil, nil, nil, nil, nil, nil, nil, nil, false)
+			if err != nil {
+				t.Fatalf("encode compact sequence: %v", err)
+			}
+			if len(encoded.pooled) != tt.outputDim {
+				t.Fatalf("pooled dim = %d, want %d", len(encoded.pooled), tt.outputDim)
+			}
+		})
+	}
+}
+
+func TestCompactEmbeddingTrainerMaskAndTokenOrderSensitivity(t *testing.T) {
+	checkpoint := compactTrainStateTestCheckpoint(4)
+	state, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, checkpoint.Manifest)
+	if err != nil {
+		t.Fatalf("load compact state: %v", err)
+	}
+	trainer, err := newCompactEmbeddingTrainerFromTrainState(&eosartifact.Module{Name: "compact"}, state)
+	if err != nil {
+		t.Fatalf("new compact trainer: %v", err)
+	}
+	pooled := func(tokens, mask []int32) []float32 {
+		prepared, err := trainer.prepareMask(tokens, mask)
+		if err != nil {
+			t.Fatalf("prepare mask: %v", err)
+		}
+		encoded, err := trainer.encodeSequence(tokens, prepared, trainer.rawRoleIndex(), nil, nil, nil, nil, nil, nil, nil, nil, false)
+		if err != nil {
+			t.Fatalf("encode compact sequence: %v", err)
+		}
+		return encoded.pooled
+	}
+	maskedA := pooled([]int32{1, 2, 3}, []int32{1, 1, 0})
+	maskedB := pooled([]int32{1, 2, 4}, []int32{1, 1, 0})
+	if !float32SlicesClose(maskedA, maskedB, 1e-6) {
+		t.Fatalf("masked padding changed compact pooled embedding: %v vs %v", maskedA, maskedB)
+	}
+	ordered := pooled([]int32{1, 2, 3}, []int32{1, 1, 1})
+	reordered := pooled([]int32{2, 1, 3}, []int32{1, 1, 1})
+	if float32SlicesClose(ordered, reordered, 1e-6) {
+		t.Fatalf("compact pooled embedding is insensitive to token order: %v vs %v", ordered, reordered)
+	}
+}
+
+func compactTestFinite(v float32) bool {
+	return !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0)
+}
+
+func float32SlicesClose(a, b []float32, tol float32) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		diff := a[i] - b[i]
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff > tol {
+			return false
+		}
+	}
+	return true
 }
 
 func TestEmbeddingTrainerFFNCheckpointRoundTrip(t *testing.T) {

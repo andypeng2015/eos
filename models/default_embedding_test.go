@@ -183,8 +183,33 @@ func TestInitDefaultEmbeddingPackageCreatesCompactBootstrapPackage(t *testing.T)
 	if got := state.OutputProjection.Tensor.Shape; len(got) != 2 || got[0] != 8 || got[1] != 4 {
 		t.Fatalf("compact state output projection shape = %v, want [8 4]", got)
 	}
-	if _, err := eosruntime.LoadEmbeddingTrainerPackage(path); err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 is not supported by trainable package initialization yet") {
-		t.Fatalf("LoadEmbeddingTrainerPackage error = %v, want unsupported compact error", err)
+	trainer, err := eosruntime.LoadEmbeddingTrainerPackage(path)
+	if err != nil {
+		t.Fatalf("load compact trainer package: %v", err)
+	}
+	evalSet := []eosruntime.EmbeddingPairExample{
+		{LeftTokens: []int32{1, 4, 5}, RightTokens: []int32{1, 4, 5}, Target: 1},
+		{LeftTokens: []int32{1, 4, 5}, RightTokens: []int32{5, 4, 1}, Target: -1},
+	}
+	beforeStep := trainer.TrainProfile().Step
+	metrics, err := trainer.EvaluatePairs(evalSet)
+	if err != nil {
+		t.Fatalf("evaluate compact trainer package: %v", err)
+	}
+	if math.IsNaN(float64(metrics.Loss)) || math.IsInf(float64(metrics.Loss), 0) ||
+		math.IsNaN(float64(metrics.AverageScore)) || math.IsInf(float64(metrics.AverageScore), 0) ||
+		metrics.PairCount != len(evalSet) {
+		t.Fatalf("compact eval metrics = %+v, want finite pair metrics", metrics)
+	}
+	summary, err := trainer.Fit(nil, evalSet, eosruntime.EmbeddingTrainRunConfig{EvalOnly: true})
+	if err != nil {
+		t.Fatalf("compact eval-only fit: %v", err)
+	}
+	if summary.StepsRun != 0 || trainer.TrainProfile().Step != beforeStep {
+		t.Fatalf("compact eval-only steps run=%d trainer step=%d want unchanged %d", summary.StepsRun, trainer.TrainProfile().Step, beforeStep)
+	}
+	if _, err := trainer.TrainStep(evalSet); err == nil || !strings.Contains(err.Error(), "compact_transformer_v1 training updates are not supported yet") {
+		t.Fatalf("compact TrainStep error = %v, want explicit unsupported", err)
 	}
 }
 

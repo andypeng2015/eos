@@ -1,6 +1,7 @@
 package eosruntime
 
 import (
+	"fmt"
 	"os"
 
 	eosartifact "m31labs.dev/eos/artifact/eos"
@@ -63,6 +64,36 @@ func LoadEmbeddingTrainerPackageWithPaths(paths EmbeddingTrainPackagePaths) (*Em
 	trainManifest, err := ReadEmbeddingTrainManifestFile(paths.TrainManifestPath)
 	if err != nil {
 		return nil, err
+	}
+	embeddingManifest := trainManifest.Embedding.normalizedForModule(mod)
+	if embeddingManifest.ArchitectureVersion == EmbeddingArchitectureCompactTransformerV1 {
+		if paths.CheckpointPath == "" {
+			return nil, fmt.Errorf("%s trainer package requires checkpoint", EmbeddingArchitectureCompactTransformerV1)
+		}
+		checkpoint, err := ReadEmbeddingTrainCheckpointFile(paths.CheckpointPath)
+		if err != nil {
+			return nil, err
+		}
+		state, err := LoadCompactEmbeddingTrainStateFromCheckpoint(checkpoint, embeddingManifest)
+		if err != nil {
+			return nil, err
+		}
+		trainer, err := newCompactEmbeddingTrainerFromTrainState(mod, state)
+		if err != nil {
+			return nil, err
+		}
+		trainer.SetScoreSpectrumLineage(trainManifest.ScoreSpectrum)
+		trainer.SetListwiseGeometryLineage(trainManifest.ListwiseGeometry)
+		if paths.MemoryPlanPath != "" {
+			if _, err := os.Stat(paths.MemoryPlanPath); err == nil {
+				plan, err := ReadMemoryPlanFile(paths.MemoryPlanPath)
+				if err != nil {
+					return nil, err
+				}
+				trainer.memoryPlan = cloneMemoryPlan(&plan)
+			}
+		}
+		return trainer, nil
 	}
 	if err := trainManifest.ValidateModule(mod); err != nil {
 		return nil, err
