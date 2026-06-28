@@ -1749,8 +1749,7 @@ func (t *EmbeddingTrainer) runCompactHardNegativeContrastiveBatchUpdate(batch []
 	if len(batch) == 0 {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("hard-negative training batch is empty")
 	}
-	if t.config.TeacherLossWeight > 0 ||
-		len(t.config.MatryoshkaDims) > 0 ||
+	if len(t.config.MatryoshkaDims) > 0 ||
 		len(t.config.TurboQuantPrefixBits) > 0 ||
 		len(t.config.TurboQuantPrefixObjectives) > 0 ||
 		len(t.config.TurboQuantCompactObjectives) > 0 ||
@@ -1761,10 +1760,8 @@ func (t *EmbeddingTrainer) runCompactHardNegativeContrastiveBatchUpdate(batch []
 	candidateInputs := make([]embeddingSequenceInput, 0, len(batch)*2)
 	targetIndexes := make([]int, len(batch))
 	candidateSpans := make([]embeddingCandidateSpan, len(batch))
+	teacherScores := make([][]float32, len(batch))
 	for i, example := range batch {
-		if len(example.TeacherScores) > 0 {
-			return EmbeddingTrainMetrics{}, fmt.Errorf("compact_transformer_v1 hard-negative training does not support teacher_scores")
-		}
 		queryInputs[i] = embeddingSequenceInput{
 			tokens: example.QueryTokens,
 			mask:   example.QueryMask,
@@ -1792,6 +1789,12 @@ func (t *EmbeddingTrainer) runCompactHardNegativeContrastiveBatchUpdate(batch []
 			})
 		}
 		candidateSpans[i].End = len(candidateInputs)
+		if len(example.TeacherScores) > 0 {
+			if len(example.TeacherScores) != candidateSpans[i].End-candidateSpans[i].Start {
+				return EmbeddingTrainMetrics{}, fmt.Errorf("hard-negative teacher_scores length %d does not match candidate count %d for batch %d", len(example.TeacherScores), candidateSpans[i].End-candidateSpans[i].Start, i)
+			}
+			teacherScores[i] = example.TeacherScores
+		}
 	}
 	if len(candidateInputs) < 2 {
 		return EmbeddingTrainMetrics{}, fmt.Errorf("hard-negative training batch needs at least two candidate documents")
@@ -1837,6 +1840,31 @@ func (t *EmbeddingTrainer) runCompactHardNegativeContrastiveBatchUpdate(batch []
 		return EmbeddingTrainMetrics{}, fmt.Errorf("compact_transformer_v1 hard-negative training does not support contrastive_loss %q", t.config.ContrastiveLoss)
 	}
 
+	teacherPairCount := 0
+	teacherWeight := t.config.TeacherLossWeight
+	if teacherWeight > 0 {
+		teacherQueryGrads := newEmbeddingPooledGradBuffers(queries)
+		teacherCandidateGrads := newEmbeddingPooledGradBuffers(candidates)
+		teacherTemperatures := make([]float32, len(batch))
+		teacherSourceWeights := make([]float32, len(batch))
+		for i, example := range batch {
+			teacherTemperatures[i] = hardNegativeTeacherTemperature(t.config.TeacherSourceTemperatures, example.Source, t.config.TeacherTemperature)
+			teacherSourceWeights[i] = hardNegativeTeacherWeight(t.config.TeacherSourceWeights, example.Source)
+		}
+		teacherLoss, teacherScore, pairs := accumulateTeacherDistributionHardNegativeGrads(queries, candidates, candidateSpans, teacherScores, teacherTemperatures, teacherSourceWeights, t.config.Temperature, t.config.TeacherTemperature, teacherQueryGrads, teacherCandidateGrads)
+		if pairs > 0 {
+			baseScale := float32(1) / (1 + teacherWeight)
+			teacherScale := teacherWeight / (1 + teacherWeight)
+			scaleEmbeddingGradBuffers(queryGrads, baseScale)
+			scaleEmbeddingGradBuffers(candidateGrads, baseScale)
+			addScaledEmbeddingGradBuffers(queryGrads, teacherQueryGrads, teacherScale)
+			addScaledEmbeddingGradBuffers(candidateGrads, teacherCandidateGrads, teacherScale)
+			totalLoss = totalLoss*baseScale + teacherLoss*teacherScale
+			totalScore += teacherScore
+			teacherPairCount = pairs
+		}
+	}
+
 	for i, query := range queries {
 		if err := t.backpropCompactEncodedSequence(query, queryGrads[i], forward.compact, grads); err != nil {
 			return EmbeddingTrainMetrics{}, fmt.Errorf("query %d: %w", i, err)
@@ -1850,7 +1878,7 @@ func (t *EmbeddingTrainer) runCompactHardNegativeContrastiveBatchUpdate(batch []
 
 	batchScale := float32(1) / float32(len(queries))
 	t.applyCompactOptimizerUpdates(grads, batchScale)
-	pairCount := hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, t.config.ContrastiveLoss)
+	pairCount := hardNegativeCandidatePairCount(len(queries), len(candidates), candidateSpans, t.config.ContrastiveLoss) + teacherPairCount
 	return EmbeddingTrainMetrics{
 		Loss:         totalLoss * batchScale,
 		AverageScore: totalScore / float32(pairCount),

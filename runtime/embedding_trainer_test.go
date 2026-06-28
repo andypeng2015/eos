@@ -1627,6 +1627,75 @@ func TestCompactEmbeddingTrainerTrainHardNegativeContrastiveStepSupportsDefaultL
 	}
 }
 
+func TestCompactEmbeddingTrainerHardNegativeSupportsTeacherDistribution(t *testing.T) {
+	trainer := newCompactEmbeddingTrainerForTest(t, 3)
+	trainer.config.ContrastiveLoss = "grouped_infonce"
+	trainer.config.Temperature = 0.05
+	trainer.config.TeacherTemperature = 1
+	trainer.config.TeacherLossWeight = 0.5
+	batch := compactHardNegativeBatchForTest()
+	for i := range batch {
+		batch[i].TeacherScores = []float32{1.2, 0.1}
+	}
+	beforeProfile := trainer.TrainProfile()
+	metrics, err := trainer.TrainHardNegativeContrastiveStep(batch)
+	if err != nil {
+		t.Fatalf("compact hard-negative teacher distribution: %v", err)
+	}
+	if !compactTestFinite(metrics.Loss) || !compactTestFinite(metrics.AverageScore) || metrics.BatchSize != 8 {
+		t.Fatalf("compact hard-negative teacher metrics = %+v, want finite metrics with teacher pairs", metrics)
+	}
+	if got := trainer.TrainProfile().Step; got != beforeProfile.Step+1 {
+		t.Fatalf("compact hard-negative teacher step = %d, want %d", got, beforeProfile.Step+1)
+	}
+	if got := trainer.TrainProfile().Optimizer.UpdateCalls - beforeProfile.Optimizer.UpdateCalls; got != 1 {
+		t.Fatalf("compact hard-negative teacher optimizer updates delta = %d, want 1", got)
+	}
+}
+
+func TestCompactEmbeddingTrainerHardNegativeRejectsMalformedTeacherScoresBeforeMutation(t *testing.T) {
+	trainer := newCompactEmbeddingTrainerForTest(t, 3)
+	trainer.config.ContrastiveLoss = "grouped_infonce"
+	trainer.config.Temperature = 0.05
+	trainer.config.TeacherLossWeight = 0.5
+	batch := compactHardNegativeBatchForTest()
+	batch[0].TeacherScores = []float32{1.2}
+	beforeProfile := trainer.TrainProfile()
+	_, err := trainer.TrainHardNegativeContrastiveStep(batch)
+	if err == nil || !strings.Contains(err.Error(), "hard-negative teacher_scores length 1 does not match candidate count 2 for batch 0") {
+		t.Fatalf("compact malformed teacher_scores error = %v", err)
+	}
+	if got := trainer.TrainProfile().Step; got != beforeProfile.Step {
+		t.Fatalf("compact malformed teacher_scores mutated step = %d, want %d", got, beforeProfile.Step)
+	}
+	if got := trainer.TrainProfile().Optimizer.UpdateCalls - beforeProfile.Optimizer.UpdateCalls; got != 0 {
+		t.Fatalf("compact malformed teacher_scores optimizer updates delta = %d, want 0", got)
+	}
+}
+
+func TestCompactEmbeddingTrainerHardNegativeTeacherSourceWeightZeroSuppressesTeacherPairs(t *testing.T) {
+	trainer := newCompactEmbeddingTrainerForTest(t, 3)
+	trainer.config.ContrastiveLoss = "grouped_infonce"
+	trainer.config.Temperature = 0.05
+	trainer.config.TeacherLossWeight = 0.5
+	trainer.config.TeacherSourceWeights = map[string]float32{"*": 0}
+	batch := compactHardNegativeBatchForTest()
+	for i := range batch {
+		batch[i].Source = "fiqa:model"
+		batch[i].TeacherScores = []float32{1.2, 0.1}
+	}
+	metrics, err := trainer.TrainHardNegativeContrastiveStep(batch)
+	if err != nil {
+		t.Fatalf("compact hard-negative teacher source weight zero: %v", err)
+	}
+	if !compactTestFinite(metrics.Loss) || !compactTestFinite(metrics.AverageScore) || metrics.BatchSize != 4 {
+		t.Fatalf("compact hard-negative source weight zero metrics = %+v, want base grouped pair count", metrics)
+	}
+	if got := trainer.TrainProfile().Step; got != 1 {
+		t.Fatalf("compact hard-negative source weight zero step = %d, want 1", got)
+	}
+}
+
 func TestCompactEmbeddingTrainerHardNegativeCheckpointRestoreParity(t *testing.T) {
 	checkpoint := compactTrainStateTestCheckpoint(3)
 	checkpoint.Step = 13
@@ -1889,19 +1958,41 @@ func TestCompactEmbeddingTrainerHardNegativeUnsupportedModes(t *testing.T) {
 			},
 			want: `does not support contrastive_loss "hybrid_infonce"`,
 		},
-		"teacher_weight": {
+		"matryoshka": {
 			configure: func(trainer *EmbeddingTrainer, batch []EmbeddingHardNegativeExample) []EmbeddingHardNegativeExample {
-				trainer.config.TeacherLossWeight = 0.5
+				trainer.config.MatryoshkaDims = []int{2}
+				trainer.config.MatryoshkaWeights = []float32{0.5}
 				return batch
 			},
 			want: "supports InfoNCE and grouped InfoNCE only",
 		},
-		"teacher_scores": {
+		"turboquant_prefix_bits": {
 			configure: func(trainer *EmbeddingTrainer, batch []EmbeddingHardNegativeExample) []EmbeddingHardNegativeExample {
-				batch[0].TeacherScores = []float32{0.9, 0.1}
+				trainer.config.TurboQuantPrefixBits = []int{2}
 				return batch
 			},
-			want: "does not support teacher_scores",
+			want: "supports InfoNCE and grouped InfoNCE only",
+		},
+		"turboquant_prefix_objectives": {
+			configure: func(trainer *EmbeddingTrainer, batch []EmbeddingHardNegativeExample) []EmbeddingHardNegativeExample {
+				trainer.config.TurboQuantPrefixObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 2, Weight: 0.25}}
+				return batch
+			},
+			want: "supports InfoNCE and grouped InfoNCE only",
+		},
+		"turboquant_compact": {
+			configure: func(trainer *EmbeddingTrainer, batch []EmbeddingHardNegativeExample) []EmbeddingHardNegativeExample {
+				trainer.config.TurboQuantCompactObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 2, Weight: 0.25}}
+				return batch
+			},
+			want: "supports InfoNCE and grouped InfoNCE only",
+		},
+		"turboquant_rank_margin": {
+			configure: func(trainer *EmbeddingTrainer, batch []EmbeddingHardNegativeExample) []EmbeddingHardNegativeExample {
+				trainer.config.TurboQuantRankMarginObjectives = []TurboQuantPrefixObjective{{Dim: 2, BitWidth: 2, Weight: 0.25}}
+				return batch
+			},
+			want: "supports InfoNCE and grouped InfoNCE only",
 		},
 	} {
 		trainer := newCompactEmbeddingTrainerForTest(t, 3)
