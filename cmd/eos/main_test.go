@@ -5304,9 +5304,12 @@ func TestRunTrainEmbedEvalOnlyWritesMetricsJSON(t *testing.T) {
 			StepsRun int `json:"steps_run"`
 		} `json:"summary"`
 		FinalEval *struct {
-			PairCount int     `json:"pair_count"`
-			Top1      float32 `json:"top1_accuracy"`
-			MRR       float32 `json:"mean_reciprocal_rank"`
+			PairCount       int     `json:"pair_count"`
+			Top1            float32 `json:"top1_accuracy"`
+			MRR             float32 `json:"mean_reciprocal_rank"`
+			RetrievalNDCG   float32 `json:"retrieval_ndcg_at_10"`
+			RetrievalMAP    float32 `json:"retrieval_map_at_100"`
+			RetrievalRecall float32 `json:"retrieval_recall_at_100"`
 		} `json:"final_eval"`
 		Workload struct {
 			ActualEvalPairs int64 `json:"actual_eval_pairs"`
@@ -5332,6 +5335,9 @@ func TestRunTrainEmbedEvalOnlyWritesMetricsJSON(t *testing.T) {
 	}
 	if got.FinalEval.Top1 <= 0 || got.FinalEval.MRR <= 0 {
 		t.Fatalf("expected ranking metrics in JSON, got final_eval %+v", *got.FinalEval)
+	}
+	if got.FinalEval.RetrievalNDCG != 0 || got.FinalEval.RetrievalMAP != 0 || got.FinalEval.RetrievalRecall != 0 {
+		t.Fatalf("expected zero retrieval metrics without retrieval eval, got final_eval %+v", *got.FinalEval)
 	}
 	if got.Workload.ActualEvalPairs != 4 {
 		t.Fatalf("actual_eval_pairs = %d, want 4", got.Workload.ActualEvalPairs)
@@ -5387,6 +5393,20 @@ func TestTrainMetricsPayloadIncludesEffectiveLearningRateAndMovement(t *testing.
 	}
 	if payload.FinalTrain.Movement.Gradient.NonzeroCount != 3 || payload.FinalTrain.Movement.ParameterDelta.NonzeroCount != 2 {
 		t.Fatalf("movement payload = %+v", payload.FinalTrain.Movement)
+	}
+}
+
+func TestEvalMetricsPayloadIncludesRetrievalMetrics(t *testing.T) {
+	payload := evalMetricsPayload(&eosruntime.EmbeddingEvalMetrics{
+		RetrievalNDCGAt10:    0.14,
+		RetrievalMAPAt100:    0.22,
+		RetrievalRecallAt100: 0.31,
+	})
+	if payload == nil {
+		t.Fatal("eval metrics payload missing")
+	}
+	if payload.RetrievalNDCGAt10 != 0.14 || payload.RetrievalMAPAt100 != 0.22 || payload.RetrievalRecallAt100 != 0.31 {
+		t.Fatalf("retrieval payload = %+v", payload)
 	}
 }
 

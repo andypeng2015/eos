@@ -69,9 +69,9 @@ func TestFitContrastiveEvalPairsDrivePerEpochSelection(t *testing.T) {
 	}
 }
 
-// The retrieval-nDCG gate must survive best-checkpoint restore: restoring
-// rebuilds the trainer, and before the fix that wiped the configured gate so
-// the post-restore final eval silently reported retrieval_ndcg=0.
+// The retrieval gate must survive best-checkpoint restore: restoring rebuilds
+// the trainer, and before the fix that wiped the configured gate so the
+// post-restore final eval silently reported zero retrieval metrics.
 func TestFitContrastiveRetrievalGateSurvivesRestore(t *testing.T) {
 	dataset := writeTinyRetrievalGateFixture(t)
 	corpusPath, queriesPath, qrelsPath := BEIRRetrievalPaths(dataset, "test")
@@ -103,14 +103,20 @@ func TestFitContrastiveRetrievalGateSurvivesRestore(t *testing.T) {
 		t.Fatal("expected best-checkpoint restore to run")
 	}
 	// Two docs and one relevant qrel: as long as the gate executes, the
-	// relevant doc is in the top-10 and nDCG is strictly positive. Zero means
-	// the gate was skipped.
+	// relevant doc is in the top-10 and all retrieval metrics are strictly
+	// positive. Zero means the gate was skipped.
 	if summary.FinalEval == nil || summary.FinalEval.RetrievalNDCGAt10 <= 0 {
 		t.Fatalf("final eval retrieval nDCG = %+v, want > 0 after restore", summary.FinalEval)
+	}
+	if summary.FinalEval.RetrievalMAPAt100 <= 0 || summary.FinalEval.RetrievalRecallAt100 <= 0 {
+		t.Fatalf("final eval retrieval MAP/recall = %+v, want > 0 after restore", summary.FinalEval)
 	}
 	for _, record := range summary.History {
 		if record.Eval == nil || record.Eval.RetrievalNDCGAt10 <= 0 {
 			t.Fatalf("epoch %d retrieval nDCG missing: %+v", record.Epoch, record.Eval)
+		}
+		if record.Eval.RetrievalMAPAt100 <= 0 || record.Eval.RetrievalRecallAt100 <= 0 {
+			t.Fatalf("epoch %d retrieval MAP/recall missing: %+v", record.Epoch, record.Eval)
 		}
 	}
 }

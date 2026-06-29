@@ -69,10 +69,11 @@ type EmbeddingTrainRunConfig struct {
 	TeacherScoreNormalization         string
 	ProgressEverySteps                int
 	Progress                          EmbeddingTrainProgressFunc
-	// Retrieval-nDCG eval gate (optional). When RetrievalEvalRuntime and a
-	// complete RetrievalEval (corpus/queries/qrels) are set, each eval also
-	// reports nDCG@10 over that held-out set, usable as -select-metric
-	// retrieval_ndcg. RetrievalEvalTokenizer is required to embed the raw text.
+	// Retrieval eval gate (optional). When RetrievalEvalRuntime and a complete
+	// RetrievalEval (corpus/queries/qrels) are set, each eval also reports
+	// nDCG@10, MAP@100, and recall@100 over that held-out set, usable as
+	// -select-metric retrieval_ndcg(_at_10), retrieval_map, or retrieval_recall.
+	// RetrievalEvalTokenizer is required to embed the raw text.
 	RetrievalEvalRuntime   *Runtime
 	RetrievalEval          RetrievalEvalConfig
 	RetrievalEvalTokenizer *TokenizerFile
@@ -2841,7 +2842,7 @@ func (t *EmbeddingTrainer) restoreCheckpoint(checkpoint EmbeddingTrainCheckpoint
 	}
 	// The rebuilt trainer never saw configureRetrievalEval; preserve the
 	// retrieval gate across restore or the post-restore final eval silently
-	// reports retrieval_ndcg=0.
+	// reports zero retrieval metrics.
 	retrievalRuntime := t.retrievalEvalRuntime
 	retrievalConfig := t.retrievalEvalConfig
 	retrievalTokenizer := t.retrievalEvalTokenizer
@@ -3534,9 +3535,22 @@ func (t *EmbeddingTrainer) syncTrainRunObjectiveConfig(cfg EmbeddingTrainRunConf
 	return cfg
 }
 
-func validTrainSelectionMetric(metric string) bool {
+func canonicalTrainSelectionMetric(metric string) string {
 	switch metric {
-	case "loss", "pair_accuracy", "threshold_accuracy", "score_margin", "auc", "top1_accuracy", "top5_accuracy", "top10_accuracy", "mrr", "mean_positive_rank", "mean_rank", "retrieval_ndcg":
+	case "retrieval_ndcg_at_10":
+		return "retrieval_ndcg"
+	case "retrieval_map":
+		return "retrieval_map_at_100"
+	case "retrieval_recall":
+		return "retrieval_recall_at_100"
+	default:
+		return metric
+	}
+}
+
+func validTrainSelectionMetric(metric string) bool {
+	switch canonicalTrainSelectionMetric(metric) {
+	case "loss", "pair_accuracy", "threshold_accuracy", "score_margin", "auc", "top1_accuracy", "top5_accuracy", "top10_accuracy", "mrr", "mean_positive_rank", "mean_rank", "retrieval_ndcg", "retrieval_map_at_100", "retrieval_recall_at_100":
 		return true
 	case "score_spectrum_any_positive_top1", "score_spectrum_alternate_recovery", "score_spectrum_best_positive_hardest_negative_margin", "score_spectrum_original_positive_top1":
 		return true
@@ -3557,7 +3571,7 @@ func scoreSpectrumSelectionMetric(metric string) bool {
 func betterEvalMetrics(current, best EmbeddingEvalMetrics, metric string, minDelta float32) bool {
 	const eps = 1e-6
 	primaryDelta := float32(math.Max(float64(minDelta), eps))
-	switch metric {
+	switch canonicalTrainSelectionMetric(metric) {
 	case "loss":
 		if current.Loss < best.Loss-primaryDelta {
 			return true
@@ -3594,7 +3608,7 @@ func betterEvalMetrics(current, best EmbeddingEvalMetrics, metric string, minDel
 				return true
 			}
 		}
-	case "auc", "top1_accuracy", "top5_accuracy", "top10_accuracy", "mrr", "retrieval_ndcg":
+	case "auc", "top1_accuracy", "top5_accuracy", "top10_accuracy", "mrr", "retrieval_ndcg", "retrieval_map_at_100", "retrieval_recall_at_100":
 		currentRankMetric := evalRankMetric(current, metric)
 		bestRankMetric := evalRankMetric(best, metric)
 		if currentRankMetric > bestRankMetric+primaryDelta {
@@ -3637,7 +3651,7 @@ func betterEvalMetrics(current, best EmbeddingEvalMetrics, metric string, minDel
 }
 
 func evalRankMetric(metrics EmbeddingEvalMetrics, metric string) float32 {
-	switch metric {
+	switch canonicalTrainSelectionMetric(metric) {
 	case "auc":
 		return metrics.ROCAUC
 	case "top5_accuracy":
@@ -3648,6 +3662,10 @@ func evalRankMetric(metrics EmbeddingEvalMetrics, metric string) float32 {
 		return metrics.MeanReciprocalRank
 	case "retrieval_ndcg":
 		return metrics.RetrievalNDCGAt10
+	case "retrieval_map_at_100":
+		return metrics.RetrievalMAPAt100
+	case "retrieval_recall_at_100":
+		return metrics.RetrievalRecallAt100
 	default:
 		return metrics.Top1Accuracy
 	}

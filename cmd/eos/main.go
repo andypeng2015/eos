@@ -5228,7 +5228,7 @@ func runTrainEmbed(args []string) error {
 	fs.IntVar(&evalEvery, "eval-every", 1, "evaluate every N epochs")
 	fs.IntVar(&evalEverySteps, "eval-every-steps", 0, "evaluate every N optimizer steps within an epoch (0 disables)")
 	fs.IntVar(&patience, "patience", 3, "early stopping patience in evals")
-	fs.StringVar(&selectMetric, "select-metric", "top1_accuracy", "selection metric: top1_accuracy, top5_accuracy, top10_accuracy, mrr, mean_rank, score_margin, pair_accuracy, threshold_accuracy, auc, or loss")
+	fs.StringVar(&selectMetric, "select-metric", "top1_accuracy", "selection metric: top1_accuracy, top5_accuracy, top10_accuracy, mrr, mean_rank, score_margin, pair_accuracy, threshold_accuracy, auc, loss, retrieval_ndcg(_at_10), retrieval_map(_at_100), or retrieval_recall(_at_100)")
 	fs.Float64Var(&minDelta, "min-delta", 0, "minimum eval improvement to count as better")
 	fs.BoolVar(&restoreBest, "restore-best", true, "restore best checkpoint at end")
 	fs.BoolVar(&lengthBucketBatches, "length-bucket-batches", true, "cluster contrastive batches by token length to improve batched GPU training")
@@ -5276,7 +5276,7 @@ func runTrainEmbed(args []string) error {
 	fs.BoolVar(&clearTurboQuantRankMargin, "clear-turboquant-rank-margin", false, "clear inherited TurboQuant rank-margin objectives for continuation hard-negative training")
 	fs.StringVar(&turboQuantRankMarginObjectives, "turboquant-rank-margin-objectives", "", "comma-separated TurboQuant hard-negative rank-margin objectives as dim:bit=weight, for example 128:4=0.1")
 	fs.Float64Var(&turboQuantRankMargin, "turboquant-rank-margin", 0, "TurboQuant hard-negative rank-margin target (default 0.02 when objectives are enabled)")
-	fs.StringVar(&retrievalEvalDir, "retrieval-eval-dir", "", "BEIR-style dataset dir for per-epoch retrieval nDCG@10 eval with current weights; enables -select-metric retrieval_ndcg")
+	fs.StringVar(&retrievalEvalDir, "retrieval-eval-dir", "", "BEIR-style dataset dir for per-epoch retrieval eval with current weights (nDCG@10, MAP@100, recall@100); enables -select-metric retrieval_ndcg(_at_10), retrieval_map, or retrieval_recall")
 	fs.StringVar(&retrievalEvalSplit, "retrieval-eval-split", "test", "qrels split for retrieval eval (test/dev/train)")
 	fs.IntVar(&retrievalEvalMaxDocs, "retrieval-eval-max-docs", 5000, "cap corpus docs embedded per retrieval eval (0 = all); smaller is faster per-epoch")
 	fs.IntVar(&retrievalEvalMaxQueries, "retrieval-eval-max-queries", 500, "cap queries per retrieval eval (0 = all)")
@@ -5647,7 +5647,7 @@ func runTrainEmbed(args []string) error {
 	fmt.Printf("epochs: %d, steps: %d, run_steps: %d, best_epoch: %d, best_step: %d\n", summary.EpochsCompleted, summary.StepsCompleted, summary.StepsRun, summary.BestEpoch, summary.BestStep)
 	fmt.Printf("final train: loss=%.6f avg_score=%.6f batch=%d\n", summary.FinalTrain.Loss, summary.FinalTrain.AverageScore, summary.FinalTrain.BatchSize)
 	if summary.FinalEval != nil {
-		fmt.Printf("final eval: loss=%.6f margin=%.6f accuracy=%.6f threshold_accuracy=%.6f threshold=%.6f auc=%.6f top1=%.6f top5=%.6f top10=%.6f mrr=%.6f mean_rank=%.3f retrieval_ndcg=%.6f pairs=%d\n", summary.FinalEval.Loss, summary.FinalEval.ScoreMargin, summary.FinalEval.PairAccuracy, summary.FinalEval.ThresholdAccuracy, summary.FinalEval.ScoreThreshold, summary.FinalEval.ROCAUC, summary.FinalEval.Top1Accuracy, summary.FinalEval.Top5Accuracy, summary.FinalEval.Top10Accuracy, summary.FinalEval.MeanReciprocalRank, summary.FinalEval.MeanPositiveRank, summary.FinalEval.RetrievalNDCGAt10, summary.FinalEval.PairCount)
+		fmt.Printf("final eval: loss=%.6f margin=%.6f accuracy=%.6f threshold_accuracy=%.6f threshold=%.6f auc=%.6f top1=%.6f top5=%.6f top10=%.6f mrr=%.6f mean_rank=%.3f retrieval_ndcg=%.6f retrieval_map=%.6f retrieval_recall=%.6f pairs=%d\n", summary.FinalEval.Loss, summary.FinalEval.ScoreMargin, summary.FinalEval.PairAccuracy, summary.FinalEval.ThresholdAccuracy, summary.FinalEval.ScoreThreshold, summary.FinalEval.ROCAUC, summary.FinalEval.Top1Accuracy, summary.FinalEval.Top5Accuracy, summary.FinalEval.Top10Accuracy, summary.FinalEval.MeanReciprocalRank, summary.FinalEval.MeanPositiveRank, summary.FinalEval.RetrievalNDCGAt10, summary.FinalEval.RetrievalMAPAt100, summary.FinalEval.RetrievalRecallAt100, summary.FinalEval.PairCount)
 	}
 	if summary.FinalScoreSpectrumEval != nil {
 		fmt.Printf("final score-spectrum eval: loss=%.6f any_positive_top1=%.6f original_positive_top1=%.6f alternate_recovery=%.6f best_positive_hardest_negative_margin=%.6f rows=%d candidates=%d\n", summary.FinalScoreSpectrumEval.Loss, summary.FinalScoreSpectrumEval.AnyPositiveTop1, summary.FinalScoreSpectrumEval.OriginalPositiveTop1, summary.FinalScoreSpectrumEval.AlternateRelevantRecovery, summary.FinalScoreSpectrumEval.BestPositiveHardestNegativeMargin, summary.FinalScoreSpectrumEval.RowCount, summary.FinalScoreSpectrumEval.CandidateCount)
@@ -6318,7 +6318,7 @@ func runTrainCorpus(args []string) error {
 	fs.IntVar(&evalEvery, "eval-every", 1, "evaluate every N epochs")
 	fs.IntVar(&evalEverySteps, "eval-every-steps", 0, "evaluate every N optimizer steps within an epoch (0 disables)")
 	fs.IntVar(&patience, "patience", 3, "early stopping patience in evals")
-	fs.StringVar(&selectMetric, "select-metric", "top1_accuracy", "selection metric: top1_accuracy, top5_accuracy, top10_accuracy, mrr, mean_rank, score_margin, pair_accuracy, threshold_accuracy, auc, or loss")
+	fs.StringVar(&selectMetric, "select-metric", "top1_accuracy", "selection metric: top1_accuracy, top5_accuracy, top10_accuracy, mrr, mean_rank, score_margin, pair_accuracy, threshold_accuracy, auc, loss, retrieval_ndcg(_at_10), retrieval_map(_at_100), or retrieval_recall(_at_100)")
 	fs.Float64Var(&minDelta, "min-delta", 0, "minimum eval improvement to count as better")
 	fs.BoolVar(&restoreBest, "restore-best", true, "restore best checkpoint at end")
 	fs.BoolVar(&lengthBucketBatches, "length-bucket-batches", true, "cluster contrastive batches by token length to improve batched GPU training")
@@ -6493,7 +6493,7 @@ func runTrainCorpus(args []string) error {
 	fmt.Printf("epochs: %d, steps: %d, run_steps: %d, best_epoch: %d, best_step: %d\n", summary.EpochsCompleted, summary.StepsCompleted, summary.StepsRun, summary.BestEpoch, summary.BestStep)
 	fmt.Printf("final train: loss=%.6f avg_score=%.6f batch=%d\n", summary.FinalTrain.Loss, summary.FinalTrain.AverageScore, summary.FinalTrain.BatchSize)
 	if summary.FinalEval != nil {
-		fmt.Printf("final eval: loss=%.6f margin=%.6f accuracy=%.6f threshold_accuracy=%.6f threshold=%.6f auc=%.6f top1=%.6f top5=%.6f top10=%.6f mrr=%.6f mean_rank=%.3f retrieval_ndcg=%.6f pairs=%d\n", summary.FinalEval.Loss, summary.FinalEval.ScoreMargin, summary.FinalEval.PairAccuracy, summary.FinalEval.ThresholdAccuracy, summary.FinalEval.ScoreThreshold, summary.FinalEval.ROCAUC, summary.FinalEval.Top1Accuracy, summary.FinalEval.Top5Accuracy, summary.FinalEval.Top10Accuracy, summary.FinalEval.MeanReciprocalRank, summary.FinalEval.MeanPositiveRank, summary.FinalEval.RetrievalNDCGAt10, summary.FinalEval.PairCount)
+		fmt.Printf("final eval: loss=%.6f margin=%.6f accuracy=%.6f threshold_accuracy=%.6f threshold=%.6f auc=%.6f top1=%.6f top5=%.6f top10=%.6f mrr=%.6f mean_rank=%.3f retrieval_ndcg=%.6f retrieval_map=%.6f retrieval_recall=%.6f pairs=%d\n", summary.FinalEval.Loss, summary.FinalEval.ScoreMargin, summary.FinalEval.PairAccuracy, summary.FinalEval.ThresholdAccuracy, summary.FinalEval.ScoreThreshold, summary.FinalEval.ROCAUC, summary.FinalEval.Top1Accuracy, summary.FinalEval.Top5Accuracy, summary.FinalEval.Top10Accuracy, summary.FinalEval.MeanReciprocalRank, summary.FinalEval.MeanPositiveRank, summary.FinalEval.RetrievalNDCGAt10, summary.FinalEval.RetrievalMAPAt100, summary.FinalEval.RetrievalRecallAt100, summary.FinalEval.PairCount)
 	}
 	fmt.Printf("workload: %s\n", formatTrainWorkload(summary.Workload))
 	fmt.Printf("throughput: %s\n", formatTrainThroughput(summary))
@@ -6639,23 +6639,26 @@ type trainStatMetricsJSON struct {
 }
 
 type evalMetricsJSON struct {
-	Loss               float32 `json:"loss"`
-	AverageScore       float32 `json:"average_score"`
-	PositiveMeanScore  float32 `json:"positive_mean_score"`
-	NegativeMeanScore  float32 `json:"negative_mean_score"`
-	PairAccuracy       float32 `json:"pair_accuracy"`
-	ThresholdAccuracy  float32 `json:"threshold_accuracy"`
-	ScoreThreshold     float32 `json:"score_threshold"`
-	ROCAUC             float32 `json:"roc_auc"`
-	ScoreMargin        float32 `json:"score_margin"`
-	Top1Accuracy       float32 `json:"top1_accuracy"`
-	Top5Accuracy       float32 `json:"top5_accuracy"`
-	Top10Accuracy      float32 `json:"top10_accuracy"`
-	MeanReciprocalRank float32 `json:"mean_reciprocal_rank"`
-	MeanPositiveRank   float32 `json:"mean_positive_rank"`
-	PairCount          int     `json:"pair_count"`
-	PositiveCount      int     `json:"positive_count"`
-	NegativeCount      int     `json:"negative_count"`
+	Loss                 float32 `json:"loss"`
+	AverageScore         float32 `json:"average_score"`
+	PositiveMeanScore    float32 `json:"positive_mean_score"`
+	NegativeMeanScore    float32 `json:"negative_mean_score"`
+	PairAccuracy         float32 `json:"pair_accuracy"`
+	ThresholdAccuracy    float32 `json:"threshold_accuracy"`
+	ScoreThreshold       float32 `json:"score_threshold"`
+	ROCAUC               float32 `json:"roc_auc"`
+	ScoreMargin          float32 `json:"score_margin"`
+	Top1Accuracy         float32 `json:"top1_accuracy"`
+	Top5Accuracy         float32 `json:"top5_accuracy"`
+	Top10Accuracy        float32 `json:"top10_accuracy"`
+	MeanReciprocalRank   float32 `json:"mean_reciprocal_rank"`
+	MeanPositiveRank     float32 `json:"mean_positive_rank"`
+	RetrievalNDCGAt10    float32 `json:"retrieval_ndcg_at_10"`
+	RetrievalMAPAt100    float32 `json:"retrieval_map_at_100"`
+	RetrievalRecallAt100 float32 `json:"retrieval_recall_at_100"`
+	PairCount            int     `json:"pair_count"`
+	PositiveCount        int     `json:"positive_count"`
+	NegativeCount        int     `json:"negative_count"`
 }
 
 type scoreSpectrumEvalMetricsJSON struct {
@@ -6891,23 +6894,26 @@ func evalMetricsPayload(metrics *eosruntime.EmbeddingEvalMetrics) *evalMetricsJS
 		return nil
 	}
 	return &evalMetricsJSON{
-		Loss:               metrics.Loss,
-		AverageScore:       metrics.AverageScore,
-		PositiveMeanScore:  metrics.PositiveMeanScore,
-		NegativeMeanScore:  metrics.NegativeMeanScore,
-		PairAccuracy:       metrics.PairAccuracy,
-		ThresholdAccuracy:  metrics.ThresholdAccuracy,
-		ScoreThreshold:     metrics.ScoreThreshold,
-		ROCAUC:             metrics.ROCAUC,
-		ScoreMargin:        metrics.ScoreMargin,
-		Top1Accuracy:       metrics.Top1Accuracy,
-		Top5Accuracy:       metrics.Top5Accuracy,
-		Top10Accuracy:      metrics.Top10Accuracy,
-		MeanReciprocalRank: metrics.MeanReciprocalRank,
-		MeanPositiveRank:   metrics.MeanPositiveRank,
-		PairCount:          metrics.PairCount,
-		PositiveCount:      metrics.PositiveCount,
-		NegativeCount:      metrics.NegativeCount,
+		Loss:                 metrics.Loss,
+		AverageScore:         metrics.AverageScore,
+		PositiveMeanScore:    metrics.PositiveMeanScore,
+		NegativeMeanScore:    metrics.NegativeMeanScore,
+		PairAccuracy:         metrics.PairAccuracy,
+		ThresholdAccuracy:    metrics.ThresholdAccuracy,
+		ScoreThreshold:       metrics.ScoreThreshold,
+		ROCAUC:               metrics.ROCAUC,
+		ScoreMargin:          metrics.ScoreMargin,
+		Top1Accuracy:         metrics.Top1Accuracy,
+		Top5Accuracy:         metrics.Top5Accuracy,
+		Top10Accuracy:        metrics.Top10Accuracy,
+		MeanReciprocalRank:   metrics.MeanReciprocalRank,
+		MeanPositiveRank:     metrics.MeanPositiveRank,
+		RetrievalNDCGAt10:    metrics.RetrievalNDCGAt10,
+		RetrievalMAPAt100:    metrics.RetrievalMAPAt100,
+		RetrievalRecallAt100: metrics.RetrievalRecallAt100,
+		PairCount:            metrics.PairCount,
+		PositiveCount:        metrics.PositiveCount,
+		NegativeCount:        metrics.NegativeCount,
 	}
 }
 

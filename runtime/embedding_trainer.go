@@ -92,7 +92,8 @@ type EmbeddingTrainMovementMetrics struct {
 	ParameterDelta EmbeddingTrainStatMetrics
 }
 
-// EmbeddingEvalMetrics summarizes retrieval-oriented quality on pairwise eval data.
+// EmbeddingEvalMetrics summarizes pairwise eval quality plus optional
+// BEIR-style retrieval metrics computed from a held-out corpus+qrels.
 type EmbeddingEvalMetrics struct {
 	Loss               float32
 	AverageScore       float32
@@ -108,15 +109,18 @@ type EmbeddingEvalMetrics struct {
 	Top10Accuracy      float32
 	MeanReciprocalRank float32
 	MeanPositiveRank   float32
-	// RetrievalNDCGAt10 is nDCG@10 over a held-out BEIR-style corpus+qrels,
-	// computed during training when a retrieval eval set is configured. It is
-	// the deployment metric (unlike the pairwise metrics above, which saturate),
-	// so it is the meaningful target for -select-metric retrieval_ndcg. Zero when
-	// no retrieval eval set is configured.
-	RetrievalNDCGAt10 float32
-	PairCount         int
-	PositiveCount     int
-	NegativeCount     int
+	// RetrievalNDCGAt10, RetrievalMAPAt100, and RetrievalRecallAt100 are
+	// BEIR-style retrieval metrics over a held-out corpus+qrels, computed during
+	// training when a retrieval eval set is configured. They are the deployment
+	// metrics (unlike the pairwise metrics above, which saturate), so they can
+	// drive -select-metric retrieval_ndcg, retrieval_map, and
+	// retrieval_recall. Zero when no retrieval eval set is configured.
+	RetrievalNDCGAt10    float32
+	RetrievalMAPAt100    float32
+	RetrievalRecallAt100 float32
+	PairCount            int
+	PositiveCount        int
+	NegativeCount        int
 }
 
 // EmbeddingScoreSpectrumEvalMetrics summarizes read-only row-local
@@ -1016,10 +1020,10 @@ func (t *EmbeddingTrainer) configureRetrievalEval(rt *Runtime, cfg RetrievalEval
 		strings.TrimSpace(cfg.QrelsPath) != ""
 }
 
-// augmentRetrievalNDCG fills metrics.RetrievalNDCGAt10 by embedding the configured
+// augmentRetrievalMetrics fills retrieval metrics by embedding the configured
 // held-out corpus + queries with the trainer's current in-memory weights and
-// scoring nDCG@10 against the qrels. No-op when the gate is not enabled.
-func (t *EmbeddingTrainer) augmentRetrievalNDCG(metrics *EmbeddingEvalMetrics) error {
+// scoring them against the qrels. No-op when the gate is not enabled.
+func (t *EmbeddingTrainer) augmentRetrievalMetrics(metrics *EmbeddingEvalMetrics) error {
 	if t == nil || metrics == nil || !t.retrievalEvalEnabled {
 		return nil
 	}
@@ -1051,6 +1055,8 @@ func (t *EmbeddingTrainer) augmentRetrievalNDCG(metrics *EmbeddingEvalMetrics) e
 		return fmt.Errorf("retrieval eval: %w", err)
 	}
 	metrics.RetrievalNDCGAt10 = float32(result.Quality.NDCGAt10)
+	metrics.RetrievalMAPAt100 = float32(result.Quality.MAPAt100)
+	metrics.RetrievalRecallAt100 = float32(result.Quality.RecallAt100)
 	return nil
 }
 
@@ -1100,7 +1106,7 @@ func (t *EmbeddingTrainer) EvaluatePairs(batch []EmbeddingPairExample) (Embeddin
 	metrics.ScoreMargin = metrics.PositiveMeanScore - metrics.NegativeMeanScore
 	finalizeEvalScoreMetrics(&metrics, scores)
 	finalizeEvalRankMetrics(&metrics, rankScores)
-	if err := t.augmentRetrievalNDCG(&metrics); err != nil {
+	if err := t.augmentRetrievalMetrics(&metrics); err != nil {
 		return EmbeddingEvalMetrics{}, err
 	}
 	return metrics, nil
@@ -1348,7 +1354,7 @@ func (t *EmbeddingTrainer) EvaluateContrastive(batch []EmbeddingContrastiveExamp
 	defer t.releaseEncodedSequences(queries)
 	defer t.releaseEncodedSequences(positives)
 	metrics := evaluateContrastiveEncodings(queries, positives, t.config)
-	if err := t.augmentRetrievalNDCG(&metrics); err != nil {
+	if err := t.augmentRetrievalMetrics(&metrics); err != nil {
 		return EmbeddingEvalMetrics{}, err
 	}
 	return metrics, nil

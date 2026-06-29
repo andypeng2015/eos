@@ -8,13 +8,23 @@ import (
 	"testing"
 )
 
-// These tests drive the retrieval-nDCG selection gate: train-embed must be able
-// to select/restore-best on retrieval nDCG (the deployment metric) instead of
-// the saturated pairwise gate (top1 ~0.957 while retrieval nDCG ~0.148).
+// These tests drive the retrieval selection gate: train-embed must be able to
+// select/restore-best on held-out retrieval metrics instead of the saturated
+// pairwise gate (top1 ~0.957 while retrieval nDCG ~0.148).
 
 func TestValidTrainSelectionMetricAcceptsRetrievalNDCG(t *testing.T) {
-	if !validTrainSelectionMetric("retrieval_ndcg") {
-		t.Fatal("retrieval_ndcg must be a valid selection metric")
+	for _, metric := range []string{"retrieval_ndcg", "retrieval_ndcg_at_10"} {
+		if !validTrainSelectionMetric(metric) {
+			t.Fatalf("%s must be a valid selection metric", metric)
+		}
+	}
+}
+
+func TestValidTrainSelectionMetricAcceptsRetrievalMAPAndRecall(t *testing.T) {
+	for _, metric := range []string{"retrieval_map", "retrieval_map_at_100", "retrieval_recall", "retrieval_recall_at_100"} {
+		if !validTrainSelectionMetric(metric) {
+			t.Fatalf("%s must be a valid selection metric", metric)
+		}
 	}
 }
 
@@ -22,6 +32,25 @@ func TestEvalRankMetricReturnsRetrievalNDCG(t *testing.T) {
 	m := EmbeddingEvalMetrics{RetrievalNDCGAt10: 0.42}
 	if got := evalRankMetric(m, "retrieval_ndcg"); got != 0.42 {
 		t.Fatalf("evalRankMetric(retrieval_ndcg) = %v, want 0.42", got)
+	}
+	if got := evalRankMetric(m, "retrieval_ndcg_at_10"); got != 0.42 {
+		t.Fatalf("evalRankMetric(retrieval_ndcg_at_10) = %v, want 0.42", got)
+	}
+}
+
+func TestEvalRankMetricReturnsRetrievalMAPAndRecall(t *testing.T) {
+	m := EmbeddingEvalMetrics{RetrievalMAPAt100: 0.37, RetrievalRecallAt100: 0.81}
+	if got := evalRankMetric(m, "retrieval_map"); got != 0.37 {
+		t.Fatalf("evalRankMetric(retrieval_map) = %v, want 0.37", got)
+	}
+	if got := evalRankMetric(m, "retrieval_map_at_100"); got != 0.37 {
+		t.Fatalf("evalRankMetric(retrieval_map_at_100) = %v, want 0.37", got)
+	}
+	if got := evalRankMetric(m, "retrieval_recall"); got != 0.81 {
+		t.Fatalf("evalRankMetric(retrieval_recall) = %v, want 0.81", got)
+	}
+	if got := evalRankMetric(m, "retrieval_recall_at_100"); got != 0.81 {
+		t.Fatalf("evalRankMetric(retrieval_recall_at_100) = %v, want 0.81", got)
 	}
 }
 
@@ -33,6 +62,17 @@ func TestBetterEvalMetricsSelectsHigherRetrievalNDCG(t *testing.T) {
 	}
 	if betterEvalMetrics(best, improved, "retrieval_ndcg", 0) {
 		t.Fatal("lower retrieval nDCG must not be considered better")
+	}
+}
+
+func TestBetterEvalMetricsSelectsHigherRetrievalRecall(t *testing.T) {
+	best := EmbeddingEvalMetrics{RetrievalRecallAt100: 0.45}
+	improved := EmbeddingEvalMetrics{RetrievalRecallAt100: 0.52}
+	if !betterEvalMetrics(improved, best, "retrieval_recall", 0) {
+		t.Fatal("higher retrieval recall must be considered better")
+	}
+	if betterEvalMetrics(best, improved, "retrieval_recall_at_100", 0) {
+		t.Fatal("lower retrieval recall must not be considered better")
 	}
 }
 
