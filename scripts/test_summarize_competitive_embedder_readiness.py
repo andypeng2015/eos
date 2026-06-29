@@ -11,12 +11,14 @@ import unittest
 from pathlib import Path
 
 import summarize_competitive_embedder_readiness as summarizer
+import summarize_dynamic_remine_readiness as dynamic_readiness
 from test_summarize_dynamic_remine_readiness import write_stagea_ready
 from test_summarize_encoder_v21_readiness import write_complete_encoder_fixture
 from test_summarize_eos_embedder1_release_readiness import (
     write_valid_default_evidence,
     write_valid_non_default_evidence,
 )
+from test_summarize_stageabc_pretraining_readiness import write_stageabc_fixture
 
 
 def write_dynamic_fixture(root: Path) -> tuple[Path, Path]:
@@ -24,6 +26,98 @@ def write_dynamic_fixture(root: Path) -> tuple[Path, Path]:
     descriptor = root / "guided-negative-dynamic-remine-plan-v1.md"
     descriptor.write_text("# dynamic-remine plan\n", encoding="utf-8")
     write_stagea_ready(stagea_root)
+    (stagea_root / "artifacts").mkdir(parents=True, exist_ok=True)
+    (stagea_root / "vectors").mkdir(parents=True, exist_ok=True)
+    (stagea_root / "beir").mkdir(parents=True, exist_ok=True)
+    expected_score_rows = 128 * dynamic_readiness.DEFAULT_EXPECTED_CANDIDATES_PER_ROW
+    (stagea_root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset": "fixture-stagea",
+                "coverage": {
+                    "examples_seen": 128,
+                    "examples_scored": 128,
+                    "examples_written": 128,
+                    "missing_examples": 0,
+                    "import_score_rows": expected_score_rows,
+                    "candidate_rows_scored": expected_score_rows,
+                },
+                "vectors": {"doc_vector_rows": expected_score_rows, "query_vector_rows": 100},
+                "beir": {"corpus_rows": expected_score_rows, "query_rows": 100},
+                "scores": {"positive_top1_rate": 1.0, "margin": {"min": 0.1}},
+                "teacher_model_id": dynamic_readiness.DEFAULT_TEACHER_MODEL_ID,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (stagea_root / "artifacts" / "validation-summary.json").write_text(
+        json.dumps(
+            {
+                "validation": {
+                    "rows_ge_128": True,
+                    "scoring_complete": True,
+                    "guide_missing_drop_0": True,
+                }
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (stagea_root / "vectors" / "manifest.json").write_text(
+        json.dumps(
+            {
+                "package_sha256": "841b0d851c06290daeeab4bf4d25cb1dd7bb87920316dac950e1b556a3bae763",
+                "package_identity_sha256": "a356a4b7dc29a8d0f0a7b7bd45e7a9d2afbfa651c1a5bfaa05008c7157ba9637",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (stagea_root / "beir" / "manifest.json").write_text(
+        json.dumps({"counts": {"unique_docs": expected_score_rows, "unique_queries": 100}}, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (stagea_root / "guide-filter-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": dynamic_readiness.GUIDE_FILTER_SCHEMA,
+                "counts": {
+                    "rows_seen": 128,
+                    "rows_emitted": 128,
+                    "clean_agreement": 128,
+                    "missing_score_drop": 0,
+                    "conflict": 0,
+                    "ambiguous_soft_only": 0,
+                },
+                "legal_gates": {
+                    "train_allowed_for_research": True,
+                    "release_train_allowed": False,
+                    "commercial_use_allowed": False,
+                    "test_rows_train_allowed": False,
+                },
+                "legal_gate_accounting": {"research_only_preserved": True},
+                "inputs": {
+                    "teacher_caches": {
+                        dynamic_readiness.DEFAULT_TEACHER_LABEL: {
+                            "model_id": dynamic_readiness.DEFAULT_TEACHER_MODEL_ID,
+                            "config": {
+                                "package_sha256": "841b0d851c06290daeeab4bf4d25cb1dd7bb87920316dac950e1b556a3bae763",
+                                "package_identity": "a356a4b7dc29a8d0f0a7b7bd45e7a9d2afbfa651c1a5bfaa05008c7157ba9637",
+                            },
+                        }
+                    }
+                },
+                "quality_claim": False,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return stagea_root, descriptor
 
 
@@ -52,6 +146,7 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
             encoder_root, bge_root, encoder_descriptor = write_complete_encoder_fixture(root)
             dynamic_root, dynamic_descriptor = write_dynamic_fixture(root)
             compact_report, stageabc_report = write_major_lever_reports(root)
+            stageabc_paths = write_stageabc_fixture(root)
             non_default_evidence = write_valid_non_default_evidence(root)
             default_evidence = write_valid_default_evidence(root)
 
@@ -63,7 +158,7 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                 dynamic_descriptor=dynamic_descriptor,
                 datasets=["scifact", "nfcorpus", "fiqa"],
                 compact_native_student_report=compact_report,
-                stageabc_pretraining_distillation_report=stageabc_report,
+                **stageabc_paths,
                 embedder1_default_gate_evidence_paths={key: str(value) for key, value in default_evidence.items()},
                 embedder1_candidate_smoke_evidence=non_default_evidence["candidate_smoke_evidence"],
                 embedder1_role_aware_provider_smoke_evidence=non_default_evidence[
@@ -83,7 +178,10 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
         self.assertEqual(summary["packets"]["eos_embedder1_non_default"]["status"], "ready_for_review")
         self.assertEqual(summary["packets"]["eos_embedder1_default_swap"]["status"], "ready_for_review")
         self.assertEqual(summary["packets"]["compact_native_student"]["status"], "evidence_only_waiting_validation")
-        self.assertEqual(summary["packets"]["stageabc_pretraining_distillation"]["status"], "planned_not_ready")
+        self.assertEqual(
+            summary["packets"]["stageabc_pretraining_distillation"]["status"],
+            "evidence_ready_not_training_ready",
+        )
         self.assertEqual(summary["packets"]["role_asymmetry"]["status"], "release_identity_gate_ready")
         self.assertEqual(summary["packets"]["quantization_profile"]["status"], "q8_ready_for_review")
         self.assertEqual(
@@ -110,6 +208,7 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
             os.remove(fiqa / "eval" / "turboquant-q8-q4.metrics.json")
             dynamic_root, dynamic_descriptor = write_dynamic_fixture(root)
             compact_report, stageabc_report = write_major_lever_reports(root)
+            stageabc_paths = write_stageabc_fixture(root)
             non_default_evidence = write_valid_non_default_evidence(root)
             output_tsv = root / "rollup.tsv"
 
@@ -121,7 +220,7 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                 dynamic_descriptor=dynamic_descriptor,
                 datasets=["scifact", "nfcorpus", "fiqa"],
                 compact_native_student_report=compact_report,
-                stageabc_pretraining_distillation_report=stageabc_report,
+                **stageabc_paths,
                 embedder1_candidate_smoke_evidence=non_default_evidence["candidate_smoke_evidence"],
                 embedder1_role_aware_provider_smoke_evidence=non_default_evidence[
                     "role_aware_provider_smoke_evidence"
@@ -142,7 +241,10 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
         self.assertEqual(summary["packets"]["eos_embedder1_non_default"]["status"], "defer")
         self.assertEqual(summary["packets"]["eos_embedder1_default_swap"]["status"], "defer")
         self.assertEqual(summary["packets"]["compact_native_student"]["status"], "waiting_on_fiqa")
-        self.assertEqual(summary["packets"]["stageabc_pretraining_distillation"]["status"], "planned_not_ready")
+        self.assertEqual(
+            summary["packets"]["stageabc_pretraining_distillation"]["status"],
+            "evidence_ready_not_training_ready",
+        )
         self.assertEqual(summary["packets"]["role_asymmetry"]["status"], "release_identity_gate_ready")
         self.assertEqual(summary["packets"]["quantization_profile"]["status"], "waiting_on_fiqa")
         self.assertIn("Wait for the active/incomplete FiQA selected-BGE export", summary["next_action"])
@@ -167,7 +269,10 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
         self.assertEqual(keyed[("packet", "selected_bge_full_gate")]["status"], "waiting_on_fiqa")
         self.assertEqual(keyed[("packet", "encoder_v21_controlled_training")]["status"], "waiting_on_fiqa")
         self.assertEqual(keyed[("packet", "compact_native_student")]["status"], "waiting_on_fiqa")
-        self.assertEqual(keyed[("packet", "stageabc_pretraining_distillation")]["status"], "planned_not_ready")
+        self.assertEqual(
+            keyed[("packet", "stageabc_pretraining_distillation")]["status"],
+            "evidence_ready_not_training_ready",
+        )
         self.assertEqual(keyed[("packet", "role_asymmetry")]["status"], "release_identity_gate_ready")
         self.assertEqual(keyed[("packet", "quantization_profile")]["status"], "waiting_on_fiqa")
         self.assertEqual(keyed[("progress", "fiqa")]["status"], "incomplete")
@@ -188,11 +293,23 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                 datasets=["scifact", "nfcorpus", "fiqa"],
                 compact_native_student_report=root / "missing-compact.md",
                 stageabc_pretraining_distillation_report=root / "missing-stageabc.md",
+                stageabc_stagea_row_manifest=root / "missing-stagea-manifest.json",
+                stageabc_stagea_leak_report=root / "missing-stagea-leak.json",
+                stageabc_imported_bge_manifest=root / "missing-imported-manifest.json",
+                stageabc_imported_bge_validation=root / "missing-imported-validation.json",
+                stageabc_imported_bge_guide_filter_manifest=root / "missing-imported-guide.json",
+                stageabc_qwen_mxbai_manifest=root / "missing-qwen-mxbai-manifest.json",
+                stageabc_qwen_mxbai_independent_summary=root / "missing-qwen-mxbai-summary.json",
+                stageabc_listwise_qwen3_metrics=root / "missing-qwen3-metrics.json",
+                stageabc_listwise_mxbai_metrics=root / "missing-mxbai-metrics.json",
                 clock=lambda: "2026-06-29T00:00:00Z",
             )
 
         self.assertEqual(summary["packets"]["compact_native_student"]["status"], "missing_evidence")
-        self.assertEqual(summary["packets"]["stageabc_pretraining_distillation"]["status"], "missing_plan")
+        self.assertEqual(
+            summary["packets"]["stageabc_pretraining_distillation"]["status"],
+            "partial_evidence_waiting_implementation",
+        )
         self.assertEqual(summary["packets"]["role_asymmetry"]["status"], "defer")
 
     def test_require_unblocked_next_action_exits_2_when_waiting_on_fiqa(self) -> None:
@@ -206,6 +323,7 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
             os.remove(fiqa / "eval" / "turboquant-q8-q4.metrics.json")
             dynamic_root, dynamic_descriptor = write_dynamic_fixture(root)
             compact_report, stageabc_report = write_major_lever_reports(root)
+            stageabc_paths = write_stageabc_fixture(root)
 
             code = summarizer.main(
                 [
@@ -225,6 +343,24 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                     str(compact_report),
                     "--stageabc-pretraining-distillation-report",
                     str(stageabc_report),
+                    "--stageabc-stagea-row-manifest",
+                    str(stageabc_paths["stageabc_stagea_row_manifest"]),
+                    "--stageabc-stagea-leak-report",
+                    str(stageabc_paths["stageabc_stagea_leak_report"]),
+                    "--stageabc-imported-bge-manifest",
+                    str(stageabc_paths["stageabc_imported_bge_manifest"]),
+                    "--stageabc-imported-bge-validation",
+                    str(stageabc_paths["stageabc_imported_bge_validation"]),
+                    "--stageabc-imported-bge-guide-filter-manifest",
+                    str(stageabc_paths["stageabc_imported_bge_guide_filter_manifest"]),
+                    "--stageabc-qwen-mxbai-manifest",
+                    str(stageabc_paths["stageabc_qwen_mxbai_manifest"]),
+                    "--stageabc-qwen-mxbai-independent-summary",
+                    str(stageabc_paths["stageabc_qwen_mxbai_independent_summary"]),
+                    "--stageabc-listwise-qwen3-metrics",
+                    str(stageabc_paths["stageabc_listwise_qwen3_metrics"]),
+                    "--stageabc-listwise-mxbai-metrics",
+                    str(stageabc_paths["stageabc_listwise_mxbai_metrics"]),
                     "--output-json",
                     str(root / "rollup.json"),
                     "--output-tsv",
@@ -246,6 +382,7 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
             os.remove(fiqa / "eval" / "turboquant-q8-q4.metrics.json")
             dynamic_root, dynamic_descriptor = write_dynamic_fixture(root)
             compact_report, stageabc_report = write_major_lever_reports(root)
+            stageabc_paths = write_stageabc_fixture(root)
             output_json = root / "rollup.json"
             command = "eos export-pretrained-bert-retrieval-vectors --dataset fiqa"
 
@@ -267,6 +404,24 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                     str(compact_report),
                     "--stageabc-pretraining-distillation-report",
                     str(stageabc_report),
+                    "--stageabc-stagea-row-manifest",
+                    str(stageabc_paths["stageabc_stagea_row_manifest"]),
+                    "--stageabc-stagea-leak-report",
+                    str(stageabc_paths["stageabc_stagea_leak_report"]),
+                    "--stageabc-imported-bge-manifest",
+                    str(stageabc_paths["stageabc_imported_bge_manifest"]),
+                    "--stageabc-imported-bge-validation",
+                    str(stageabc_paths["stageabc_imported_bge_validation"]),
+                    "--stageabc-imported-bge-guide-filter-manifest",
+                    str(stageabc_paths["stageabc_imported_bge_guide_filter_manifest"]),
+                    "--stageabc-qwen-mxbai-manifest",
+                    str(stageabc_paths["stageabc_qwen_mxbai_manifest"]),
+                    "--stageabc-qwen-mxbai-independent-summary",
+                    str(stageabc_paths["stageabc_qwen_mxbai_independent_summary"]),
+                    "--stageabc-listwise-qwen3-metrics",
+                    str(stageabc_paths["stageabc_listwise_qwen3_metrics"]),
+                    "--stageabc-listwise-mxbai-metrics",
+                    str(stageabc_paths["stageabc_listwise_mxbai_metrics"]),
                     "--output-json",
                     str(output_json),
                     "--output-tsv",

@@ -24,6 +24,7 @@ import summarize_bge_selected_package_gate as bge_gate
 import summarize_dynamic_remine_readiness as dynamic_remine
 import summarize_encoder_v21_readiness as encoder_v21
 import summarize_eos_embedder1_release_readiness as embedder1
+import summarize_stageabc_pretraining_readiness as stageabc
 
 
 SUMMARY_SCHEMA = "eos.competitive_embedder_readiness_rollup.v1"
@@ -32,9 +33,7 @@ DEFAULT_OUTPUT_TSV = ".tiller/scratch/codex/competitive-embedder-goal-readiness-
 DEFAULT_COMPACT_NATIVE_STUDENT_REPORT = (
     ".tiller/scratch/codex/compact-bge-listwise-larger-validation-split211-seed191-v1-report.md"
 )
-DEFAULT_STAGEABC_PRETRAINING_DISTILLATION_REPORT = (
-    ".tiller/scratch/codex/retrieval-pretraining-distillation-pipeline-map-v1-report.md"
-)
+DEFAULT_STAGEABC_PRETRAINING_DISTILLATION_REPORT = stageabc.DEFAULT_PIPELINE_MAP_REPORT
 
 
 class RollupError(ValueError):
@@ -236,32 +235,20 @@ def compact_native_student_packet(report_path: Path, waiting_on_fiqa: bool) -> d
     )
 
 
-def stageabc_pretraining_distillation_packet(report_path: Path) -> dict[str, Any]:
-    text = read_optional_text(report_path)
-    if text is None:
-        return packet(
-            packet_id="stageabc_pretraining_distillation",
-            title="Stage A/B/C pretraining-distillation",
-            status="missing_plan",
-            blockers=[f"Stage A/B/C pipeline map missing: {report_path}"],
-            next_safe_action="Write the Stage A/B/C pipeline map before implementation work.",
-            details=report_path_detail(report_path),
-        )
+def stageabc_pretraining_distillation_packet(stageabc_summary: dict[str, Any]) -> dict[str, Any]:
     return packet(
         packet_id="stageabc_pretraining_distillation",
         title="Stage A/B/C pretraining-distillation",
-        status="planned_not_ready",
-        blockers=[
-            "Stage A row builder, teacher guide cache/filter, and listwise harness are mapped but not implementation-ready"
-        ],
-        next_safe_action="Implement the Stage A row builder, guide cache/filter, and listwise harness before any training.",
+        status=stageabc_summary.get("status", "planned_not_ready"),
+        blockers=[str(item) for item in stageabc_summary.get("blockers", [])],
+        next_safe_action=str(stageabc_summary.get("next_safe_action") or "Resolve Stage A/B/C evidence blockers."),
         details={
-            **report_path_detail(report_path),
-            "waiting_on_implementation": True,
-            "training_ready": False,
-            "mentions_stage_a": "Stage A" in text,
-            "mentions_stage_b": "Stage B" in text,
-            "mentions_stage_c": "Stage C" in text,
+            "training_ready": stageabc_summary.get("training_ready"),
+            "release_train_allowed": stageabc_summary.get("release_train_allowed"),
+            "quality_claim": stageabc_summary.get("quality_claim"),
+            "evidence_paths": stageabc_summary.get("evidence_paths", {}),
+            "components": stageabc_summary.get("components", {}),
+            "warnings": stageabc_summary.get("warnings", []),
         },
     )
 
@@ -359,6 +346,15 @@ def build_summary(
     datasets: list[str],
     compact_native_student_report: Path = Path(DEFAULT_COMPACT_NATIVE_STUDENT_REPORT),
     stageabc_pretraining_distillation_report: Path = Path(DEFAULT_STAGEABC_PRETRAINING_DISTILLATION_REPORT),
+    stageabc_stagea_row_manifest: Path = Path(stageabc.DEFAULT_STAGEA_ROW_MANIFEST),
+    stageabc_stagea_leak_report: Path = Path(stageabc.DEFAULT_STAGEA_LEAK_REPORT),
+    stageabc_imported_bge_manifest: Path = Path(stageabc.DEFAULT_IMPORTED_BGE_MANIFEST),
+    stageabc_imported_bge_validation: Path = Path(stageabc.DEFAULT_IMPORTED_BGE_VALIDATION),
+    stageabc_imported_bge_guide_filter_manifest: Path = Path(stageabc.DEFAULT_IMPORTED_BGE_GUIDE_FILTER_MANIFEST),
+    stageabc_qwen_mxbai_manifest: Path = Path(stageabc.DEFAULT_QWEN_MXBAI_MANIFEST),
+    stageabc_qwen_mxbai_independent_summary: Path = Path(stageabc.DEFAULT_QWEN_MXBAI_INDEPENDENT_SUMMARY),
+    stageabc_listwise_qwen3_metrics: Path = Path(stageabc.DEFAULT_LISTWISE_QWEN3_METRICS),
+    stageabc_listwise_mxbai_metrics: Path = Path(stageabc.DEFAULT_LISTWISE_MXBAI_METRICS),
     encoder_binary: Path | None = None,
     encoder_tiny_metrics: Path | None = None,
     encoder_capped_metrics: Path | None = None,
@@ -398,6 +394,19 @@ def build_summary(
         role_aware_provider_smoke_evidence=embedder1_role_aware_provider_smoke_evidence,
         corkscrewdb_serving_smoke_evidence=embedder1_corkscrewdb_serving_smoke_evidence,
         scan_paths=embedder1_scan_paths or [],
+        clock=clock,
+    )
+    stageabc_summary = stageabc.build_summary(
+        pipeline_map_report=stageabc_pretraining_distillation_report,
+        stagea_row_manifest=stageabc_stagea_row_manifest,
+        stagea_leak_report=stageabc_stagea_leak_report,
+        imported_bge_manifest=stageabc_imported_bge_manifest,
+        imported_bge_validation=stageabc_imported_bge_validation,
+        imported_bge_guide_filter_manifest=stageabc_imported_bge_guide_filter_manifest,
+        qwen_mxbai_manifest=stageabc_qwen_mxbai_manifest,
+        qwen_mxbai_independent_summary=stageabc_qwen_mxbai_independent_summary,
+        listwise_qwen3_metrics=stageabc_listwise_qwen3_metrics,
+        listwise_mxbai_metrics=stageabc_listwise_mxbai_metrics,
         clock=clock,
     )
     waiting_on_fiqa = not bge["all_complete"] and bool(bge["active_export_markers"])
@@ -461,9 +470,7 @@ def build_summary(
             details={"public_name": release["public_name"], "public_id": release["public_id"]},
         ),
         "compact_native_student": compact_native_student_packet(compact_native_student_report, waiting_on_fiqa),
-        "stageabc_pretraining_distillation": stageabc_pretraining_distillation_packet(
-            stageabc_pretraining_distillation_report
-        ),
+        "stageabc_pretraining_distillation": stageabc_pretraining_distillation_packet(stageabc_summary),
         "role_asymmetry": role_asymmetry_packet(release),
         "quantization_profile": quantization_profile_packet(bge, waiting_on_fiqa),
     }
@@ -510,6 +517,7 @@ def build_summary(
             "encoder_v21": encoder,
             "dynamic_remine": dynamic,
             "eos_embedder1": release,
+            "stageabc_pretraining_distillation": stageabc_summary,
         },
     }
 
@@ -620,6 +628,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--stageabc-pretraining-distillation-report",
         default=DEFAULT_STAGEABC_PRETRAINING_DISTILLATION_REPORT,
     )
+    parser.add_argument("--stageabc-stagea-row-manifest", default=stageabc.DEFAULT_STAGEA_ROW_MANIFEST)
+    parser.add_argument("--stageabc-stagea-leak-report", default=stageabc.DEFAULT_STAGEA_LEAK_REPORT)
+    parser.add_argument("--stageabc-imported-bge-manifest", default=stageabc.DEFAULT_IMPORTED_BGE_MANIFEST)
+    parser.add_argument("--stageabc-imported-bge-validation", default=stageabc.DEFAULT_IMPORTED_BGE_VALIDATION)
+    parser.add_argument(
+        "--stageabc-imported-bge-guide-filter-manifest",
+        default=stageabc.DEFAULT_IMPORTED_BGE_GUIDE_FILTER_MANIFEST,
+    )
+    parser.add_argument("--stageabc-qwen-mxbai-manifest", default=stageabc.DEFAULT_QWEN_MXBAI_MANIFEST)
+    parser.add_argument(
+        "--stageabc-qwen-mxbai-independent-summary",
+        default=stageabc.DEFAULT_QWEN_MXBAI_INDEPENDENT_SUMMARY,
+    )
+    parser.add_argument("--stageabc-listwise-qwen3-metrics", default=stageabc.DEFAULT_LISTWISE_QWEN3_METRICS)
+    parser.add_argument("--stageabc-listwise-mxbai-metrics", default=stageabc.DEFAULT_LISTWISE_MXBAI_METRICS)
     parser.add_argument("--scan-paths", default="")
     parser.add_argument("--candidate-smoke-evidence")
     parser.add_argument("--role-aware-provider-smoke-evidence")
@@ -648,6 +671,15 @@ def main(argv: list[str] | None = None) -> int:
             datasets=parse_datasets(args.datasets),
             compact_native_student_report=Path(args.compact_native_student_report),
             stageabc_pretraining_distillation_report=Path(args.stageabc_pretraining_distillation_report),
+            stageabc_stagea_row_manifest=Path(args.stageabc_stagea_row_manifest),
+            stageabc_stagea_leak_report=Path(args.stageabc_stagea_leak_report),
+            stageabc_imported_bge_manifest=Path(args.stageabc_imported_bge_manifest),
+            stageabc_imported_bge_validation=Path(args.stageabc_imported_bge_validation),
+            stageabc_imported_bge_guide_filter_manifest=Path(args.stageabc_imported_bge_guide_filter_manifest),
+            stageabc_qwen_mxbai_manifest=Path(args.stageabc_qwen_mxbai_manifest),
+            stageabc_qwen_mxbai_independent_summary=Path(args.stageabc_qwen_mxbai_independent_summary),
+            stageabc_listwise_qwen3_metrics=Path(args.stageabc_listwise_qwen3_metrics),
+            stageabc_listwise_mxbai_metrics=Path(args.stageabc_listwise_mxbai_metrics),
             encoder_binary=Path(args.encoder_binary) if args.encoder_binary else None,
             encoder_tiny_metrics=Path(args.encoder_tiny_metrics) if args.encoder_tiny_metrics else None,
             encoder_capped_metrics=Path(args.encoder_capped_metrics) if args.encoder_capped_metrics else None,
@@ -661,7 +693,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         write_json(Path(args.output_json), summary)
         write_tsv(Path(args.output_tsv), summary)
-    except (RollupError, bge_gate.SummaryError, encoder_v21.ReadinessError, dynamic_remine.ReadinessError, embedder1.ReadinessError) as exc:
+    except (
+        RollupError,
+        bge_gate.SummaryError,
+        encoder_v21.ReadinessError,
+        dynamic_remine.ReadinessError,
+        embedder1.ReadinessError,
+        stageabc.ReadinessError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if args.require_unblocked_next_action and summary["summary"]["waiting_on_fiqa"]:
