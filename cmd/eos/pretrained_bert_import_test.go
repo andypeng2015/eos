@@ -311,6 +311,12 @@ func TestRunImportPretrainedBERTWeightsOutWritesReadableWeightFile(t *testing.T)
 	if loaded.PackageExport.OutputPath != packagePath || loaded.PackageExport.NativeDim != 2 || loaded.PackageExport.MaxLength != 4 {
 		t.Fatalf("package export = %+v", loaded.PackageExport)
 	}
+	if !strings.Contains(loaded.PackageExport.ExecutionStatus, "source_free_package_host_reference_full_stack") {
+		t.Fatalf("package export execution_status = %q", loaded.PackageExport.ExecutionStatus)
+	}
+	if loaded.ExecutionStatus != loaded.PackageExport.ExecutionStatus {
+		t.Fatalf("plan execution_status = %q, want package export status %q", loaded.ExecutionStatus, loaded.PackageExport.ExecutionStatus)
+	}
 	if !isCommandSHA256Hex(loaded.PackageExport.IdentitySHA256) || !isCommandSHA256Hex(loaded.PackageExport.ModuleSHA256) ||
 		!isCommandSHA256Hex(loaded.PackageExport.WeightsSHA256) || !isCommandSHA256Hex(loaded.PackageExport.ConfigSHA256) ||
 		!isCommandSHA256Hex(loaded.PackageExport.VocabSHA256) {
@@ -325,6 +331,73 @@ func TestRunImportPretrainedBERTWeightsOutWritesReadableWeightFile(t *testing.T)
 	}
 	if _, err := pkg.Tokenizer(); err != nil {
 		t.Fatalf("package tokenizer: %v", err)
+	}
+}
+
+func TestRunImportPretrainedBERTModuleOutUpdatesPlanExecutionStatus(t *testing.T) {
+	dir := t.TempDir()
+	snapshot := filepath.Join(dir, "hf-snapshot")
+	if err := os.MkdirAll(snapshot, 0o755); err != nil {
+		t.Fatalf("mkdir snapshot: %v", err)
+	}
+	config := `{
+		"architectures": ["BertModel"],
+		"model_type": "bert",
+		"vocab_size": 3,
+		"hidden_size": 2,
+		"num_hidden_layers": 1,
+		"num_attention_heads": 1,
+		"intermediate_size": 4,
+		"hidden_act": "gelu",
+		"max_position_embeddings": 4,
+		"type_vocab_size": 2
+	}`
+	if err := os.WriteFile(filepath.Join(snapshot, "config.json"), []byte(config), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(snapshot, "vocab.txt"), []byte("[PAD]\n[UNK]\n[CLS]\n[SEP]\n[MASK]\n"), 0o644); err != nil {
+		t.Fatalf("write vocab: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(snapshot, "tokenizer_config.json"), []byte(`{"do_lower_case":true}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write tokenizer config: %v", err)
+	}
+	plan, err := eosruntime.PlanPretrainedBERTImportFromDir(snapshot, "fixture")
+	if err != nil {
+		t.Fatalf("plan fixture: %v", err)
+	}
+	header := commandSafeTensorsHeaderForBERTPlan(plan)
+	payloadSize := renumberCommandSafeTensorFixtureOffsets(header)
+	if err := writeCommandSafeTensorsFixture(filepath.Join(snapshot, "model.safetensors"), header, make([]byte, payloadSize)); err != nil {
+		t.Fatalf("write safetensors: %v", err)
+	}
+	planPath := filepath.Join(dir, "plan.json")
+	modulePath := filepath.Join(dir, "bert.module.mll")
+	if err := runImportPretrainedBERT([]string{
+		"--source", snapshot,
+		"--module-out", modulePath,
+		"--plan-json", planPath,
+	}); err != nil {
+		t.Fatalf("run import-pretrained-bert: %v", err)
+	}
+	data, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatalf("read plan json: %v", err)
+	}
+	var loaded eosruntime.PretrainedBERTImportPlan
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		t.Fatalf("parse plan json: %v\n%s", err, data)
+	}
+	if loaded.ModuleExport == nil {
+		t.Fatal("expected module export report")
+	}
+	if strings.Contains(loaded.ExecutionStatus, "plan_only") {
+		t.Fatalf("plan execution_status stayed stale: %q", loaded.ExecutionStatus)
+	}
+	if !strings.Contains(loaded.ExecutionStatus, "host_reference_full_stack") {
+		t.Fatalf("plan execution_status = %q", loaded.ExecutionStatus)
+	}
+	if loaded.ExecutionStatus != loaded.ModuleExport.ExecutionStatus {
+		t.Fatalf("plan execution_status = %q, want module export status %q", loaded.ExecutionStatus, loaded.ModuleExport.ExecutionStatus)
 	}
 }
 

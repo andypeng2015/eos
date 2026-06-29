@@ -66,6 +66,9 @@ func runImportPretrainedBERT(args []string) error {
 			return fmt.Errorf("export embedder module: %w", err)
 		}
 		plan.ModuleExport = &report
+		if report.ExecutionStatus != "" {
+			plan.ExecutionStatus = report.ExecutionStatus
+		}
 	}
 	if *packageOut != "" {
 		report, err := eosruntime.ExportPretrainedBERTPackageFromDir(*source, plan, *packageOut)
@@ -73,6 +76,9 @@ func runImportPretrainedBERT(args []string) error {
 			return fmt.Errorf("export package: %w", err)
 		}
 		plan.PackageExport = &report
+		if report.ExecutionStatus != "" {
+			plan.ExecutionStatus = report.ExecutionStatus
+		}
 	}
 	if *tokenizerSmoke != "" {
 		tokenizer, err := eosruntime.LoadHFWordPieceTokenizerFromDir(*source)

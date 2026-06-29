@@ -167,6 +167,8 @@ func run(args []string) error {
 		return runDemo(args[1:])
 	case "inspect":
 		return runInspect(args[1:])
+	case "inspect-pretrained-bert-package":
+		return runInspectPretrainedBERTPackage(args[1:])
 	case "export-mll":
 		return runExportMLL(args[1:])
 	case "import-pretrained-bert":
@@ -8301,6 +8303,7 @@ func printUsage() {
 	fmt.Println("  eos kernels [--backend backend] [--out dir] <source.eos|artifact.mll>")
 	fmt.Println("  eos doctor")
 	fmt.Println("  eos inspect <artifact.mll>")
+	fmt.Println("  eos inspect-pretrained-bert-package [--json] <package.mll>")
 	fmt.Println("  eos export-mll <artifact.mll> [output.mll]")
 	fmt.Println("  eos import-pretrained-bert --source <hf-snapshot-dir> [--model-name name] [--plan-json plan.json] [--verify-weights] [--weights-out weights.mll] [--module-out artifact.mll]")
 	fmt.Println("  eos fit-pretrained-bert-projection-head --weights-json weights.json --out head.mll [metadata flags]")

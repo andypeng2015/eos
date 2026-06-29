@@ -70,6 +70,7 @@ type PretrainedBERTPackage struct {
 type PretrainedBERTPackageExportReport struct {
 	Status                string                               `json:"status"`
 	OutputPath            string                               `json:"output_path,omitempty"`
+	ExecutionStatus       string                               `json:"execution_status,omitempty"`
 	IdentitySHA256        string                               `json:"identity_sha256,omitempty"`
 	ModelName             string                               `json:"model_name,omitempty"`
 	ModuleSHA256          string                               `json:"module_sha256,omitempty"`
@@ -106,6 +107,7 @@ func ExportPretrainedBERTPackageFromDir(dir string, plan PretrainedBERTImportPla
 	return PretrainedBERTPackageExportReport{
 		Status:                "ok",
 		OutputPath:            outPath,
+		ExecutionStatus:       pretrainedBERTPackageExecutionStatus(),
 		IdentitySHA256:        pkg.IdentitySHA256,
 		ModelName:             pkg.ModelName,
 		ModuleSHA256:          pkg.ModuleSHA256,
@@ -120,6 +122,10 @@ func ExportPretrainedBERTPackageFromDir(dir string, plan PretrainedBERTImportPla
 		FileCount:             len(pkg.Files),
 		PackageBytes:          int64(len(data)),
 	}, nil
+}
+
+func pretrainedBERTPackageExecutionStatus() string {
+	return "source_free_package_host_reference_full_stack: source-free imported BERT package embeds host_reference_full_stack module, weights, tokenizer, and config; no device or quantized execution claim"
 }
 
 func BuildPretrainedBERTPackageFromDir(dir string, plan PretrainedBERTImportPlan) (PretrainedBERTPackage, error) {
