@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 
 	eosartifact "m31labs.dev/eos/artifact/eos"
 	mll "m31labs.dev/mll"
 )
 
 const PretrainedBERTPackageVersion = "manta/pretrained-bert-package/v0alpha1"
+const PretrainedBERTRetrievalRoleContractSchema = "manta.pretrained_bert_retrieval_role_contract.v1"
 
 var tagXPBT = [4]byte{'X', 'P', 'B', 'T'}
 
@@ -25,46 +27,62 @@ type PretrainedBERTPackageFile struct {
 	Bytes  int    `json:"bytes"`
 }
 
+type PretrainedBERTRetrievalRoleContract struct {
+	Schema               string `json:"schema"`
+	Source               string `json:"source,omitempty"`
+	Preset               string `json:"preset,omitempty"`
+	QueryRole            string `json:"query_role,omitempty"`
+	DocumentRole         string `json:"document_role,omitempty"`
+	QueryPrefix          string `json:"query_prefix"`
+	DocumentPrefix       string `json:"document_prefix"`
+	Pooling              string `json:"pooling,omitempty"`
+	MaxLength            int    `json:"max_length,omitempty"`
+	EmbeddingSpaceRecipe string `json:"embedding_space_recipe,omitempty"`
+	Notes                string `json:"notes,omitempty"`
+}
+
 type PretrainedBERTPackage struct {
-	Version                string                      `json:"version"`
-	ModelName              string                      `json:"model_name,omitempty"`
-	Architecture           string                      `json:"architecture,omitempty"`
-	Config                 PretrainedBERTConfig        `json:"config"`
-	STMetadata             *PretrainedBERTSTMetadata   `json:"sentence_transformers,omitempty"`
-	Pooling                string                      `json:"pooling,omitempty"`
-	Normalization          string                      `json:"normalization,omitempty"`
-	MaxLength              int                         `json:"max_length"`
-	NativeDim              int                         `json:"native_dim"`
-	ModuleSHA256           string                      `json:"module_sha256"`
-	WeightsSHA256          string                      `json:"weights_sha256"`
-	Files                  []PretrainedBERTPackageFile `json:"files"`
-	ModuleBytes            []byte                      `json:"module_bytes"`
-	WeightsBytes           []byte                      `json:"weights_bytes"`
-	ConfigJSON             []byte                      `json:"config_json"`
-	Vocab                  []byte                      `json:"vocab"`
-	TokenizerJSON          []byte                      `json:"tokenizer_json,omitempty"`
-	TokenizerConfigJSON    []byte                      `json:"tokenizer_config_json,omitempty"`
-	SpecialTokensMapJSON   []byte                      `json:"special_tokens_map_json,omitempty"`
-	STPoolingConfigJSON    []byte                      `json:"sentence_transformers_pooling_config_json,omitempty"`
-	SentenceBERTConfigJSON []byte                      `json:"sentence_bert_config_json,omitempty"`
-	IdentitySHA256         string                      `json:"identity_sha256"`
+	Version                string                               `json:"version"`
+	ModelName              string                               `json:"model_name,omitempty"`
+	Architecture           string                               `json:"architecture,omitempty"`
+	Config                 PretrainedBERTConfig                 `json:"config"`
+	STMetadata             *PretrainedBERTSTMetadata            `json:"sentence_transformers,omitempty"`
+	RetrievalRoleContract  *PretrainedBERTRetrievalRoleContract `json:"retrieval_role_contract,omitempty"`
+	Pooling                string                               `json:"pooling,omitempty"`
+	Normalization          string                               `json:"normalization,omitempty"`
+	MaxLength              int                                  `json:"max_length"`
+	NativeDim              int                                  `json:"native_dim"`
+	ModuleSHA256           string                               `json:"module_sha256"`
+	WeightsSHA256          string                               `json:"weights_sha256"`
+	Files                  []PretrainedBERTPackageFile          `json:"files"`
+	ModuleBytes            []byte                               `json:"module_bytes"`
+	WeightsBytes           []byte                               `json:"weights_bytes"`
+	ConfigJSON             []byte                               `json:"config_json"`
+	Vocab                  []byte                               `json:"vocab"`
+	TokenizerJSON          []byte                               `json:"tokenizer_json,omitempty"`
+	TokenizerConfigJSON    []byte                               `json:"tokenizer_config_json,omitempty"`
+	SpecialTokensMapJSON   []byte                               `json:"special_tokens_map_json,omitempty"`
+	STPoolingConfigJSON    []byte                               `json:"sentence_transformers_pooling_config_json,omitempty"`
+	SentenceBERTConfigJSON []byte                               `json:"sentence_bert_config_json,omitempty"`
+	IdentitySHA256         string                               `json:"identity_sha256"`
 }
 
 type PretrainedBERTPackageExportReport struct {
-	Status         string `json:"status"`
-	OutputPath     string `json:"output_path,omitempty"`
-	IdentitySHA256 string `json:"identity_sha256,omitempty"`
-	ModelName      string `json:"model_name,omitempty"`
-	ModuleSHA256   string `json:"module_sha256,omitempty"`
-	WeightsSHA256  string `json:"weights_sha256,omitempty"`
-	ConfigSHA256   string `json:"config_sha256,omitempty"`
-	VocabSHA256    string `json:"vocab_sha256,omitempty"`
-	Pooling        string `json:"pooling,omitempty"`
-	Normalization  string `json:"normalization,omitempty"`
-	MaxLength      int    `json:"max_length,omitempty"`
-	NativeDim      int    `json:"native_dim,omitempty"`
-	FileCount      int    `json:"file_count"`
-	PackageBytes   int64  `json:"package_bytes,omitempty"`
+	Status                string                               `json:"status"`
+	OutputPath            string                               `json:"output_path,omitempty"`
+	IdentitySHA256        string                               `json:"identity_sha256,omitempty"`
+	ModelName             string                               `json:"model_name,omitempty"`
+	ModuleSHA256          string                               `json:"module_sha256,omitempty"`
+	WeightsSHA256         string                               `json:"weights_sha256,omitempty"`
+	ConfigSHA256          string                               `json:"config_sha256,omitempty"`
+	VocabSHA256           string                               `json:"vocab_sha256,omitempty"`
+	Pooling               string                               `json:"pooling,omitempty"`
+	Normalization         string                               `json:"normalization,omitempty"`
+	MaxLength             int                                  `json:"max_length,omitempty"`
+	NativeDim             int                                  `json:"native_dim,omitempty"`
+	RetrievalRoleContract *PretrainedBERTRetrievalRoleContract `json:"retrieval_role_contract,omitempty"`
+	FileCount             int                                  `json:"file_count"`
+	PackageBytes          int64                                `json:"package_bytes,omitempty"`
 }
 
 func ExportPretrainedBERTPackageFromDir(dir string, plan PretrainedBERTImportPlan, outPath string) (PretrainedBERTPackageExportReport, error) {
@@ -86,20 +104,21 @@ func ExportPretrainedBERTPackageFromDir(dir string, plan PretrainedBERTImportPla
 		return PretrainedBERTPackageExportReport{}, err
 	}
 	return PretrainedBERTPackageExportReport{
-		Status:         "ok",
-		OutputPath:     outPath,
-		IdentitySHA256: pkg.IdentitySHA256,
-		ModelName:      pkg.ModelName,
-		ModuleSHA256:   pkg.ModuleSHA256,
-		WeightsSHA256:  pkg.WeightsSHA256,
-		ConfigSHA256:   packageFileHash(pkg.Files, "config"),
-		VocabSHA256:    packageFileHash(pkg.Files, "vocab"),
-		Pooling:        pkg.Pooling,
-		Normalization:  pkg.Normalization,
-		MaxLength:      pkg.MaxLength,
-		NativeDim:      pkg.NativeDim,
-		FileCount:      len(pkg.Files),
-		PackageBytes:   int64(len(data)),
+		Status:                "ok",
+		OutputPath:            outPath,
+		IdentitySHA256:        pkg.IdentitySHA256,
+		ModelName:             pkg.ModelName,
+		ModuleSHA256:          pkg.ModuleSHA256,
+		WeightsSHA256:         pkg.WeightsSHA256,
+		ConfigSHA256:          packageFileHash(pkg.Files, "config"),
+		VocabSHA256:           packageFileHash(pkg.Files, "vocab"),
+		Pooling:               pkg.Pooling,
+		Normalization:         pkg.Normalization,
+		MaxLength:             pkg.MaxLength,
+		NativeDim:             pkg.NativeDim,
+		RetrievalRoleContract: clonePretrainedBERTRetrievalRoleContract(pkg.RetrievalRoleContract),
+		FileCount:             len(pkg.Files),
+		PackageBytes:          int64(len(data)),
 	}, nil
 }
 
@@ -175,6 +194,7 @@ func BuildPretrainedBERTPackageFromDir(dir string, plan PretrainedBERTImportPlan
 		Normalization:          normalization,
 		MaxLength:              maxLength,
 		NativeDim:              plan.Config.HiddenSize,
+		RetrievalRoleContract:  InferPretrainedBERTRetrievalRoleContract(plan.ModelName, pooling, maxLength),
 		ModuleSHA256:           sha256BytesHex(moduleBytes),
 		WeightsSHA256:          sha256BytesHex(weightsBytes),
 		ModuleBytes:            moduleBytes,
@@ -249,6 +269,9 @@ func (p PretrainedBERTPackage) Validate() error {
 	if p.NativeDim != p.Config.HiddenSize {
 		return fmt.Errorf("pretrained BERT package native_dim %d does not match config hidden_size %d", p.NativeDim, p.Config.HiddenSize)
 	}
+	if err := p.validateRetrievalRoleContract(); err != nil {
+		return err
+	}
 	if len(p.ConfigJSON) == 0 || len(p.Vocab) == 0 || len(p.ModuleBytes) == 0 || len(p.WeightsBytes) == 0 {
 		return fmt.Errorf("pretrained BERT package requires config, vocab, module, and weights bytes")
 	}
@@ -292,6 +315,73 @@ func (p PretrainedBERTPackage) Validate() error {
 	}
 	if _, err := p.Tokenizer(); err != nil {
 		return fmt.Errorf("decode package tokenizer: %w", err)
+	}
+	return nil
+}
+
+func InferPretrainedBERTRetrievalRoleContract(modelName, pooling string, maxLength int) *PretrainedBERTRetrievalRoleContract {
+	switch strings.ToLower(strings.TrimSpace(modelName)) {
+	case "baai/bge-small-en-v1.5":
+		return &PretrainedBERTRetrievalRoleContract{
+			Schema:               PretrainedBERTRetrievalRoleContractSchema,
+			Source:               "known_sentence_transformers_model_name",
+			Preset:               "BAAI/bge-small-en-v1.5",
+			QueryRole:            "query",
+			DocumentRole:         "document",
+			QueryPrefix:          "Represent this sentence for searching relevant passages: ",
+			DocumentPrefix:       "",
+			Pooling:              pooling,
+			MaxLength:            maxLength,
+			EmbeddingSpaceRecipe: "apply query_prefix to queries, document_prefix to documents, then run imported BERT with package pooling/max_length and L2-normalized output",
+		}
+	case "intfloat/e5-small-v2":
+		return &PretrainedBERTRetrievalRoleContract{
+			Schema:               PretrainedBERTRetrievalRoleContractSchema,
+			Source:               "known_sentence_transformers_model_name",
+			Preset:               "intfloat/e5-small-v2",
+			QueryRole:            "query",
+			DocumentRole:         "document",
+			QueryPrefix:          "query: ",
+			DocumentPrefix:       "passage: ",
+			Pooling:              pooling,
+			MaxLength:            maxLength,
+			EmbeddingSpaceRecipe: "apply query_prefix to queries, document_prefix to documents, then run imported BERT with package pooling/max_length and L2-normalized output",
+		}
+	default:
+		return nil
+	}
+}
+
+func clonePretrainedBERTRetrievalRoleContract(contract *PretrainedBERTRetrievalRoleContract) *PretrainedBERTRetrievalRoleContract {
+	if contract == nil {
+		return nil
+	}
+	cloned := *contract
+	return &cloned
+}
+
+func (p PretrainedBERTPackage) validateRetrievalRoleContract() error {
+	if p.RetrievalRoleContract == nil {
+		return nil
+	}
+	c := p.RetrievalRoleContract
+	if c.Schema != PretrainedBERTRetrievalRoleContractSchema {
+		return fmt.Errorf("pretrained BERT retrieval role contract schema %q is not supported, want %q", c.Schema, PretrainedBERTRetrievalRoleContractSchema)
+	}
+	if c.QueryRole == "" {
+		return fmt.Errorf("pretrained BERT retrieval role contract query_role is required")
+	}
+	if c.DocumentRole == "" {
+		return fmt.Errorf("pretrained BERT retrieval role contract document_role is required")
+	}
+	if c.QueryPrefix == "" && c.DocumentPrefix == "" {
+		return fmt.Errorf("pretrained BERT retrieval role contract requires at least one role prefix")
+	}
+	if c.Pooling != "" && p.Pooling != "" && c.Pooling != p.Pooling {
+		return fmt.Errorf("pretrained BERT retrieval role contract pooling %q does not match package pooling %q", c.Pooling, p.Pooling)
+	}
+	if c.MaxLength != 0 && p.MaxLength != 0 && c.MaxLength != p.MaxLength {
+		return fmt.Errorf("pretrained BERT retrieval role contract max_length %d does not match package max_length %d", c.MaxLength, p.MaxLength)
 	}
 	return nil
 }
@@ -384,33 +474,35 @@ func emptyPretrainedBERTSTMetadataToNil(meta *PretrainedBERTSTMetadata) *Pretrai
 
 func (p PretrainedBERTPackage) IdentityHash() string {
 	type identity struct {
-		Version       string                      `json:"version"`
-		ModelName     string                      `json:"model_name,omitempty"`
-		Architecture  string                      `json:"architecture,omitempty"`
-		ModelType     string                      `json:"model_type,omitempty"`
-		Pooling       string                      `json:"pooling,omitempty"`
-		Normalization string                      `json:"normalization,omitempty"`
-		MaxLength     int                         `json:"max_length"`
-		NativeDim     int                         `json:"native_dim"`
-		ModuleSHA256  string                      `json:"module_sha256"`
-		WeightsSHA256 string                      `json:"weights_sha256"`
-		Files         []PretrainedBERTPackageFile `json:"files"`
+		Version               string                               `json:"version"`
+		ModelName             string                               `json:"model_name,omitempty"`
+		Architecture          string                               `json:"architecture,omitempty"`
+		ModelType             string                               `json:"model_type,omitempty"`
+		Pooling               string                               `json:"pooling,omitempty"`
+		Normalization         string                               `json:"normalization,omitempty"`
+		MaxLength             int                                  `json:"max_length"`
+		NativeDim             int                                  `json:"native_dim"`
+		RetrievalRoleContract *PretrainedBERTRetrievalRoleContract `json:"retrieval_role_contract,omitempty"`
+		ModuleSHA256          string                               `json:"module_sha256"`
+		WeightsSHA256         string                               `json:"weights_sha256"`
+		Files                 []PretrainedBERTPackageFile          `json:"files"`
 	}
 	files := pretrainedBERTPackageFiles(p)
 	moduleSHA256 := sha256BytesHex(p.ModuleBytes)
 	weightsSHA256 := sha256BytesHex(p.WeightsBytes)
 	data, _ := json.Marshal(identity{
-		Version:       p.Version,
-		ModelName:     p.ModelName,
-		Architecture:  p.Architecture,
-		ModelType:     p.Config.ModelType,
-		Pooling:       p.Pooling,
-		Normalization: p.Normalization,
-		MaxLength:     p.MaxLength,
-		NativeDim:     p.NativeDim,
-		ModuleSHA256:  moduleSHA256,
-		WeightsSHA256: weightsSHA256,
-		Files:         files,
+		Version:               p.Version,
+		ModelName:             p.ModelName,
+		Architecture:          p.Architecture,
+		ModelType:             p.Config.ModelType,
+		Pooling:               p.Pooling,
+		Normalization:         p.Normalization,
+		MaxLength:             p.MaxLength,
+		NativeDim:             p.NativeDim,
+		RetrievalRoleContract: clonePretrainedBERTRetrievalRoleContract(p.RetrievalRoleContract),
+		ModuleSHA256:          moduleSHA256,
+		WeightsSHA256:         weightsSHA256,
+		Files:                 files,
 	})
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])

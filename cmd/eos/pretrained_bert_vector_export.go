@@ -28,6 +28,7 @@ func runExportPretrainedBERTRetrievalVectors(args []string) error {
 	queryPrefix := fs.String("query-prefix", "", "prefix prepended to query text before WordPiece tokenization")
 	documentPrefix := fs.String("document-prefix", "", "prefix prepended to document text before WordPiece tokenization")
 	docPrefix := fs.String("doc-prefix", "", "compatibility alias for --document-prefix")
+	usePackageRoleContract := fs.Bool("use-package-role-contract", false, "when using --package, load query/document prefixes from the package retrieval role contract")
 	batchSize := fs.Int("batch-size", 64, "embedding batch size")
 	outputDim := fs.Int("output-dim", 0, "when positive, prefix-truncate embeddings to this dimension and L2-renormalize before writing")
 	projectionHeadPath := fs.String("projection-head", "", "MLL projection head sidecar to apply to native embeddings before writing")
@@ -64,28 +65,31 @@ func runExportPretrainedBERTRetrievalVectors(args []string) error {
 	}
 	rt := eosruntime.New(cuda.New(), metal.New(), vulkan.New(), directml.New(), webgpu.New())
 	summary, err := eosruntime.ExportPretrainedBERTRetrievalVectors(context.Background(), eosruntime.PretrainedBERTRetrievalVectorExportConfig{
-		DatasetName:        *datasetName,
-		DatasetDir:         datasetDir,
-		QrelsPath:          *qrelsPath,
-		OutputDir:          outputDir,
-		SourceDir:          *sourceDir,
-		ModulePath:         *modulePath,
-		WeightsPath:        *weightsPath,
-		PackagePath:        *packagePath,
-		QueryPrefix:        *queryPrefix,
-		DocumentPrefix:     resolvedDocumentPrefix,
-		BatchSize:          *batchSize,
-		OutputDim:          *outputDim,
-		ProjectionHeadPath: *projectionHeadPath,
-		MaxDocs:            *maxDocs,
-		MaxQueries:         *maxQueries,
-		MaxLength:          *maxLength,
-		Split:              *split,
-		Runtime:            rt,
-		ManifestJSONPath:   *manifestPath,
-		Resume:             *resume,
-		ProgressEvery:      *progressEvery,
-		Progress:           printPretrainedBERTVectorExportProgress,
+		DatasetName:            *datasetName,
+		DatasetDir:             datasetDir,
+		QrelsPath:              *qrelsPath,
+		OutputDir:              outputDir,
+		SourceDir:              *sourceDir,
+		ModulePath:             *modulePath,
+		WeightsPath:            *weightsPath,
+		PackagePath:            *packagePath,
+		QueryPrefix:            *queryPrefix,
+		DocumentPrefix:         resolvedDocumentPrefix,
+		QueryPrefixSet:         flagWasProvided(fs, "query-prefix"),
+		DocumentPrefixSet:      flagWasProvided(fs, "document-prefix") || flagWasProvided(fs, "doc-prefix"),
+		UsePackageRoleContract: *usePackageRoleContract,
+		BatchSize:              *batchSize,
+		OutputDim:              *outputDim,
+		ProjectionHeadPath:     *projectionHeadPath,
+		MaxDocs:                *maxDocs,
+		MaxQueries:             *maxQueries,
+		MaxLength:              *maxLength,
+		Split:                  *split,
+		Runtime:                rt,
+		ManifestJSONPath:       *manifestPath,
+		Resume:                 *resume,
+		ProgressEvery:          *progressEvery,
+		Progress:               printPretrainedBERTVectorExportProgress,
 	})
 	if err != nil {
 		return err

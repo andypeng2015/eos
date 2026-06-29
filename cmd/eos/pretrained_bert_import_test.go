@@ -328,6 +328,77 @@ func TestRunImportPretrainedBERTWeightsOutWritesReadableWeightFile(t *testing.T)
 	}
 }
 
+func TestRunImportPretrainedBERTPackageReportIncludesRetrievalRoleContract(t *testing.T) {
+	dir := t.TempDir()
+	snapshot := filepath.Join(dir, "hf-snapshot")
+	if err := os.MkdirAll(snapshot, 0o755); err != nil {
+		t.Fatalf("mkdir snapshot: %v", err)
+	}
+	config := `{
+		"architectures": ["BertModel"],
+		"model_type": "bert",
+		"vocab_size": 3,
+		"hidden_size": 2,
+		"num_hidden_layers": 1,
+		"num_attention_heads": 1,
+		"intermediate_size": 4,
+		"hidden_act": "gelu",
+		"max_position_embeddings": 4,
+		"type_vocab_size": 2
+	}`
+	if err := os.WriteFile(filepath.Join(snapshot, "config.json"), []byte(config), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(snapshot, "vocab.txt"), []byte("[PAD]\n[UNK]\n[CLS]\n[SEP]\n[MASK]\n"), 0o644); err != nil {
+		t.Fatalf("write vocab: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(snapshot, "tokenizer_config.json"), []byte(`{"do_lower_case":true}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write tokenizer config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(snapshot, "1_Pooling"), 0o755); err != nil {
+		t.Fatalf("mkdir pooling: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(snapshot, "1_Pooling", "config.json"), []byte(`{"pooling_mode_mean_tokens":true}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write pooling config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(snapshot, "sentence_bert_config.json"), []byte(`{"max_seq_length":4}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write sentence_bert_config: %v", err)
+	}
+	plan, err := eosruntime.PlanPretrainedBERTImportFromDir(snapshot, "intfloat/e5-small-v2")
+	if err != nil {
+		t.Fatalf("plan fixture: %v", err)
+	}
+	header := commandSafeTensorsHeaderForBERTPlan(plan)
+	payloadSize := renumberCommandSafeTensorFixtureOffsets(header)
+	if err := writeCommandSafeTensorsFixture(filepath.Join(snapshot, "model.safetensors"), header, make([]byte, payloadSize)); err != nil {
+		t.Fatalf("write safetensors: %v", err)
+	}
+	planPath := filepath.Join(dir, "plan.json")
+	packagePath := filepath.Join(dir, "e5.imported.mll")
+	if err := runImportPretrainedBERT([]string{
+		"--source", snapshot,
+		"--model-name", "intfloat/e5-small-v2",
+		"--package-out", packagePath,
+		"--plan-json", planPath,
+	}); err != nil {
+		t.Fatalf("run import-pretrained-bert: %v", err)
+	}
+	data, err := os.ReadFile(planPath)
+	if err != nil {
+		t.Fatalf("read plan json: %v", err)
+	}
+	var loaded eosruntime.PretrainedBERTImportPlan
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		t.Fatalf("parse plan json: %v\n%s", err, data)
+	}
+	if loaded.PackageExport == nil || loaded.PackageExport.RetrievalRoleContract == nil {
+		t.Fatalf("package export retrieval contract = %+v", loaded.PackageExport)
+	}
+	if loaded.PackageExport.RetrievalRoleContract.QueryPrefix != "query: " || loaded.PackageExport.RetrievalRoleContract.DocumentPrefix != "passage: " {
+		t.Fatalf("package export prefixes = %+v", loaded.PackageExport.RetrievalRoleContract)
+	}
+}
+
 func writeCommandSafeTensorsFixture(path string, header map[string]any, payload []byte) error {
 	data, err := json.Marshal(header)
 	if err != nil {

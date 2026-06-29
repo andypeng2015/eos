@@ -174,6 +174,101 @@ func TestPretrainedBERTRetrievalVectorExportLoadsSourceFreePackage(t *testing.T)
 	}
 }
 
+func TestPretrainedBERTRetrievalVectorExportUsesPackageRoleContract(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	packagePath := writeTinyPretrainedBERTPackageFromFixture(t, sourceDir, modulePath, weightsPath)
+	packagePath = writeTamperedPretrainedBERTPackage(t, packagePath, func(pkg *PretrainedBERTPackage) {
+		pkg.RetrievalRoleContract = &PretrainedBERTRetrievalRoleContract{
+			Schema:         PretrainedBERTRetrievalRoleContractSchema,
+			QueryRole:      "query",
+			DocumentRole:   "document",
+			QueryPrefix:    "query: ",
+			DocumentPrefix: "passage: ",
+			Pooling:        pkg.Pooling,
+			MaxLength:      pkg.MaxLength,
+		}
+		pkg.IdentitySHA256 = pkg.IdentityHash()
+	})
+	datasetDir := writeTinyPretrainedBERTBEIRFixture(t)
+	outputDir := filepath.Join(t.TempDir(), "vectors")
+
+	summary, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName:            "tiny-bert",
+		DatasetDir:             datasetDir,
+		OutputDir:              outputDir,
+		PackagePath:            packagePath,
+		UsePackageRoleContract: true,
+		BatchSize:              1,
+		MaxLength:              4,
+		Runtime:                New(cuda.New()),
+	})
+	if err != nil {
+		t.Fatalf("export package pretrained BERT retrieval vectors: %v", err)
+	}
+	if summary.QueryPrefix != "query: " || summary.DocumentPrefix != "passage: " {
+		t.Fatalf("summary prefixes = %q/%q", summary.QueryPrefix, summary.DocumentPrefix)
+	}
+	if !summary.QueryRoleApplied || !summary.DocumentRoleApplied {
+		t.Fatalf("summary role flags = %+v", summary)
+	}
+}
+
+func TestPretrainedBERTRetrievalVectorExportUsePackageRoleContractRejectsConflictingPrefixes(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	packagePath := writeTinyPretrainedBERTPackageFromFixture(t, sourceDir, modulePath, weightsPath)
+	packagePath = writeTamperedPretrainedBERTPackage(t, packagePath, func(pkg *PretrainedBERTPackage) {
+		pkg.RetrievalRoleContract = &PretrainedBERTRetrievalRoleContract{
+			Schema:         PretrainedBERTRetrievalRoleContractSchema,
+			QueryRole:      "query",
+			DocumentRole:   "document",
+			QueryPrefix:    "query: ",
+			DocumentPrefix: "passage: ",
+			Pooling:        pkg.Pooling,
+			MaxLength:      pkg.MaxLength,
+		}
+		pkg.IdentitySHA256 = pkg.IdentityHash()
+	})
+	datasetDir := writeTinyPretrainedBERTBEIRFixture(t)
+	outputDir := filepath.Join(t.TempDir(), "vectors")
+
+	_, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName:            "tiny-bert",
+		DatasetDir:             datasetDir,
+		OutputDir:              outputDir,
+		PackagePath:            packagePath,
+		QueryPrefix:            "different: ",
+		QueryPrefixSet:         true,
+		UsePackageRoleContract: true,
+		BatchSize:              1,
+		MaxLength:              4,
+		Runtime:                New(cuda.New()),
+	})
+	if err == nil || !strings.Contains(err.Error(), "conflicts with package retrieval role contract") {
+		t.Fatalf("err = %v, want package contract conflict", err)
+	}
+}
+
+func TestPretrainedBERTRetrievalVectorExportUsePackageRoleContractRejectsLegacyPackage(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	packagePath := writeTinyPretrainedBERTPackageFromFixture(t, sourceDir, modulePath, weightsPath)
+	datasetDir := writeTinyPretrainedBERTBEIRFixture(t)
+	outputDir := filepath.Join(t.TempDir(), "vectors")
+
+	_, err := ExportPretrainedBERTRetrievalVectors(context.Background(), PretrainedBERTRetrievalVectorExportConfig{
+		DatasetName:            "tiny-bert",
+		DatasetDir:             datasetDir,
+		OutputDir:              outputDir,
+		PackagePath:            packagePath,
+		UsePackageRoleContract: true,
+		BatchSize:              1,
+		MaxLength:              4,
+		Runtime:                New(cuda.New()),
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not declare retrieval_role_contract") {
+		t.Fatalf("err = %v, want missing package role contract", err)
+	}
+}
+
 func TestPretrainedBERTRetrievalVectorExportPackageResumeRequiresManifestIdentity(t *testing.T) {
 	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
 	packagePath := writeTinyPretrainedBERTPackageFromFixture(t, sourceDir, modulePath, weightsPath)

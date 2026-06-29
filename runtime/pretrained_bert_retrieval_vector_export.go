@@ -22,21 +22,22 @@ const PretrainedBERTRetrievalVectorExportManifestSchema = "manta.pretrained_bert
 // PretrainedBERTTextEmbedder runs an imported BERT-family embedder module with
 // Hugging Face WordPiece tokenization and role-named weight files.
 type PretrainedBERTTextEmbedder struct {
-	config          PretrainedBERTConfig
-	stMeta          *PretrainedBERTSTMetadata
-	tokenizer       *HFWordPieceTokenizer
-	program         *Program
-	maxLength       int
-	maxLengthSource string
-	pooling         string
-	normalization   string
-	modelName       string
-	architecture    string
-	dynamicTokens   bool
-	packagePath     string
-	packageSHA256   string
-	packageIdentity string
-	packageFileSHA  map[string]string
+	config                PretrainedBERTConfig
+	stMeta                *PretrainedBERTSTMetadata
+	tokenizer             *HFWordPieceTokenizer
+	program               *Program
+	maxLength             int
+	maxLengthSource       string
+	pooling               string
+	normalization         string
+	modelName             string
+	architecture          string
+	dynamicTokens         bool
+	packagePath           string
+	packageSHA256         string
+	packageIdentity       string
+	packageFileSHA        map[string]string
+	retrievalRoleContract *PretrainedBERTRetrievalRoleContract
 }
 
 type PretrainedBERTTextEmbedderConfig struct {
@@ -49,30 +50,33 @@ type PretrainedBERTTextEmbedderConfig struct {
 }
 
 type PretrainedBERTRetrievalVectorExportConfig struct {
-	DatasetName        string
-	DatasetDir         string
-	CorpusPath         string
-	QueriesPath        string
-	QrelsPath          string
-	OutputDir          string
-	SourceDir          string
-	ModulePath         string
-	WeightsPath        string
-	PackagePath        string
-	QueryPrefix        string
-	DocumentPrefix     string
-	BatchSize          int
-	OutputDim          int
-	MaxDocs            int
-	MaxQueries         int
-	MaxLength          int
-	Split              string
-	Runtime            *Runtime
-	ManifestJSONPath   string
-	ProjectionHeadPath string
-	Resume             bool
-	ProgressEvery      int
-	Progress           PretrainedBERTRetrievalVectorExportProgressFunc
+	DatasetName            string
+	DatasetDir             string
+	CorpusPath             string
+	QueriesPath            string
+	QrelsPath              string
+	OutputDir              string
+	SourceDir              string
+	ModulePath             string
+	WeightsPath            string
+	PackagePath            string
+	QueryPrefix            string
+	DocumentPrefix         string
+	QueryPrefixSet         bool
+	DocumentPrefixSet      bool
+	UsePackageRoleContract bool
+	BatchSize              int
+	OutputDim              int
+	MaxDocs                int
+	MaxQueries             int
+	MaxLength              int
+	Split                  string
+	Runtime                *Runtime
+	ManifestJSONPath       string
+	ProjectionHeadPath     string
+	Resume                 bool
+	ProgressEvery          int
+	Progress               PretrainedBERTRetrievalVectorExportProgressFunc
 }
 
 type PretrainedBERTRetrievalVectorExportSummary struct {
@@ -265,21 +269,22 @@ func loadPretrainedBERTTextEmbedderFromPackage(ctx context.Context, cfg Pretrain
 		fileHashes[file.Role] = file.SHA256
 	}
 	return &PretrainedBERTTextEmbedder{
-		config:          config,
-		stMeta:          stMeta,
-		tokenizer:       tokenizer,
-		program:         program,
-		maxLength:       maxLength,
-		maxLengthSource: maxLengthSource,
-		pooling:         pooling,
-		normalization:   normalization,
-		modelName:       modelName,
-		architecture:    architecture,
-		dynamicTokens:   pretrainedBERTProgramSupportsDynamicTokens(program, "bert_embed"),
-		packagePath:     cfg.PackagePath,
-		packageSHA256:   packageSHA,
-		packageIdentity: pkg.IdentitySHA256,
-		packageFileSHA:  fileHashes,
+		config:                config,
+		stMeta:                stMeta,
+		tokenizer:             tokenizer,
+		program:               program,
+		maxLength:             maxLength,
+		maxLengthSource:       maxLengthSource,
+		pooling:               pooling,
+		normalization:         normalization,
+		modelName:             modelName,
+		architecture:          architecture,
+		dynamicTokens:         pretrainedBERTProgramSupportsDynamicTokens(program, "bert_embed"),
+		packagePath:           cfg.PackagePath,
+		packageSHA256:         packageSHA,
+		packageIdentity:       pkg.IdentitySHA256,
+		packageFileSHA:        fileHashes,
+		retrievalRoleContract: clonePretrainedBERTRetrievalRoleContract(pkg.RetrievalRoleContract),
 	}, nil
 }
 
@@ -482,6 +487,12 @@ func ExportPretrainedBERTRetrievalVectors(ctx context.Context, cfg PretrainedBER
 	if err != nil {
 		return PretrainedBERTRetrievalVectorExportSummary{}, err
 	}
+	queryPrefix, documentPrefix, err := resolvePretrainedBERTRetrievalPrefixes(cfg, embedder)
+	if err != nil {
+		return PretrainedBERTRetrievalVectorExportSummary{}, err
+	}
+	cfg.QueryPrefix = queryPrefix
+	cfg.DocumentPrefix = documentPrefix
 	nativeDim := embedder.config.HiddenSize
 	var projectionHead *PretrainedBERTProjectionHead
 	if cfg.ProjectionHeadPath != "" {
@@ -627,6 +638,26 @@ func ExportPretrainedBERTRetrievalVectors(ctx context.Context, cfg PretrainedBER
 		return PretrainedBERTRetrievalVectorExportSummary{}, err
 	}
 	return summary, nil
+}
+
+func resolvePretrainedBERTRetrievalPrefixes(cfg PretrainedBERTRetrievalVectorExportConfig, embedder *PretrainedBERTTextEmbedder) (string, string, error) {
+	if !cfg.UsePackageRoleContract {
+		return cfg.QueryPrefix, cfg.DocumentPrefix, nil
+	}
+	if embedder == nil || embedder.packagePath == "" {
+		return "", "", fmt.Errorf("use-package-role-contract requires package mode")
+	}
+	contract := embedder.retrievalRoleContract
+	if contract == nil {
+		return "", "", fmt.Errorf("package %s does not declare retrieval_role_contract", embedder.packagePath)
+	}
+	if cfg.QueryPrefixSet && cfg.QueryPrefix != contract.QueryPrefix {
+		return "", "", fmt.Errorf("query prefix %q conflicts with package retrieval role contract %q", cfg.QueryPrefix, contract.QueryPrefix)
+	}
+	if cfg.DocumentPrefixSet && cfg.DocumentPrefix != contract.DocumentPrefix {
+		return "", "", fmt.Errorf("document prefix %q conflicts with package retrieval role contract %q", cfg.DocumentPrefix, contract.DocumentPrefix)
+	}
+	return contract.QueryPrefix, contract.DocumentPrefix, nil
 }
 
 func WritePretrainedBERTRetrievalVectorExportSummaryFile(path string, summary PretrainedBERTRetrievalVectorExportSummary) error {

@@ -18,7 +18,7 @@ func TestRunExportPretrainedBERTRetrievalVectorsRequiresArtifacts(t *testing.T) 
 }
 
 func TestRunExportPretrainedBERTRetrievalVectorsAcceptsResumeProgressFlags(t *testing.T) {
-	err := runExportPretrainedBERTRetrievalVectors([]string{"--resume", "--progress-every", "7", "--projection-head", "head.mll"})
+	err := runExportPretrainedBERTRetrievalVectors([]string{"--resume", "--progress-every", "7", "--projection-head", "head.mll", "--use-package-role-contract"})
 	if err == nil {
 		t.Fatal("runExportPretrainedBERTRetrievalVectors succeeded without positional args, want usage error")
 	}
