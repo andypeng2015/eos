@@ -79,6 +79,55 @@ def write_compact_native_fixture(root: Path) -> dict[str, Path]:
         "A future implementation still needs true multi-head compact serving parity.\n",
         encoding="utf-8",
     )
+    default_embedding_source = base / "models" / "default_embedding.go"
+    default_embedding_source.parent.mkdir(parents=True, exist_ok=True)
+    default_embedding_source.write_text(
+        "if cfg.AttentionHeads > 1 {\n"
+        '    fmt.Fprintf(&b, "compact_multihead_attention_h%d", cfg.AttentionHeads)\n'
+        "}\n",
+        encoding="utf-8",
+    )
+    runtime_embedding_model_source = base / "runtime" / "embedding_model.go"
+    runtime_embedding_model_source.parent.mkdir(parents=True, exist_ok=True)
+    runtime_embedding_model_source.write_text(
+        '!moduleHasKernelOp(mod, "masked_softmax") && !moduleHasKernelOp(mod, "compact_multihead_attention")\n'
+        '!moduleHasScaledAttentionMatMul(mod) && !moduleHasKernelOp(mod, "compact_multihead_attention")\n',
+        encoding="utf-8",
+    )
+    backend_tensor_ops_source = base / "runtime" / "backend" / "tensor_ops.go"
+    backend_tensor_ops_source.parent.mkdir(parents=True, exist_ok=True)
+    backend_tensor_ops_source.write_text(
+        'case "compact_multihead_attention":\n'
+        "func compactMultiheadAttentionTensor() {}\n"
+        "num_attention_heads\n"
+        "hidden%heads != 0\n",
+        encoding="utf-8",
+    )
+    default_embedding_test = base / "models" / "default_embedding_test.go"
+    default_embedding_test.write_text(
+        "TestInitDefaultEmbeddingPackageCreatesCompactMultiHeadServingGraph\n"
+        "compact_multihead_attention num_attention_heads = %q, want 2\n",
+        encoding="utf-8",
+    )
+    runtime_embedding_model_test = base / "runtime" / "embedding_model_test.go"
+    runtime_embedding_model_test.write_text(
+        "TestLoadEmbeddingAcceptsCompactMultiHeadServingGraph\n"
+        "compact_multihead_attention_h2\n",
+        encoding="utf-8",
+    )
+    backend_compact_attention_test = base / "runtime" / "backend" / "compact_attention_ops_test.go"
+    backend_compact_attention_test.write_text(
+        "TestCompactMultiheadAttentionTensorMatchesReference\n"
+        "TestCompactMultiheadAttentionTensorBatchedMasked\n",
+        encoding="utf-8",
+    )
+    cmd_eos_main_test = base / "cmd" / "eos" / "main_test.go"
+    cmd_eos_main_test.parent.mkdir(parents=True, exist_ok=True)
+    cmd_eos_main_test.write_text(
+        "TestRunInitModelCreatesCompactMultiHeadServingGraph\n"
+        '"--attention-heads", "2"\n',
+        encoding="utf-8",
+    )
     bge_report = base / "compact-bge-listwise-larger-validation-split211-seed191-v1-report.md"
     bge_report.write_text("Decision gate result: pass. evidence-only and research-only.\n", encoding="utf-8")
     heads_report = base / "compact-native-heads2-lr-bracket-v1-report.md"
@@ -115,6 +164,13 @@ def write_compact_native_fixture(root: Path) -> dict[str, Path]:
         "compact_native_generic_bootstrap_report": bootstrap,
         "compact_native_train_guard_report": train_guard,
         "compact_native_serving_parity_report": serving_parity,
+        "compact_native_default_embedding_source": default_embedding_source,
+        "compact_native_runtime_embedding_model_source": runtime_embedding_model_source,
+        "compact_native_backend_tensor_ops_source": backend_tensor_ops_source,
+        "compact_native_default_embedding_test": default_embedding_test,
+        "compact_native_runtime_embedding_model_test": runtime_embedding_model_test,
+        "compact_native_backend_compact_attention_test": backend_compact_attention_test,
+        "compact_native_cmd_eos_main_test": cmd_eos_main_test,
         "compact_native_student_report": bge_report,
         "compact_native_heads2_lr_bracket_report": heads_report,
         "compact_native_heads2_lr_bracket_gate_log": heads_log,
@@ -144,6 +200,13 @@ class SummarizeCompactNativeReadinessTest(unittest.TestCase):
                 generic_bootstrap_report=paths["compact_native_generic_bootstrap_report"],
                 compact_train_guard_report=paths["compact_native_train_guard_report"],
                 serving_parity_report=paths["compact_native_serving_parity_report"],
+                default_embedding_source=paths["compact_native_default_embedding_source"],
+                runtime_embedding_model_source=paths["compact_native_runtime_embedding_model_source"],
+                backend_tensor_ops_source=paths["compact_native_backend_tensor_ops_source"],
+                default_embedding_test=paths["compact_native_default_embedding_test"],
+                runtime_embedding_model_test=paths["compact_native_runtime_embedding_model_test"],
+                backend_compact_attention_test=paths["compact_native_backend_compact_attention_test"],
+                cmd_eos_main_test=paths["compact_native_cmd_eos_main_test"],
                 bge_listwise_validation_report=paths["compact_native_student_report"],
                 heads2_lr_bracket_report=paths["compact_native_heads2_lr_bracket_report"],
                 heads2_lr_bracket_gate_log=paths["compact_native_heads2_lr_bracket_gate_log"],
@@ -165,7 +228,7 @@ class SummarizeCompactNativeReadinessTest(unittest.TestCase):
                 rows = list(csv.DictReader(handle, delimiter="\t"))
 
         self.assertEqual(summary["schema"], summarizer.SUMMARY_SCHEMA)
-        self.assertEqual(summary["status"], "evidence_positive_blocked_by_serving_and_training")
+        self.assertEqual(summary["status"], "evidence_positive_blocked_by_training_movement")
         self.assertFalse(summary["promotion_ready"])
         self.assertFalse(summary["training_ready"])
         self.assertFalse(summary["release_train_allowed"])
@@ -174,7 +237,11 @@ class SummarizeCompactNativeReadinessTest(unittest.TestCase):
         self.assertEqual(summary["components"]["manifest_checkpoint_foundation"]["status"], "evidence_ready")
         self.assertEqual(summary["components"]["generic_bootstrap"]["status"], "evidence_ready")
         self.assertEqual(summary["components"]["compact_train_guard"]["status"], "evidence_ready")
-        self.assertEqual(summary["components"]["serving_parity"]["status"], "blocked_multihead_serving_parity")
+        self.assertEqual(summary["components"]["serving_parity"]["status"], "source_and_tests_ready")
+        self.assertIn(
+            "historical gate report exists but is superseded by current source/test evidence",
+            summary["components"]["serving_parity"]["warnings"],
+        )
         self.assertEqual(summary["components"]["bge_listwise_validation"]["status"], "evidence_positive")
         self.assertEqual(
             summary["components"]["heads2_lr_bracket"]["status"],
@@ -190,7 +257,7 @@ class SummarizeCompactNativeReadinessTest(unittest.TestCase):
             0,
         )
         keyed = {(row["section"], row["key"]): row for row in rows}
-        self.assertEqual(keyed[("component", "serving_parity")]["status"], "blocked_multihead_serving_parity")
+        self.assertEqual(keyed[("component", "serving_parity")]["status"], "source_and_tests_ready")
 
     def test_missing_inputs_do_not_raise_and_report_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -201,6 +268,13 @@ class SummarizeCompactNativeReadinessTest(unittest.TestCase):
                 generic_bootstrap_report=root / "missing-bootstrap.md",
                 compact_train_guard_report=root / "missing-guard.md",
                 serving_parity_report=root / "missing-serving.md",
+                default_embedding_source=root / "missing-default-embedding.go",
+                runtime_embedding_model_source=root / "missing-runtime-embedding.go",
+                backend_tensor_ops_source=root / "missing-tensor-ops.go",
+                default_embedding_test=root / "missing-default-embedding-test.go",
+                runtime_embedding_model_test=root / "missing-runtime-embedding-test.go",
+                backend_compact_attention_test=root / "missing-compact-attention-test.go",
+                cmd_eos_main_test=root / "missing-main-test.go",
                 bge_listwise_validation_report=root / "missing-bge.md",
                 heads2_lr_bracket_report=root / "missing-heads.md",
                 heads2_lr_bracket_gate_log=root / "missing-heads.log",
@@ -219,6 +293,7 @@ class SummarizeCompactNativeReadinessTest(unittest.TestCase):
 
         self.assertEqual(summary["status"], "partial_evidence_waiting_validation")
         self.assertEqual(summary["components"]["architecture_plan"]["status"], "missing_evidence")
+        self.assertEqual(summary["components"]["serving_parity"]["status"], "missing_evidence")
         self.assertEqual(summary["components"]["bge_listwise_validation"]["status"], "missing_evidence")
         self.assertEqual(summary["components"]["laststep_movement"]["status"], "missing_evidence")
         self.assertTrue(summary["blockers"])

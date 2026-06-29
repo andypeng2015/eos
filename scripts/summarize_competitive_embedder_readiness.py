@@ -319,6 +319,15 @@ def build_summary(
     compact_native_generic_bootstrap_report: Path = Path(compact_native.DEFAULT_GENERIC_BOOTSTRAP_REPORT),
     compact_native_train_guard_report: Path = Path(compact_native.DEFAULT_COMPACT_TRAIN_GUARD_REPORT),
     compact_native_serving_parity_report: Path = Path(compact_native.DEFAULT_SERVING_PARITY_REPORT),
+    compact_native_default_embedding_source: Path = Path(compact_native.DEFAULT_MODELS_DEFAULT_EMBEDDING_SOURCE),
+    compact_native_runtime_embedding_model_source: Path = Path(compact_native.DEFAULT_RUNTIME_EMBEDDING_MODEL_SOURCE),
+    compact_native_backend_tensor_ops_source: Path = Path(compact_native.DEFAULT_RUNTIME_BACKEND_TENSOR_OPS_SOURCE),
+    compact_native_default_embedding_test: Path = Path(compact_native.DEFAULT_MODELS_DEFAULT_EMBEDDING_TEST),
+    compact_native_runtime_embedding_model_test: Path = Path(compact_native.DEFAULT_RUNTIME_EMBEDDING_MODEL_TEST),
+    compact_native_backend_compact_attention_test: Path = Path(
+        compact_native.DEFAULT_RUNTIME_BACKEND_COMPACT_ATTENTION_TEST
+    ),
+    compact_native_cmd_eos_main_test: Path = Path(compact_native.DEFAULT_CMD_EOS_MAIN_TEST),
     compact_native_heads2_lr_bracket_report: Path = Path(compact_native.DEFAULT_HEADS2_LR_BRACKET_REPORT),
     compact_native_heads2_lr_bracket_gate_log: Path = Path(compact_native.DEFAULT_HEADS2_LR_BRACKET_GATE_LOG),
     compact_native_laststep_movement_report: Path = Path(compact_native.DEFAULT_LASTSTEP_MOVEMENT_REPORT),
@@ -402,6 +411,13 @@ def build_summary(
         generic_bootstrap_report=compact_native_generic_bootstrap_report,
         compact_train_guard_report=compact_native_train_guard_report,
         serving_parity_report=compact_native_serving_parity_report,
+        default_embedding_source=compact_native_default_embedding_source,
+        runtime_embedding_model_source=compact_native_runtime_embedding_model_source,
+        backend_tensor_ops_source=compact_native_backend_tensor_ops_source,
+        default_embedding_test=compact_native_default_embedding_test,
+        runtime_embedding_model_test=compact_native_runtime_embedding_model_test,
+        backend_compact_attention_test=compact_native_backend_compact_attention_test,
+        cmd_eos_main_test=compact_native_cmd_eos_main_test,
         bge_listwise_validation_report=compact_native_student_report,
         heads2_lr_bracket_report=compact_native_heads2_lr_bracket_report,
         heads2_lr_bracket_gate_log=compact_native_heads2_lr_bracket_gate_log,
@@ -642,6 +658,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--compact-native-generic-bootstrap-report", default=compact_native.DEFAULT_GENERIC_BOOTSTRAP_REPORT)
     parser.add_argument("--compact-native-train-guard-report", default=compact_native.DEFAULT_COMPACT_TRAIN_GUARD_REPORT)
     parser.add_argument("--compact-native-serving-parity-report", default=compact_native.DEFAULT_SERVING_PARITY_REPORT)
+    parser.add_argument("--compact-native-default-embedding-source", default=compact_native.DEFAULT_MODELS_DEFAULT_EMBEDDING_SOURCE)
+    parser.add_argument(
+        "--compact-native-runtime-embedding-model-source",
+        default=compact_native.DEFAULT_RUNTIME_EMBEDDING_MODEL_SOURCE,
+    )
+    parser.add_argument("--compact-native-backend-tensor-ops-source", default=compact_native.DEFAULT_RUNTIME_BACKEND_TENSOR_OPS_SOURCE)
+    parser.add_argument("--compact-native-default-embedding-test", default=compact_native.DEFAULT_MODELS_DEFAULT_EMBEDDING_TEST)
+    parser.add_argument("--compact-native-runtime-embedding-model-test", default=compact_native.DEFAULT_RUNTIME_EMBEDDING_MODEL_TEST)
+    parser.add_argument(
+        "--compact-native-backend-compact-attention-test",
+        default=compact_native.DEFAULT_RUNTIME_BACKEND_COMPACT_ATTENTION_TEST,
+    )
+    parser.add_argument("--compact-native-cmd-eos-main-test", default=compact_native.DEFAULT_CMD_EOS_MAIN_TEST)
     parser.add_argument("--compact-native-heads2-lr-bracket-report", default=compact_native.DEFAULT_HEADS2_LR_BRACKET_REPORT)
     parser.add_argument(
         "--compact-native-heads2-lr-bracket-gate-log",
@@ -711,6 +740,13 @@ def main(argv: list[str] | None = None) -> int:
             compact_native_generic_bootstrap_report=Path(args.compact_native_generic_bootstrap_report),
             compact_native_train_guard_report=Path(args.compact_native_train_guard_report),
             compact_native_serving_parity_report=Path(args.compact_native_serving_parity_report),
+            compact_native_default_embedding_source=Path(args.compact_native_default_embedding_source),
+            compact_native_runtime_embedding_model_source=Path(args.compact_native_runtime_embedding_model_source),
+            compact_native_backend_tensor_ops_source=Path(args.compact_native_backend_tensor_ops_source),
+            compact_native_default_embedding_test=Path(args.compact_native_default_embedding_test),
+            compact_native_runtime_embedding_model_test=Path(args.compact_native_runtime_embedding_model_test),
+            compact_native_backend_compact_attention_test=Path(args.compact_native_backend_compact_attention_test),
+            compact_native_cmd_eos_main_test=Path(args.compact_native_cmd_eos_main_test),
             compact_native_heads2_lr_bracket_report=Path(args.compact_native_heads2_lr_bracket_report),
             compact_native_heads2_lr_bracket_gate_log=Path(args.compact_native_heads2_lr_bracket_gate_log),
             compact_native_laststep_movement_report=Path(args.compact_native_laststep_movement_report),

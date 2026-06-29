@@ -26,6 +26,13 @@ DEFAULT_MANIFEST_CHECKPOINT_FOUNDATION_REPORT = (
 DEFAULT_GENERIC_BOOTSTRAP_REPORT = ".tiller/scratch/codex/compact-native-generic-bootstrap-v1-report.md"
 DEFAULT_COMPACT_TRAIN_GUARD_REPORT = ".tiller/scratch/codex/compact-native-batched-guard-v1-report.md"
 DEFAULT_SERVING_PARITY_REPORT = ".tiller/scratch/codex/compact-native-serving-parity-v1-report.md"
+DEFAULT_MODELS_DEFAULT_EMBEDDING_SOURCE = "models/default_embedding.go"
+DEFAULT_RUNTIME_EMBEDDING_MODEL_SOURCE = "runtime/embedding_model.go"
+DEFAULT_RUNTIME_BACKEND_TENSOR_OPS_SOURCE = "runtime/backend/tensor_ops.go"
+DEFAULT_MODELS_DEFAULT_EMBEDDING_TEST = "models/default_embedding_test.go"
+DEFAULT_RUNTIME_EMBEDDING_MODEL_TEST = "runtime/embedding_model_test.go"
+DEFAULT_RUNTIME_BACKEND_COMPACT_ATTENTION_TEST = "runtime/backend/compact_attention_ops_test.go"
+DEFAULT_CMD_EOS_MAIN_TEST = "cmd/eos/main_test.go"
 DEFAULT_BGE_LISTWISE_VALIDATION_REPORT = (
     ".tiller/scratch/codex/compact-bge-listwise-larger-validation-split211-seed191-v1-report.md"
 )
@@ -228,24 +235,134 @@ def summarize_compact_train_guard(report_path: Path) -> dict[str, Any]:
     )
 
 
-def summarize_serving_parity(report_path: Path) -> dict[str, Any]:
-    text, error = read_optional_text(report_path)
+def required_text_checks(
+    *, component_id: str, path: Path, required_markers: dict[str, str]
+) -> tuple[dict[str, bool], list[str]]:
+    text, error = read_optional_text(path)
     blockers = [error] if error else []
-    checks = {
-        "exists": text is not None,
-        "report_is_gate_not_fix": bool(text and "This is a gate, not true serving parity" in text),
-        "future_true_parity_required": bool(text and "future implementation still needs" in text),
+    checks = {"exists": text is not None}
+    for name, marker in required_markers.items():
+        checks[name] = bool(text and marker in text)
+        if not checks[name]:
+            blockers.append(f"{component_id} marker missing in {path}: {name}")
+    return checks, blockers
+
+
+def summarize_serving_parity(
+    *,
+    report_path: Path,
+    default_embedding_source: Path,
+    runtime_embedding_model_source: Path,
+    backend_tensor_ops_source: Path,
+    default_embedding_test: Path,
+    runtime_embedding_model_test: Path,
+    backend_compact_attention_test: Path,
+    cmd_eos_main_test: Path,
+) -> dict[str, Any]:
+    report_text, report_error = read_optional_text(report_path)
+    checks: dict[str, Any] = {}
+    blockers: list[str] = []
+    marker_specs = {
+        "default_embedding_source": (
+            default_embedding_source,
+            {
+                "attention_heads_branch": "if cfg.AttentionHeads > 1",
+                "generated_multihead_call": "compact_multihead_attention_h%d",
+            },
+        ),
+        "runtime_embedding_model_source": (
+            runtime_embedding_model_source,
+            {
+                "mask_accepts_compact_multihead": (
+                    'moduleHasKernelOp(mod, "masked_softmax") && '
+                    '!moduleHasKernelOp(mod, "compact_multihead_attention")'
+                ),
+                "scale_accepts_compact_multihead": (
+                    '!moduleHasScaledAttentionMatMul(mod) && '
+                    '!moduleHasKernelOp(mod, "compact_multihead_attention")'
+                ),
+            },
+        ),
+        "backend_tensor_ops_source": (
+            backend_tensor_ops_source,
+            {
+                "dispatches_compact_multihead": 'case "compact_multihead_attention"',
+                "implements_compact_multihead_tensor": "func compactMultiheadAttentionTensor",
+                "validates_num_attention_heads": "num_attention_heads",
+                "validates_head_divisibility": "hidden%heads != 0",
+            },
+        ),
+        "default_embedding_test": (
+            default_embedding_test,
+            {
+                "generated_package_load_embed_test": (
+                    "TestInitDefaultEmbeddingPackageCreatesCompactMultiHeadServingGraph"
+                ),
+                "asserts_num_attention_heads": "compact_multihead_attention num_attention_heads = %q, want 2",
+            },
+        ),
+        "runtime_embedding_model_test": (
+            runtime_embedding_model_test,
+            {
+                "runtime_load_embed_test": "TestLoadEmbeddingAcceptsCompactMultiHeadServingGraph",
+                "runtime_compact_multihead_source": "compact_multihead_attention_h2",
+            },
+        ),
+        "backend_compact_attention_test": (
+            backend_compact_attention_test,
+            {
+                "reference_test": "TestCompactMultiheadAttentionTensorMatchesReference",
+                "batched_masked_test": "TestCompactMultiheadAttentionTensorBatchedMasked",
+            },
+        ),
+        "cmd_eos_main_test": (
+            cmd_eos_main_test,
+            {
+                "cli_init_model_test": "TestRunInitModelCreatesCompactMultiHeadServingGraph",
+                "cli_attention_heads_flag": '"--attention-heads", "2"',
+            },
+        ),
     }
-    if text is not None:
-        blockers.append("true multi-head compact serving parity is not implemented; current evidence is a gate")
+    source_paths: dict[str, str] = {}
+    for name, (path, markers) in marker_specs.items():
+        path_checks, path_blockers = required_text_checks(component_id="serving_parity", path=path, required_markers=markers)
+        checks[name] = path_checks
+        blockers.extend(path_blockers)
+        source_paths[name] = str(path)
+
+    historical_gate = bool(report_text and "This is a gate, not true serving parity" in report_text)
+    if report_error:
+        warnings = [report_error]
+    elif historical_gate:
+        warnings = ["historical gate report exists but is superseded by current source/test evidence"]
+    else:
+        warnings = ["historical serving gate report is absent or no longer has the expected stale-gate wording"]
+
+    if blockers:
+        status = "evidence_incomplete" if report_text is not None or any(item.get("exists") for item in checks.values()) else "missing_evidence"
+    else:
+        status = "source_and_tests_ready"
     return component(
         component_id="serving_parity",
-        status="missing_evidence" if error else "blocked_multihead_serving_parity",
+        status=status,
         blockers=blockers,
+        warnings=warnings,
         details={
             "report_path": str(report_path),
+            "source_paths": source_paths,
             "checks": checks,
-            "current_report_is_gate_not_fix": True,
+            "historical_report_is_gate_not_fix": historical_gate,
+            "focused_go_verification": [
+                "go test ./runtime/backend -run TestCompactMultiheadAttentionTensor -count=1",
+                "go test ./runtime -run TestLoadEmbeddingAcceptsCompactMultiHeadServingGraph -count=1",
+                "go test ./models -run TestInitDefaultEmbeddingPackageCreatesCompactMultiHeadServingGraph -count=1",
+                "go test ./cmd/eos -run TestRunInitModelCreatesCompactMultiHeadServingGraph -count=1",
+            ],
+            "numeric_parity_caveat": (
+                "Source and focused tests cover generated serving graphs, runtime loading/embedding, "
+                "and backend masked multi-head attention; no exact trainer-vs-serving numeric parity "
+                "claim is made here."
+            ),
         },
     )
 
@@ -445,11 +562,14 @@ def summarize_laststep_movement(
 
 def overall_status(components: dict[str, dict[str, Any]]) -> str:
     if components["bge_listwise_validation"]["status"] == "evidence_positive":
-        if (
-            components["serving_parity"]["status"] == "blocked_multihead_serving_parity"
-            or components["laststep_movement"]["status"] == "negative_diagnostic"
+        serving_ready = components["serving_parity"]["status"] == "source_and_tests_ready"
+        training_blocked = (
+            components["laststep_movement"]["status"] == "negative_diagnostic"
             or components["heads2_lr_bracket"]["status"] == "diagnostic_only_restored_best_static"
-        ):
+        )
+        if serving_ready and training_blocked:
+            return "evidence_positive_blocked_by_training_movement"
+        if training_blocked or components["serving_parity"]["status"] in {"evidence_incomplete", "missing_evidence"}:
             return "evidence_positive_blocked_by_serving_and_training"
     return "partial_evidence_waiting_validation"
 
@@ -461,6 +581,13 @@ def build_summary(
     generic_bootstrap_report: Path = Path(DEFAULT_GENERIC_BOOTSTRAP_REPORT),
     compact_train_guard_report: Path = Path(DEFAULT_COMPACT_TRAIN_GUARD_REPORT),
     serving_parity_report: Path = Path(DEFAULT_SERVING_PARITY_REPORT),
+    default_embedding_source: Path = Path(DEFAULT_MODELS_DEFAULT_EMBEDDING_SOURCE),
+    runtime_embedding_model_source: Path = Path(DEFAULT_RUNTIME_EMBEDDING_MODEL_SOURCE),
+    backend_tensor_ops_source: Path = Path(DEFAULT_RUNTIME_BACKEND_TENSOR_OPS_SOURCE),
+    default_embedding_test: Path = Path(DEFAULT_MODELS_DEFAULT_EMBEDDING_TEST),
+    runtime_embedding_model_test: Path = Path(DEFAULT_RUNTIME_EMBEDDING_MODEL_TEST),
+    backend_compact_attention_test: Path = Path(DEFAULT_RUNTIME_BACKEND_COMPACT_ATTENTION_TEST),
+    cmd_eos_main_test: Path = Path(DEFAULT_CMD_EOS_MAIN_TEST),
     bge_listwise_validation_report: Path = Path(DEFAULT_BGE_LISTWISE_VALIDATION_REPORT),
     heads2_lr_bracket_report: Path = Path(DEFAULT_HEADS2_LR_BRACKET_REPORT),
     heads2_lr_bracket_gate_log: Path = Path(DEFAULT_HEADS2_LR_BRACKET_GATE_LOG),
@@ -484,7 +611,16 @@ def build_summary(
         ),
         "generic_bootstrap": summarize_generic_bootstrap(generic_bootstrap_report),
         "compact_train_guard": summarize_compact_train_guard(compact_train_guard_report),
-        "serving_parity": summarize_serving_parity(serving_parity_report),
+        "serving_parity": summarize_serving_parity(
+            report_path=serving_parity_report,
+            default_embedding_source=default_embedding_source,
+            runtime_embedding_model_source=runtime_embedding_model_source,
+            backend_tensor_ops_source=backend_tensor_ops_source,
+            default_embedding_test=default_embedding_test,
+            runtime_embedding_model_test=runtime_embedding_model_test,
+            backend_compact_attention_test=backend_compact_attention_test,
+            cmd_eos_main_test=cmd_eos_main_test,
+        ),
         "bge_listwise_validation": summarize_bge_listwise_validation(
             report_path=bge_listwise_validation_report,
             pre_retrieval_2000=bge_pre_retrieval_2000,
@@ -510,8 +646,8 @@ def build_summary(
         for blocker in item.get("blockers", [])
         if item.get("status") not in {"pass", "evidence_ready", "evidence_positive"}
     ]
-    if components["serving_parity"]["status"] == "blocked_multihead_serving_parity":
-        blockers.append("true multi-head compact serving parity remains blocked")
+    if components["serving_parity"]["status"] != "source_and_tests_ready":
+        blockers.append("compact multi-head serving source/test evidence is incomplete")
     if components["laststep_movement"]["status"] == "negative_diagnostic":
         blockers.append("last-step/no-restore compact native training movement is retrieval-negative")
     if components["heads2_lr_bracket"]["status"] == "diagnostic_only_restored_best_static":
@@ -527,7 +663,7 @@ def build_summary(
         "quality_claim": False,
         "blockers": blockers,
         "next_safe_action": (
-            "Implement true multi-head compact serving parity and find non-destructive compact native "
+            "Find non-destructive compact native "
             "training movement before any promotion, training readiness, or release readiness claim."
         ),
         "components": components,
@@ -537,6 +673,13 @@ def build_summary(
             "generic_bootstrap_report": str(generic_bootstrap_report),
             "compact_train_guard_report": str(compact_train_guard_report),
             "serving_parity_report": str(serving_parity_report),
+            "default_embedding_source": str(default_embedding_source),
+            "runtime_embedding_model_source": str(runtime_embedding_model_source),
+            "backend_tensor_ops_source": str(backend_tensor_ops_source),
+            "default_embedding_test": str(default_embedding_test),
+            "runtime_embedding_model_test": str(runtime_embedding_model_test),
+            "backend_compact_attention_test": str(backend_compact_attention_test),
+            "cmd_eos_main_test": str(cmd_eos_main_test),
             "bge_listwise_validation_report": str(bge_listwise_validation_report),
             "heads2_lr_bracket_report": str(heads2_lr_bracket_report),
             "heads2_lr_bracket_gate_log": str(heads2_lr_bracket_gate_log),
@@ -609,6 +752,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--generic-bootstrap-report", default=DEFAULT_GENERIC_BOOTSTRAP_REPORT)
     parser.add_argument("--compact-train-guard-report", default=DEFAULT_COMPACT_TRAIN_GUARD_REPORT)
     parser.add_argument("--serving-parity-report", default=DEFAULT_SERVING_PARITY_REPORT)
+    parser.add_argument("--default-embedding-source", default=DEFAULT_MODELS_DEFAULT_EMBEDDING_SOURCE)
+    parser.add_argument("--runtime-embedding-model-source", default=DEFAULT_RUNTIME_EMBEDDING_MODEL_SOURCE)
+    parser.add_argument("--backend-tensor-ops-source", default=DEFAULT_RUNTIME_BACKEND_TENSOR_OPS_SOURCE)
+    parser.add_argument("--default-embedding-test", default=DEFAULT_MODELS_DEFAULT_EMBEDDING_TEST)
+    parser.add_argument("--runtime-embedding-model-test", default=DEFAULT_RUNTIME_EMBEDDING_MODEL_TEST)
+    parser.add_argument("--backend-compact-attention-test", default=DEFAULT_RUNTIME_BACKEND_COMPACT_ATTENTION_TEST)
+    parser.add_argument("--cmd-eos-main-test", default=DEFAULT_CMD_EOS_MAIN_TEST)
     parser.add_argument("--bge-listwise-validation-report", default=DEFAULT_BGE_LISTWISE_VALIDATION_REPORT)
     parser.add_argument("--heads2-lr-bracket-report", default=DEFAULT_HEADS2_LR_BRACKET_REPORT)
     parser.add_argument("--heads2-lr-bracket-gate-log", default=DEFAULT_HEADS2_LR_BRACKET_GATE_LOG)
@@ -635,6 +785,13 @@ def main(argv: list[str] | None = None) -> int:
             generic_bootstrap_report=Path(args.generic_bootstrap_report),
             compact_train_guard_report=Path(args.compact_train_guard_report),
             serving_parity_report=Path(args.serving_parity_report),
+            default_embedding_source=Path(args.default_embedding_source),
+            runtime_embedding_model_source=Path(args.runtime_embedding_model_source),
+            backend_tensor_ops_source=Path(args.backend_tensor_ops_source),
+            default_embedding_test=Path(args.default_embedding_test),
+            runtime_embedding_model_test=Path(args.runtime_embedding_model_test),
+            backend_compact_attention_test=Path(args.backend_compact_attention_test),
+            cmd_eos_main_test=Path(args.cmd_eos_main_test),
             bge_listwise_validation_report=Path(args.bge_listwise_validation_report),
             heads2_lr_bracket_report=Path(args.heads2_lr_bracket_report),
             heads2_lr_bracket_gate_log=Path(args.heads2_lr_bracket_gate_log),

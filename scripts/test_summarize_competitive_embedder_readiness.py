@@ -152,6 +152,13 @@ def compact_cli_args(paths: dict[str, Path]) -> list[str]:
         "compact_native_generic_bootstrap_report": "--compact-native-generic-bootstrap-report",
         "compact_native_train_guard_report": "--compact-native-train-guard-report",
         "compact_native_serving_parity_report": "--compact-native-serving-parity-report",
+        "compact_native_default_embedding_source": "--compact-native-default-embedding-source",
+        "compact_native_runtime_embedding_model_source": "--compact-native-runtime-embedding-model-source",
+        "compact_native_backend_tensor_ops_source": "--compact-native-backend-tensor-ops-source",
+        "compact_native_default_embedding_test": "--compact-native-default-embedding-test",
+        "compact_native_runtime_embedding_model_test": "--compact-native-runtime-embedding-model-test",
+        "compact_native_backend_compact_attention_test": "--compact-native-backend-compact-attention-test",
+        "compact_native_cmd_eos_main_test": "--compact-native-cmd-eos-main-test",
         "compact_native_heads2_lr_bracket_report": "--compact-native-heads2-lr-bracket-report",
         "compact_native_heads2_lr_bracket_gate_log": "--compact-native-heads2-lr-bracket-gate-log",
         "compact_native_laststep_movement_report": "--compact-native-laststep-movement-report",
@@ -212,7 +219,7 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
         self.assertEqual(summary["packets"]["eos_embedder1_default_swap"]["status"], "ready_for_review")
         self.assertEqual(
             summary["packets"]["compact_native_student"]["status"],
-            "evidence_positive_blocked_by_serving_and_training",
+            "evidence_positive_blocked_by_training_movement",
         )
         self.assertEqual(
             summary["packets"]["stageabc_pretraining_distillation"]["status"],
@@ -336,6 +343,13 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                 compact_native_generic_bootstrap_report=root / "missing-bootstrap.md",
                 compact_native_train_guard_report=root / "missing-guard.md",
                 compact_native_serving_parity_report=root / "missing-serving.md",
+                compact_native_default_embedding_source=root / "missing-default-embedding.go",
+                compact_native_runtime_embedding_model_source=root / "missing-runtime-embedding.go",
+                compact_native_backend_tensor_ops_source=root / "missing-tensor-ops.go",
+                compact_native_default_embedding_test=root / "missing-default-embedding-test.go",
+                compact_native_runtime_embedding_model_test=root / "missing-runtime-embedding-test.go",
+                compact_native_backend_compact_attention_test=root / "missing-compact-attention-test.go",
+                compact_native_cmd_eos_main_test=root / "missing-main-test.go",
                 compact_native_heads2_lr_bracket_report=root / "missing-bracket.md",
                 compact_native_heads2_lr_bracket_gate_log=root / "missing-bracket.log",
                 compact_native_laststep_movement_report=root / "missing-laststep.md",
