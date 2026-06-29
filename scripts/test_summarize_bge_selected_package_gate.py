@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import csv
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -114,6 +116,23 @@ def write_complete_dataset(
 
 
 class SummarizeBgeSelectedPackageGateTest(unittest.TestCase):
+    def run_main_for_root(self, root: Path, *extra_args: str) -> tuple[int, str]:
+        stderr = io.StringIO()
+        argv = [
+            "--run-root",
+            str(root),
+            "--datasets",
+            "scifact",
+            "--output-json",
+            str(root / "summary.json"),
+            "--output-tsv",
+            str(root / "summary.tsv"),
+            *extra_args,
+        ]
+        with contextlib.redirect_stderr(stderr):
+            code = summarizer.main(argv)
+        return code, stderr.getvalue()
+
     def test_complete_fixture_computes_macros_and_q_deltas(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -191,6 +210,41 @@ class SummarizeBgeSelectedPackageGateTest(unittest.TestCase):
         self.assertFalse(policy["q8_policy_pass"])
         self.assertEqual(policy["per_dataset"]["fiqa"]["ready"], False)
         self.assertIn("fiqa: dataset gate incomplete", policy["blockers"])
+
+    def test_cli_quality_policy_require_flags_pass_for_release_ready_fixture(self) -> None:
+        require_flags = [
+            "--require-non-default-promotion-policy",
+            "--require-dense-policy",
+            "--require-q8-policy",
+            "--require-q4-release-profile",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_complete_dataset(root, "scifact", 0.7, 0.9, 0.697, 0.89, 0.65, 0.85)
+
+            code, stderr = self.run_main_for_root(root, *require_flags)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+
+    def test_cli_quality_policy_require_flags_fail_with_exit_2_and_blockers(self) -> None:
+        require_flags = [
+            "--require-non-default-promotion-policy",
+            "--require-dense-policy",
+            "--require-q8-policy",
+            "--require-q4-release-profile",
+        ]
+        for flag in require_flags:
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                write_lines(root / "scifact" / "vectors" / "doc-vectors.jsonl", 3)
+
+                code, stderr = self.run_main_for_root(root, flag)
+
+                self.assertEqual(code, 2)
+                self.assertIn("error: required", stderr)
+                self.assertIn("blockers:", stderr)
+                self.assertIn("scifact: dataset gate incomplete", stderr)
 
     def test_quality_policy_allows_non_default_review_without_q4_release_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

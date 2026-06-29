@@ -856,6 +856,48 @@ def write_tsv(path: Path, summary: dict[str, Any]) -> None:
             writer.writerow({key: format_tsv_value(row.get(key)) for key in fieldnames})
 
 
+QUALITY_POLICY_REQUIREMENTS = {
+    "require_non_default_promotion_policy": (
+        "non_default_promotion_policy_pass",
+        "non-default promotion policy",
+    ),
+    "require_dense_policy": (
+        "dense_policy_pass",
+        "dense policy",
+    ),
+    "require_q8_policy": (
+        "q8_policy_pass",
+        "q8 policy",
+    ),
+    "require_q4_release_profile": (
+        "q4_release_profile_pass",
+        "q4 release profile",
+    ),
+}
+
+
+def policy_blocker_message(policy: dict[str, Any]) -> str:
+    blockers = policy.get("blockers")
+    if not isinstance(blockers, list) or not blockers:
+        return ""
+    return " blockers: " + "; ".join(str(blocker) for blocker in blockers[:8])
+
+
+def check_quality_policy_requirements(args: argparse.Namespace, summary: dict[str, Any]) -> bool:
+    policy = summary["aggregate"].get("quality_policy")
+    if not isinstance(policy, dict):
+        print("error: missing aggregate quality_policy", file=sys.stderr)
+        return False
+    for arg_name, (policy_key, label) in QUALITY_POLICY_REQUIREMENTS.items():
+        if getattr(args, arg_name) and policy.get(policy_key) is not True:
+            print(
+                f"error: required {label} did not pass.{policy_blocker_message(policy)}",
+                file=sys.stderr,
+            )
+            return False
+    return True
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-root", default=DEFAULT_RUN_ROOT)
@@ -886,6 +928,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_false",
     )
     parser.add_argument("--require-complete", action="store_true")
+    parser.add_argument("--require-non-default-promotion-policy", action="store_true")
+    parser.add_argument("--require-dense-policy", action="store_true")
+    parser.add_argument("--require-q8-policy", action="store_true")
+    parser.add_argument("--require-q4-release-profile", action="store_true")
     return parser
 
 
@@ -916,6 +962,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     if args.require_complete and not summary["aggregate"]["all_complete"]:
+        return 2
+    if not check_quality_policy_requirements(args, summary):
         return 2
     return 0
 
