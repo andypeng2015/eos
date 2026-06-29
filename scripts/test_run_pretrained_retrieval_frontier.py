@@ -67,6 +67,26 @@ class PretrainedRetrievalFrontierTest(unittest.TestCase):
         self.assertEqual(dense[dense.index("--max-docs") + 1], "200")
         self.assertEqual(dense[dense.index("--max-queries") + 1], "20")
 
+    def test_dry_run_threads_empty_document_policy_to_export_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = args_for(
+                root,
+                presets="e5-small-v2",
+                datasets="fiqa",
+                empty_document_policy="qrels-placeholder",
+                empty_document_placeholder="EMPTY",
+                dry_run=True,
+            )
+
+            payload = frontier.execute(args)
+
+        export = payload["commands"][0]["argv"]
+        dense = payload["commands"][1]["argv"]
+        self.assertEqual(export[export.index("--empty-document-policy") + 1], "qrels-placeholder")
+        self.assertEqual(export[export.index("--empty-document-placeholder") + 1], "EMPTY")
+        self.assertNotIn("--empty-document-policy", dense)
+
     def test_summary_collects_dense_q8_q4_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

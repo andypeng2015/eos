@@ -66,6 +66,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-docs", type=int, default=0)
     parser.add_argument("--max-queries", type=int, default=0)
     parser.add_argument("--top-k", type=int, default=100)
+    parser.add_argument(
+        "--empty-document-policy",
+        choices=("skip", "qrels-placeholder"),
+        default="skip",
+        help="Policy passed to export_retrieval_vectors.py for empty corpus rows.",
+    )
+    parser.add_argument(
+        "--empty-document-placeholder",
+        default="[EMPTY_DOCUMENT]",
+        help="Placeholder passed to export_retrieval_vectors.py for qrels-relevant empty corpus rows.",
+    )
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--go", default="go")
     parser.add_argument("--skip-export", action="store_true")
@@ -134,6 +145,10 @@ def command_specs(args: argparse.Namespace, run_root: Path) -> list[CommandSpec]
                     argv.extend(["--max-docs", str(args.max_docs)])
                 if args.max_queries > 0:
                     argv.extend(["--max-queries", str(args.max_queries)])
+                if args.empty_document_policy != "skip":
+                    argv.extend(["--empty-document-policy", args.empty_document_policy])
+                if args.empty_document_placeholder != "[EMPTY_DOCUMENT]":
+                    argv.extend(["--empty-document-placeholder", args.empty_document_placeholder])
                 specs.append(
                     CommandSpec(
                         f"export:{preset}:{dataset}",

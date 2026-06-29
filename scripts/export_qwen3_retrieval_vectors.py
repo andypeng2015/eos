@@ -53,6 +53,8 @@ class ItemSelection(NamedTuple):
     raw_rows: int
     empty_skipped: int
     empty_sample_ids: list[str]
+    qrels_placeholder_rows: int
+    qrels_placeholder_sample_ids: list[str]
 
 
 class Qrels(NamedTuple):
@@ -124,6 +126,21 @@ def parse_args() -> argparse.Namespace:
         "--document-prefix",
         default="",
         help="Instruction prefix prepended to document title/text. Use '' to disable.",
+    )
+    parser.add_argument(
+        "--empty-document-policy",
+        choices=("skip", "qrels-placeholder"),
+        default="skip",
+        help=(
+            "Policy for corpus rows whose title and text are empty. Default skip "
+            "preserves existing behavior. qrels-placeholder exports only empty "
+            "documents referenced by positive qrels with --empty-document-placeholder."
+        ),
+    )
+    parser.add_argument(
+        "--empty-document-placeholder",
+        default="[EMPTY_DOCUMENT]",
+        help="Stable placeholder text used when --empty-document-policy=qrels-placeholder.",
     )
     parser.add_argument(
         "--document-chunk-words",
@@ -320,27 +337,74 @@ def load_items(path: Path, limit: int, text_fn: Callable[[dict], str]) -> ItemSe
         out.append((item_id, text))
         if limit > 0 and len(out) >= limit:
             break
-    return ItemSelection(out, raw_rows, empty_skipped, empty_sample_ids)
+    return ItemSelection(out, raw_rows, empty_skipped, empty_sample_ids, 0, [])
 
 
-def load_docs(path: Path, limit: int, qrels: Qrels | None) -> ItemSelection:
-    if qrels is None or limit <= 0:
+def load_docs(
+    path: Path,
+    limit: int,
+    qrels: Qrels | None,
+    empty_document_policy: str = "skip",
+    empty_document_placeholder: str = "[EMPTY_DOCUMENT]",
+) -> ItemSelection:
+    use_qrels_placeholder = empty_document_policy == "qrels-placeholder" and qrels is not None
+    if not use_qrels_placeholder and (qrels is None or limit <= 0):
         return load_items(path, limit, corpus_text)
+
+    if limit <= 0:
+        out: list[tuple[str, str]] = []
+        raw_rows = 0
+        empty_skipped = 0
+        empty_sample_ids: list[str] = []
+        qrels_placeholder_rows = 0
+        qrels_placeholder_sample_ids: list[str] = []
+        for row in iter_jsonl_all(path):
+            raw_rows += 1
+            item_id = row_id(row, path)
+            text = corpus_text(row)
+            if not text:
+                if use_qrels_placeholder and item_id in qrels.relevant_docs:
+                    text = empty_document_placeholder
+                    qrels_placeholder_rows += 1
+                    if len(qrels_placeholder_sample_ids) < 10:
+                        qrels_placeholder_sample_ids.append(item_id)
+                else:
+                    empty_skipped += 1
+                    if len(empty_sample_ids) < 10:
+                        empty_sample_ids.append(item_id)
+                    continue
+            out.append((item_id, text))
+        return ItemSelection(
+            out,
+            raw_rows,
+            empty_skipped,
+            empty_sample_ids,
+            qrels_placeholder_rows,
+            qrels_placeholder_sample_ids,
+        )
 
     relevant: list[tuple[str, str]] = []
     filler: list[tuple[str, str]] = []
     raw_rows = 0
     empty_skipped = 0
     empty_sample_ids: list[str] = []
+    qrels_placeholder_rows = 0
+    qrels_placeholder_sample_ids: list[str] = []
     for row in iter_jsonl_all(path):
         raw_rows += 1
         item_id = row_id(row, path)
         text = corpus_text(row)
         if not text:
-            empty_skipped += 1
-            if len(empty_sample_ids) < 10:
-                empty_sample_ids.append(item_id)
-            continue
+            if use_qrels_placeholder and item_id in qrels.relevant_docs:
+                text = empty_document_placeholder
+                qrels_placeholder_rows += 1
+                if len(qrels_placeholder_sample_ids) < 10:
+                    qrels_placeholder_sample_ids.append(item_id)
+            else:
+                empty_skipped += 1
+                if len(empty_sample_ids) < 10:
+                    empty_sample_ids.append(item_id)
+                continue
         if item_id in qrels.relevant_docs:
             relevant.append((item_id, text))
         elif len(filler) < limit:
@@ -353,7 +417,14 @@ def load_docs(path: Path, limit: int, qrels: Qrels | None) -> ItemSelection:
         if item[0] not in seen:
             selected.append(item)
             seen.add(item[0])
-    return ItemSelection(selected, raw_rows, empty_skipped, empty_sample_ids)
+    return ItemSelection(
+        selected,
+        raw_rows,
+        empty_skipped,
+        empty_sample_ids,
+        qrels_placeholder_rows,
+        qrels_placeholder_sample_ids,
+    )
 
 
 def load_queries(path: Path, limit: int, qrels: Qrels | None) -> ItemSelection:
@@ -379,7 +450,7 @@ def load_queries(path: Path, limit: int, qrels: Qrels | None) -> ItemSelection:
         selected.append((item_id, text))
         if limit > 0 and len(selected) >= limit:
             break
-    return ItemSelection(selected, raw_rows, empty_skipped, empty_sample_ids)
+    return ItemSelection(selected, raw_rows, empty_skipped, empty_sample_ids, 0, [])
 
 
 def chunk_document_text(
@@ -585,10 +656,14 @@ def write_manifest(
         "max_queries": args.max_queries,
         "document_raw_rows_scanned": doc_selection.raw_rows,
         "query_raw_rows_scanned": query_selection.raw_rows,
+        "document_empty_policy": args.empty_document_policy,
+        "document_empty_placeholder": args.empty_document_placeholder,
         "document_empty_rows_skipped": doc_selection.empty_skipped,
         "query_empty_rows_skipped": query_selection.empty_skipped,
         "document_empty_sample_ids": doc_selection.empty_sample_ids,
         "query_empty_sample_ids": query_selection.empty_sample_ids,
+        "document_qrels_placeholder_rows": doc_selection.qrels_placeholder_rows,
+        "document_qrels_placeholder_sample_ids": doc_selection.qrels_placeholder_sample_ids,
         "selected_document_count": len(docs),
         "selected_query_count": len(queries),
     }
@@ -631,7 +706,13 @@ def main() -> int:
     print(f"loading {args.model_name}", flush=True)
     model = SentenceTransformer(args.model_name, device=args.device)
 
-    doc_selection = load_docs(corpus_path, args.max_docs, qrels)
+    doc_selection = load_docs(
+        corpus_path,
+        args.max_docs,
+        qrels,
+        args.empty_document_policy,
+        args.empty_document_placeholder,
+    )
     query_selection = load_queries(queries_path, args.max_queries, qrels)
     docs = doc_selection.items
     queries = query_selection.items
