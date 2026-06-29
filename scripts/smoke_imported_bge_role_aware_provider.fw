@@ -1,0 +1,744 @@
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+const smokeSchema = "eos.imported_bge_role_aware_provider_smoke.v1"
+const providerID = "corkscrewdb-imported-bge-eos-embed-v1-candidate"
+
+func usage() {
+	fmt.Println(`Imported BGE role-aware CorkScrewDB provider smoke.
+
+This creates a run-local Go harness module, replaces Eos and CorkScrewDB with
+local checkouts, verifies the imported BGE candidate package identity, and
+checks that CorkScrewDB text writes use document-role embeddings while text
+searches use query-role embeddings.
+
+Run:
+  EOS_REPO_ROOT=$PWD EOS_IMPORTED_BGE_PROVIDER_SMOKE_PACKAGE=/path/to/bge-small-en-v1.5.imported.mll EOS_IMPORTED_BGE_PROVIDER_SMOKE_CORKSCREWDB_REPO=/home/draco/work/corkscrewdb ferrous-wheel run scripts/smoke_imported_bge_role_aware_provider.fw
+
+Environment:
+  EOS_IMPORTED_BGE_PROVIDER_SMOKE_PACKAGE=/path/to/bge-small-en-v1.5.imported.mll
+  EOS_IMPORTED_BGE_PROVIDER_SMOKE_CORKSCREWDB_REPO=/path/to/corkscrewdb
+  EOS_IMPORTED_BGE_PROVIDER_SMOKE_RUN_DIR=runs/imported-bge-eos-embed-v1-role-aware-provider-smoke-v1-<timestamp>`)
+}
+
+func hasRepoRoot(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		return false
+	}
+	return true
+}
+
+func findAncestorRoot(start string) string {
+	if start == "" {
+		return ""
+	}
+	dir, err := filepath.Abs(start)
+	if err != nil {
+		return ""
+	}
+	for {
+		if hasRepoRoot(dir) {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+func findRoot() (string, error) {
+	for _, candidate := range []string{os.Getenv("EOS_REPO_ROOT"), os.Getenv("PWD")} {
+		if root := findAncestorRoot(candidate); root != "" {
+			return root, nil
+		}
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if root := findAncestorRoot(cwd); root != "" {
+		return root, nil
+	}
+	return "", fmt.Errorf("could not find Eos repo root; set EOS_REPO_ROOT")
+}
+
+func rootedPath(root string, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" || filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(root, path)
+}
+
+func defaultRunDir(root string) string {
+	if explicit := strings.TrimSpace(os.Getenv("EOS_IMPORTED_BGE_PROVIDER_SMOKE_RUN_DIR")); explicit != "" {
+		return rootedPath(root, explicit)
+	}
+	stamp := time.Now().UTC().Format("20060102T150405Z")
+	return filepath.Join(root, "runs", "imported-bge-eos-embed-v1-role-aware-provider-smoke-v1-"+stamp)
+}
+
+func requireFile(label string, path string) error {
+	if path == "" {
+		return fmt.Errorf("%s path is required", label)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("%s path %s: %w", label, path, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s path %s is a directory", label, path)
+	}
+	return nil
+}
+
+func requireDir(label string, path string) error {
+	if path == "" {
+		return fmt.Errorf("%s path is required", label)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("%s path %s: %w", label, path, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s path %s is not a directory", label, path)
+	}
+	return nil
+}
+
+func writeFile(path string, text string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(text), 0o644)
+}
+
+func runCapture(dir string, label string, args []string, logPath string) error {
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GOWORK=off")
+	output, err := cmd.CombinedOutput()
+	var b strings.Builder
+	b.WriteString("+ ")
+	b.WriteString(strings.Join(args, " "))
+	b.WriteByte('\n')
+	b.Write(output)
+	if writeErr := writeFile(logPath, b.String()); writeErr != nil {
+		return writeErr
+	}
+	if err != nil {
+		return fmt.Errorf("%s failed: %w; see %s", label, err, logPath)
+	}
+	return nil
+}
+
+func writeGoMod(path string, eosRoot string, corkscrewdbRoot string) error {
+	text := fmt.Sprintf(`module eos-imported-bge-role-aware-provider-smoke
+
+go 1.26
+
+require (
+	m31labs.dev/corkscrewdb v0.0.0
+	m31labs.dev/eos v0.0.0
+)
+
+replace m31labs.dev/eos => %s
+replace m31labs.dev/corkscrewdb => %s
+`, filepath.ToSlash(eosRoot), filepath.ToSlash(corkscrewdbRoot))
+	return writeFile(path, text)
+}
+
+func generatedHarnessSource(repoRoot string, packagePath string) string {
+	return fmt.Sprintf(`package main
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	corkscrewdb "m31labs.dev/corkscrewdb"
+	"m31labs.dev/eos/models"
+	eosruntime "m31labs.dev/eos/runtime"
+	"m31labs.dev/eos/runtime/backends/cuda"
+)
+
+const (
+	smokeSchema = %[1]q
+	providerID = %[2]q
+	collectionID = "role_aware_text"
+	repoRoot = %[3]q
+	candidateMLL = %[4]q
+)
+
+type bgeRoleProvider struct {
+	embedder *eosruntime.PretrainedBERTTextEmbedder
+	dim int
+	fp string
+	encodeCalls int
+	encodeBatchCalls int
+	queryRoleCalls int
+	docRoleCalls int
+	lastQueryPrefix string
+	lastDocPrefix string
+}
+
+func (p *bgeRoleProvider) ProviderID() string { return providerID }
+func (p *bgeRoleProvider) Deterministic() bool { return true }
+func (p *bgeRoleProvider) BackendFingerprint() string { return p.fp }
+func (p *bgeRoleProvider) Dim() int { return p.dim }
+func (p *bgeRoleProvider) Close() error { return nil }
+
+func (p *bgeRoleProvider) Encode(text string) ([]float32, error) {
+	p.encodeCalls++
+	p.queryRoleCalls++
+	if strings.TrimSpace(text) == "" {
+		return make([]float32, p.dim), nil
+	}
+	vecs, prefix, err := p.embedder.EmbedTextBatchWithRole(context.Background(), []string{text}, eosruntime.EmbeddingRoleQuery)
+	if err != nil {
+		return nil, err
+	}
+	p.lastQueryPrefix = prefix
+	if len(vecs) != 1 || len(vecs[0]) != p.dim {
+		return nil, fmt.Errorf("query embedding dim = %%d rows = %%d, want dim %%d rows 1", firstDim(vecs), len(vecs), p.dim)
+	}
+	return vecs[0], nil
+}
+
+func (p *bgeRoleProvider) EncodeBatch(texts []string) ([][]float32, error) {
+	p.encodeBatchCalls++
+	p.docRoleCalls++
+	out := make([][]float32, len(texts))
+	nonblank := make([]string, 0, len(texts))
+	positions := make([]int, 0, len(texts))
+	for i, text := range texts {
+		if strings.TrimSpace(text) == "" {
+			out[i] = make([]float32, p.dim)
+			continue
+		}
+		positions = append(positions, i)
+		nonblank = append(nonblank, text)
+	}
+	if len(nonblank) == 0 {
+		return out, nil
+	}
+	vecs, prefix, err := p.embedder.EmbedTextBatchWithRole(context.Background(), nonblank, eosruntime.EmbeddingRoleDocument)
+	if err != nil {
+		return nil, err
+	}
+	p.lastDocPrefix = prefix
+	if len(vecs) != len(nonblank) {
+		return nil, fmt.Errorf("document embedding rows = %%d, want %%d", len(vecs), len(nonblank))
+	}
+	for i, vec := range vecs {
+		if len(vec) != p.dim {
+			return nil, fmt.Errorf("document embedding dim = %%d, want %%d", len(vec), p.dim)
+		}
+		out[positions[i]] = vec
+	}
+	return out, nil
+}
+
+func firstDim(vecs [][]float32) int {
+	if len(vecs) == 0 {
+		return 0
+	}
+	return len(vecs[0])
+}
+
+type docCase struct {
+	ID string
+	Text string
+}
+
+type queryCase struct {
+	ID string
+	Query string
+	Expected string
+}
+
+type queryResult struct {
+	QueryID string
+	Query string
+	ExpectedTop1 string
+	ActualTop1 string
+	Top1OK bool
+	Results []corkscrewdb.SearchResult
+}
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "smoke failed:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	ctx := context.Background()
+	runDir, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	asset, err := models.ImportedEmbedderCandidateAssetInfo(repoRoot, candidateMLL)
+	if err != nil {
+		return err
+	}
+	if asset.QualityClaim || asset.DefaultAliasChanged {
+		return fmt.Errorf("candidate asset unexpectedly has quality/default claim: %%+v", asset)
+	}
+	if asset.CandidateID != providerID {
+		return fmt.Errorf("candidate id = %%q, want %%q", asset.CandidateID, providerID)
+	}
+	if asset.ModelName != eosruntime.ImportedBERTEmbedderCandidateModelName || asset.SourceModel != eosruntime.ImportedBERTEmbedderCandidateSourceModel {
+		return fmt.Errorf("candidate identity mismatch: %%+v", asset)
+	}
+	pkg, err := eosruntime.ReadPretrainedBERTPackageFile(candidateMLL)
+	if err != nil {
+		return err
+	}
+	sum, err := sha256File(candidateMLL)
+	if err != nil {
+		return err
+	}
+	if sum != eosruntime.ImportedBERTEmbedderCandidatePackageSHA256 {
+		return fmt.Errorf("package sha256 = %%s, want %%s", sum, eosruntime.ImportedBERTEmbedderCandidatePackageSHA256)
+	}
+	identity := pkg.IdentityHash()
+	if identity != eosruntime.ImportedBERTEmbedderCandidatePackageIdentitySHA256 {
+		return fmt.Errorf("package identity = %%s, want %%s", identity, eosruntime.ImportedBERTEmbedderCandidatePackageIdentitySHA256)
+	}
+	if pkg.ModelName != eosruntime.ImportedBERTEmbedderCandidateSourceModel {
+		return fmt.Errorf("package model_name = %%q, want %%q", pkg.ModelName, eosruntime.ImportedBERTEmbedderCandidateSourceModel)
+	}
+	embedder, err := eosruntime.LoadImportedBERTEmbedderCandidate(ctx, candidateMLL, eosruntime.New(cuda.New()))
+	if err != nil {
+		return err
+	}
+	probe, docPrefix, err := embedder.EmbedTextBatchWithRole(ctx, []string{"dimension probe document for role-aware CorkScrewDB smoke"}, eosruntime.EmbeddingRoleDocument)
+	if err != nil {
+		return err
+	}
+	if len(probe) != 1 {
+		return fmt.Errorf("dimension probe rows = %%d, want 1", len(probe))
+	}
+	dim := len(probe[0])
+	if dim != 384 {
+		return fmt.Errorf("provider dim = %%d, want 384", dim)
+	}
+	queryPrefix, err := embedder.PrefixForRole(eosruntime.EmbeddingRoleQuery)
+	if err != nil {
+		return err
+	}
+	provider := &bgeRoleProvider{
+		embedder: embedder,
+		dim: dim,
+		fp: "eos-imported-bge:" + sum + ":" + identity,
+	}
+	dbPath := filepath.Join(runDir, "corkscrewdb")
+	db, err := corkscrewdb.Open(dbPath, corkscrewdb.WithProvider(provider))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	coll := db.Collection(collectionID, corkscrewdb.WithBitWidth(8), corkscrewdb.WithRecomputeRawFromText())
+	if coll == nil {
+		return errors.New("nil collection")
+	}
+	docs := []docCase{
+		{ID: "bio-statins", Text: "Biomedical note: statin therapy lowers LDL cholesterol and reduces cardiovascular risk in patients with hyperlipidemia."},
+		{ID: "finance-bonds", Text: "Finance note: rising government bond yields pressure duration-heavy portfolios and change fixed income pricing."},
+		{ID: "process-kafka", Text: "Process engineering note: Kafka consumer offsets, retry queues, and idempotent workers keep event pipelines reliable."},
+		{ID: "climate-solar", Text: "Energy note: solar photovoltaic capacity and battery storage help reduce grid carbon intensity during daylight peaks."},
+	}
+	queries := []queryCase{
+		{ID: "q-bio", Query: "Which document discusses LDL cholesterol treatment with statins?", Expected: "bio-statins"},
+		{ID: "q-finance", Query: "Which document is about bond yields and fixed income portfolios?", Expected: "finance-bonds"},
+		{ID: "q-process", Query: "Which document covers Kafka offsets and retry queues?", Expected: "process-kafka"},
+	}
+	provider.encodeCalls = 0
+	provider.encodeBatchCalls = 0
+	provider.queryRoleCalls = 0
+	provider.docRoleCalls = 0
+	for _, doc := range docs {
+		if err := coll.Put(doc.ID, corkscrewdb.Entry{Text: doc.Text, Metadata: map[string]string{"kind": "smoke"}}); err != nil {
+			return fmt.Errorf("put %%s: %%w", doc.ID, err)
+		}
+	}
+	if provider.encodeBatchCalls != len(docs) || provider.docRoleCalls != len(docs) {
+		return fmt.Errorf("after writes EncodeBatch/doc role calls = %%d/%%d, want %%d/%%d", provider.encodeBatchCalls, provider.docRoleCalls, len(docs), len(docs))
+	}
+	if provider.encodeCalls != 0 || provider.queryRoleCalls != 0 {
+		return fmt.Errorf("writes unexpectedly used Encode/query role calls = %%d/%%d", provider.encodeCalls, provider.queryRoleCalls)
+	}
+	var results []queryResult
+	allTop1 := true
+	for _, q := range queries {
+		hits, err := coll.Search(q.Query, 3)
+		if err != nil {
+			return fmt.Errorf("search %%s: %%w", q.ID, err)
+		}
+		actual := ""
+		if len(hits) > 0 {
+			actual = hits[0].ID
+		}
+		ok := actual == q.Expected
+		allTop1 = allTop1 && ok
+		results = append(results, queryResult{
+			QueryID: q.ID,
+			Query: q.Query,
+			ExpectedTop1: q.Expected,
+			ActualTop1: actual,
+			Top1OK: ok,
+			Results: hits,
+		})
+	}
+	if provider.encodeCalls != len(queries) || provider.queryRoleCalls != len(queries) {
+		return fmt.Errorf("after searches Encode/query role calls = %%d/%%d, want %%d/%%d", provider.encodeCalls, provider.queryRoleCalls, len(queries), len(queries))
+	}
+	if provider.encodeBatchCalls != len(docs) || provider.docRoleCalls != len(docs) {
+		return fmt.Errorf("searches unexpectedly changed EncodeBatch/doc role calls = %%d/%%d", provider.encodeBatchCalls, provider.docRoleCalls)
+	}
+	if !allTop1 {
+		return fmt.Errorf("one or more top-1 assertions failed: %%+v", results)
+	}
+	if err := db.Close(); err != nil {
+		return err
+	}
+	dbm, err := readJSONMap(filepath.Join(dbPath, "manifest.json"))
+	if err != nil {
+		return err
+	}
+	embedding, ok := dbm["embedding"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("missing DB embedding manifest")
+	}
+	if embedding["id"] != providerID || intFromAny(embedding["dim"]) != dim || embedding["backend_fingerprint"] != provider.fp {
+		return fmt.Errorf("db embedding manifest mismatch: %%+v", embedding)
+	}
+	collections, ok := dbm["collections"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("missing DB collection manifest")
+	}
+	colMeta, ok := collections[collectionID].(map[string]any)
+	if !ok {
+		return fmt.Errorf("collection %%q missing from DB manifest", collectionID)
+	}
+	if intFromAny(colMeta["bit_width"]) != 8 || intFromAny(colMeta["dim"]) != dim || colMeta["cold_tier"] != "recompute" || boolFromAny(colMeta["raw_store"]) {
+		return fmt.Errorf("collection manifest mismatch: %%+v", colMeta)
+	}
+	manifest := map[string]any{
+		"schema": smokeSchema,
+		"run_utc": time.Now().UTC().Format(time.RFC3339),
+		"candidate_package": candidateMLL,
+		"candidate_package_sha256": sum,
+		"candidate_identity": identity,
+		"package_model_name": pkg.ModelName,
+		"public_model_name": asset.ModelName,
+		"display_name": asset.DisplayName,
+		"source_model": asset.SourceModel,
+		"provider_id": provider.ProviderID(),
+		"backend_fingerprint": provider.BackendFingerprint(),
+		"dim": dim,
+		"quality_claim": asset.QualityClaim,
+		"default_alias_changed": asset.DefaultAliasChanged,
+		"role_mapping": "Encode(text)=query role; EncodeBatch(texts)=document role",
+		"query_prefix": queryPrefix,
+		"document_prefix": docPrefix,
+		"encode_calls": provider.encodeCalls,
+		"encode_batch_calls": provider.encodeBatchCalls,
+		"query_role_calls": provider.queryRoleCalls,
+		"document_role_calls": provider.docRoleCalls,
+		"db_manifest_embedding": embedding,
+		"db_collection_manifest": colMeta,
+		"docs": docs,
+		"queries": results,
+		"all_top1_ok": allTop1,
+	}
+	if err := writeJSON(filepath.Join(runDir, "manifest.json"), manifest); err != nil {
+		return err
+	}
+	if err := writeSummary(filepath.Join(runDir, "summary.tsv"), results); err != nil {
+		return err
+	}
+	fmt.Printf("PASS run_dir=%%s dim=%%d encode_batch=%%d encode=%%d top1=%%d/%%d\n", runDir, dim, provider.encodeBatchCalls, provider.encodeCalls, len(results), len(results))
+	return nil
+}
+
+func intFromAny(v any) int {
+	switch x := v.(type) {
+	case float64:
+		return int(x)
+	case int:
+		return x
+	default:
+		return 0
+	}
+}
+
+func boolFromAny(v any) bool {
+	x, _ := v.(bool)
+	return x
+}
+
+func sha256File(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func readJSONMap(path string) (map[string]any, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func writeJSON(path string, v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o644)
+}
+
+func writeSummary(path string, results []queryResult) error {
+	var b strings.Builder
+	b.WriteString("query_id\texpected_top1\tactual_top1\ttop1_ok\ttop3\n")
+	for _, q := range results {
+		top := make([]string, 0, len(q.Results))
+		for _, hit := range q.Results {
+			top = append(top, fmt.Sprintf("%%s:%%.6f", hit.ID, hit.Score))
+		}
+		fmt.Fprintf(&b, "%%s\t%%s\t%%s\t%%t\t%%s\n", q.QueryID, q.ExpectedTop1, q.ActualTop1, q.Top1OK, strings.Join(top, ","))
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+`, smokeSchema, providerID, repoRoot, packagePath)
+}
+
+func validateManifest(path string) (map[string]interface{}, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var manifest map[string]interface{}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	checkString := func(key string, want string) error {
+		got, _ := manifest[key].(string)
+		if got != want {
+			return fmt.Errorf("manifest %s = %q, want %q", key, got, want)
+		}
+		return nil
+	}
+	checkBool := func(key string, want bool) error {
+		got, ok := manifest[key].(bool)
+		if !ok || got != want {
+			return fmt.Errorf("manifest %s = %v, want %v", key, manifest[key], want)
+		}
+		return nil
+	}
+	if err := checkString("schema", smokeSchema); err != nil {
+		return nil, err
+	}
+	if err := checkString("provider_id", providerID); err != nil {
+		return nil, err
+	}
+	if err := checkString("public_model_name", "eos-embed-v1"); err != nil {
+		return nil, err
+	}
+	if err := checkString("source_model", "BAAI/bge-small-en-v1.5"); err != nil {
+		return nil, err
+	}
+	if err := checkBool("quality_claim", false); err != nil {
+		return nil, err
+	}
+	if err := checkBool("default_alias_changed", false); err != nil {
+		return nil, err
+	}
+	if err := checkBool("all_top1_ok", true); err != nil {
+		return nil, err
+	}
+	if intFromJSON(manifest["dim"]) != 384 {
+		return nil, fmt.Errorf("manifest dim = %v, want 384", manifest["dim"])
+	}
+	if intFromJSON(manifest["encode_calls"]) != 3 || intFromJSON(manifest["query_role_calls"]) != 3 {
+		return nil, fmt.Errorf("query role counters = %v/%v, want 3/3", manifest["encode_calls"], manifest["query_role_calls"])
+	}
+	if intFromJSON(manifest["encode_batch_calls"]) != 4 || intFromJSON(manifest["document_role_calls"]) != 4 {
+		return nil, fmt.Errorf("document role counters = %v/%v, want 4/4", manifest["encode_batch_calls"], manifest["document_role_calls"])
+	}
+	queries, ok := manifest["queries"].([]interface{})
+	if !ok || len(queries) != 3 {
+		return nil, fmt.Errorf("manifest queries length = %v, want 3", manifest["queries"])
+	}
+	for _, q := range queries {
+		row, ok := q.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("manifest query row has unexpected type %T", q)
+		}
+		if ok, _ := row["Top1OK"].(bool); !ok {
+			return nil, fmt.Errorf("manifest query row failed top1: %v", row)
+		}
+	}
+	return manifest, nil
+}
+
+func intFromJSON(value interface{}) int {
+	switch v := value.(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	default:
+		return 0
+	}
+}
+
+func validateSummaryTSV(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	line := 0
+	fields := 0
+	rows := 0
+	for scanner.Scan() {
+		line++
+		cols := strings.Split(scanner.Text(), "\t")
+		if line == 1 {
+			fields = len(cols)
+			if scanner.Text() != "query_id\texpected_top1\tactual_top1\ttop1_ok\ttop3" {
+				return fmt.Errorf("unexpected summary header: %s", scanner.Text())
+			}
+			continue
+		}
+		rows++
+		if len(cols) != fields {
+			return fmt.Errorf("summary line %d has %d fields, want %d", line, len(cols), fields)
+		}
+		if cols[3] != "true" {
+			return fmt.Errorf("summary line %d top1_ok = %q, want true", line, cols[3])
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if rows != 3 {
+		return fmt.Errorf("summary rows = %d, want 3", rows)
+	}
+	return nil
+}
+
+func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		usage()
+		return
+	}
+	root, err := findRoot()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	packagePath := rootedPath(root, os.Getenv("EOS_IMPORTED_BGE_PROVIDER_SMOKE_PACKAGE"))
+	if packagePath == "" {
+		fmt.Fprintln(os.Stderr, "EOS_IMPORTED_BGE_PROVIDER_SMOKE_PACKAGE is required; pass the imported BGE .mll package explicitly")
+		os.Exit(1)
+	}
+	corkscrewdbRoot := rootedPath(root, os.Getenv("EOS_IMPORTED_BGE_PROVIDER_SMOKE_CORKSCREWDB_REPO"))
+	if corkscrewdbRoot == "" {
+		corkscrewdbRoot = "/home/draco/work/corkscrewdb"
+	}
+	if err := requireFile("candidate package", packagePath); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := requireDir("CorkScrewDB repo", corkscrewdbRoot); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := requireFile("CorkScrewDB go.mod", filepath.Join(corkscrewdbRoot, "go.mod")); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	runDir := defaultRunDir(root)
+	logDir := filepath.Join(runDir, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := writeGoMod(filepath.Join(runDir, "go.mod"), root, corkscrewdbRoot); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := writeFile(filepath.Join(runDir, "main.go"), generatedHarnessSource(root, packagePath)); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := runCapture(runDir, "gofmt", []string{"gofmt", "-w", "main.go"}, filepath.Join(logDir, "gofmt.log")); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := runCapture(runDir, "go mod tidy", []string{"go", "mod", "tidy"}, filepath.Join(logDir, "go-mod-tidy.log")); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := runCapture(runDir, "go run", []string{"go", "run", "."}, filepath.Join(logDir, "go-run.log")); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	manifestPath := filepath.Join(runDir, "manifest.json")
+	summaryPath := filepath.Join(runDir, "summary.tsv")
+	manifest, err := validateManifest(manifestPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := validateSummaryTSV(summaryPath); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Printf("PASS run_dir=%s dim=%d encode_batch=%d encode=%d top1=3/3\n",
+		runDir,
+		intFromJSON(manifest["dim"]),
+		intFromJSON(manifest["encode_batch_calls"]),
+		intFromJSON(manifest["encode_calls"]),
+	)
+}
