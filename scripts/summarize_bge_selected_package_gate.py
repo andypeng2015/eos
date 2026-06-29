@@ -34,6 +34,11 @@ DEFAULT_POOLING = "cls"
 DEFAULT_NORMALIZATION = "l2"
 DEFAULT_DIM = 384
 DEFAULT_MAX_LENGTH = 512
+DEFAULT_EXPECTED_COUNTS = {
+    "scifact": {"documents": 5183, "queries": 300},
+    "nfcorpus": {"documents": 3633, "queries": 323},
+    "fiqa": {"documents": 57638, "queries": 6648},
+}
 
 
 class SummaryError(ValueError):
@@ -85,6 +90,29 @@ def parse_datasets(value: str) -> list[str]:
     return datasets
 
 
+def parse_expected_counts(value: str | None) -> dict[str, dict[str, int]]:
+    expected = {dataset: counts.copy() for dataset, counts in DEFAULT_EXPECTED_COUNTS.items()}
+    if value is None or not value.strip():
+        return expected
+    for raw_part in value.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        pieces = [piece.strip() for piece in part.split(":")]
+        if len(pieces) != 3 or not pieces[0]:
+            raise SummaryError("--expected-counts entries must look like dataset:documents:queries")
+        dataset, documents_text, queries_text = pieces
+        try:
+            documents = int(documents_text)
+            queries = int(queries_text)
+        except ValueError as exc:
+            raise SummaryError(f"--expected-counts entry has non-integer counts: {part}") from exc
+        if documents < 0 or queries < 0:
+            raise SummaryError(f"--expected-counts entry has negative counts: {part}")
+        expected[dataset] = {"documents": documents, "queries": queries}
+    return expected
+
+
 def artifact_paths(run_root: Path, dataset: str) -> dict[str, Path]:
     dataset_root = run_root / dataset
     return {
@@ -102,6 +130,24 @@ def count_lines(path: Path) -> int:
         for _line in handle:
             count += 1
     return count
+
+
+def as_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def file_stats(path: Path) -> dict[str, Any] | None:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return {
+        "path": str(path),
+        "size_bytes": stat.st_size,
+        "mtime_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
 
 
 def quality_metrics(metrics: dict[str, Any] | None) -> dict[str, float | None]:
@@ -190,6 +236,41 @@ def manifest_identity_matches(
     )
 
 
+def vector_line_count(
+    path: Path,
+    *,
+    manifest: dict[str, Any] | None,
+    manifest_key: str,
+    count_partial_vector_lines: bool,
+) -> int | None:
+    if manifest is not None:
+        written = as_int(manifest.get(manifest_key))
+        if written is not None:
+            return written
+    if count_partial_vector_lines and path.exists():
+        return count_lines(path)
+    return None
+
+
+def expected_count(
+    *,
+    manifest: dict[str, Any] | None,
+    manifest_key: str,
+    fallback: int | None,
+) -> int | None:
+    if manifest is not None:
+        value = as_int(manifest.get(manifest_key))
+        if value is not None:
+            return value
+    return fallback
+
+
+def progress_ratio(completed: int | None, total: int | None) -> float | None:
+    if completed is None or total is None or total <= 0:
+        return None
+    return min(completed / total, 1.0)
+
+
 def summarize_dataset(
     run_root: Path,
     dataset: str,
@@ -197,6 +278,7 @@ def summarize_dataset(
     expected_package_sha256: str,
     expected_identity_sha256: str,
     count_partial_vector_lines: bool,
+    expected_counts: dict[str, dict[str, int]],
 ) -> dict[str, Any]:
     paths = artifact_paths(run_root, dataset)
     present = [name for name, path in paths.items() if path.exists()]
@@ -227,14 +309,40 @@ def summarize_dataset(
         if not identity_match:
             blockers.append(f"{dataset}: vector manifest package identity mismatch")
 
-    partial_doc_vector_lines = None
-    if (
-        count_partial_vector_lines
-        and manifest is None
-        and paths["doc_vectors"].exists()
-        and not paths["query_vectors"].exists()
-    ):
-        partial_doc_vector_lines = count_lines(paths["doc_vectors"])
+    default_counts = expected_counts.get(dataset, {})
+    expected_documents = expected_count(
+        manifest=manifest,
+        manifest_key="documents",
+        fallback=default_counts.get("documents"),
+    )
+    expected_queries = expected_count(
+        manifest=manifest,
+        manifest_key="queries",
+        fallback=default_counts.get("queries"),
+    )
+    doc_vector_lines = vector_line_count(
+        paths["doc_vectors"],
+        manifest=manifest,
+        manifest_key="written_documents",
+        count_partial_vector_lines=count_partial_vector_lines,
+    )
+    query_vector_lines = vector_line_count(
+        paths["query_vectors"],
+        manifest=manifest,
+        manifest_key="written_queries",
+        count_partial_vector_lines=count_partial_vector_lines,
+    )
+    vector_progress_completed = (
+        (doc_vector_lines or 0) + (query_vector_lines or 0)
+        if doc_vector_lines is not None or query_vector_lines is not None
+        else None
+    )
+    vector_progress_total = (
+        (expected_documents or 0) + (expected_queries or 0)
+        if expected_documents is not None or expected_queries is not None
+        else None
+    )
+    ratio = progress_ratio(vector_progress_completed, vector_progress_total)
 
     return {
         "dataset": dataset,
@@ -247,7 +355,17 @@ def summarize_dataset(
         "q4": q_rows.get("q4"),
         "vector_manifest": compact_manifest(manifest),
         "identity_match": identity_match,
-        "partial_doc_vector_lines": partial_doc_vector_lines,
+        "expected_documents": expected_documents,
+        "expected_queries": expected_queries,
+        "doc_vector_lines": doc_vector_lines,
+        "query_vector_lines": query_vector_lines,
+        "partial_doc_vector_lines": doc_vector_lines if manifest is None else None,
+        "vector_progress_completed": vector_progress_completed,
+        "vector_progress_total": vector_progress_total,
+        "vector_progress_ratio": ratio,
+        "vector_progress_percent": ratio * 100.0 if ratio is not None else None,
+        "doc_vector_file": file_stats(paths["doc_vectors"]),
+        "query_vector_file": file_stats(paths["query_vectors"]),
         "blockers": blockers,
     }
 
@@ -286,8 +404,14 @@ def build_summary(
     model: str = DEFAULT_MODEL,
     snapshot: str = DEFAULT_SNAPSHOT,
     count_partial_vector_lines: bool = True,
+    expected_counts: dict[str, dict[str, int]] | None = None,
     clock: Any = utc_now,
 ) -> dict[str, Any]:
+    resolved_expected_counts = (
+        {dataset: counts.copy() for dataset, counts in DEFAULT_EXPECTED_COUNTS.items()}
+        if expected_counts is None
+        else expected_counts
+    )
     dataset_summaries = [
         summarize_dataset(
             run_root,
@@ -295,6 +419,7 @@ def build_summary(
             expected_package_sha256=package_sha256,
             expected_identity_sha256=identity_sha256,
             count_partial_vector_lines=count_partial_vector_lines,
+            expected_counts=resolved_expected_counts,
         )
         for dataset in datasets
     ]
@@ -386,7 +511,27 @@ def tsv_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
                     "compression_ratio": metrics.get("compression_ratio") if storage != "dense" else "",
                     "documents": manifest.get("documents"),
                     "queries": manifest.get("queries"),
+                    "expected_documents": dataset.get("expected_documents"),
+                    "expected_queries": dataset.get("expected_queries"),
+                    "doc_vector_lines": dataset.get("doc_vector_lines"),
+                    "query_vector_lines": dataset.get("query_vector_lines"),
                     "partial_doc_vector_lines": dataset.get("partial_doc_vector_lines"),
+                    "vector_progress_completed": dataset.get("vector_progress_completed"),
+                    "vector_progress_total": dataset.get("vector_progress_total"),
+                    "vector_progress_ratio": dataset.get("vector_progress_ratio"),
+                    "vector_progress_percent": dataset.get("vector_progress_percent"),
+                    "doc_vector_size_bytes": (dataset.get("doc_vector_file") or {}).get("size_bytes")
+                    if isinstance(dataset.get("doc_vector_file"), dict)
+                    else None,
+                    "doc_vector_mtime_utc": (dataset.get("doc_vector_file") or {}).get("mtime_utc")
+                    if isinstance(dataset.get("doc_vector_file"), dict)
+                    else None,
+                    "query_vector_size_bytes": (dataset.get("query_vector_file") or {}).get("size_bytes")
+                    if isinstance(dataset.get("query_vector_file"), dict)
+                    else None,
+                    "query_vector_mtime_utc": (dataset.get("query_vector_file") or {}).get("mtime_utc")
+                    if isinstance(dataset.get("query_vector_file"), dict)
+                    else None,
                     "present_artifacts": ",".join(dataset.get("present_artifacts", [])),
                     "missing_artifacts": ",".join(dataset.get("missing_artifacts", [])),
                     "identity_match": dataset.get("identity_match"),
@@ -416,7 +561,19 @@ def write_tsv(path: Path, summary: dict[str, Any]) -> None:
         "compression_ratio",
         "documents",
         "queries",
+        "expected_documents",
+        "expected_queries",
+        "doc_vector_lines",
+        "query_vector_lines",
         "partial_doc_vector_lines",
+        "vector_progress_completed",
+        "vector_progress_total",
+        "vector_progress_ratio",
+        "vector_progress_percent",
+        "doc_vector_size_bytes",
+        "doc_vector_mtime_utc",
+        "query_vector_size_bytes",
+        "query_vector_mtime_utc",
         "present_artifacts",
         "missing_artifacts",
         "identity_match",
@@ -441,6 +598,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--snapshot", default=DEFAULT_SNAPSHOT)
     parser.add_argument(
+        "--expected-counts",
+        help="Override expected vector counts as dataset:documents:queries[,dataset:documents:queries...]",
+    )
+    parser.add_argument(
         "--count-partial-vector-lines",
         dest="count_partial_vector_lines",
         action="store_true",
@@ -461,6 +622,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         run_root = Path(args.run_root)
         datasets = parse_datasets(args.datasets)
+        expected_counts = parse_expected_counts(args.expected_counts)
         output_json = Path(args.output_json) if args.output_json else run_root / "selected-package-gate-summary.json"
         output_tsv = Path(args.output_tsv) if args.output_tsv else run_root / "selected-package-gate-summary.tsv"
         summary = build_summary(
@@ -471,6 +633,7 @@ def main(argv: list[str] | None = None) -> int:
             model=args.model,
             snapshot=args.snapshot,
             count_partial_vector_lines=args.count_partial_vector_lines,
+            expected_counts=expected_counts,
         )
         write_json(output_json, summary)
         write_tsv(output_tsv, summary)

@@ -137,6 +137,17 @@ class SummarizeBgeSelectedPackageGateTest(unittest.TestCase):
         self.assertAlmostEqual(aggregate["macro"]["q4"]["recall_at_100"], 0.55)
         self.assertAlmostEqual(summary["datasets"][0]["q8"]["ndcg_at_10_delta_vs_dense"], 0.05)
         self.assertAlmostEqual(summary["datasets"][0]["q4"]["recall_at_100_delta_vs_dense"], -0.05)
+        first = summary["datasets"][0]
+        self.assertEqual(first["expected_documents"], 100)
+        self.assertEqual(first["expected_queries"], 10)
+        self.assertEqual(first["doc_vector_lines"], 100)
+        self.assertEqual(first["query_vector_lines"], 10)
+        self.assertEqual(first["vector_progress_completed"], 110)
+        self.assertEqual(first["vector_progress_total"], 110)
+        self.assertEqual(first["vector_progress_ratio"], 1.0)
+        self.assertEqual(first["vector_progress_percent"], 100.0)
+        self.assertIsNotNone(first["doc_vector_file"])
+        self.assertIsNotNone(first["query_vector_file"])
 
     def test_incomplete_fiqa_fixture_marks_missing_artifacts_and_defers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -154,6 +165,17 @@ class SummarizeBgeSelectedPackageGateTest(unittest.TestCase):
         fiqa = next(dataset for dataset in summary["datasets"] if dataset["dataset"] == "fiqa")
         self.assertEqual(fiqa["status"], "incomplete")
         self.assertEqual(fiqa["partial_doc_vector_lines"], 3)
+        self.assertEqual(fiqa["expected_documents"], 57638)
+        self.assertEqual(fiqa["expected_queries"], 6648)
+        self.assertEqual(fiqa["doc_vector_lines"], 3)
+        self.assertIsNone(fiqa["query_vector_lines"])
+        self.assertEqual(fiqa["vector_progress_completed"], 3)
+        self.assertEqual(fiqa["vector_progress_total"], 64286)
+        self.assertAlmostEqual(fiqa["vector_progress_ratio"], 3 / 64286)
+        self.assertAlmostEqual(fiqa["vector_progress_percent"], (3 / 64286) * 100.0)
+        self.assertGreater(fiqa["doc_vector_file"]["size_bytes"], 0)
+        self.assertIn("mtime_utc", fiqa["doc_vector_file"])
+        self.assertIsNone(fiqa["query_vector_file"])
         self.assertIn("query_vectors", fiqa["missing_artifacts"])
         self.assertIn("vector_manifest", fiqa["missing_artifacts"])
         self.assertIn("dense_metrics", fiqa["missing_artifacts"])
@@ -216,6 +238,48 @@ class SummarizeBgeSelectedPackageGateTest(unittest.TestCase):
         self.assertEqual(q8["ndcg_at_10"], "0.71")
         self.assertEqual(q8["compression_ratio"], "4.0")
         self.assertEqual(q8["identity_match"], "true")
+        self.assertEqual(q8["expected_documents"], "100")
+        self.assertEqual(q8["expected_queries"], "10")
+        self.assertEqual(q8["doc_vector_lines"], "100")
+        self.assertEqual(q8["query_vector_lines"], "10")
+        self.assertEqual(q8["vector_progress_completed"], "110")
+        self.assertEqual(q8["vector_progress_total"], "110")
+        self.assertEqual(q8["vector_progress_ratio"], "1.0")
+        self.assertEqual(q8["vector_progress_percent"], "100.0")
+        self.assertNotEqual(q8["doc_vector_size_bytes"], "")
+        self.assertNotEqual(q8["doc_vector_mtime_utc"], "")
+
+    def test_tsv_writer_emits_incomplete_fiqa_progress_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_lines(root / "fiqa" / "vectors" / "doc-vectors.jsonl", 7)
+            output_tsv = root / "summary.tsv"
+            summary = summarizer.build_summary(
+                run_root=root,
+                datasets=["fiqa"],
+                clock=lambda: "2026-06-29T00:00:00Z",
+            )
+
+            summarizer.write_tsv(output_tsv, summary)
+            with output_tsv.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+
+        dense = rows[0]
+        self.assertEqual(dense["dataset"], "fiqa")
+        self.assertEqual(dense["status"], "incomplete")
+        self.assertEqual(dense["expected_documents"], "57638")
+        self.assertEqual(dense["expected_queries"], "6648")
+        self.assertEqual(dense["doc_vector_lines"], "7")
+        self.assertEqual(dense["query_vector_lines"], "")
+        self.assertEqual(dense["vector_progress_completed"], "7")
+        self.assertEqual(dense["vector_progress_total"], "64286")
+        self.assertEqual(dense["partial_doc_vector_lines"], "7")
+        self.assertNotEqual(dense["vector_progress_ratio"], "")
+        self.assertNotEqual(dense["vector_progress_percent"], "")
+        self.assertNotEqual(dense["doc_vector_size_bytes"], "")
+        self.assertNotEqual(dense["doc_vector_mtime_utc"], "")
+        self.assertEqual(dense["query_vector_size_bytes"], "")
+        self.assertEqual(dense["query_vector_mtime_utc"], "")
 
 
 if __name__ == "__main__":
