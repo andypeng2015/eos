@@ -14,20 +14,20 @@ const (
 )
 
 type ImportedBERTEmbedderCandidateConfig struct {
-	PackagePath            string
-	ExpectedSHA256         string
-	ExpectedIdentitySHA256 string
-	ExpectedModelName      string
-	Runtime                *Runtime
+	PackagePath              string
+	ExpectedSHA256           string
+	ExpectedIdentitySHA256   string
+	ExpectedPackageModelName string
+	Runtime                  *Runtime
 }
 
 func LoadImportedBERTEmbedderCandidate(ctx context.Context, packagePath string, rt *Runtime) (*PretrainedBERTTextEmbedder, error) {
 	return LoadVerifiedImportedBERTEmbedder(ctx, ImportedBERTEmbedderCandidateConfig{
-		PackagePath:            packagePath,
-		ExpectedSHA256:         ImportedBERTEmbedderCandidatePackageSHA256,
-		ExpectedIdentitySHA256: ImportedBERTEmbedderCandidatePackageIdentitySHA256,
-		ExpectedModelName:      ImportedBERTEmbedderCandidateModelName,
-		Runtime:                rt,
+		PackagePath:              packagePath,
+		ExpectedSHA256:           ImportedBERTEmbedderCandidatePackageSHA256,
+		ExpectedIdentitySHA256:   ImportedBERTEmbedderCandidatePackageIdentitySHA256,
+		ExpectedPackageModelName: ImportedBERTEmbedderCandidateSourceModel,
+		Runtime:                  rt,
 	})
 }
 
@@ -53,8 +53,8 @@ func LoadVerifiedImportedBERTEmbedder(ctx context.Context, cfg ImportedBERTEmbed
 	if cfg.ExpectedIdentitySHA256 != "" && identity != cfg.ExpectedIdentitySHA256 {
 		return nil, fmt.Errorf("package identity mismatch: got %s want %s", identity, cfg.ExpectedIdentitySHA256)
 	}
-	if cfg.ExpectedModelName != "" && pkg.ModelName != cfg.ExpectedModelName {
-		return nil, fmt.Errorf("package model_name mismatch: got %q want %q", pkg.ModelName, cfg.ExpectedModelName)
+	if cfg.ExpectedPackageModelName != "" && pkg.ModelName != cfg.ExpectedPackageModelName {
+		return nil, fmt.Errorf("package model_name mismatch: got %q want %q", pkg.ModelName, cfg.ExpectedPackageModelName)
 	}
 	return LoadPretrainedBERTTextEmbedder(ctx, PretrainedBERTTextEmbedderConfig{
 		PackagePath: cfg.PackagePath,
