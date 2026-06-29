@@ -41,6 +41,18 @@ DEFAULT_HEADS2_LR_BRACKET_REPORT = ".tiller/scratch/codex/compact-native-heads2-
 DEFAULT_HEADS2_LR_BRACKET_GATE_LOG = (
     "runs/compact-native-heads2-lr-bracket-v1-20260628T215111Z/diagnostics/verification-gate.stdout.log"
 )
+DEFAULT_HEADS2_TRAIN_METRICS = (
+    "runs/compact-native-heads2-lr-bracket-v1-20260628T215111Z/"
+    "arms/heads2_lr2e-4_t05/metrics/train.metrics.json"
+)
+DEFAULT_HEADS2_TRAIN_STDOUT_LOG = (
+    "runs/compact-native-heads2-lr-bracket-v1-20260628T215111Z/"
+    "arms/heads2_lr2e-4_t05/logs/train.stdout.log"
+)
+DEFAULT_HEADS2_TRAIN_TIME_LOG = (
+    "runs/compact-native-heads2-lr-bracket-v1-20260628T215111Z/"
+    "arms/heads2_lr2e-4_t05/logs/train.time.log"
+)
 DEFAULT_LASTSTEP_MOVEMENT_REPORT = ".tiller/scratch/codex/compact-native-laststep-movement-diagnostic-v1-report.md"
 
 DEFAULT_BGE_PRE_RETRIEVAL_2000 = (
@@ -507,16 +519,58 @@ def summarize_bge_listwise_validation(
     )
 
 
-def summarize_heads2_lr_bracket(report_path: Path, verification_log: Path) -> dict[str, Any]:
+def summarize_heads2_lr_bracket(
+    *,
+    report_path: Path,
+    verification_log: Path,
+    train_metrics: Path,
+    train_stdout_log: Path,
+    train_time_log: Path,
+) -> dict[str, Any]:
     text, error = read_optional_text(report_path)
     log_text, log_error = read_optional_text(verification_log)
-    blockers = [item for item in (error, log_error) if item]
+    metrics, metrics_error = load_optional_json(train_metrics)
+    stdout_text, stdout_error = read_optional_text(train_stdout_log)
+    time_text, time_error = read_optional_text(train_time_log)
+    blockers = [item for item in (error, log_error, metrics_error, stdout_error, time_error) if item]
+    config = nested_dict(metrics, "config")
+    train_summary = nested_dict(metrics, "summary")
+    profile_delta = nested_dict(metrics, "profile_delta")
+    retrieval_eval_dir_enabled = bool(time_text and "--retrieval-eval-dir" in time_text)
+    retrieval_ndcg_reported_zero = bool(stdout_text and "retrieval_ndcg=0.000000" in stdout_text)
     checks = {
         "report_exists": text is not None,
         "verification_log_exists": log_text is not None,
+        "train_metrics_exists": metrics is not None,
+        "train_stdout_log_exists": stdout_text is not None,
+        "train_time_log_exists": time_text is not None,
         "best_step_0": bool(text and "best_step=0" in text),
         "restored_best_true": bool(text and "restored_best=true" in text),
         "verification_passed": bool(log_text and "PASS compact-native-heads2-lr-bracket-v1" in log_text),
+        "selection_metric_top1_accuracy": config.get("select_metric") == "top1_accuracy",
+        "restore_best_true": config.get("restore_best") is True,
+        "grouped_infonce": config.get("contrastive_loss") == "grouped_infonce",
+        "hard_negative_train": config.get("hard_negative_train") is True,
+        "temperature_0_05": as_number(config.get("temperature")) == 0.05,
+        "retrieval_eval_dir_disabled": not retrieval_eval_dir_enabled if time_text is not None else False,
+        "retrieval_ndcg_reported_zero": retrieval_ndcg_reported_zero,
+    }
+    diagnosis = {
+        "selection_metric": config.get("select_metric"),
+        "restore_best": config.get("restore_best"),
+        "best_step": train_summary.get("best_step"),
+        "restored_best": train_summary.get("restored_best"),
+        "optimizer_updates": profile_delta.get("optimizer_updates"),
+        "contrastive_loss": config.get("contrastive_loss"),
+        "hard_negative_train": config.get("hard_negative_train"),
+        "temperature": config.get("temperature"),
+        "retrieval_eval_dir_enabled": retrieval_eval_dir_enabled,
+        "retrieval_ndcg_reported_zero": retrieval_ndcg_reported_zero,
+        "primary_root_cause": "restore-best selected pairwise top1 while retrieval selection was disabled",
+        "secondary_root_cause": (
+            "score-free grouped InfoNCE at lr=2e-4 temperature=0.05 moved but retrieval degraded when not restored"
+        ),
+        "next_descriptor_id": "compact-native-retrieval-gated-low-lr-v1",
     }
     return component(
         component_id="heads2_lr_bracket",
@@ -525,7 +579,13 @@ def summarize_heads2_lr_bracket(report_path: Path, verification_log: Path) -> di
         details={
             "report_path": str(report_path),
             "verification_log": str(verification_log),
+            "metric_paths": {"train_metrics": str(train_metrics)},
+            "log_paths": {
+                "train_stdout_log": str(train_stdout_log),
+                "train_time_log": str(train_time_log),
+            },
             "checks": checks,
+            "diagnosis": diagnosis,
             "interpretation": "No productive movement: exported packages restored best_step=0.",
         },
     )
@@ -607,6 +667,9 @@ def build_summary(
     bge_listwise_validation_report: Path = Path(DEFAULT_BGE_LISTWISE_VALIDATION_REPORT),
     heads2_lr_bracket_report: Path = Path(DEFAULT_HEADS2_LR_BRACKET_REPORT),
     heads2_lr_bracket_gate_log: Path = Path(DEFAULT_HEADS2_LR_BRACKET_GATE_LOG),
+    heads2_train_metrics: Path = Path(DEFAULT_HEADS2_TRAIN_METRICS),
+    heads2_train_stdout_log: Path = Path(DEFAULT_HEADS2_TRAIN_STDOUT_LOG),
+    heads2_train_time_log: Path = Path(DEFAULT_HEADS2_TRAIN_TIME_LOG),
     laststep_movement_report: Path = Path(DEFAULT_LASTSTEP_MOVEMENT_REPORT),
     bge_pre_retrieval_2000: Path = Path(DEFAULT_BGE_PRE_RETRIEVAL_2000),
     bge_post_retrieval_2000: Path = Path(DEFAULT_BGE_POST_RETRIEVAL_2000),
@@ -648,7 +711,13 @@ def build_summary(
             post_listwise=bge_post_listwise,
             train_metrics=bge_train_metrics,
         ),
-        "heads2_lr_bracket": summarize_heads2_lr_bracket(heads2_lr_bracket_report, heads2_lr_bracket_gate_log),
+        "heads2_lr_bracket": summarize_heads2_lr_bracket(
+            report_path=heads2_lr_bracket_report,
+            verification_log=heads2_lr_bracket_gate_log,
+            train_metrics=heads2_train_metrics,
+            train_stdout_log=heads2_train_stdout_log,
+            train_time_log=heads2_train_time_log,
+        ),
         "laststep_movement": summarize_laststep_movement(
             report_path=laststep_movement_report,
             pre_retrieval=laststep_pre_retrieval,
@@ -680,8 +749,8 @@ def build_summary(
         "quality_claim": False,
         "blockers": blockers,
         "next_safe_action": (
-            "Find non-destructive compact native "
-            "training movement before any promotion, training readiness, or release readiness claim."
+            "Wait for FiQA export to clear, then run compact-native-retrieval-gated-low-lr-v1: "
+            "a retrieval-gated low-LR diagnostic before any promotion, training readiness, or release readiness claim."
         ),
         "components": components,
         "evidence_paths": {
@@ -701,6 +770,9 @@ def build_summary(
             "bge_listwise_validation_report": str(bge_listwise_validation_report),
             "heads2_lr_bracket_report": str(heads2_lr_bracket_report),
             "heads2_lr_bracket_gate_log": str(heads2_lr_bracket_gate_log),
+            "heads2_train_metrics": str(heads2_train_metrics),
+            "heads2_train_stdout_log": str(heads2_train_stdout_log),
+            "heads2_train_time_log": str(heads2_train_time_log),
             "laststep_movement_report": str(laststep_movement_report),
         },
     }
@@ -781,6 +853,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bge-listwise-validation-report", default=DEFAULT_BGE_LISTWISE_VALIDATION_REPORT)
     parser.add_argument("--heads2-lr-bracket-report", default=DEFAULT_HEADS2_LR_BRACKET_REPORT)
     parser.add_argument("--heads2-lr-bracket-gate-log", default=DEFAULT_HEADS2_LR_BRACKET_GATE_LOG)
+    parser.add_argument("--heads2-train-metrics", default=DEFAULT_HEADS2_TRAIN_METRICS)
+    parser.add_argument("--heads2-train-stdout-log", default=DEFAULT_HEADS2_TRAIN_STDOUT_LOG)
+    parser.add_argument("--heads2-train-time-log", default=DEFAULT_HEADS2_TRAIN_TIME_LOG)
     parser.add_argument("--laststep-movement-report", default=DEFAULT_LASTSTEP_MOVEMENT_REPORT)
     parser.add_argument("--bge-pre-retrieval-2000", default=DEFAULT_BGE_PRE_RETRIEVAL_2000)
     parser.add_argument("--bge-post-retrieval-2000", default=DEFAULT_BGE_POST_RETRIEVAL_2000)
@@ -815,6 +890,9 @@ def main(argv: list[str] | None = None) -> int:
             bge_listwise_validation_report=Path(args.bge_listwise_validation_report),
             heads2_lr_bracket_report=Path(args.heads2_lr_bracket_report),
             heads2_lr_bracket_gate_log=Path(args.heads2_lr_bracket_gate_log),
+            heads2_train_metrics=Path(args.heads2_train_metrics),
+            heads2_train_stdout_log=Path(args.heads2_train_stdout_log),
+            heads2_train_time_log=Path(args.heads2_train_time_log),
             laststep_movement_report=Path(args.laststep_movement_report),
             bge_pre_retrieval_2000=Path(args.bge_pre_retrieval_2000),
             bge_post_retrieval_2000=Path(args.bge_post_retrieval_2000),

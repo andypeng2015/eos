@@ -331,6 +331,9 @@ def build_summary(
     compact_native_cmd_eos_main_test: Path = Path(compact_native.DEFAULT_CMD_EOS_MAIN_TEST),
     compact_native_heads2_lr_bracket_report: Path = Path(compact_native.DEFAULT_HEADS2_LR_BRACKET_REPORT),
     compact_native_heads2_lr_bracket_gate_log: Path = Path(compact_native.DEFAULT_HEADS2_LR_BRACKET_GATE_LOG),
+    compact_native_heads2_train_metrics: Path = Path(compact_native.DEFAULT_HEADS2_TRAIN_METRICS),
+    compact_native_heads2_train_stdout_log: Path = Path(compact_native.DEFAULT_HEADS2_TRAIN_STDOUT_LOG),
+    compact_native_heads2_train_time_log: Path = Path(compact_native.DEFAULT_HEADS2_TRAIN_TIME_LOG),
     compact_native_laststep_movement_report: Path = Path(compact_native.DEFAULT_LASTSTEP_MOVEMENT_REPORT),
     compact_native_bge_pre_retrieval_2000: Path = Path(compact_native.DEFAULT_BGE_PRE_RETRIEVAL_2000),
     compact_native_bge_post_retrieval_2000: Path = Path(compact_native.DEFAULT_BGE_POST_RETRIEVAL_2000),
@@ -423,6 +426,9 @@ def build_summary(
         bge_listwise_validation_report=compact_native_student_report,
         heads2_lr_bracket_report=compact_native_heads2_lr_bracket_report,
         heads2_lr_bracket_gate_log=compact_native_heads2_lr_bracket_gate_log,
+        heads2_train_metrics=compact_native_heads2_train_metrics,
+        heads2_train_stdout_log=compact_native_heads2_train_stdout_log,
+        heads2_train_time_log=compact_native_heads2_train_time_log,
         laststep_movement_report=compact_native_laststep_movement_report,
         bge_pre_retrieval_2000=compact_native_bge_pre_retrieval_2000,
         bge_post_retrieval_2000=compact_native_bge_post_retrieval_2000,
@@ -682,6 +688,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--compact-native-heads2-lr-bracket-gate-log",
         default=compact_native.DEFAULT_HEADS2_LR_BRACKET_GATE_LOG,
     )
+    parser.add_argument("--compact-native-heads2-train-metrics", default=compact_native.DEFAULT_HEADS2_TRAIN_METRICS)
+    parser.add_argument(
+        "--compact-native-heads2-train-stdout-log",
+        default=compact_native.DEFAULT_HEADS2_TRAIN_STDOUT_LOG,
+    )
+    parser.add_argument(
+        "--compact-native-heads2-train-time-log",
+        default=compact_native.DEFAULT_HEADS2_TRAIN_TIME_LOG,
+    )
     parser.add_argument("--compact-native-laststep-movement-report", default=compact_native.DEFAULT_LASTSTEP_MOVEMENT_REPORT)
     parser.add_argument("--compact-native-bge-pre-retrieval-2000", default=compact_native.DEFAULT_BGE_PRE_RETRIEVAL_2000)
     parser.add_argument("--compact-native-bge-post-retrieval-2000", default=compact_native.DEFAULT_BGE_POST_RETRIEVAL_2000)
@@ -756,6 +771,9 @@ def main(argv: list[str] | None = None) -> int:
             compact_native_cmd_eos_main_test=Path(args.compact_native_cmd_eos_main_test),
             compact_native_heads2_lr_bracket_report=Path(args.compact_native_heads2_lr_bracket_report),
             compact_native_heads2_lr_bracket_gate_log=Path(args.compact_native_heads2_lr_bracket_gate_log),
+            compact_native_heads2_train_metrics=Path(args.compact_native_heads2_train_metrics),
+            compact_native_heads2_train_stdout_log=Path(args.compact_native_heads2_train_stdout_log),
+            compact_native_heads2_train_time_log=Path(args.compact_native_heads2_train_time_log),
             compact_native_laststep_movement_report=Path(args.compact_native_laststep_movement_report),
             compact_native_bge_pre_retrieval_2000=Path(args.compact_native_bge_pre_retrieval_2000),
             compact_native_bge_post_retrieval_2000=Path(args.compact_native_bge_post_retrieval_2000),

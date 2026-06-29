@@ -162,6 +162,9 @@ def compact_cli_args(paths: dict[str, Path]) -> list[str]:
         "compact_native_cmd_eos_main_test": "--compact-native-cmd-eos-main-test",
         "compact_native_heads2_lr_bracket_report": "--compact-native-heads2-lr-bracket-report",
         "compact_native_heads2_lr_bracket_gate_log": "--compact-native-heads2-lr-bracket-gate-log",
+        "compact_native_heads2_train_metrics": "--compact-native-heads2-train-metrics",
+        "compact_native_heads2_train_stdout_log": "--compact-native-heads2-train-stdout-log",
+        "compact_native_heads2_train_time_log": "--compact-native-heads2-train-time-log",
         "compact_native_laststep_movement_report": "--compact-native-laststep-movement-report",
         "compact_native_bge_pre_retrieval_2000": "--compact-native-bge-pre-retrieval-2000",
         "compact_native_bge_post_retrieval_2000": "--compact-native-bge-post-retrieval-2000",
@@ -241,6 +244,13 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                 "serving_parity"
             ]["details"]["trainer_serving_numeric_parity"]
         )
+        diagnosis = summary["packets"]["compact_native_student"]["details"]["compact_native_readiness"]["components"][
+            "heads2_lr_bracket"
+        ]["details"]["diagnosis"]
+        self.assertEqual(diagnosis["selection_metric"], "top1_accuracy")
+        self.assertFalse(diagnosis["retrieval_eval_dir_enabled"])
+        self.assertTrue(diagnosis["retrieval_ndcg_reported_zero"])
+        self.assertEqual(diagnosis["next_descriptor_id"], "compact-native-retrieval-gated-low-lr-v1")
         self.assertFalse(summary["packets"]["stageabc_pretraining_distillation"]["details"]["training_ready"])
         self.assertEqual(summary["summary"]["quantization_profile_status"], "q8_ready_for_review")
         self.assertEqual(summary["public_identity_policy"]["public_name"], "Eos Embedder 1")
@@ -359,6 +369,9 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                 compact_native_cmd_eos_main_test=root / "missing-main-test.go",
                 compact_native_heads2_lr_bracket_report=root / "missing-bracket.md",
                 compact_native_heads2_lr_bracket_gate_log=root / "missing-bracket.log",
+                compact_native_heads2_train_metrics=root / "missing-heads-train.json",
+                compact_native_heads2_train_stdout_log=root / "missing-heads-stdout.log",
+                compact_native_heads2_train_time_log=root / "missing-heads-time.log",
                 compact_native_laststep_movement_report=root / "missing-laststep.md",
                 compact_native_bge_pre_retrieval_2000=root / "missing-pre-2000.json",
                 compact_native_bge_post_retrieval_2000=root / "missing-post-2000.json",

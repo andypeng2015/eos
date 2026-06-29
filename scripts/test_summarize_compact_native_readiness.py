@@ -42,8 +42,15 @@ def listwise_metrics(ce: float, kl: float, top1: float, any_positive: float) -> 
     }
 
 
-def train_metrics(*, steps_run: int, optimizer_updates: int, restored_best: bool, best_step: int) -> dict[str, Any]:
-    return {
+def train_metrics(
+    *,
+    steps_run: int,
+    optimizer_updates: int,
+    restored_best: bool,
+    best_step: int,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    data = {
         "schema": "manta.embedding_train_metrics.v1",
         "summary": {
             "steps_run": steps_run,
@@ -52,6 +59,9 @@ def train_metrics(*, steps_run: int, optimizer_updates: int, restored_best: bool
         },
         "profile_delta": {"optimizer_updates": optimizer_updates},
     }
+    if config is not None:
+        data["config"] = config
+    return data
 
 
 def write_compact_native_fixture(root: Path) -> dict[str, Path]:
@@ -144,6 +154,29 @@ def write_compact_native_fixture(root: Path) -> dict[str, Path]:
     heads_report.write_text("best_step=0\nrestored_best=true\n", encoding="utf-8")
     heads_log = base / "verification-gate.stdout.log"
     heads_log.write_text("PASS compact-native-heads2-lr-bracket-v1\n", encoding="utf-8")
+    heads_train_metrics = write_json(
+        base / "metrics" / "heads2.train.metrics.json",
+        train_metrics(
+            steps_run=32,
+            optimizer_updates=32,
+            restored_best=True,
+            best_step=0,
+            config={
+                "select_metric": "top1_accuracy",
+                "restore_best": True,
+                "contrastive_loss": "grouped_infonce",
+                "hard_negative_train": True,
+                "temperature": 0.05,
+            },
+        ),
+    )
+    heads_stdout_log = base / "heads2.train.stdout.log"
+    heads_stdout_log.write_text("final eval top1=0.562500 retrieval_ndcg=0.000000\n", encoding="utf-8")
+    heads_time_log = base / "heads2.train.time.log"
+    heads_time_log.write_text(
+        "Command being timed: eos train-embedding --contrastive-loss grouped_infonce --lr 0.0002 --temperature 0.05\n",
+        encoding="utf-8",
+    )
     laststep_report = base / "compact-native-laststep-movement-diagnostic-v1-report.md"
     laststep_report.write_text("negative last-step movement diagnostic\n", encoding="utf-8")
 
@@ -185,6 +218,9 @@ def write_compact_native_fixture(root: Path) -> dict[str, Path]:
         "compact_native_student_report": bge_report,
         "compact_native_heads2_lr_bracket_report": heads_report,
         "compact_native_heads2_lr_bracket_gate_log": heads_log,
+        "compact_native_heads2_train_metrics": heads_train_metrics,
+        "compact_native_heads2_train_stdout_log": heads_stdout_log,
+        "compact_native_heads2_train_time_log": heads_time_log,
         "compact_native_laststep_movement_report": laststep_report,
         "compact_native_bge_pre_retrieval_2000": pre2000,
         "compact_native_bge_post_retrieval_2000": post2000,
@@ -222,6 +258,9 @@ class SummarizeCompactNativeReadinessTest(unittest.TestCase):
                 bge_listwise_validation_report=paths["compact_native_student_report"],
                 heads2_lr_bracket_report=paths["compact_native_heads2_lr_bracket_report"],
                 heads2_lr_bracket_gate_log=paths["compact_native_heads2_lr_bracket_gate_log"],
+                heads2_train_metrics=paths["compact_native_heads2_train_metrics"],
+                heads2_train_stdout_log=paths["compact_native_heads2_train_stdout_log"],
+                heads2_train_time_log=paths["compact_native_heads2_train_time_log"],
                 laststep_movement_report=paths["compact_native_laststep_movement_report"],
                 bge_pre_retrieval_2000=paths["compact_native_bge_pre_retrieval_2000"],
                 bge_post_retrieval_2000=paths["compact_native_bge_post_retrieval_2000"],
@@ -269,6 +308,19 @@ class SummarizeCompactNativeReadinessTest(unittest.TestCase):
             summary["components"]["heads2_lr_bracket"]["status"],
             "diagnostic_only_restored_best_static",
         )
+        diagnosis = summary["components"]["heads2_lr_bracket"]["details"]["diagnosis"]
+        self.assertEqual(diagnosis["selection_metric"], "top1_accuracy")
+        self.assertTrue(diagnosis["restore_best"])
+        self.assertEqual(diagnosis["best_step"], 0)
+        self.assertEqual(diagnosis["optimizer_updates"], 32)
+        self.assertFalse(diagnosis["retrieval_eval_dir_enabled"])
+        self.assertTrue(diagnosis["retrieval_ndcg_reported_zero"])
+        self.assertEqual(
+            diagnosis["primary_root_cause"],
+            "restore-best selected pairwise top1 while retrieval selection was disabled",
+        )
+        self.assertEqual(diagnosis["next_descriptor_id"], "compact-native-retrieval-gated-low-lr-v1")
+        self.assertIn("Wait for FiQA export to clear", summary["next_safe_action"])
         self.assertEqual(summary["components"]["laststep_movement"]["status"], "negative_diagnostic")
         self.assertGreater(
             summary["components"]["bge_listwise_validation"]["details"]["retrieval_2000"]["ndcg_at_10"]["delta"],
@@ -301,6 +353,9 @@ class SummarizeCompactNativeReadinessTest(unittest.TestCase):
                 bge_listwise_validation_report=root / "missing-bge.md",
                 heads2_lr_bracket_report=root / "missing-heads.md",
                 heads2_lr_bracket_gate_log=root / "missing-heads.log",
+                heads2_train_metrics=root / "missing-heads-train.json",
+                heads2_train_stdout_log=root / "missing-heads-stdout.log",
+                heads2_train_time_log=root / "missing-heads-time.log",
                 laststep_movement_report=root / "missing-laststep.md",
                 bge_pre_retrieval_2000=root / "missing-pre2000.json",
                 bge_post_retrieval_2000=root / "missing-post2000.json",
@@ -318,6 +373,10 @@ class SummarizeCompactNativeReadinessTest(unittest.TestCase):
         self.assertEqual(summary["components"]["architecture_plan"]["status"], "missing_evidence")
         self.assertEqual(summary["components"]["serving_parity"]["status"], "missing_evidence")
         self.assertEqual(summary["components"]["bge_listwise_validation"]["status"], "missing_evidence")
+        self.assertEqual(summary["components"]["heads2_lr_bracket"]["status"], "missing_evidence")
+        self.assertFalse(
+            summary["components"]["heads2_lr_bracket"]["details"]["diagnosis"]["retrieval_eval_dir_enabled"]
+        )
         self.assertEqual(summary["components"]["laststep_movement"]["status"], "missing_evidence")
         self.assertTrue(summary["blockers"])
         self.assertFalse(summary["promotion_ready"])
