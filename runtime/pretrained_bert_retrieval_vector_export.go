@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	eosartifact "m31labs.dev/eos/artifact/eos"
@@ -314,6 +315,91 @@ func (e *PretrainedBERTTextEmbedder) Normalization() string {
 		return ""
 	}
 	return e.normalization
+}
+
+func (e *PretrainedBERTTextEmbedder) ModelName() string {
+	if e == nil {
+		return ""
+	}
+	return e.modelName
+}
+
+func (e *PretrainedBERTTextEmbedder) PackagePath() string {
+	if e == nil {
+		return ""
+	}
+	return e.packagePath
+}
+
+func (e *PretrainedBERTTextEmbedder) PackageSHA256() string {
+	if e == nil {
+		return ""
+	}
+	return e.packageSHA256
+}
+
+func (e *PretrainedBERTTextEmbedder) PackageIdentitySHA256() string {
+	if e == nil {
+		return ""
+	}
+	return e.packageIdentity
+}
+
+func (e *PretrainedBERTTextEmbedder) NativeDim() int {
+	if e == nil {
+		return 0
+	}
+	return e.config.HiddenSize
+}
+
+func (e *PretrainedBERTTextEmbedder) RetrievalRoleContract() *PretrainedBERTRetrievalRoleContract {
+	if e == nil {
+		return nil
+	}
+	return clonePretrainedBERTRetrievalRoleContract(e.retrievalRoleContract)
+}
+
+func (e *PretrainedBERTTextEmbedder) PrefixForRole(role string) (string, error) {
+	normalized := strings.TrimSpace(strings.ToLower(role))
+	if normalized == "" {
+		normalized = EmbeddingRoleRaw
+	}
+	switch normalized {
+	case EmbeddingRoleRaw:
+		return "", nil
+	case EmbeddingRoleQuery, EmbeddingRoleDocument:
+	default:
+		return "", fmt.Errorf("unsupported pretrained BERT embedding role %q; want raw, query, or document", role)
+	}
+	if e == nil {
+		return "", fmt.Errorf("pretrained BERT text embedder is not loaded")
+	}
+	if e.retrievalRoleContract == nil {
+		if e.packagePath != "" {
+			return "", fmt.Errorf("package %s does not declare retrieval_role_contract; role %q requires a package role contract or explicit lower-level prefix", e.packagePath, normalized)
+		}
+		return "", fmt.Errorf("role %q requires a retrieval role contract or explicit lower-level prefix", normalized)
+	}
+	switch normalized {
+	case EmbeddingRoleQuery:
+		return e.retrievalRoleContract.QueryPrefix, nil
+	case EmbeddingRoleDocument:
+		return e.retrievalRoleContract.DocumentPrefix, nil
+	default:
+		return "", nil
+	}
+}
+
+func (e *PretrainedBERTTextEmbedder) EmbedTextBatchWithRole(ctx context.Context, texts []string, role string) ([][]float32, string, error) {
+	prefix, err := e.PrefixForRole(role)
+	if err != nil {
+		return nil, "", err
+	}
+	embeddings, err := e.EmbedTextBatch(ctx, texts, prefix)
+	if err != nil {
+		return nil, "", err
+	}
+	return embeddings, prefix, nil
 }
 
 func resolvePretrainedBERTMaxLength(explicit int, config PretrainedBERTConfig, stMeta *PretrainedBERTSTMetadata) (int, string) {

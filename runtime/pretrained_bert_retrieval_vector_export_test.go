@@ -213,6 +213,91 @@ func TestPretrainedBERTRetrievalVectorExportUsesPackageRoleContract(t *testing.T
 	}
 }
 
+func TestPretrainedBERTTextEmbedderPrefixForRole(t *testing.T) {
+	embedder := &PretrainedBERTTextEmbedder{
+		packagePath: "fixture.imported.mll",
+		retrievalRoleContract: &PretrainedBERTRetrievalRoleContract{
+			Schema:         PretrainedBERTRetrievalRoleContractSchema,
+			QueryRole:      EmbeddingRoleQuery,
+			DocumentRole:   EmbeddingRoleDocument,
+			QueryPrefix:    "q: ",
+			DocumentPrefix: "d: ",
+		},
+	}
+	for _, tt := range []struct {
+		role string
+		want string
+	}{
+		{role: EmbeddingRoleRaw, want: ""},
+		{role: "", want: ""},
+		{role: EmbeddingRoleQuery, want: "q: "},
+		{role: EmbeddingRoleDocument, want: "d: "},
+		{role: " QUERY ", want: "q: "},
+	} {
+		got, err := embedder.PrefixForRole(tt.role)
+		if err != nil {
+			t.Fatalf("PrefixForRole(%q): %v", tt.role, err)
+		}
+		if got != tt.want {
+			t.Fatalf("PrefixForRole(%q) = %q, want %q", tt.role, got, tt.want)
+		}
+	}
+	if _, err := embedder.PrefixForRole("other"); err == nil || !strings.Contains(err.Error(), "raw, query, or document") {
+		t.Fatalf("unsupported role err = %v", err)
+	}
+}
+
+func TestPretrainedBERTTextEmbedderPrefixForRoleRejectsLegacyPackage(t *testing.T) {
+	embedder := &PretrainedBERTTextEmbedder{packagePath: "legacy.imported.mll"}
+	prefix, err := embedder.PrefixForRole(EmbeddingRoleRaw)
+	if err != nil || prefix != "" {
+		t.Fatalf("raw prefix = %q err=%v", prefix, err)
+	}
+	_, err = embedder.PrefixForRole(EmbeddingRoleQuery)
+	if err == nil || !strings.Contains(err.Error(), "does not declare retrieval_role_contract") {
+		t.Fatalf("query err = %v, want retrieval_role_contract error", err)
+	}
+}
+
+func TestPretrainedBERTTextEmbedderEmbedTextBatchWithRoleUsesPackageContract(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
+	packagePath := writeTinyPretrainedBERTPackageFromFixture(t, sourceDir, modulePath, weightsPath)
+	packagePath = writeTamperedPretrainedBERTPackage(t, packagePath, func(pkg *PretrainedBERTPackage) {
+		pkg.RetrievalRoleContract = &PretrainedBERTRetrievalRoleContract{
+			Schema:         PretrainedBERTRetrievalRoleContractSchema,
+			QueryRole:      EmbeddingRoleQuery,
+			DocumentRole:   EmbeddingRoleDocument,
+			QueryPrefix:    "q: ",
+			DocumentPrefix: "",
+			Pooling:        pkg.Pooling,
+			MaxLength:      pkg.MaxLength,
+		}
+		pkg.IdentitySHA256 = pkg.IdentityHash()
+	})
+	embedder, err := LoadPretrainedBERTTextEmbedder(context.Background(), PretrainedBERTTextEmbedderConfig{
+		PackagePath: packagePath,
+		MaxLength:   4,
+		Runtime:     New(cuda.New()),
+	})
+	if err != nil {
+		t.Fatalf("load package embedder: %v", err)
+	}
+	withRole, prefix, err := embedder.EmbedTextBatchWithRole(context.Background(), []string{"hello"}, EmbeddingRoleQuery)
+	if err != nil {
+		t.Fatalf("EmbedTextBatchWithRole: %v", err)
+	}
+	if prefix != "q: " {
+		t.Fatalf("prefix = %q", prefix)
+	}
+	explicit, err := embedder.EmbedTextBatch(context.Background(), []string{"hello"}, "q: ")
+	if err != nil {
+		t.Fatalf("EmbedTextBatch explicit: %v", err)
+	}
+	if !slices.Equal(withRole[0], explicit[0]) {
+		t.Fatalf("role embedding differs from explicit prefix embedding: role=%v explicit=%v", withRole[0], explicit[0])
+	}
+}
+
 func TestPretrainedBERTRetrievalVectorExportUsePackageRoleContractRejectsConflictingPrefixes(t *testing.T) {
 	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixture(t)
 	packagePath := writeTinyPretrainedBERTPackageFromFixture(t, sourceDir, modulePath, weightsPath)

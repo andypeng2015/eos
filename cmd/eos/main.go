@@ -107,6 +107,8 @@ func run(args []string) error {
 		return runArtifact(args[1:])
 	case "embed-text":
 		return runEmbedText(args[1:])
+	case "embed-pretrained-bert-package":
+		return runEmbedPretrainedBERTPackage(args[1:])
 	case "default-embedder":
 		return runDefaultEmbedder(args[1:])
 	case "export-retrieval-vectors":
@@ -8347,6 +8349,7 @@ func printUsage() {
 	fmt.Println("  eos import-pretrained-bert --source <hf-snapshot-dir> [--model-name name] [--plan-json plan.json] [--verify-weights] [--weights-out weights.mll] [--module-out artifact.mll]")
 	fmt.Println("  eos fit-pretrained-bert-projection-head --weights-json weights.json --out head.mll [metadata flags]")
 	fmt.Println("  eos embed-text <artifact.mll> <text...>")
+	fmt.Println("  eos embed-pretrained-bert-package [--role raw|query|document] [--json] [--max-length N] <package.mll> <text...>")
 	fmt.Println("  eos default-embedder [--root dir] [--path-only] [--verify] [--json]")
 	fmt.Println("  eos export-retrieval-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
 	fmt.Println("  eos export-sparse-token-pool-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
@@ -8411,6 +8414,7 @@ func printUsage() {
 	fmt.Println("import-pretrained-bert writes a BERT-family HF config/tensor plan and optional WordPiece tokenizer smoke check; --verify-weights validates safetensors headers, --weights-out writes role-named decoded weights, and --module-out writes the host-reference executable BERT embedder module artifact.")
 	fmt.Println("fit-pretrained-bert-projection-head packages a learned imported-BERT compact projection matrix as a validated MLL sidecar.")
 	fmt.Println("embed-text loads a packaged or sealed embedding .mll and embeds text with its tokenizer.")
+	fmt.Println("embed-pretrained-bert-package directly embeds text from a source-free imported BERT package; --role defaults to raw, query/document use the package retrieval role contract, and JSON keeps quality_claim=false.")
 	fmt.Println("export-retrieval-vectors writes BEIR document/query vector caches from a packaged or sealed Eos embedding .mll, optionally as parent-child document chunks.")
 	fmt.Println("export-pretrained-bert-retrieval-vectors writes BEIR document/query vector caches from an imported BERT embedder module, role-named weights, and a Hugging Face WordPiece tokenizer snapshot; --projection-head applies a learned compact sidecar; quality_claim=false.")
 	fmt.Println("export-sparse-token-pool-vectors writes experimental_sparse_token_pool BEIR vector caches from tokenizer ids, token_embedding rows, and host-reference attention (--attention-mode turboquant_sparse|dense); --token-span-tokens emits child vectors from one encoded document pass; quality_claim=false; --min-observed-doc-tokens can fail runs that never consume the requested document token length.")

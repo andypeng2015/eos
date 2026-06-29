@@ -79,7 +79,7 @@ func writeCommandPretrainedBERTPackageFixture(t *testing.T, modelName string, wi
 	config := `{
 		"architectures": ["BertModel"],
 		"model_type": "bert",
-		"vocab_size": 3,
+		"vocab_size": 5,
 		"hidden_size": 2,
 		"num_hidden_layers": 1,
 		"num_attention_heads": 1,
