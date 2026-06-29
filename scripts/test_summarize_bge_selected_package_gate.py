@@ -185,6 +185,64 @@ class SummarizeBgeSelectedPackageGateTest(unittest.TestCase):
         self.assertFalse(summary["aggregate"]["default_alias_changed"])
         self.assertEqual(summary["aggregate"]["promotion_recommendation"], "defer")
         self.assertIn("incomplete datasets: fiqa", summary["aggregate"]["blockers"])
+        policy = summary["aggregate"]["quality_policy"]
+        self.assertFalse(policy["non_default_promotion_policy_pass"])
+        self.assertFalse(policy["dense_policy_pass"])
+        self.assertFalse(policy["q8_policy_pass"])
+        self.assertEqual(policy["per_dataset"]["fiqa"]["ready"], False)
+        self.assertIn("fiqa: dataset gate incomplete", policy["blockers"])
+
+    def test_quality_policy_allows_non_default_review_without_q4_release_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_complete_dataset(root, "scifact", 0.7, 0.9, 0.697, 0.88, 0.5, 0.8)
+
+            summary = summarizer.build_summary(
+                run_root=root,
+                datasets=["scifact"],
+                clock=lambda: "2026-06-29T00:00:00Z",
+            )
+
+        policy = summary["aggregate"]["quality_policy"]
+        self.assertTrue(policy["dense_policy_pass"])
+        self.assertTrue(policy["q8_policy_pass"])
+        self.assertFalse(policy["q4_release_profile_pass"])
+        self.assertTrue(policy["non_default_promotion_policy_pass"])
+        self.assertEqual(policy["q4_release_profile_decision"], "diagnostic_storage_only")
+        self.assertEqual(summary["aggregate"]["promotion_recommendation"], "review")
+        scifact_policy = policy["per_dataset"]["scifact"]
+        self.assertTrue(scifact_policy["dense"]["pass"])
+        self.assertTrue(scifact_policy["q8"]["pass"])
+        self.assertFalse(scifact_policy["q4"]["pass"])
+        self.assertEqual(scifact_policy["q4"]["release_profile_decision"], "diagnostic_storage_only")
+        self.assertAlmostEqual(
+            scifact_policy["dense"]["ndcg_at_10_delta_vs_current_default_dense"],
+            0.7 - summarizer.DEFAULT_BASELINE_METRICS["scifact"]["ndcg_at_10"],
+        )
+
+    def test_quality_policy_q8_failure_defers_non_default_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_complete_dataset(root, "scifact", 0.7, 0.9, 0.68, 0.88, 0.65, 0.85)
+
+            summary = summarizer.build_summary(
+                run_root=root,
+                datasets=["scifact"],
+                clock=lambda: "2026-06-29T00:00:00Z",
+            )
+
+        policy = summary["aggregate"]["quality_policy"]
+        self.assertTrue(policy["dense_policy_pass"])
+        self.assertFalse(policy["q8_policy_pass"])
+        self.assertFalse(policy["non_default_promotion_policy_pass"])
+        self.assertEqual(summary["aggregate"]["promotion_recommendation"], "defer")
+        self.assertGreater(policy["per_dataset"]["scifact"]["q8"]["ndcg_at_10_drop_vs_dense"], 0.005)
+
+    def test_parse_baseline_metrics_override(self) -> None:
+        baselines = summarizer.parse_baseline_metrics("custom:0.1:0.2,scifact:0.3:0.4")
+
+        self.assertEqual(baselines["custom"], {"ndcg_at_10": 0.1, "recall_at_100": 0.2})
+        self.assertEqual(baselines["scifact"], {"ndcg_at_10": 0.3, "recall_at_100": 0.4})
 
     def test_identity_mismatch_sets_consistency_false_and_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -248,6 +306,11 @@ class SummarizeBgeSelectedPackageGateTest(unittest.TestCase):
         self.assertEqual(q8["vector_progress_percent"], "100.0")
         self.assertNotEqual(q8["doc_vector_size_bytes"], "")
         self.assertNotEqual(q8["doc_vector_mtime_utc"], "")
+        self.assertEqual(q8["current_default_dense_ndcg_at_10"], str(summarizer.DEFAULT_BASELINE_METRICS["scifact"]["ndcg_at_10"]))
+        self.assertEqual(q8["policy_ready"], "true")
+        self.assertEqual(q8["policy_pass"], "true")
+        self.assertNotEqual(q8["ndcg_at_10_ratio_vs_dense"], "")
+        self.assertNotEqual(q8["q8_ndcg_at_10_drop_vs_dense"], "")
 
     def test_tsv_writer_emits_incomplete_fiqa_progress_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

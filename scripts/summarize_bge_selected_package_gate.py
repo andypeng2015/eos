@@ -39,6 +39,16 @@ DEFAULT_EXPECTED_COUNTS = {
     "nfcorpus": {"documents": 3633, "queries": 323},
     "fiqa": {"documents": 57638, "queries": 6648},
 }
+DEFAULT_BASELINE_METRICS = {
+    # Current promoted Eos dense default from docs/manta-embed-sota-avenues.md.
+    "scifact": {"ndcg_at_10": 0.5645379155, "recall_at_100": 0.7964444444},
+    "nfcorpus": {"ndcg_at_10": 0.205745967860765, "recall_at_100": 0.242066067459883},
+    "fiqa": {"ndcg_at_10": 0.121260940614285, "recall_at_100": 0.351678208622653},
+}
+Q8_MIN_DENSE_NDCG_RATIO = 0.98
+Q8_MAX_ABS_NDCG_DROP = 0.005
+Q4_MIN_DENSE_NDCG_RATIO = 0.90
+Q4_MIN_DENSE_RECALL_RATIO = 0.90
 
 
 class SummaryError(ValueError):
@@ -111,6 +121,29 @@ def parse_expected_counts(value: str | None) -> dict[str, dict[str, int]]:
             raise SummaryError(f"--expected-counts entry has negative counts: {part}")
         expected[dataset] = {"documents": documents, "queries": queries}
     return expected
+
+
+def parse_baseline_metrics(value: str | None) -> dict[str, dict[str, float]]:
+    baselines = {dataset: metrics.copy() for dataset, metrics in DEFAULT_BASELINE_METRICS.items()}
+    if value is None or not value.strip():
+        return baselines
+    for raw_part in value.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        pieces = [piece.strip() for piece in part.split(":")]
+        if len(pieces) != 3 or not pieces[0]:
+            raise SummaryError("--baseline-metrics entries must look like dataset:ndcg_at_10:recall_at_100")
+        dataset, ndcg_text, recall_text = pieces
+        try:
+            ndcg = float(ndcg_text)
+            recall = float(recall_text)
+        except ValueError as exc:
+            raise SummaryError(f"--baseline-metrics entry has non-numeric metrics: {part}") from exc
+        if ndcg < 0 or recall < 0:
+            raise SummaryError(f"--baseline-metrics entry has negative metrics: {part}")
+        baselines[dataset] = {"ndcg_at_10": ndcg, "recall_at_100": recall}
+    return baselines
 
 
 def artifact_paths(run_root: Path, dataset: str) -> dict[str, Path]:
@@ -395,6 +428,189 @@ def metric_macro(datasets: list[dict[str, Any]], storage: str) -> dict[str, Any]
     }
 
 
+def baseline_macro(datasets: list[str], baselines: dict[str, dict[str, float]]) -> dict[str, Any]:
+    used: list[str] = []
+    ndcg_values: list[float] = []
+    recall_values: list[float] = []
+    for dataset in datasets:
+        baseline = baselines.get(dataset)
+        if baseline is None:
+            continue
+        ndcg_values.append(baseline["ndcg_at_10"])
+        recall_values.append(baseline["recall_at_100"])
+        used.append(dataset)
+    return {
+        "dataset_count": len(used),
+        "datasets": used,
+        "ndcg_at_10": mean(ndcg_values),
+        "recall_at_100": mean(recall_values),
+    }
+
+
+def metric_ratio(value: float | None, baseline: float | None) -> float | None:
+    if value is None or baseline is None or baseline == 0:
+        return None
+    return value / baseline
+
+
+def metric_ge(value: float | None, floor: float | None) -> bool:
+    return value is not None and floor is not None and value >= floor
+
+
+def build_quality_policy(
+    dataset_summaries: list[dict[str, Any]],
+    *,
+    baseline_metrics: dict[str, dict[str, float]],
+    all_complete: bool,
+    identity_consistent: bool,
+) -> dict[str, Any]:
+    policy_blockers: list[str] = []
+    per_dataset: dict[str, Any] = {}
+    dense_passes: list[bool] = []
+    q8_passes: list[bool] = []
+    q4_passes: list[bool] = []
+
+    baseline = baseline_macro([str(dataset["dataset"]) for dataset in dataset_summaries], baseline_metrics)
+    dense_macro = metric_macro(dataset_summaries, "dense")
+    macro_dense_delta = {
+        "ndcg_at_10": delta(dense_macro.get("ndcg_at_10"), baseline.get("ndcg_at_10")),
+        "recall_at_100": delta(dense_macro.get("recall_at_100"), baseline.get("recall_at_100")),
+    }
+    macro_dense_pass = (
+        dense_macro["dataset_count"] == len(dataset_summaries)
+        and baseline["dataset_count"] == len(dataset_summaries)
+        and metric_ge(dense_macro.get("ndcg_at_10"), baseline.get("ndcg_at_10"))
+        and metric_ge(dense_macro.get("recall_at_100"), baseline.get("recall_at_100"))
+    )
+
+    for dataset in dataset_summaries:
+        name = str(dataset["dataset"])
+        reasons: list[str] = []
+        baseline_row = baseline_metrics.get(name)
+        dense = dataset.get("dense") if isinstance(dataset.get("dense"), dict) else None
+        q8 = dataset.get("q8") if isinstance(dataset.get("q8"), dict) else None
+        q4 = dataset.get("q4") if isinstance(dataset.get("q4"), dict) else None
+
+        if baseline_row is None:
+            reasons.append("missing current-default dense baseline")
+        if dataset.get("status") != "complete":
+            reasons.append("dataset gate incomplete")
+
+        dense_ndcg = as_number(dense.get("ndcg_at_10")) if dense is not None else None
+        dense_recall = as_number(dense.get("recall_at_100")) if dense is not None else None
+        baseline_ndcg = baseline_row.get("ndcg_at_10") if baseline_row is not None else None
+        baseline_recall = baseline_row.get("recall_at_100") if baseline_row is not None else None
+        dense_decision = {
+            "pass": metric_ge(dense_ndcg, baseline_ndcg) and metric_ge(dense_recall, baseline_recall),
+            "ndcg_at_10_delta_vs_current_default_dense": delta(dense_ndcg, baseline_ndcg),
+            "recall_at_100_delta_vs_current_default_dense": delta(dense_recall, baseline_recall),
+        }
+        if not dense_decision["pass"]:
+            reasons.append("dense below current-default dense baseline or missing metrics")
+
+        q8_ndcg = as_number(q8.get("ndcg_at_10")) if q8 is not None else None
+        q8_ndcg_ratio = metric_ratio(q8_ndcg, dense_ndcg)
+        q8_ndcg_drop = None if q8_ndcg is None or dense_ndcg is None else dense_ndcg - q8_ndcg
+        q8_decision = {
+            "pass": (
+                q8_ndcg_ratio is not None
+                and q8_ndcg_ratio >= Q8_MIN_DENSE_NDCG_RATIO
+                and q8_ndcg_drop is not None
+                and q8_ndcg_drop <= Q8_MAX_ABS_NDCG_DROP
+            ),
+            "ndcg_at_10_ratio_vs_dense": q8_ndcg_ratio,
+            "ndcg_at_10_drop_vs_dense": q8_ndcg_drop,
+        }
+        if not q8_decision["pass"]:
+            reasons.append("q8 is not near dense or q8 metrics are missing")
+
+        q4_ndcg = as_number(q4.get("ndcg_at_10")) if q4 is not None else None
+        q4_recall = as_number(q4.get("recall_at_100")) if q4 is not None else None
+        q4_ndcg_ratio = metric_ratio(q4_ndcg, dense_ndcg)
+        q4_recall_ratio = metric_ratio(q4_recall, dense_recall)
+        q4_release_profile_pass = (
+            q4_ndcg_ratio is not None
+            and q4_ndcg_ratio >= Q4_MIN_DENSE_NDCG_RATIO
+            and q4_recall_ratio is not None
+            and q4_recall_ratio >= Q4_MIN_DENSE_RECALL_RATIO
+            and metric_ge(q4_ndcg, baseline_ndcg)
+            and metric_ge(q4_recall, baseline_recall)
+        )
+        q4_decision = {
+            "pass": q4_release_profile_pass,
+            "release_profile_decision": "review" if q4_release_profile_pass else "diagnostic_storage_only",
+            "ndcg_at_10_ratio_vs_dense": q4_ndcg_ratio,
+            "recall_at_100_ratio_vs_dense": q4_recall_ratio,
+            "ndcg_at_10_delta_vs_current_default_dense": delta(q4_ndcg, baseline_ndcg),
+            "recall_at_100_delta_vs_current_default_dense": delta(q4_recall, baseline_recall),
+        }
+
+        dataset_policy = {
+            "current_default_dense_baseline": baseline_row,
+            "dense": dense_decision,
+            "q8": q8_decision,
+            "q4": q4_decision,
+            "ready": dataset.get("status") == "complete" and baseline_row is not None,
+            "reasons": reasons,
+        }
+        dataset["quality_policy"] = dataset_policy
+        per_dataset[name] = dataset_policy
+        dense_passes.append(bool(dense_decision["pass"]))
+        q8_passes.append(bool(q8_decision["pass"]))
+        q4_passes.append(bool(q4_release_profile_pass))
+        for reason in reasons:
+            policy_blockers.append(f"{name}: {reason}")
+
+    if not macro_dense_pass:
+        policy_blockers.append("dense macro below current-default dense baseline or not ready")
+    if not all_complete:
+        policy_blockers.append("full gate incomplete")
+    if not identity_consistent:
+        policy_blockers.append("package identity inconsistent")
+
+    dense_policy_pass = all(dense_passes) and macro_dense_pass and all_complete
+    q8_policy_pass = all(q8_passes) and all_complete
+    q4_release_profile_pass = all(q4_passes) and all_complete
+
+    return {
+        "thresholds": {
+            "dense": {
+                "per_dataset": ">= current-default dense ndcg_at_10 and recall_at_100",
+                "macro": ">= current-default dense macro ndcg_at_10 and recall_at_100",
+            },
+            "q8": {
+                "min_dense_ndcg_at_10_ratio": Q8_MIN_DENSE_NDCG_RATIO,
+                "max_abs_ndcg_at_10_drop": Q8_MAX_ABS_NDCG_DROP,
+            },
+            "q4": {
+                "min_dense_ndcg_at_10_ratio": Q4_MIN_DENSE_NDCG_RATIO,
+                "min_dense_recall_at_100_ratio": Q4_MIN_DENSE_RECALL_RATIO,
+                "must_clear_current_default_dense": True,
+            },
+        },
+        "current_default_dense_baselines": {
+            "source": "docs/manta-embed-sota-avenues.md promoted narrow default dense table",
+            "datasets": baseline_metrics,
+            "macro": baseline,
+        },
+        "per_dataset": per_dataset,
+        "macro": {
+            "dense": dense_macro,
+            "current_default_dense": baseline,
+            "dense_delta_vs_current_default_dense": macro_dense_delta,
+            "dense_pass": macro_dense_pass,
+        },
+        "dense_policy_pass": dense_policy_pass,
+        "q8_policy_pass": q8_policy_pass,
+        "q4_release_profile_pass": q4_release_profile_pass,
+        "q4_release_profile_decision": "review" if q4_release_profile_pass else "diagnostic_storage_only",
+        "non_default_promotion_policy_pass": (
+            all_complete and identity_consistent and dense_policy_pass and q8_policy_pass
+        ),
+        "blockers": policy_blockers,
+    }
+
+
 def build_summary(
     *,
     run_root: Path,
@@ -405,12 +621,18 @@ def build_summary(
     snapshot: str = DEFAULT_SNAPSHOT,
     count_partial_vector_lines: bool = True,
     expected_counts: dict[str, dict[str, int]] | None = None,
+    baseline_metrics: dict[str, dict[str, float]] | None = None,
     clock: Any = utc_now,
 ) -> dict[str, Any]:
     resolved_expected_counts = (
         {dataset: counts.copy() for dataset, counts in DEFAULT_EXPECTED_COUNTS.items()}
         if expected_counts is None
         else expected_counts
+    )
+    resolved_baseline_metrics = (
+        {dataset: metrics.copy() for dataset, metrics in DEFAULT_BASELINE_METRICS.items()}
+        if baseline_metrics is None
+        else baseline_metrics
     )
     dataset_summaries = [
         summarize_dataset(
@@ -441,6 +663,13 @@ def build_summary(
     if not all_complete:
         incomplete = [dataset["dataset"] for dataset in dataset_summaries if dataset["status"] != "complete"]
         blockers.append("incomplete datasets: " + ",".join(incomplete))
+    quality_policy = build_quality_policy(
+        dataset_summaries,
+        baseline_metrics=resolved_baseline_metrics,
+        all_complete=all_complete,
+        identity_consistent=identity_consistent,
+    )
+    blockers.extend(quality_policy["blockers"])
 
     return {
         "schema": SUMMARY_SCHEMA,
@@ -473,9 +702,12 @@ def build_summary(
             "identity_checked_manifest_count": present_manifest_count,
             "identity_mismatched_datasets": identity_mismatches,
             "blockers": blockers,
+            "quality_policy": quality_policy,
             "quality_claim": False,
             "default_alias_changed": False,
-            "promotion_recommendation": "review" if all_complete and identity_consistent else "defer",
+            "promotion_recommendation": "review"
+            if quality_policy["non_default_promotion_policy_pass"]
+            else "defer",
         },
     }
 
@@ -493,8 +725,13 @@ def tsv_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
     aggregate = summary["aggregate"]
     for dataset in summary["datasets"]:
         manifest = dataset.get("vector_manifest") if isinstance(dataset.get("vector_manifest"), dict) else {}
+        policy = dataset.get("quality_policy") if isinstance(dataset.get("quality_policy"), dict) else {}
         for storage in ("dense", "q8", "q4"):
             metrics = dataset.get(storage) if isinstance(dataset.get(storage), dict) else {}
+            storage_policy = policy.get(storage) if isinstance(policy.get(storage), dict) else {}
+            baseline = policy.get("current_default_dense_baseline")
+            if not isinstance(baseline, dict):
+                baseline = {}
             rows.append(
                 {
                     "dataset": dataset["dataset"],
@@ -532,6 +769,27 @@ def tsv_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
                     "query_vector_mtime_utc": (dataset.get("query_vector_file") or {}).get("mtime_utc")
                     if isinstance(dataset.get("query_vector_file"), dict)
                     else None,
+                    "current_default_dense_ndcg_at_10": baseline.get("ndcg_at_10"),
+                    "current_default_dense_recall_at_100": baseline.get("recall_at_100"),
+                    "policy_ready": policy.get("ready"),
+                    "policy_pass": storage_policy.get("pass"),
+                    "policy_reasons": ";".join(policy.get("reasons", []))
+                    if isinstance(policy.get("reasons"), list)
+                    else "",
+                    "ndcg_at_10_delta_vs_current_default_dense": storage_policy.get(
+                        "ndcg_at_10_delta_vs_current_default_dense"
+                    ),
+                    "recall_at_100_delta_vs_current_default_dense": storage_policy.get(
+                        "recall_at_100_delta_vs_current_default_dense"
+                    ),
+                    "ndcg_at_10_ratio_vs_dense": storage_policy.get("ndcg_at_10_ratio_vs_dense"),
+                    "recall_at_100_ratio_vs_dense": storage_policy.get("recall_at_100_ratio_vs_dense"),
+                    "q8_ndcg_at_10_drop_vs_dense": storage_policy.get("ndcg_at_10_drop_vs_dense")
+                    if storage == "q8"
+                    else "",
+                    "q4_release_profile_decision": storage_policy.get("release_profile_decision")
+                    if storage == "q4"
+                    else "",
                     "present_artifacts": ",".join(dataset.get("present_artifacts", [])),
                     "missing_artifacts": ",".join(dataset.get("missing_artifacts", [])),
                     "identity_match": dataset.get("identity_match"),
@@ -574,6 +832,17 @@ def write_tsv(path: Path, summary: dict[str, Any]) -> None:
         "doc_vector_mtime_utc",
         "query_vector_size_bytes",
         "query_vector_mtime_utc",
+        "current_default_dense_ndcg_at_10",
+        "current_default_dense_recall_at_100",
+        "policy_ready",
+        "policy_pass",
+        "policy_reasons",
+        "ndcg_at_10_delta_vs_current_default_dense",
+        "recall_at_100_delta_vs_current_default_dense",
+        "ndcg_at_10_ratio_vs_dense",
+        "recall_at_100_ratio_vs_dense",
+        "q8_ndcg_at_10_drop_vs_dense",
+        "q4_release_profile_decision",
         "present_artifacts",
         "missing_artifacts",
         "identity_match",
@@ -602,6 +871,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Override expected vector counts as dataset:documents:queries[,dataset:documents:queries...]",
     )
     parser.add_argument(
+        "--baseline-metrics",
+        help="Override current-default dense baselines as dataset:ndcg_at_10:recall_at_100[,dataset:ndcg_at_10:recall_at_100...]",
+    )
+    parser.add_argument(
         "--count-partial-vector-lines",
         dest="count_partial_vector_lines",
         action="store_true",
@@ -623,6 +896,7 @@ def main(argv: list[str] | None = None) -> int:
         run_root = Path(args.run_root)
         datasets = parse_datasets(args.datasets)
         expected_counts = parse_expected_counts(args.expected_counts)
+        baseline_metrics = parse_baseline_metrics(args.baseline_metrics)
         output_json = Path(args.output_json) if args.output_json else run_root / "selected-package-gate-summary.json"
         output_tsv = Path(args.output_tsv) if args.output_tsv else run_root / "selected-package-gate-summary.tsv"
         summary = build_summary(
@@ -634,6 +908,7 @@ def main(argv: list[str] | None = None) -> int:
             snapshot=args.snapshot,
             count_partial_vector_lines=args.count_partial_vector_lines,
             expected_counts=expected_counts,
+            baseline_metrics=baseline_metrics,
         )
         write_json(output_json, summary)
         write_tsv(output_tsv, summary)
