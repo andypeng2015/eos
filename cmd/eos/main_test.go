@@ -398,15 +398,32 @@ func TestRunImportedEmbedderCandidateJSONIsNonDefaultReference(t *testing.T) {
 	})
 	var payload struct {
 		Asset struct {
-			CandidateID         string `json:"candidate_id"`
-			ModelName           string `json:"model_name"`
-			SourceModel         string `json:"source_model"`
-			Status              string `json:"status"`
-			PublicIdentityNote  string `json:"public_identity_note"`
-			PackagePath         string `json:"package_path"`
-			QualityClaim        bool   `json:"quality_claim"`
-			DefaultAliasChanged bool   `json:"default_alias_changed"`
-			LoadPath            string `json:"load_path"`
+			CandidateID              string `json:"candidate_id"`
+			ModelName                string `json:"model_name"`
+			SourceModel              string `json:"source_model"`
+			Status                   string `json:"status"`
+			PublicIdentityNote       string `json:"public_identity_note"`
+			PackagePath              string `json:"package_path"`
+			PackageSHA256            string `json:"package_sha256"`
+			PackageIdentity          string `json:"package_identity"`
+			SourceSnapshotCommit     string `json:"source_snapshot_commit"`
+			UpstreamModelURL         string `json:"upstream_model_url"`
+			LicenseID                string `json:"license_id"`
+			LicenseNoticeRequired    bool   `json:"license_notice_required"`
+			ProvenanceNoticeRequired bool   `json:"provenance_notice_required"`
+			Attribution              string `json:"attribution"`
+			RoleContractSchema       string `json:"role_contract_schema"`
+			QueryRole                string `json:"query_role"`
+			QueryPrefix              string `json:"query_prefix"`
+			DocumentRole             string `json:"document_role"`
+			DocumentPrefix           string `json:"document_prefix"`
+			Pooling                  string `json:"pooling"`
+			Normalization            string `json:"normalization"`
+			MaxLength                int    `json:"max_length"`
+			NativeDim                int    `json:"native_dim"`
+			QualityClaim             bool   `json:"quality_claim"`
+			DefaultAliasChanged      bool   `json:"default_alias_changed"`
+			LoadPath                 string `json:"load_path"`
 		} `json:"asset"`
 		Verification *models.ImportedEmbedderCandidateVerification `json:"verification,omitempty"`
 	}
@@ -431,6 +448,26 @@ func TestRunImportedEmbedderCandidateJSONIsNonDefaultReference(t *testing.T) {
 	if payload.Asset.PackagePath != packagePath {
 		t.Fatalf("unexpected package path fields: %+v", payload.Asset)
 	}
+	if payload.Asset.PackageSHA256 != models.ImportedEmbedderCandidatePackageSHA256 || payload.Asset.PackageIdentity != models.ImportedEmbedderCandidatePackageIdentity {
+		t.Fatalf("unexpected package identity fields: %+v", payload.Asset)
+	}
+	if payload.Asset.SourceSnapshotCommit != "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a" || payload.Asset.UpstreamModelURL != "https://huggingface.co/BAAI/bge-small-en-v1.5" {
+		t.Fatalf("unexpected provenance fields: %+v", payload.Asset)
+	}
+	if payload.Asset.LicenseID != "MIT" || !payload.Asset.LicenseNoticeRequired || !payload.Asset.ProvenanceNoticeRequired || payload.Asset.Attribution != "FlagEmbedding/BAAI" {
+		t.Fatalf("unexpected license fields: %+v", payload.Asset)
+	}
+	if payload.Asset.RoleContractSchema != eosruntime.PretrainedBERTRetrievalRoleContractSchema ||
+		payload.Asset.QueryRole != "query" ||
+		payload.Asset.QueryPrefix != "Represent this sentence for searching relevant passages: " ||
+		payload.Asset.DocumentRole != "document" ||
+		payload.Asset.DocumentPrefix != "" ||
+		payload.Asset.Pooling != "cls" ||
+		payload.Asset.Normalization != "l2" ||
+		payload.Asset.MaxLength != 512 ||
+		payload.Asset.NativeDim != 384 {
+		t.Fatalf("unexpected role contract fields: %+v", payload.Asset)
+	}
 	if payload.Asset.QualityClaim || payload.Asset.DefaultAliasChanged {
 		t.Fatalf("candidate unexpectedly claims quality/default: %+v", payload.Asset)
 	}
@@ -439,6 +476,30 @@ func TestRunImportedEmbedderCandidateJSONIsNonDefaultReference(t *testing.T) {
 	}
 	if payload.Verification != nil {
 		t.Fatalf("verification should be omitted without --verify: %+v", payload.Verification)
+	}
+}
+
+func TestRunImportedEmbedderCandidateTextPrintsAuditFields(t *testing.T) {
+	packagePath := writeCommandPretrainedBERTPackageFixture(t, "BAAI/bge-small-en-v1.5", true)
+	output := captureRunOutput(t, []string{
+		"imported-embedder-candidate",
+		"--package", packagePath,
+	})
+	for _, want := range []string{
+		"package_sha256: " + models.ImportedEmbedderCandidatePackageSHA256,
+		"package_identity: " + models.ImportedEmbedderCandidatePackageIdentity,
+		"source_snapshot_commit: 5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+		"upstream_model_url: https://huggingface.co/BAAI/bge-small-en-v1.5",
+		"license: MIT attribution=\"FlagEmbedding/BAAI\" notice_required=true provenance_notice_required=true",
+		"role_contract: schema=" + eosruntime.PretrainedBERTRetrievalRoleContractSchema,
+		"query_prefix=\"Represent this sentence for searching relevant passages: \"",
+		"document_prefix=\"\" pooling=cls normalization=l2 max_length=512 native_dim=384",
+		"quality_claim: false",
+		"default_alias_changed: false",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output missing %q:\n%s", want, output)
+		}
 	}
 }
 

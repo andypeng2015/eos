@@ -19,21 +19,49 @@ const (
 	ImportedEmbedderCandidatePackageIdentity     = eosruntime.ImportedBERTEmbedderCandidatePackageIdentitySHA256
 	ImportedEmbedderCandidatePublicIdentityNote  = "Public identity is model_name/display_name/source_model; candidate_id is an internal review slug."
 	ImportedEmbedderCandidateAssetID             = ImportedEmbedderCandidateID
+	ImportedEmbedderCandidateSourceSnapshot      = eosruntime.ImportedBERTEmbedderCandidateSourceSnapshotCommit
+	ImportedEmbedderCandidateUpstreamModelURL    = eosruntime.ImportedBERTEmbedderCandidateUpstreamModelURL
+	ImportedEmbedderCandidateLicenseID           = eosruntime.ImportedBERTEmbedderCandidateLicenseID
+	ImportedEmbedderCandidateAttribution         = eosruntime.ImportedBERTEmbedderCandidateAttribution
+	ImportedEmbedderCandidateRoleContractSchema  = eosruntime.PretrainedBERTRetrievalRoleContractSchema
+	ImportedEmbedderCandidateQueryRole           = "query"
+	ImportedEmbedderCandidateQueryPrefix         = "Represent this sentence for searching relevant passages: "
+	ImportedEmbedderCandidateDocumentRole        = "document"
+	ImportedEmbedderCandidateDocumentPrefix      = ""
+	ImportedEmbedderCandidatePooling             = eosruntime.ImportedBERTEmbedderCandidatePooling
+	ImportedEmbedderCandidateNormalization       = eosruntime.ImportedBERTEmbedderCandidateNormalization
+	ImportedEmbedderCandidateMaxLength           = eosruntime.ImportedBERTEmbedderCandidateMaxLength
+	ImportedEmbedderCandidateNativeDim           = eosruntime.ImportedBERTEmbedderCandidateNativeDim
 )
 
 type ImportedEmbedderCandidateAsset struct {
-	CandidateID         string `json:"candidate_id"`
-	ModelName           string `json:"model_name"`
-	DisplayName         string `json:"display_name"`
-	SourceModel         string `json:"source_model"`
-	Status              string `json:"status"`
-	PublicIdentityNote  string `json:"public_identity_note"`
-	PackagePath         string `json:"package_path"`
-	PackageSHA256       string `json:"package_sha256"`
-	PackageIdentity     string `json:"package_identity"`
-	QualityClaim        bool   `json:"quality_claim"`
-	DefaultAliasChanged bool   `json:"default_alias_changed"`
-	LoadPath            string `json:"load_path"`
+	CandidateID              string `json:"candidate_id"`
+	ModelName                string `json:"model_name"`
+	DisplayName              string `json:"display_name"`
+	SourceModel              string `json:"source_model"`
+	Status                   string `json:"status"`
+	PublicIdentityNote       string `json:"public_identity_note"`
+	PackagePath              string `json:"package_path"`
+	PackageSHA256            string `json:"package_sha256"`
+	PackageIdentity          string `json:"package_identity"`
+	SourceSnapshotCommit     string `json:"source_snapshot_commit"`
+	UpstreamModelURL         string `json:"upstream_model_url"`
+	LicenseID                string `json:"license_id"`
+	LicenseNoticeRequired    bool   `json:"license_notice_required"`
+	ProvenanceNoticeRequired bool   `json:"provenance_notice_required"`
+	Attribution              string `json:"attribution"`
+	RoleContractSchema       string `json:"role_contract_schema"`
+	QueryRole                string `json:"query_role"`
+	QueryPrefix              string `json:"query_prefix"`
+	DocumentRole             string `json:"document_role"`
+	DocumentPrefix           string `json:"document_prefix"`
+	Pooling                  string `json:"pooling"`
+	Normalization            string `json:"normalization"`
+	MaxLength                int    `json:"max_length"`
+	NativeDim                int    `json:"native_dim"`
+	QualityClaim             bool   `json:"quality_claim"`
+	DefaultAliasChanged      bool   `json:"default_alias_changed"`
+	LoadPath                 string `json:"load_path"`
 }
 
 type ImportedEmbedderCandidateVerification struct {
@@ -78,18 +106,33 @@ func ImportedEmbedderCandidateAssetInfo(root, packagePath string) (ImportedEmbed
 	}
 	path = abs
 	return ImportedEmbedderCandidateAsset{
-		CandidateID:         ImportedEmbedderCandidateID,
-		ModelName:           ImportedEmbedderCandidateModelName,
-		DisplayName:         ImportedEmbedderCandidateDisplayName,
-		SourceModel:         ImportedEmbedderCandidateSourceModel,
-		Status:              ImportedEmbedderCandidateStatus,
-		PublicIdentityNote:  ImportedEmbedderCandidatePublicIdentityNote,
-		PackagePath:         path,
-		PackageSHA256:       ImportedEmbedderCandidatePackageSHA256,
-		PackageIdentity:     ImportedEmbedderCandidatePackageIdentity,
-		QualityClaim:        false,
-		DefaultAliasChanged: false,
-		LoadPath:            "runtime.LoadImportedBERTEmbedderCandidate",
+		CandidateID:              ImportedEmbedderCandidateID,
+		ModelName:                ImportedEmbedderCandidateModelName,
+		DisplayName:              ImportedEmbedderCandidateDisplayName,
+		SourceModel:              ImportedEmbedderCandidateSourceModel,
+		Status:                   ImportedEmbedderCandidateStatus,
+		PublicIdentityNote:       ImportedEmbedderCandidatePublicIdentityNote,
+		PackagePath:              path,
+		PackageSHA256:            ImportedEmbedderCandidatePackageSHA256,
+		PackageIdentity:          ImportedEmbedderCandidatePackageIdentity,
+		SourceSnapshotCommit:     ImportedEmbedderCandidateSourceSnapshot,
+		UpstreamModelURL:         ImportedEmbedderCandidateUpstreamModelURL,
+		LicenseID:                ImportedEmbedderCandidateLicenseID,
+		LicenseNoticeRequired:    true,
+		ProvenanceNoticeRequired: true,
+		Attribution:              ImportedEmbedderCandidateAttribution,
+		RoleContractSchema:       ImportedEmbedderCandidateRoleContractSchema,
+		QueryRole:                ImportedEmbedderCandidateQueryRole,
+		QueryPrefix:              ImportedEmbedderCandidateQueryPrefix,
+		DocumentRole:             ImportedEmbedderCandidateDocumentRole,
+		DocumentPrefix:           ImportedEmbedderCandidateDocumentPrefix,
+		Pooling:                  ImportedEmbedderCandidatePooling,
+		Normalization:            ImportedEmbedderCandidateNormalization,
+		MaxLength:                ImportedEmbedderCandidateMaxLength,
+		NativeDim:                ImportedEmbedderCandidateNativeDim,
+		QualityClaim:             false,
+		DefaultAliasChanged:      false,
+		LoadPath:                 "runtime.LoadImportedBERTEmbedderCandidate",
 	}, nil
 }
 

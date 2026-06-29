@@ -858,6 +858,23 @@ func TestImportedEmbedderCandidateAssetInfoOverrideIsNonDefault(t *testing.T) {
 	if info.PackageSHA256 != ImportedEmbedderCandidatePackageSHA256 || info.PackageIdentity != ImportedEmbedderCandidatePackageIdentity {
 		t.Fatalf("candidate expected identity changed: %+v", info)
 	}
+	if info.SourceSnapshotCommit != ImportedEmbedderCandidateSourceSnapshot || info.UpstreamModelURL != ImportedEmbedderCandidateUpstreamModelURL {
+		t.Fatalf("candidate provenance metadata changed: %+v", info)
+	}
+	if info.LicenseID != ImportedEmbedderCandidateLicenseID || !info.LicenseNoticeRequired || !info.ProvenanceNoticeRequired || info.Attribution != ImportedEmbedderCandidateAttribution {
+		t.Fatalf("candidate license metadata changed: %+v", info)
+	}
+	if info.RoleContractSchema != eosruntime.PretrainedBERTRetrievalRoleContractSchema ||
+		info.QueryRole != ImportedEmbedderCandidateQueryRole ||
+		info.QueryPrefix != ImportedEmbedderCandidateQueryPrefix ||
+		info.DocumentRole != ImportedEmbedderCandidateDocumentRole ||
+		info.DocumentPrefix != ImportedEmbedderCandidateDocumentPrefix ||
+		info.Pooling != ImportedEmbedderCandidatePooling ||
+		info.Normalization != ImportedEmbedderCandidateNormalization ||
+		info.MaxLength != ImportedEmbedderCandidateMaxLength ||
+		info.NativeDim != ImportedEmbedderCandidateNativeDim {
+		t.Fatalf("candidate role contract metadata changed: %+v", info)
+	}
 }
 
 func TestImportedEmbedderCandidateAssetInfoRootUsesRunArtifactPath(t *testing.T) {

@@ -11,6 +11,14 @@ const (
 	ImportedBERTEmbedderCandidatePackageSHA256           = "841b0d851c06290daeeab4bf4d25cb1dd7bb87920316dac950e1b556a3bae763"
 	ImportedBERTEmbedderCandidatePackageIdentitySHA256   = "a356a4b7dc29a8d0f0a7b7bd45e7a9d2afbfa651c1a5bfaa05008c7157ba9637"
 	ImportedBERTEmbedderCandidatePackageRelativePathHint = "runs/pretrained-bert-current-hf-parity-v1-20260629T090818Z/bge/bge-small-en-v1.5.imported.mll"
+	ImportedBERTEmbedderCandidateSourceSnapshotCommit    = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
+	ImportedBERTEmbedderCandidateUpstreamModelURL        = "https://huggingface.co/BAAI/bge-small-en-v1.5"
+	ImportedBERTEmbedderCandidateLicenseID               = "MIT"
+	ImportedBERTEmbedderCandidateAttribution             = "FlagEmbedding/BAAI"
+	ImportedBERTEmbedderCandidatePooling                 = "cls"
+	ImportedBERTEmbedderCandidateNormalization           = "l2"
+	ImportedBERTEmbedderCandidateMaxLength               = 512
+	ImportedBERTEmbedderCandidateNativeDim               = 384
 )
 
 type ImportedBERTEmbedderCandidateConfig struct {
