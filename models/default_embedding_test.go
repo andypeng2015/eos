@@ -877,6 +877,32 @@ func TestImportedEmbedderCandidateAssetInfoOverrideIsNonDefault(t *testing.T) {
 	}
 }
 
+func TestImportedEmbedderCandidateNoticePacketContainsProvenance(t *testing.T) {
+	noticePath := filepath.Join("..", "NOTICE")
+	noticeBytes, err := os.ReadFile(noticePath)
+	if err != nil {
+		t.Fatalf("read %s: %v", noticePath, err)
+	}
+	notice := string(noticeBytes)
+	for _, want := range []string{
+		"Imported BGE non-default candidate",
+		ImportedEmbedderCandidateID,
+		ImportedEmbedderCandidateSourceModel,
+		ImportedEmbedderCandidateSourceSnapshot,
+		ImportedEmbedderCandidatePackageSHA256,
+		ImportedEmbedderCandidatePackageIdentity,
+		ImportedEmbedderCandidateQueryPrefix,
+		"quality_claim=false",
+		"default_alias_changed=false",
+		"Copyright (c) 2022 staoxiao",
+		"Permission is hereby granted, free of charge",
+	} {
+		if !strings.Contains(notice, want) {
+			t.Fatalf("NOTICE missing %q", want)
+		}
+	}
+}
+
 func TestImportedEmbedderCandidateAssetInfoRootUsesRunArtifactPath(t *testing.T) {
 	root := t.TempDir()
 	packagePath := filepath.Join(root, ImportedEmbedderCandidatePackageRelativePath)

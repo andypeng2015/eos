@@ -12,6 +12,24 @@ Use `scripts/train_manta_embed_v1_candidate.fw` to create a release-grade `eos-e
 - compares dense retrieval against TurboQuant IP-preserving quantized document vectors before default CorkScrewDB embedder promotion
 - supports metric gates through environment variables
 
+## Imported BGE Candidate Boundary
+
+The imported BGE package for `BAAI/bge-small-en-v1.5` is a first-class
+non-default candidate only after the exact selected-package full gate passes.
+It remains separate from the `corkscrewdb-default-embedder` alias: the package
+uses an imported BERT/WordPiece runtime, 384d vectors, CLS pooling, L2
+normalization, and the BGE query prefix role contract. The candidate package
+SHA256 is `841b0d851c06290daeeab4bf4d25cb1dd7bb87920316dac950e1b556a3bae763`,
+the identity SHA256 is
+`a356a4b7dc29a8d0f0a7b7bd45e7a9d2afbfa651c1a5bfaa05008c7157ba9637`,
+`quality_claim=false`, and `default_alias_changed=false`.
+
+Do not treat BGE package availability as a default-embedder promotion. Keep the
+current default release smoke and 256d CorkScrewDB manifest checks attached to
+`corkscrewdb-default-embedder`; use the top-level `NOTICE` for the shipped BGE
+source, snapshot, package identity, role contract, quality boundary, and MIT
+notice packet.
+
 ## Preflight
 
 Run the local preflight before spending trainer time on a candidate:

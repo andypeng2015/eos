@@ -2,6 +2,17 @@
 
 This plan is scoped to `eos-embed-v1`, the small sealed local default embedder candidate for CorkScrewDB, with reproducible local training, retrieval scoring, and TurboQuant-first serving gates. The shipping alias is `corkscrewdb-default-embedder` once the promotion gates pass. This plan does not claim state-of-the-art quality or superiority over hosted/open embedding models until scored rows exist in the baseline matrix.
 
+Imported BGE (`BAAI/bge-small-en-v1.5`) is a distinct non-default candidate,
+not a replacement for the current shipping alias. It can become first-class
+only after the exact selected-package full gate passes with package SHA256
+`841b0d851c06290daeeab4bf4d25cb1dd7bb87920316dac950e1b556a3bae763`,
+identity SHA256
+`a356a4b7dc29a8d0f0a7b7bd45e7a9d2afbfa651c1a5bfaa05008c7157ba9637`,
+the preserved BGE query/document role contract, `quality_claim=false`, and
+`default_alias_changed=false`. Its notice/provenance packet lives in the
+top-level `NOTICE`; do not make it the `corkscrewdb-default-embedder` alias
+without a separate default-swap migration and release decision.
+
 ## Current Promoted Dense Default
 
 - Artifact: `runs/eos-s40-nfcorpus-compact-mined-narrow-candidate-v1-20260623T032556Z/candidate/eos-embed-v1.sealed.mll`
