@@ -21,6 +21,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import summarize_bge_selected_package_gate as bge_gate
+import summarize_compact_native_readiness as compact_native
 import summarize_dynamic_remine_readiness as dynamic_remine
 import summarize_encoder_v21_readiness as encoder_v21
 import summarize_eos_embedder1_release_readiness as embedder1
@@ -30,9 +31,7 @@ import summarize_stageabc_pretraining_readiness as stageabc
 SUMMARY_SCHEMA = "eos.competitive_embedder_readiness_rollup.v1"
 DEFAULT_OUTPUT_JSON = ".tiller/scratch/codex/competitive-embedder-goal-readiness-current.json"
 DEFAULT_OUTPUT_TSV = ".tiller/scratch/codex/competitive-embedder-goal-readiness-current.tsv"
-DEFAULT_COMPACT_NATIVE_STUDENT_REPORT = (
-    ".tiller/scratch/codex/compact-bge-listwise-larger-validation-split211-seed191-v1-report.md"
-)
+DEFAULT_COMPACT_NATIVE_STUDENT_REPORT = compact_native.DEFAULT_BGE_LISTWISE_VALIDATION_REPORT
 DEFAULT_STAGEABC_PRETRAINING_DISTILLATION_REPORT = stageabc.DEFAULT_PIPELINE_MAP_REPORT
 
 
@@ -180,57 +179,25 @@ def report_path_detail(path: Path) -> dict[str, Any]:
     }
 
 
-def read_optional_text(path: Path) -> str | None:
-    try:
-        return path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-
-
-def parse_compact_native_student_deltas(text: str) -> dict[str, str]:
-    deltas: dict[str, str] = {}
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("- 2000-doc gate:"):
-            parts = stripped.split("`")
-            if len(parts) >= 6:
-                deltas["2000_doc_ndcg_delta"] = parts[1]
-                deltas["2000_doc_map_delta"] = parts[3]
-                deltas["2000_doc_recall_delta"] = parts[5]
-        if stripped.startswith("- 4000-doc gate:"):
-            parts = stripped.split("`")
-            if len(parts) >= 6:
-                deltas["4000_doc_ndcg_delta"] = parts[1]
-                deltas["4000_doc_map_delta"] = parts[3]
-                deltas["4000_doc_recall_delta"] = parts[5]
-    return {key: value for key, value in deltas.items() if value}
-
-
-def compact_native_student_packet(report_path: Path, waiting_on_fiqa: bool) -> dict[str, Any]:
-    text = read_optional_text(report_path)
-    if text is None:
-        return packet(
-            packet_id="compact_native_student",
-            title="Compact native student/listwise distillation",
-            status="missing_evidence",
-            blockers=[f"compact native student report missing: {report_path}"],
-            next_safe_action="Locate or create compact native/listwise validation evidence before planning promotion.",
-            details=report_path_detail(report_path),
-        )
-    status = "waiting_on_fiqa" if waiting_on_fiqa else "evidence_only_waiting_validation"
+def compact_native_student_packet(compact_summary: dict[str, Any], waiting_on_fiqa: bool) -> dict[str, Any]:
+    status = "waiting_on_fiqa" if waiting_on_fiqa else str(compact_summary.get("status"))
+    blockers = [str(item) for item in compact_summary.get("blockers", [])]
+    if waiting_on_fiqa:
+        blockers = ["FiQA selected-BGE export is still active/incomplete"] + blockers
     return packet(
         packet_id="compact_native_student",
         title="Compact native student/listwise distillation",
         status=status,
-        blockers=["existing compact native/listwise evidence is validation-only, not promotion proof"],
+        blockers=blockers,
         next_safe_action="Third deterministic larger split or broader validation after FiQA clears."
         if waiting_on_fiqa
-        else "Run a third deterministic larger split or broader validation before any promotion discussion.",
+        else str(compact_summary.get("next_safe_action") or "Resolve compact native evidence blockers."),
         details={
-            **report_path_detail(report_path),
-            "parsed_deltas": parse_compact_native_student_deltas(text),
-            "promotion_ready": False,
-            "quality_claim": False,
+            "compact_native_readiness": compact_summary,
+            "promotion_ready": compact_summary.get("promotion_ready"),
+            "training_ready": compact_summary.get("training_ready"),
+            "release_train_allowed": compact_summary.get("release_train_allowed"),
+            "quality_claim": compact_summary.get("quality_claim"),
         },
     )
 
@@ -345,6 +312,26 @@ def build_summary(
     dynamic_descriptor: Path,
     datasets: list[str],
     compact_native_student_report: Path = Path(DEFAULT_COMPACT_NATIVE_STUDENT_REPORT),
+    compact_native_architecture_map_report: Path = Path(compact_native.DEFAULT_ARCHITECTURE_MAP_REPORT),
+    compact_native_manifest_checkpoint_foundation_report: Path = Path(
+        compact_native.DEFAULT_MANIFEST_CHECKPOINT_FOUNDATION_REPORT
+    ),
+    compact_native_generic_bootstrap_report: Path = Path(compact_native.DEFAULT_GENERIC_BOOTSTRAP_REPORT),
+    compact_native_train_guard_report: Path = Path(compact_native.DEFAULT_COMPACT_TRAIN_GUARD_REPORT),
+    compact_native_serving_parity_report: Path = Path(compact_native.DEFAULT_SERVING_PARITY_REPORT),
+    compact_native_heads2_lr_bracket_report: Path = Path(compact_native.DEFAULT_HEADS2_LR_BRACKET_REPORT),
+    compact_native_heads2_lr_bracket_gate_log: Path = Path(compact_native.DEFAULT_HEADS2_LR_BRACKET_GATE_LOG),
+    compact_native_laststep_movement_report: Path = Path(compact_native.DEFAULT_LASTSTEP_MOVEMENT_REPORT),
+    compact_native_bge_pre_retrieval_2000: Path = Path(compact_native.DEFAULT_BGE_PRE_RETRIEVAL_2000),
+    compact_native_bge_post_retrieval_2000: Path = Path(compact_native.DEFAULT_BGE_POST_RETRIEVAL_2000),
+    compact_native_bge_pre_retrieval_4000: Path = Path(compact_native.DEFAULT_BGE_PRE_RETRIEVAL_4000),
+    compact_native_bge_post_retrieval_4000: Path = Path(compact_native.DEFAULT_BGE_POST_RETRIEVAL_4000),
+    compact_native_bge_pre_listwise: Path = Path(compact_native.DEFAULT_BGE_PRE_LISTWISE),
+    compact_native_bge_post_listwise: Path = Path(compact_native.DEFAULT_BGE_POST_LISTWISE),
+    compact_native_bge_train_metrics: Path = Path(compact_native.DEFAULT_BGE_TRAIN_METRICS),
+    compact_native_laststep_pre_retrieval: Path = Path(compact_native.DEFAULT_LASTSTEP_PRE_RETRIEVAL),
+    compact_native_laststep_post_retrieval: Path = Path(compact_native.DEFAULT_LASTSTEP_POST_RETRIEVAL),
+    compact_native_laststep_train_metrics: Path = Path(compact_native.DEFAULT_LASTSTEP_TRAIN_METRICS),
     stageabc_pretraining_distillation_report: Path = Path(DEFAULT_STAGEABC_PRETRAINING_DISTILLATION_REPORT),
     stageabc_stagea_row_manifest: Path = Path(stageabc.DEFAULT_STAGEA_ROW_MANIFEST),
     stageabc_stagea_leak_report: Path = Path(stageabc.DEFAULT_STAGEA_LEAK_REPORT),
@@ -409,6 +396,28 @@ def build_summary(
         listwise_mxbai_metrics=stageabc_listwise_mxbai_metrics,
         clock=clock,
     )
+    compact_summary = compact_native.build_summary(
+        architecture_map_report=compact_native_architecture_map_report,
+        manifest_checkpoint_foundation_report=compact_native_manifest_checkpoint_foundation_report,
+        generic_bootstrap_report=compact_native_generic_bootstrap_report,
+        compact_train_guard_report=compact_native_train_guard_report,
+        serving_parity_report=compact_native_serving_parity_report,
+        bge_listwise_validation_report=compact_native_student_report,
+        heads2_lr_bracket_report=compact_native_heads2_lr_bracket_report,
+        heads2_lr_bracket_gate_log=compact_native_heads2_lr_bracket_gate_log,
+        laststep_movement_report=compact_native_laststep_movement_report,
+        bge_pre_retrieval_2000=compact_native_bge_pre_retrieval_2000,
+        bge_post_retrieval_2000=compact_native_bge_post_retrieval_2000,
+        bge_pre_retrieval_4000=compact_native_bge_pre_retrieval_4000,
+        bge_post_retrieval_4000=compact_native_bge_post_retrieval_4000,
+        bge_pre_listwise=compact_native_bge_pre_listwise,
+        bge_post_listwise=compact_native_bge_post_listwise,
+        bge_train_metrics=compact_native_bge_train_metrics,
+        laststep_pre_retrieval=compact_native_laststep_pre_retrieval,
+        laststep_post_retrieval=compact_native_laststep_post_retrieval,
+        laststep_train_metrics=compact_native_laststep_train_metrics,
+        clock=clock,
+    )
     waiting_on_fiqa = not bge["all_complete"] and bool(bge["active_export_markers"])
     next_action = bge_wait_action() if waiting_on_fiqa else None
 
@@ -469,7 +478,7 @@ def build_summary(
             progress=release.get("bge_gate", {}).get("incomplete_dataset_progress", []),
             details={"public_name": release["public_name"], "public_id": release["public_id"]},
         ),
-        "compact_native_student": compact_native_student_packet(compact_native_student_report, waiting_on_fiqa),
+        "compact_native_student": compact_native_student_packet(compact_summary, waiting_on_fiqa),
         "stageabc_pretraining_distillation": stageabc_pretraining_distillation_packet(stageabc_summary),
         "role_asymmetry": role_asymmetry_packet(release),
         "quantization_profile": quantization_profile_packet(bge, waiting_on_fiqa),
@@ -517,6 +526,7 @@ def build_summary(
             "encoder_v21": encoder,
             "dynamic_remine": dynamic,
             "eos_embedder1": release,
+            "compact_native_student": compact_summary,
             "stageabc_pretraining_distillation": stageabc_summary,
         },
     }
@@ -624,6 +634,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dynamic-stagea-root", default=dynamic_remine.DEFAULT_STAGEA_ROOT)
     parser.add_argument("--dynamic-descriptor", default=dynamic_remine.DEFAULT_DESCRIPTOR)
     parser.add_argument("--compact-native-student-report", default=DEFAULT_COMPACT_NATIVE_STUDENT_REPORT)
+    parser.add_argument("--compact-native-architecture-map-report", default=compact_native.DEFAULT_ARCHITECTURE_MAP_REPORT)
+    parser.add_argument(
+        "--compact-native-manifest-checkpoint-foundation-report",
+        default=compact_native.DEFAULT_MANIFEST_CHECKPOINT_FOUNDATION_REPORT,
+    )
+    parser.add_argument("--compact-native-generic-bootstrap-report", default=compact_native.DEFAULT_GENERIC_BOOTSTRAP_REPORT)
+    parser.add_argument("--compact-native-train-guard-report", default=compact_native.DEFAULT_COMPACT_TRAIN_GUARD_REPORT)
+    parser.add_argument("--compact-native-serving-parity-report", default=compact_native.DEFAULT_SERVING_PARITY_REPORT)
+    parser.add_argument("--compact-native-heads2-lr-bracket-report", default=compact_native.DEFAULT_HEADS2_LR_BRACKET_REPORT)
+    parser.add_argument(
+        "--compact-native-heads2-lr-bracket-gate-log",
+        default=compact_native.DEFAULT_HEADS2_LR_BRACKET_GATE_LOG,
+    )
+    parser.add_argument("--compact-native-laststep-movement-report", default=compact_native.DEFAULT_LASTSTEP_MOVEMENT_REPORT)
+    parser.add_argument("--compact-native-bge-pre-retrieval-2000", default=compact_native.DEFAULT_BGE_PRE_RETRIEVAL_2000)
+    parser.add_argument("--compact-native-bge-post-retrieval-2000", default=compact_native.DEFAULT_BGE_POST_RETRIEVAL_2000)
+    parser.add_argument("--compact-native-bge-pre-retrieval-4000", default=compact_native.DEFAULT_BGE_PRE_RETRIEVAL_4000)
+    parser.add_argument("--compact-native-bge-post-retrieval-4000", default=compact_native.DEFAULT_BGE_POST_RETRIEVAL_4000)
+    parser.add_argument("--compact-native-bge-pre-listwise", default=compact_native.DEFAULT_BGE_PRE_LISTWISE)
+    parser.add_argument("--compact-native-bge-post-listwise", default=compact_native.DEFAULT_BGE_POST_LISTWISE)
+    parser.add_argument("--compact-native-bge-train-metrics", default=compact_native.DEFAULT_BGE_TRAIN_METRICS)
+    parser.add_argument("--compact-native-laststep-pre-retrieval", default=compact_native.DEFAULT_LASTSTEP_PRE_RETRIEVAL)
+    parser.add_argument("--compact-native-laststep-post-retrieval", default=compact_native.DEFAULT_LASTSTEP_POST_RETRIEVAL)
+    parser.add_argument("--compact-native-laststep-train-metrics", default=compact_native.DEFAULT_LASTSTEP_TRAIN_METRICS)
     parser.add_argument(
         "--stageabc-pretraining-distillation-report",
         default=DEFAULT_STAGEABC_PRETRAINING_DISTILLATION_REPORT,
@@ -670,6 +704,26 @@ def main(argv: list[str] | None = None) -> int:
             dynamic_descriptor=Path(args.dynamic_descriptor),
             datasets=parse_datasets(args.datasets),
             compact_native_student_report=Path(args.compact_native_student_report),
+            compact_native_architecture_map_report=Path(args.compact_native_architecture_map_report),
+            compact_native_manifest_checkpoint_foundation_report=Path(
+                args.compact_native_manifest_checkpoint_foundation_report
+            ),
+            compact_native_generic_bootstrap_report=Path(args.compact_native_generic_bootstrap_report),
+            compact_native_train_guard_report=Path(args.compact_native_train_guard_report),
+            compact_native_serving_parity_report=Path(args.compact_native_serving_parity_report),
+            compact_native_heads2_lr_bracket_report=Path(args.compact_native_heads2_lr_bracket_report),
+            compact_native_heads2_lr_bracket_gate_log=Path(args.compact_native_heads2_lr_bracket_gate_log),
+            compact_native_laststep_movement_report=Path(args.compact_native_laststep_movement_report),
+            compact_native_bge_pre_retrieval_2000=Path(args.compact_native_bge_pre_retrieval_2000),
+            compact_native_bge_post_retrieval_2000=Path(args.compact_native_bge_post_retrieval_2000),
+            compact_native_bge_pre_retrieval_4000=Path(args.compact_native_bge_pre_retrieval_4000),
+            compact_native_bge_post_retrieval_4000=Path(args.compact_native_bge_post_retrieval_4000),
+            compact_native_bge_pre_listwise=Path(args.compact_native_bge_pre_listwise),
+            compact_native_bge_post_listwise=Path(args.compact_native_bge_post_listwise),
+            compact_native_bge_train_metrics=Path(args.compact_native_bge_train_metrics),
+            compact_native_laststep_pre_retrieval=Path(args.compact_native_laststep_pre_retrieval),
+            compact_native_laststep_post_retrieval=Path(args.compact_native_laststep_post_retrieval),
+            compact_native_laststep_train_metrics=Path(args.compact_native_laststep_train_metrics),
             stageabc_pretraining_distillation_report=Path(args.stageabc_pretraining_distillation_report),
             stageabc_stagea_row_manifest=Path(args.stageabc_stagea_row_manifest),
             stageabc_stagea_leak_report=Path(args.stageabc_stagea_leak_report),
@@ -697,6 +751,7 @@ def main(argv: list[str] | None = None) -> int:
         RollupError,
         bge_gate.SummaryError,
         encoder_v21.ReadinessError,
+        compact_native.ReadinessError,
         dynamic_remine.ReadinessError,
         embedder1.ReadinessError,
         stageabc.ReadinessError,

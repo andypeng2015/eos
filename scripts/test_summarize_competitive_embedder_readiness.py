@@ -12,6 +12,7 @@ from pathlib import Path
 
 import summarize_competitive_embedder_readiness as summarizer
 import summarize_dynamic_remine_readiness as dynamic_readiness
+from test_summarize_compact_native_readiness import write_compact_native_fixture
 from test_summarize_dynamic_remine_readiness import write_stagea_ready
 from test_summarize_encoder_v21_readiness import write_complete_encoder_fixture
 from test_summarize_eos_embedder1_release_readiness import (
@@ -139,13 +140,45 @@ def write_major_lever_reports(root: Path) -> tuple[Path, Path]:
     return compact_report, stageabc_report
 
 
+def compact_rollup_paths(root: Path) -> dict[str, Path]:
+    return write_compact_native_fixture(root)
+
+
+def compact_cli_args(paths: dict[str, Path]) -> list[str]:
+    option_names = {
+        "compact_native_student_report": "--compact-native-student-report",
+        "compact_native_architecture_map_report": "--compact-native-architecture-map-report",
+        "compact_native_manifest_checkpoint_foundation_report": "--compact-native-manifest-checkpoint-foundation-report",
+        "compact_native_generic_bootstrap_report": "--compact-native-generic-bootstrap-report",
+        "compact_native_train_guard_report": "--compact-native-train-guard-report",
+        "compact_native_serving_parity_report": "--compact-native-serving-parity-report",
+        "compact_native_heads2_lr_bracket_report": "--compact-native-heads2-lr-bracket-report",
+        "compact_native_heads2_lr_bracket_gate_log": "--compact-native-heads2-lr-bracket-gate-log",
+        "compact_native_laststep_movement_report": "--compact-native-laststep-movement-report",
+        "compact_native_bge_pre_retrieval_2000": "--compact-native-bge-pre-retrieval-2000",
+        "compact_native_bge_post_retrieval_2000": "--compact-native-bge-post-retrieval-2000",
+        "compact_native_bge_pre_retrieval_4000": "--compact-native-bge-pre-retrieval-4000",
+        "compact_native_bge_post_retrieval_4000": "--compact-native-bge-post-retrieval-4000",
+        "compact_native_bge_pre_listwise": "--compact-native-bge-pre-listwise",
+        "compact_native_bge_post_listwise": "--compact-native-bge-post-listwise",
+        "compact_native_bge_train_metrics": "--compact-native-bge-train-metrics",
+        "compact_native_laststep_pre_retrieval": "--compact-native-laststep-pre-retrieval",
+        "compact_native_laststep_post_retrieval": "--compact-native-laststep-post-retrieval",
+        "compact_native_laststep_train_metrics": "--compact-native-laststep-train-metrics",
+    }
+    args: list[str] = []
+    for key, option in option_names.items():
+        args.extend([option, str(paths[key])])
+    return args
+
+
 class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
     def test_complete_fixture_rolls_up_ready_packets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             encoder_root, bge_root, encoder_descriptor = write_complete_encoder_fixture(root)
             dynamic_root, dynamic_descriptor = write_dynamic_fixture(root)
-            compact_report, stageabc_report = write_major_lever_reports(root)
+            compact_paths = compact_rollup_paths(root)
             stageabc_paths = write_stageabc_fixture(root)
             non_default_evidence = write_valid_non_default_evidence(root)
             default_evidence = write_valid_default_evidence(root)
@@ -157,7 +190,7 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                 dynamic_stagea_root=dynamic_root,
                 dynamic_descriptor=dynamic_descriptor,
                 datasets=["scifact", "nfcorpus", "fiqa"],
-                compact_native_student_report=compact_report,
+                **compact_paths,
                 **stageabc_paths,
                 embedder1_default_gate_evidence_paths={key: str(value) for key, value in default_evidence.items()},
                 embedder1_candidate_smoke_evidence=non_default_evidence["candidate_smoke_evidence"],
@@ -177,18 +210,24 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
         self.assertEqual(summary["packets"]["dynamic_remine"]["status"], "ready_to_launch")
         self.assertEqual(summary["packets"]["eos_embedder1_non_default"]["status"], "ready_for_review")
         self.assertEqual(summary["packets"]["eos_embedder1_default_swap"]["status"], "ready_for_review")
-        self.assertEqual(summary["packets"]["compact_native_student"]["status"], "evidence_only_waiting_validation")
+        self.assertEqual(
+            summary["packets"]["compact_native_student"]["status"],
+            "evidence_positive_blocked_by_serving_and_training",
+        )
         self.assertEqual(
             summary["packets"]["stageabc_pretraining_distillation"]["status"],
             "evidence_ready_not_training_ready",
         )
         self.assertEqual(summary["packets"]["role_asymmetry"]["status"], "release_identity_gate_ready")
         self.assertEqual(summary["packets"]["quantization_profile"]["status"], "q8_ready_for_review")
-        self.assertEqual(
-            summary["packets"]["compact_native_student"]["details"]["parsed_deltas"]["2000_doc_ndcg_delta"],
-            "+0.062803213",
+        self.assertAlmostEqual(
+            summary["packets"]["compact_native_student"]["details"]["compact_native_readiness"]["components"][
+                "bge_listwise_validation"
+            ]["details"]["retrieval_2000"]["ndcg_at_10"]["delta"],
+            0.06,
         )
         self.assertFalse(summary["packets"]["compact_native_student"]["details"]["promotion_ready"])
+        self.assertFalse(summary["packets"]["compact_native_student"]["details"]["training_ready"])
         self.assertFalse(summary["packets"]["stageabc_pretraining_distillation"]["details"]["training_ready"])
         self.assertEqual(summary["summary"]["quantization_profile_status"], "q8_ready_for_review")
         self.assertEqual(summary["public_identity_policy"]["public_name"], "Eos Embedder 1")
@@ -207,7 +246,7 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
             os.remove(fiqa / "eval" / "dense.metrics.json")
             os.remove(fiqa / "eval" / "turboquant-q8-q4.metrics.json")
             dynamic_root, dynamic_descriptor = write_dynamic_fixture(root)
-            compact_report, stageabc_report = write_major_lever_reports(root)
+            compact_paths = compact_rollup_paths(root)
             stageabc_paths = write_stageabc_fixture(root)
             non_default_evidence = write_valid_non_default_evidence(root)
             output_tsv = root / "rollup.tsv"
@@ -219,7 +258,7 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                 dynamic_stagea_root=dynamic_root,
                 dynamic_descriptor=dynamic_descriptor,
                 datasets=["scifact", "nfcorpus", "fiqa"],
-                compact_native_student_report=compact_report,
+                **compact_paths,
                 **stageabc_paths,
                 embedder1_candidate_smoke_evidence=non_default_evidence["candidate_smoke_evidence"],
                 embedder1_role_aware_provider_smoke_evidence=non_default_evidence[
@@ -292,6 +331,24 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                 dynamic_descriptor=dynamic_descriptor,
                 datasets=["scifact", "nfcorpus", "fiqa"],
                 compact_native_student_report=root / "missing-compact.md",
+                compact_native_architecture_map_report=root / "missing-architecture.md",
+                compact_native_manifest_checkpoint_foundation_report=root / "missing-foundation.md",
+                compact_native_generic_bootstrap_report=root / "missing-bootstrap.md",
+                compact_native_train_guard_report=root / "missing-guard.md",
+                compact_native_serving_parity_report=root / "missing-serving.md",
+                compact_native_heads2_lr_bracket_report=root / "missing-bracket.md",
+                compact_native_heads2_lr_bracket_gate_log=root / "missing-bracket.log",
+                compact_native_laststep_movement_report=root / "missing-laststep.md",
+                compact_native_bge_pre_retrieval_2000=root / "missing-pre-2000.json",
+                compact_native_bge_post_retrieval_2000=root / "missing-post-2000.json",
+                compact_native_bge_pre_retrieval_4000=root / "missing-pre-4000.json",
+                compact_native_bge_post_retrieval_4000=root / "missing-post-4000.json",
+                compact_native_bge_pre_listwise=root / "missing-pre-listwise.json",
+                compact_native_bge_post_listwise=root / "missing-post-listwise.json",
+                compact_native_bge_train_metrics=root / "missing-bge-train.json",
+                compact_native_laststep_pre_retrieval=root / "missing-last-pre.json",
+                compact_native_laststep_post_retrieval=root / "missing-last-post.json",
+                compact_native_laststep_train_metrics=root / "missing-last-train.json",
                 stageabc_pretraining_distillation_report=root / "missing-stageabc.md",
                 stageabc_stagea_row_manifest=root / "missing-stagea-manifest.json",
                 stageabc_stagea_leak_report=root / "missing-stagea-leak.json",
@@ -305,7 +362,7 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                 clock=lambda: "2026-06-29T00:00:00Z",
             )
 
-        self.assertEqual(summary["packets"]["compact_native_student"]["status"], "missing_evidence")
+        self.assertEqual(summary["packets"]["compact_native_student"]["status"], "partial_evidence_waiting_validation")
         self.assertEqual(
             summary["packets"]["stageabc_pretraining_distillation"]["status"],
             "partial_evidence_waiting_implementation",
@@ -322,7 +379,7 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
             os.remove(fiqa / "eval" / "dense.metrics.json")
             os.remove(fiqa / "eval" / "turboquant-q8-q4.metrics.json")
             dynamic_root, dynamic_descriptor = write_dynamic_fixture(root)
-            compact_report, stageabc_report = write_major_lever_reports(root)
+            compact_paths = compact_rollup_paths(root)
             stageabc_paths = write_stageabc_fixture(root)
 
             code = summarizer.main(
@@ -339,10 +396,9 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                     str(dynamic_descriptor),
                     "--datasets",
                     "scifact,nfcorpus,fiqa",
-                    "--compact-native-student-report",
-                    str(compact_report),
+                    *compact_cli_args(compact_paths),
                     "--stageabc-pretraining-distillation-report",
-                    str(stageabc_report),
+                    str(stageabc_paths["stageabc_pretraining_distillation_report"]),
                     "--stageabc-stagea-row-manifest",
                     str(stageabc_paths["stageabc_stagea_row_manifest"]),
                     "--stageabc-stagea-leak-report",
@@ -381,7 +437,7 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
             os.remove(fiqa / "eval" / "dense.metrics.json")
             os.remove(fiqa / "eval" / "turboquant-q8-q4.metrics.json")
             dynamic_root, dynamic_descriptor = write_dynamic_fixture(root)
-            compact_report, stageabc_report = write_major_lever_reports(root)
+            compact_paths = compact_rollup_paths(root)
             stageabc_paths = write_stageabc_fixture(root)
             output_json = root / "rollup.json"
             command = "eos export-pretrained-bert-retrieval-vectors --dataset fiqa"
@@ -400,10 +456,9 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                     str(dynamic_descriptor),
                     "--datasets",
                     "scifact,nfcorpus,fiqa",
-                    "--compact-native-student-report",
-                    str(compact_report),
+                    *compact_cli_args(compact_paths),
                     "--stageabc-pretraining-distillation-report",
-                    str(stageabc_report),
+                    str(stageabc_paths["stageabc_pretraining_distillation_report"]),
                     "--stageabc-stagea-row-manifest",
                     str(stageabc_paths["stageabc_stagea_row_manifest"]),
                     "--stageabc-stagea-leak-report",
