@@ -111,6 +111,8 @@ func run(args []string) error {
 		return runEmbedPretrainedBERTPackage(args[1:])
 	case "default-embedder":
 		return runDefaultEmbedder(args[1:])
+	case "imported-embedder-candidate":
+		return runImportedEmbedderCandidate(args[1:])
 	case "export-retrieval-vectors":
 		return runExportRetrievalVectors(args[1:])
 	case "export-pretrained-bert-retrieval-vectors":
@@ -508,6 +510,75 @@ func runDefaultEmbedder(args []string) error {
 			}
 			fmt.Printf("sha256 %s: %s %s\n", check.Role, status, check.SHA256)
 		}
+	}
+	return nil
+}
+
+func runImportedEmbedderCandidate(args []string) error {
+	fs := flag.NewFlagSet("imported-embedder-candidate", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	root := fs.String("root", "", "repository root containing candidate run artifacts")
+	packagePath := fs.String("package", "", "override imported pretrained BERT package path")
+	pathOnly := fs.Bool("path-only", false, "print only the imported candidate package path")
+	verify := fs.Bool("verify", false, "verify package SHA256 hash and package identity")
+	jsonOut := fs.Bool("json", false, "write JSON output")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: eos imported-embedder-candidate [--root dir] [--package path] [--path-only] [--verify] [--json]")
+	}
+
+	info, err := models.ImportedEmbedderCandidateAssetInfo(*root, *packagePath)
+	if err != nil {
+		return err
+	}
+	if *pathOnly && !*jsonOut {
+		fmt.Println(info.PackagePath)
+		return nil
+	}
+
+	var verification *models.ImportedEmbedderCandidateVerification
+	if *verify {
+		report, err := models.VerifyImportedEmbedderCandidate(*root, *packagePath)
+		verification = &report
+		if err != nil {
+			if *jsonOut {
+				_ = writeJSON(os.Stdout, struct {
+					Asset        models.ImportedEmbedderCandidateAsset         `json:"asset"`
+					Verification *models.ImportedEmbedderCandidateVerification `json:"verification,omitempty"`
+				}{Asset: info, Verification: verification})
+			}
+			return err
+		}
+	}
+	if *jsonOut {
+		return writeJSON(os.Stdout, struct {
+			Asset        models.ImportedEmbedderCandidateAsset         `json:"asset"`
+			Verification *models.ImportedEmbedderCandidateVerification `json:"verification,omitempty"`
+		}{Asset: info, Verification: verification})
+	}
+
+	fmt.Printf("asset_id: %s\n", info.AssetID)
+	fmt.Printf("model: %s\n", info.ModelName)
+	fmt.Printf("display_name: %s\n", info.DisplayName)
+	fmt.Printf("source_model: %s\n", info.SourceModel)
+	fmt.Printf("status: %s\n", info.Status)
+	fmt.Printf("package: %s\n", info.PackagePath)
+	fmt.Printf("load_path: %s\n", info.LoadPath)
+	fmt.Printf("quality_claim: %t\n", info.QualityClaim)
+	fmt.Printf("default_alias_changed: %t\n", info.DefaultAliasChanged)
+	if verification != nil {
+		status := "FAIL"
+		if verification.File.OK {
+			status = "OK"
+		}
+		fmt.Printf("sha256 package: %s %s\n", status, verification.File.SHA256)
+		identityStatus := "FAIL"
+		if verification.Identity.OK {
+			identityStatus = "OK"
+		}
+		fmt.Printf("identity package: %s %s\n", identityStatus, verification.Identity.Identity)
 	}
 	return nil
 }
@@ -8351,6 +8422,7 @@ func printUsage() {
 	fmt.Println("  eos embed-text <artifact.mll> <text...>")
 	fmt.Println("  eos embed-pretrained-bert-package [--role raw|query|document] [--json] [--max-length N] <package.mll> <text...>")
 	fmt.Println("  eos default-embedder [--root dir] [--path-only] [--verify] [--json]")
+	fmt.Println("  eos imported-embedder-candidate [--root dir] [--package path] [--path-only] [--verify] [--json]")
 	fmt.Println("  eos export-retrieval-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
 	fmt.Println("  eos export-sparse-token-pool-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")
 	fmt.Println("  eos export-sparse-encoder-vectors [flags] <artifact.mll> <beir-dataset-dir> <output-dir>")

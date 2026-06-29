@@ -372,6 +372,71 @@ func TestRunDefaultEmbedderVerifyJSON(t *testing.T) {
 	}
 }
 
+func TestRunImportedEmbedderCandidatePathOnlyUsesPackageOverride(t *testing.T) {
+	packagePath := writeCommandPretrainedBERTPackageFixture(t, "BAAI/bge-small-en-v1.5", true)
+	output := strings.TrimSpace(captureRunOutput(t, []string{
+		"imported-embedder-candidate",
+		"--package", packagePath,
+		"--path-only",
+	}))
+	if output != packagePath {
+		t.Fatalf("candidate package path = %q, want %q", output, packagePath)
+	}
+	if strings.Contains(output, models.DefaultEmbedderAssetID) || strings.Contains(output, models.DefaultEmbedderAssetRelativeDir) {
+		t.Fatalf("path-only output should not claim default asset: %q", output)
+	}
+}
+
+func TestRunImportedEmbedderCandidateJSONIsNonDefaultReference(t *testing.T) {
+	packagePath := writeCommandPretrainedBERTPackageFixture(t, "BAAI/bge-small-en-v1.5", true)
+	output := captureRunOutput(t, []string{
+		"imported-embedder-candidate",
+		"--package", packagePath,
+		"--json",
+	})
+	var payload struct {
+		Asset struct {
+			AssetID             string `json:"asset_id"`
+			ModelName           string `json:"model_name"`
+			SourceModel         string `json:"source_model"`
+			Status              string `json:"status"`
+			PackagePath         string `json:"package_path"`
+			QualityClaim        bool   `json:"quality_claim"`
+			DefaultAliasChanged bool   `json:"default_alias_changed"`
+			PackageRelativePath string `json:"package_relative_path"`
+			LoadPath            string `json:"load_path"`
+		} `json:"asset"`
+		Verification *models.ImportedEmbedderCandidateVerification `json:"verification,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		t.Fatalf("unmarshal imported candidate JSON: %v\n%s", err, output)
+	}
+	if payload.Asset.AssetID != models.ImportedEmbedderCandidateAssetID {
+		t.Fatalf("asset id = %q", payload.Asset.AssetID)
+	}
+	if payload.Asset.ModelName != models.ImportedEmbedderCandidateModelName {
+		t.Fatalf("model name = %q", payload.Asset.ModelName)
+	}
+	if payload.Asset.SourceModel != models.ImportedEmbedderCandidateSourceModel {
+		t.Fatalf("source model = %q", payload.Asset.SourceModel)
+	}
+	if payload.Asset.Status != models.ImportedEmbedderCandidateStatus {
+		t.Fatalf("status = %q", payload.Asset.Status)
+	}
+	if payload.Asset.PackagePath != packagePath || payload.Asset.PackageRelativePath != "" {
+		t.Fatalf("unexpected package path fields: %+v", payload.Asset)
+	}
+	if payload.Asset.QualityClaim || payload.Asset.DefaultAliasChanged {
+		t.Fatalf("candidate unexpectedly claims quality/default: %+v", payload.Asset)
+	}
+	if payload.Asset.LoadPath != "runtime.LoadPretrainedBERTTextEmbedder" {
+		t.Fatalf("load path = %q", payload.Asset.LoadPath)
+	}
+	if payload.Verification != nil {
+		t.Fatalf("verification should be omitted without --verify: %+v", payload.Verification)
+	}
+}
+
 func TestParseNonNegativeFloatMapAllowsZeroTeacherSourceWeight(t *testing.T) {
 	got, err := parseNonNegativeFloatMap("scifact=1,nfcorpus=0,fiqa=0.25")
 	if err != nil {

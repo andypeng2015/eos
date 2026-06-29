@@ -827,3 +827,53 @@ func TestDefaultEmbedderAssetInfoAndVerify(t *testing.T) {
 		}
 	}
 }
+
+func TestImportedEmbedderCandidateAssetInfoOverrideIsNonDefault(t *testing.T) {
+	override := filepath.Join(t.TempDir(), "fixture.imported.mll")
+	info, err := ImportedEmbedderCandidateAssetInfo("", override)
+	if err != nil {
+		t.Fatalf("imported candidate asset info: %v", err)
+	}
+	if info.AssetID != ImportedEmbedderCandidateAssetID {
+		t.Fatalf("asset id = %q, want %q", info.AssetID, ImportedEmbedderCandidateAssetID)
+	}
+	if info.ModelName != ImportedEmbedderCandidateModelName {
+		t.Fatalf("model name = %q, want %q", info.ModelName, ImportedEmbedderCandidateModelName)
+	}
+	if info.ModelName != DefaultEmbeddingModelName {
+		t.Fatalf("model name = %q", info.ModelName)
+	}
+	if info.SourceModel != ImportedEmbedderCandidateSourceModel {
+		t.Fatalf("source model = %q", info.SourceModel)
+	}
+	if info.Status != ImportedEmbedderCandidateStatus {
+		t.Fatalf("status = %q", info.Status)
+	}
+	if info.QualityClaim || info.DefaultAliasChanged {
+		t.Fatalf("candidate unexpectedly claims default or quality: %+v", info)
+	}
+	if info.PackageRelativePath != "" {
+		t.Fatalf("override should clear package relative path, got %q", info.PackageRelativePath)
+	}
+	if info.PackagePath != override {
+		t.Fatalf("package path = %q, want %q", info.PackagePath, override)
+	}
+	if info.PackageSHA256 != ImportedEmbedderCandidatePackageSHA256 || info.PackageIdentity != ImportedEmbedderCandidatePackageIdentity {
+		t.Fatalf("candidate expected identity changed: %+v", info)
+	}
+}
+
+func TestImportedEmbedderCandidateAssetInfoRootUsesRunArtifactPath(t *testing.T) {
+	root := t.TempDir()
+	info, err := ImportedEmbedderCandidateAssetInfo(root, "")
+	if err != nil {
+		t.Fatalf("imported candidate asset info with root: %v", err)
+	}
+	want := filepath.Join(root, ImportedEmbedderCandidatePackageRelativePath)
+	if info.PackagePath != want {
+		t.Fatalf("package path = %q, want %q", info.PackagePath, want)
+	}
+	if info.PackageRelativePath != ImportedEmbedderCandidatePackageRelativePath {
+		t.Fatalf("relative package path = %q", info.PackageRelativePath)
+	}
+}
