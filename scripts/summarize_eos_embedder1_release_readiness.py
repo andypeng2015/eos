@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import re
 import sys
 from datetime import datetime, timezone
@@ -32,6 +33,13 @@ DEFAULT_BGE_GATE_ROOT = bge_gate.DEFAULT_RUN_ROOT
 DEFAULT_DATASETS = bge_gate.DEFAULT_DATASETS
 DEFAULT_CANDIDATE_PROVIDER_ID = "corkscrewdb-imported-bge-eos-embed-v1-candidate"
 DEFAULT_ROLE_CONTRACT_SCHEMA = "manta.pretrained_bert_retrieval_role_contract.v1"
+DEFAULT_CANDIDATE_SMOKE_SCHEMA = "manta.imported_bge_eos_embed_v1_candidate_smoke.v1"
+DEFAULT_ROLE_AWARE_PROVIDER_SMOKE_SCHEMA = "eos.imported_bge_role_aware_provider_smoke.v1"
+DEFAULT_CORKSCREWDB_SERVING_SMOKE_SCHEMA = "eos.imported_bge_serving_candidate_manifest.v1"
+NORM_TOLERANCE = 1e-3
+OFFLINE_DELTA_TOLERANCE = 1e-9
+Q4_P95_MS_CEILING = 25.0
+Q8_P95_MS_CEILING = 50.0
 DEFAULT_SWAP_GATES = [
     ("default_provider_bridge", "default provider bridge missing"),
     ("default_release_smoke", "default release smoke missing"),
@@ -90,6 +98,34 @@ def parse_scan_paths(value: str | None) -> list[Path]:
 
 def backend_fingerprint(package_sha256: str, identity_sha256: str) -> str:
     return f"eos-imported-bge:{package_sha256}:{identity_sha256}"
+
+
+def load_json_object(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ReadinessError(f"required JSON file not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ReadinessError(f"{path}: invalid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ReadinessError(f"{path}: expected top-level JSON object")
+    return data
+
+
+def as_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+def nested(data: dict[str, Any], *keys: str) -> Any:
+    current: Any = data
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
 
 
 def release_identity(
@@ -265,6 +301,334 @@ def summarize_default_gates(evidence_paths: dict[str, str | None]) -> dict[str, 
     }
 
 
+def add_check(blockers: list[str], condition: bool, message: str) -> None:
+    if not condition:
+        blockers.append(message)
+
+
+def close_to(value: Any, expected: float, tolerance: float) -> bool:
+    number = as_number(value)
+    return number is not None and abs(number - expected) <= tolerance
+
+
+def validate_candidate_smoke(
+    data: dict[str, Any],
+    *,
+    package_sha256: str,
+    identity_sha256: str,
+    legacy_model_name: str,
+    public_name: str,
+    model: str,
+) -> tuple[list[str], dict[str, Any]]:
+    blockers: list[str] = []
+    add_check(blockers, data.get("schema") == DEFAULT_CANDIDATE_SMOKE_SCHEMA, "candidate smoke schema mismatch")
+    add_check(blockers, data.get("candidate_model_name") == legacy_model_name, "candidate smoke model name mismatch")
+    add_check(blockers, data.get("candidate_display_name") == public_name, "candidate smoke display name mismatch")
+    add_check(
+        blockers,
+        data.get("candidate_status") == "non_default_reference_candidate",
+        "candidate smoke status is not non_default_reference_candidate",
+    )
+    add_check(blockers, data.get("source_model") == model, "candidate smoke source model mismatch")
+    add_check(blockers, data.get("quality_claim") is False, "candidate smoke quality_claim must be false")
+    add_check(
+        blockers,
+        data.get("default_alias_changed") is False,
+        "candidate smoke default_alias_changed must be false",
+    )
+    add_check(blockers, nested(data, "package", "sha256") == package_sha256, "candidate smoke package sha mismatch")
+    add_check(
+        blockers,
+        nested(data, "package", "identity_sha256") == identity_sha256,
+        "candidate smoke package identity mismatch",
+    )
+    add_check(
+        blockers,
+        nested(data, "role_contract", "query_prefix") == bge_gate.DEFAULT_QUERY_PREFIX,
+        "candidate smoke query prefix mismatch",
+    )
+    add_check(
+        blockers,
+        nested(data, "role_contract", "document_prefix") == bge_gate.DEFAULT_DOCUMENT_PREFIX,
+        "candidate smoke document prefix mismatch",
+    )
+    add_check(
+        blockers,
+        nested(data, "role_contract", "pooling") == bge_gate.DEFAULT_POOLING,
+        "candidate smoke pooling mismatch",
+    )
+    add_check(
+        blockers,
+        nested(data, "role_contract", "max_length") == bge_gate.DEFAULT_MAX_LENGTH,
+        "candidate smoke max length mismatch",
+    )
+    add_check(
+        blockers,
+        close_to(nested(data, "direct_embed_smoke", "query_norm"), 1.0, NORM_TOLERANCE),
+        "candidate smoke query norm is not close to 1.0",
+    )
+    add_check(
+        blockers,
+        close_to(nested(data, "direct_embed_smoke", "document_norm"), 1.0, NORM_TOLERANCE),
+        "candidate smoke document norm is not close to 1.0",
+    )
+    details = {
+        "schema": data.get("schema"),
+        "candidate_model_name": data.get("candidate_model_name"),
+        "candidate_display_name": data.get("candidate_display_name"),
+        "package_sha256": nested(data, "package", "sha256"),
+        "identity_sha256": nested(data, "package", "identity_sha256"),
+        "query_norm": nested(data, "direct_embed_smoke", "query_norm"),
+        "document_norm": nested(data, "direct_embed_smoke", "document_norm"),
+        "caveats": data.get("caveats", []),
+    }
+    return blockers, details
+
+
+def validate_role_aware_provider_smoke(
+    data: dict[str, Any],
+    *,
+    package_sha256: str,
+    identity_sha256: str,
+    **_: Any,
+) -> tuple[list[str], dict[str, Any]]:
+    blockers: list[str] = []
+    expected_fingerprint = backend_fingerprint(package_sha256, identity_sha256)
+    add_check(blockers, data.get("schema") == DEFAULT_ROLE_AWARE_PROVIDER_SMOKE_SCHEMA, "role-aware provider smoke schema mismatch")
+    add_check(blockers, data.get("provider_id") == DEFAULT_CANDIDATE_PROVIDER_ID, "role-aware provider id mismatch")
+    add_check(blockers, data.get("dim") == bge_gate.DEFAULT_DIM, "role-aware provider dim mismatch")
+    add_check(
+        blockers,
+        data.get("backend_fingerprint") == expected_fingerprint,
+        "role-aware provider backend fingerprint mismatch",
+    )
+    add_check(
+        blockers,
+        data.get("candidate_package_sha256") == package_sha256,
+        "role-aware provider package sha mismatch",
+    )
+    add_check(blockers, data.get("candidate_identity") == identity_sha256, "role-aware provider identity mismatch")
+    add_check(blockers, data.get("quality_claim") is False, "role-aware provider quality_claim must be false")
+    add_check(
+        blockers,
+        data.get("default_alias_changed") is False,
+        "role-aware provider default_alias_changed must be false",
+    )
+    add_check(blockers, data.get("all_top1_ok") is True, "role-aware provider top1 smoke failed")
+    for field in ("query_role_calls", "document_role_calls", "encode_calls", "encode_batch_calls"):
+        add_check(blockers, isinstance(data.get(field), int) and data.get(field) > 0, f"role-aware provider {field} must be > 0")
+    add_check(
+        blockers,
+        nested(data, "db_manifest_embedding", "id") == DEFAULT_CANDIDATE_PROVIDER_ID,
+        "role-aware provider db manifest embedding id mismatch",
+    )
+    add_check(
+        blockers,
+        nested(data, "db_manifest_embedding", "dim") == bge_gate.DEFAULT_DIM,
+        "role-aware provider db manifest embedding dim mismatch",
+    )
+    add_check(
+        blockers,
+        nested(data, "db_manifest_embedding", "backend_fingerprint") == expected_fingerprint,
+        "role-aware provider db manifest backend fingerprint mismatch",
+    )
+    details = {
+        "schema": data.get("schema"),
+        "provider_id": data.get("provider_id"),
+        "dim": data.get("dim"),
+        "backend_fingerprint": data.get("backend_fingerprint"),
+        "all_top1_ok": data.get("all_top1_ok"),
+        "query_role_calls": data.get("query_role_calls"),
+        "document_role_calls": data.get("document_role_calls"),
+        "encode_calls": data.get("encode_calls"),
+        "encode_batch_calls": data.get("encode_batch_calls"),
+    }
+    return blockers, details
+
+
+def validate_serving_smoke(
+    data: dict[str, Any],
+    *,
+    package_sha256: str,
+    identity_sha256: str,
+    **_: Any,
+) -> tuple[list[str], dict[str, Any]]:
+    blockers: list[str] = []
+    add_check(blockers, data.get("schema") == DEFAULT_CORKSCREWDB_SERVING_SMOKE_SCHEMA, "CorkScrewDB serving smoke schema mismatch")
+    add_check(blockers, nested(data, "candidate", "quality_claim") is False, "CorkScrewDB serving quality_claim must be false")
+    add_check(
+        blockers,
+        nested(data, "candidate", "default_alias_changed") is False,
+        "CorkScrewDB serving default_alias_changed must be false",
+    )
+    add_check(blockers, nested(data, "package", "sha256") == package_sha256, "CorkScrewDB serving package sha mismatch")
+    add_check(
+        blockers,
+        nested(data, "package", "identity_sha256") == identity_sha256,
+        "CorkScrewDB serving package identity mismatch",
+    )
+    add_check(
+        blockers,
+        nested(data, "corkscrewdb_smoke", "quantized_only") is True,
+        "CorkScrewDB serving smoke quantized_only must be true",
+    )
+    add_check(
+        blockers,
+        nested(data, "corkscrewdb_smoke", "index_type") == "flat",
+        "CorkScrewDB serving smoke index_type must be flat",
+    )
+    add_check(
+        blockers,
+        nested(data, "corkscrewdb_smoke", "layout") == "single_parent_vectors",
+        "CorkScrewDB serving smoke layout must be single_parent_vectors",
+    )
+    comparisons = data.get("offline_comparison") if isinstance(data.get("offline_comparison"), dict) else {}
+    details: dict[str, Any] = {
+        "schema": data.get("schema"),
+        "candidate": data.get("candidate", {}),
+        "package_sha256": nested(data, "package", "sha256"),
+        "identity_sha256": nested(data, "package", "identity_sha256"),
+        "quantized_only": nested(data, "corkscrewdb_smoke", "quantized_only"),
+        "index_type": nested(data, "corkscrewdb_smoke", "index_type"),
+        "layout": nested(data, "corkscrewdb_smoke", "layout"),
+        "offline_comparison": {},
+        "caveats": data.get("caveats", []),
+    }
+    for key, ceiling in (("q4", Q4_P95_MS_CEILING), ("q8", Q8_P95_MS_CEILING)):
+        comparison = comparisons.get(key) if isinstance(comparisons, dict) else None
+        if not isinstance(comparison, dict):
+            blockers.append(f"CorkScrewDB serving missing {key} offline comparison")
+            details["offline_comparison"][key] = None
+            continue
+        ndcg_delta = as_number(nested(comparison, "delta", "ndcg_at_10"))
+        recall_delta = as_number(nested(comparison, "delta", "recall_at_100"))
+        p95_ms = as_number(nested(comparison, "corkscrew", "p95_ms"))
+        add_check(
+            blockers,
+            ndcg_delta is not None and abs(ndcg_delta) <= OFFLINE_DELTA_TOLERANCE,
+            f"CorkScrewDB serving {key} nDCG delta exceeds tolerance",
+        )
+        add_check(
+            blockers,
+            recall_delta is not None and abs(recall_delta) <= OFFLINE_DELTA_TOLERANCE,
+            f"CorkScrewDB serving {key} recall delta exceeds tolerance",
+        )
+        add_check(
+            blockers,
+            p95_ms is not None and 0.0 < p95_ms <= ceiling,
+            f"CorkScrewDB serving {key} p95 exceeds {ceiling:g}ms ceiling",
+        )
+        details["offline_comparison"][key] = {
+            "ndcg_at_10_delta": ndcg_delta,
+            "recall_at_100_delta": recall_delta,
+            "p95_ms": p95_ms,
+            "p95_ms_ceiling": ceiling,
+        }
+    return blockers, details
+
+
+def summarize_evidence_gate(
+    name: str,
+    raw_path: str | Path | None,
+    validator: Any,
+    *,
+    package_sha256: str,
+    identity_sha256: str,
+    legacy_model_name: str,
+    public_name: str,
+    model: str,
+) -> dict[str, Any]:
+    if raw_path is None:
+        return {
+            "status": "missing",
+            "evidence_path": None,
+            "blockers": [f"{name} evidence missing: evidence path not supplied"],
+            "details": {},
+        }
+    path = Path(raw_path)
+    if not path.exists():
+        return {
+            "status": "missing",
+            "evidence_path": str(path),
+            "blockers": [f"{name} evidence missing: {path}"],
+            "details": {},
+        }
+    try:
+        data = load_json_object(path)
+        blockers, details = validator(
+            data,
+            package_sha256=package_sha256,
+            identity_sha256=identity_sha256,
+            legacy_model_name=legacy_model_name,
+            public_name=public_name,
+            model=model,
+        )
+    except ReadinessError as exc:
+        return {
+            "status": "fail",
+            "evidence_path": str(path),
+            "blockers": [f"{name} evidence failed validation: {exc}"],
+            "details": {},
+        }
+    return {
+        "status": "pass" if not blockers else "fail",
+        "evidence_path": str(path),
+        "blockers": [f"{name} evidence failed validation: {blocker}" for blocker in blockers],
+        "details": details,
+    }
+
+
+def summarize_non_default_evidence(
+    *,
+    candidate_smoke_evidence: str | Path | None,
+    role_aware_provider_smoke_evidence: str | Path | None,
+    corkscrewdb_serving_smoke_evidence: str | Path | None,
+    package_sha256: str,
+    identity_sha256: str,
+    legacy_model_name: str,
+    public_name: str,
+    model: str,
+) -> dict[str, Any]:
+    gates = {
+        "candidate_smoke": summarize_evidence_gate(
+            "candidate smoke",
+            candidate_smoke_evidence,
+            validate_candidate_smoke,
+            package_sha256=package_sha256,
+            identity_sha256=identity_sha256,
+            legacy_model_name=legacy_model_name,
+            public_name=public_name,
+            model=model,
+        ),
+        "role_aware_provider_smoke": summarize_evidence_gate(
+            "role-aware provider smoke",
+            role_aware_provider_smoke_evidence,
+            validate_role_aware_provider_smoke,
+            package_sha256=package_sha256,
+            identity_sha256=identity_sha256,
+            legacy_model_name=legacy_model_name,
+            public_name=public_name,
+            model=model,
+        ),
+        "corkscrewdb_serving_smoke": summarize_evidence_gate(
+            "CorkScrewDB serving smoke",
+            corkscrewdb_serving_smoke_evidence,
+            validate_serving_smoke,
+            package_sha256=package_sha256,
+            identity_sha256=identity_sha256,
+            legacy_model_name=legacy_model_name,
+            public_name=public_name,
+            model=model,
+        ),
+    }
+    blockers = [blocker for gate in gates.values() for blocker in gate.get("blockers", [])]
+    return {
+        "gates": gates,
+        "all_valid": not blockers,
+        "blockers": blockers,
+    }
+
+
 def build_summary(
     *,
     bge_gate_root: Path,
@@ -278,6 +642,9 @@ def build_summary(
     model: str = bge_gate.DEFAULT_MODEL,
     snapshot: str = bge_gate.DEFAULT_SNAPSHOT,
     default_gate_evidence_paths: dict[str, str | None] | None = None,
+    candidate_smoke_evidence: str | Path | None = None,
+    role_aware_provider_smoke_evidence: str | Path | None = None,
+    corkscrewdb_serving_smoke_evidence: str | Path | None = None,
     scan_paths: list[Path] | None = None,
     clock: Any = utc_now,
 ) -> dict[str, Any]:
@@ -292,6 +659,16 @@ def build_summary(
     bge = compact_bge_summary(bge_summary)
     scan = scan_public_name_hygiene(scan_paths or [])
     default_gates = summarize_default_gates(default_gate_evidence_paths or {})
+    non_default_evidence = summarize_non_default_evidence(
+        candidate_smoke_evidence=candidate_smoke_evidence,
+        role_aware_provider_smoke_evidence=role_aware_provider_smoke_evidence,
+        corkscrewdb_serving_smoke_evidence=corkscrewdb_serving_smoke_evidence,
+        package_sha256=package_sha256,
+        identity_sha256=identity_sha256,
+        legacy_model_name=legacy_model_name,
+        public_name=public_name,
+        model=model,
+    )
 
     bge_ready = bool(bge["all_complete"] and bge["identity_consistent"])
     non_default_blockers: list[str] = []
@@ -300,9 +677,14 @@ def build_summary(
     if not bge["identity_consistent"]:
         non_default_blockers.append("selected BGE gate identity inconsistent")
     non_default_blockers.extend(f"bge gate: {blocker}" for blocker in bge.get("blockers", []))
+    non_default_blockers.extend(non_default_evidence["blockers"])
     non_default_blockers.extend(scan["blockers"])
 
-    non_default_status = "ready_for_review" if bge_ready and not scan["blockers"] else "defer"
+    non_default_status = (
+        "ready_for_review"
+        if bge_ready and non_default_evidence["all_valid"] and not scan["blockers"]
+        else "defer"
+    )
     default_swap_blockers = list(default_gates["blockers"])
     if non_default_status != "ready_for_review":
         default_swap_blockers.append("non-default candidate not ready for review")
@@ -335,6 +717,7 @@ def build_summary(
             snapshot=snapshot,
         ),
         "bge_gate": bge,
+        "non_default_evidence": non_default_evidence,
         "default_swap_gates": default_gates,
         "public_name_hygiene": scan,
     }
@@ -408,6 +791,23 @@ def tsv_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
                 "status": data.get("status"),
             }
         )
+    for gate, data in summary["non_default_evidence"]["gates"].items():
+        rows.append(
+            {
+                "section": "non_default_evidence",
+                "key": gate,
+                "value": data.get("evidence_path"),
+                "status": data.get("status"),
+            }
+        )
+        rows.append(
+            {
+                "section": "non_default_evidence_detail",
+                "key": gate,
+                "value": json.dumps(data.get("details", {}), sort_keys=True, separators=(",", ":")),
+                "status": data.get("status"),
+            }
+        )
     rows.extend(
         {"section": "blocker.non_default", "key": str(index), "value": blocker, "status": "block"}
         for index, blocker in enumerate(summary["blockers"]["non_default"], start=1)
@@ -460,6 +860,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--legacy-256d-migration-evidence")
     parser.add_argument("--throughput-gate-evidence")
     parser.add_argument("--default-asset-size-policy-evidence")
+    parser.add_argument("--candidate-smoke-evidence")
+    parser.add_argument("--role-aware-provider-smoke-evidence")
+    parser.add_argument("--corkscrewdb-serving-smoke-evidence")
     return parser
 
 
@@ -489,6 +892,9 @@ def main(argv: list[str] | None = None) -> int:
             model=args.model,
             snapshot=args.snapshot,
             default_gate_evidence_paths=default_gate_evidence_map(args),
+            candidate_smoke_evidence=args.candidate_smoke_evidence,
+            role_aware_provider_smoke_evidence=args.role_aware_provider_smoke_evidence,
+            corkscrewdb_serving_smoke_evidence=args.corkscrewdb_serving_smoke_evidence,
             scan_paths=parse_scan_paths(args.scan_paths),
         )
         write_json(output_json, summary)

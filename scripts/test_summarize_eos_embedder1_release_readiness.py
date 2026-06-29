@@ -101,15 +101,128 @@ def write_complete_gate(root: Path) -> None:
         write_complete_bge_dataset(root, dataset)
 
 
+def candidate_smoke_manifest() -> dict:
+    return {
+        "schema": "manta.imported_bge_eos_embed_v1_candidate_smoke.v1",
+        "candidate_model_name": "eos-embed-v1",
+        "candidate_display_name": "Eos Embedder 1",
+        "candidate_status": "non_default_reference_candidate",
+        "source_model": "BAAI/bge-small-en-v1.5",
+        "quality_claim": False,
+        "default_alias_changed": False,
+        "package": {
+            "sha256": bge_summarizer.DEFAULT_PACKAGE_SHA256,
+            "identity_sha256": bge_summarizer.DEFAULT_IDENTITY_SHA256,
+        },
+        "role_contract": {
+            "query_prefix": bge_summarizer.DEFAULT_QUERY_PREFIX,
+            "document_prefix": bge_summarizer.DEFAULT_DOCUMENT_PREFIX,
+            "pooling": "cls",
+            "max_length": 512,
+        },
+        "direct_embed_smoke": {
+            "query_norm": 1.00000001,
+            "document_norm": 0.99999999,
+        },
+        "caveats": ["fixture caveat"],
+    }
+
+
+def role_aware_provider_smoke_manifest() -> dict:
+    fingerprint = summarizer.backend_fingerprint(
+        bge_summarizer.DEFAULT_PACKAGE_SHA256,
+        bge_summarizer.DEFAULT_IDENTITY_SHA256,
+    )
+    return {
+        "schema": "eos.imported_bge_role_aware_provider_smoke.v1",
+        "provider_id": "corkscrewdb-imported-bge-eos-embed-v1-candidate",
+        "dim": 384,
+        "backend_fingerprint": fingerprint,
+        "candidate_package_sha256": bge_summarizer.DEFAULT_PACKAGE_SHA256,
+        "candidate_identity": bge_summarizer.DEFAULT_IDENTITY_SHA256,
+        "quality_claim": False,
+        "default_alias_changed": False,
+        "all_top1_ok": True,
+        "query_role_calls": 3,
+        "document_role_calls": 4,
+        "encode_calls": 3,
+        "encode_batch_calls": 4,
+        "db_manifest_embedding": {
+            "id": "corkscrewdb-imported-bge-eos-embed-v1-candidate",
+            "dim": 384,
+            "backend_fingerprint": fingerprint,
+        },
+    }
+
+
+def corkscrewdb_serving_smoke_manifest() -> dict:
+    return {
+        "schema": "eos.imported_bge_serving_candidate_manifest.v1",
+        "candidate": {
+            "quality_claim": False,
+            "default_alias_changed": False,
+        },
+        "package": {
+            "sha256": bge_summarizer.DEFAULT_PACKAGE_SHA256,
+            "identity_sha256": bge_summarizer.DEFAULT_IDENTITY_SHA256,
+        },
+        "corkscrewdb_smoke": {
+            "quantized_only": True,
+            "index_type": "flat",
+            "layout": "single_parent_vectors",
+        },
+        "offline_comparison": {
+            "q4": {
+                "delta": {"ndcg_at_10": 0.0, "recall_at_100": 0.0},
+                "corkscrew": {"p95_ms": 12.0},
+            },
+            "q8": {
+                "delta": {"ndcg_at_10": 0.0, "recall_at_100": 0.0},
+                "corkscrew": {"p95_ms": 24.0},
+            },
+        },
+        "caveats": ["fixture serving caveat"],
+    }
+
+
+def write_valid_non_default_evidence(root: Path) -> dict[str, Path]:
+    evidence_root = root / "evidence"
+    paths = {
+        "candidate_smoke_evidence": write_json(evidence_root / "candidate-smoke.json", candidate_smoke_manifest()),
+        "role_aware_provider_smoke_evidence": write_json(
+            evidence_root / "role-aware-provider-smoke.json",
+            role_aware_provider_smoke_manifest(),
+        ),
+        "corkscrewdb_serving_smoke_evidence": write_json(
+            evidence_root / "corkscrewdb-serving-smoke.json",
+            corkscrewdb_serving_smoke_manifest(),
+        ),
+    }
+    return paths
+
+
+def evidence_cli_args(paths: dict[str, Path]) -> list[str]:
+    return [
+        "--candidate-smoke-evidence",
+        str(paths["candidate_smoke_evidence"]),
+        "--role-aware-provider-smoke-evidence",
+        str(paths["role_aware_provider_smoke_evidence"]),
+        "--corkscrewdb-serving-smoke-evidence",
+        str(paths["corkscrewdb_serving_smoke_evidence"]),
+    ]
+
+
 class SummarizeEosEmbedder1ReleaseReadinessTest(unittest.TestCase):
     def test_complete_bge_gate_makes_non_default_ready_but_default_defer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_complete_gate(root)
+            evidence = write_valid_non_default_evidence(root)
 
             summary = summarizer.build_summary(
                 bge_gate_root=root,
                 datasets=["scifact", "nfcorpus", "fiqa"],
+                **evidence,
                 clock=lambda: "2026-06-29T00:00:00Z",
             )
 
@@ -117,6 +230,8 @@ class SummarizeEosEmbedder1ReleaseReadinessTest(unittest.TestCase):
         self.assertEqual(summary["non_default_candidate_status"], "ready_for_review")
         self.assertEqual(summary["default_swap_status"], "defer")
         self.assertEqual(summary["blockers"]["non_default"], [])
+        self.assertTrue(summary["non_default_evidence"]["all_valid"])
+        self.assertEqual(summary["non_default_evidence"]["gates"]["candidate_smoke"]["status"], "pass")
         self.assertIn("default provider bridge missing", summary["blockers"]["default_swap"])
         self.assertFalse(summary["quality_claim"])
         self.assertFalse(summary["default_alias_changed"])
@@ -133,10 +248,12 @@ class SummarizeEosEmbedder1ReleaseReadinessTest(unittest.TestCase):
             write_complete_bge_dataset(root, "scifact")
             write_complete_bge_dataset(root, "nfcorpus")
             write_lines(root / "fiqa" / "vectors" / "doc-vectors.jsonl", 3)
+            evidence = write_valid_non_default_evidence(root)
 
             summary = summarizer.build_summary(
                 bge_gate_root=root,
                 datasets=["scifact", "nfcorpus", "fiqa"],
+                **evidence,
             )
 
         self.assertEqual(summary["non_default_candidate_status"], "defer")
@@ -150,10 +267,12 @@ class SummarizeEosEmbedder1ReleaseReadinessTest(unittest.TestCase):
             write_complete_bge_dataset(root, "scifact", identity_sha="wrong")
             write_complete_bge_dataset(root, "nfcorpus")
             write_complete_bge_dataset(root, "fiqa")
+            evidence = write_valid_non_default_evidence(root)
 
             summary = summarizer.build_summary(
                 bge_gate_root=root,
                 datasets=["scifact", "nfcorpus", "fiqa"],
+                **evidence,
             )
 
         self.assertEqual(summary["non_default_candidate_status"], "defer")
@@ -171,6 +290,7 @@ class SummarizeEosEmbedder1ReleaseReadinessTest(unittest.TestCase):
             write_complete_gate(complete)
             write_complete_bge_dataset(incomplete, "scifact")
             write_complete_bge_dataset(incomplete, "nfcorpus")
+            evidence = write_valid_non_default_evidence(root)
 
             complete_code = summarizer.main(
                 [
@@ -184,6 +304,7 @@ class SummarizeEosEmbedder1ReleaseReadinessTest(unittest.TestCase):
                     str(root / "complete.tsv"),
                     "--require-non-default-ready",
                 ]
+                + evidence_cli_args(evidence)
             )
             incomplete_code = summarizer.main(
                 [
@@ -197,6 +318,7 @@ class SummarizeEosEmbedder1ReleaseReadinessTest(unittest.TestCase):
                     str(root / "incomplete.tsv"),
                     "--require-non-default-ready",
                 ]
+                + evidence_cli_args(evidence)
             )
 
         self.assertEqual(complete_code, 0)
@@ -206,6 +328,7 @@ class SummarizeEosEmbedder1ReleaseReadinessTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_complete_gate(root)
+            evidence = write_valid_non_default_evidence(root)
 
             code = summarizer.main(
                 [
@@ -219,6 +342,7 @@ class SummarizeEosEmbedder1ReleaseReadinessTest(unittest.TestCase):
                     str(root / "summary.tsv"),
                     "--require-default-ready",
                 ]
+                + evidence_cli_args(evidence)
             )
 
         self.assertEqual(code, 2)
@@ -227,10 +351,12 @@ class SummarizeEosEmbedder1ReleaseReadinessTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_complete_gate(root)
+            evidence = write_valid_non_default_evidence(root)
             output_tsv = root / "readiness.tsv"
             summary = summarizer.build_summary(
                 bge_gate_root=root,
                 datasets=["scifact", "nfcorpus", "fiqa"],
+                **evidence,
             )
 
             summarizer.write_tsv(output_tsv, summary)
@@ -247,11 +373,80 @@ class SummarizeEosEmbedder1ReleaseReadinessTest(unittest.TestCase):
         self.assertEqual(keyed[("identity", "public_id")]["value"], "eos-embedder-1")
         self.assertEqual(keyed[("bge_gate", "all_complete")]["value"], "true")
         self.assertEqual(keyed[("default_swap_gate", "default_provider_bridge")]["status"], "missing")
+        self.assertEqual(keyed[("non_default_evidence", "candidate_smoke")]["status"], "pass")
+        self.assertIn("query_norm", keyed[("non_default_evidence_detail", "candidate_smoke")]["value"])
+
+    def test_complete_bge_gate_missing_evidence_defers_non_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_complete_gate(root)
+
+            summary = summarizer.build_summary(
+                bge_gate_root=root,
+                datasets=["scifact", "nfcorpus", "fiqa"],
+            )
+
+        self.assertEqual(summary["non_default_candidate_status"], "defer")
+        self.assertFalse(summary["non_default_evidence"]["all_valid"])
+        self.assertTrue(
+            any("candidate smoke evidence missing" in blocker for blocker in summary["blockers"]["non_default"])
+        )
+        self.assertTrue(
+            any("role-aware provider smoke evidence missing" in blocker for blocker in summary["blockers"]["non_default"])
+        )
+        self.assertTrue(
+            any("CorkScrewDB serving smoke evidence missing" in blocker for blocker in summary["blockers"]["non_default"])
+        )
+
+    def test_bad_role_provider_fingerprint_or_missing_role_calls_defers_non_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_complete_gate(root)
+            evidence = write_valid_non_default_evidence(root)
+            bad_role = role_aware_provider_smoke_manifest()
+            bad_role["backend_fingerprint"] = "wrong"
+            bad_role["db_manifest_embedding"]["backend_fingerprint"] = "wrong"
+            bad_role["query_role_calls"] = 0
+            write_json(evidence["role_aware_provider_smoke_evidence"], bad_role)
+
+            summary = summarizer.build_summary(
+                bge_gate_root=root,
+                datasets=["scifact", "nfcorpus", "fiqa"],
+                **evidence,
+            )
+
+        self.assertEqual(summary["non_default_candidate_status"], "defer")
+        blockers = "\n".join(summary["blockers"]["non_default"])
+        self.assertIn("role-aware provider smoke evidence failed validation", blockers)
+        self.assertIn("backend fingerprint mismatch", blockers)
+        self.assertIn("query_role_calls must be > 0", blockers)
+
+    def test_bad_serving_q8_delta_or_p95_defers_non_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_complete_gate(root)
+            evidence = write_valid_non_default_evidence(root)
+            bad_serving = corkscrewdb_serving_smoke_manifest()
+            bad_serving["offline_comparison"]["q8"]["delta"]["ndcg_at_10"] = 0.01
+            bad_serving["offline_comparison"]["q8"]["corkscrew"]["p95_ms"] = 60.0
+            write_json(evidence["corkscrewdb_serving_smoke_evidence"], bad_serving)
+
+            summary = summarizer.build_summary(
+                bge_gate_root=root,
+                datasets=["scifact", "nfcorpus", "fiqa"],
+                **evidence,
+            )
+
+        self.assertEqual(summary["non_default_candidate_status"], "defer")
+        blockers = "\n".join(summary["blockers"]["non_default"])
+        self.assertIn("CorkScrewDB serving q8 nDCG delta exceeds tolerance", blockers)
+        self.assertIn("CorkScrewDB serving q8 p95 exceeds 50ms ceiling", blockers)
 
     def test_scan_paths_flags_public_v6_and_allows_internal_run_label(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_complete_gate(root / "gate")
+            evidence = write_valid_non_default_evidence(root)
             docs = root / "docs"
             docs.mkdir()
             (docs / "bad.md").write_text("Public release v6 is ready.\n", encoding="utf-8")
@@ -267,13 +462,14 @@ class SummarizeEosEmbedder1ReleaseReadinessTest(unittest.TestCase):
                 bge_gate_root=root / "gate",
                 datasets=["scifact", "nfcorpus", "fiqa"],
                 scan_paths=[docs, ignored.parent],
+                **evidence,
             )
 
         self.assertEqual(summary["non_default_candidate_status"], "defer")
         matches = summary["public_name_hygiene"]["matches"]
         self.assertEqual(len(matches), 1)
         self.assertTrue(matches[0]["path"].endswith("bad.md"))
-        self.assertIn("public-name hygiene", summary["blockers"]["non_default"][0])
+        self.assertTrue(any("public-name hygiene" in blocker for blocker in summary["blockers"]["non_default"]))
 
 
 if __name__ == "__main__":
