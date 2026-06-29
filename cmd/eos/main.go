@@ -526,7 +526,7 @@ func runImportedEmbedderCandidate(args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: eos imported-embedder-candidate [--root dir] [--package path] [--path-only] [--verify] [--json]")
+		return fmt.Errorf("usage: eos imported-embedder-candidate (--package path | --root dir) [--path-only] [--verify] [--json]")
 	}
 
 	info, err := models.ImportedEmbedderCandidateAssetInfo(*root, *packagePath)
@@ -559,10 +559,10 @@ func runImportedEmbedderCandidate(args []string) error {
 		}{Asset: info, Verification: verification})
 	}
 
-	fmt.Printf("asset_id: %s\n", info.AssetID)
 	fmt.Printf("model: %s\n", info.ModelName)
 	fmt.Printf("display_name: %s\n", info.DisplayName)
 	fmt.Printf("source_model: %s\n", info.SourceModel)
+	fmt.Printf("candidate_id: %s\n", info.CandidateID)
 	fmt.Printf("status: %s\n", info.Status)
 	fmt.Printf("package: %s\n", info.PackagePath)
 	fmt.Printf("load_path: %s\n", info.LoadPath)

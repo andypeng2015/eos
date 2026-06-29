@@ -9,24 +9,26 @@ import (
 )
 
 const (
-	ImportedEmbedderCandidateAssetID             = "corkscrewdb-imported-bge-eos-embed-v1-candidate"
-	ImportedEmbedderCandidateModelName           = "eos-embed-v1"
+	ImportedEmbedderCandidateID                  = "corkscrewdb-imported-bge-eos-embed-v1-candidate"
+	ImportedEmbedderCandidateModelName           = eosruntime.ImportedBERTEmbedderCandidateModelName
 	ImportedEmbedderCandidateDisplayName         = "Eos Embedder 1"
-	ImportedEmbedderCandidateSourceModel         = "BAAI/bge-small-en-v1.5"
+	ImportedEmbedderCandidateSourceModel         = eosruntime.ImportedBERTEmbedderCandidateSourceModel
 	ImportedEmbedderCandidateStatus              = "non_default_reference_candidate"
-	ImportedEmbedderCandidatePackageRelativePath = "runs/pretrained-bert-current-hf-parity-v1-20260629T090818Z/bge/bge-small-en-v1.5.imported.mll"
-	ImportedEmbedderCandidatePackageSHA256       = "841b0d851c06290daeeab4bf4d25cb1dd7bb87920316dac950e1b556a3bae763"
-	ImportedEmbedderCandidatePackageIdentity     = "a356a4b7dc29a8d0f0a7b7bd45e7a9d2afbfa651c1a5bfaa05008c7157ba9637"
+	ImportedEmbedderCandidatePackageRelativePath = eosruntime.ImportedBERTEmbedderCandidatePackageRelativePathHint
+	ImportedEmbedderCandidatePackageSHA256       = eosruntime.ImportedBERTEmbedderCandidatePackageSHA256
+	ImportedEmbedderCandidatePackageIdentity     = eosruntime.ImportedBERTEmbedderCandidatePackageIdentitySHA256
+	ImportedEmbedderCandidatePublicIdentityNote  = "Public identity is model_name/display_name/source_model; candidate_id is an internal review slug."
+	ImportedEmbedderCandidateAssetID             = ImportedEmbedderCandidateID
 )
 
 type ImportedEmbedderCandidateAsset struct {
-	AssetID             string `json:"asset_id"`
+	CandidateID         string `json:"candidate_id"`
 	ModelName           string `json:"model_name"`
 	DisplayName         string `json:"display_name"`
 	SourceModel         string `json:"source_model"`
 	Status              string `json:"status"`
+	PublicIdentityNote  string `json:"public_identity_note"`
 	PackagePath         string `json:"package_path"`
-	PackageRelativePath string `json:"package_relative_path,omitempty"`
 	PackageSHA256       string `json:"package_sha256"`
 	PackageIdentity     string `json:"package_identity"`
 	QualityClaim        bool   `json:"quality_claim"`
@@ -48,67 +50,92 @@ type ImportedEmbedderIdentityCheck struct {
 	OK               bool   `json:"ok"`
 }
 
+type ImportedEmbedderCandidateVerifyConfig struct {
+	Root                   string
+	PackagePath            string
+	ExpectedSHA256         string
+	ExpectedIdentitySHA256 string
+}
+
 func ImportedEmbedderCandidateAssetInfo(root, packagePath string) (ImportedEmbedderCandidateAsset, error) {
 	path := packagePath
-	rel := ImportedEmbedderCandidatePackageRelativePath
 	if path == "" {
-		resolvedRoot, err := ResolveImportedEmbedderCandidateRoot(root)
+		if root == "" {
+			return ImportedEmbedderCandidateAsset{}, fmt.Errorf("imported embedder candidate package path is required; pass --package <path> or --root <repo-root>")
+		}
+		resolvedRoot, err := filepath.Abs(root)
 		if err != nil {
 			return ImportedEmbedderCandidateAsset{}, err
 		}
 		path = filepath.Join(resolvedRoot, ImportedEmbedderCandidatePackageRelativePath)
-	} else {
-		abs, err := filepath.Abs(path)
-		if err != nil {
-			return ImportedEmbedderCandidateAsset{}, err
+		if !importedEmbedderCandidatePackagePathExists(path) {
+			return ImportedEmbedderCandidateAsset{}, fmt.Errorf("imported embedder candidate package %q not found under root %q; pass --package <path>", ImportedEmbedderCandidatePackageRelativePath, resolvedRoot)
 		}
-		path = abs
-		rel = ""
 	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return ImportedEmbedderCandidateAsset{}, err
+	}
+	path = abs
 	return ImportedEmbedderCandidateAsset{
-		AssetID:             ImportedEmbedderCandidateAssetID,
+		CandidateID:         ImportedEmbedderCandidateID,
 		ModelName:           ImportedEmbedderCandidateModelName,
 		DisplayName:         ImportedEmbedderCandidateDisplayName,
 		SourceModel:         ImportedEmbedderCandidateSourceModel,
 		Status:              ImportedEmbedderCandidateStatus,
+		PublicIdentityNote:  ImportedEmbedderCandidatePublicIdentityNote,
 		PackagePath:         path,
-		PackageRelativePath: rel,
 		PackageSHA256:       ImportedEmbedderCandidatePackageSHA256,
 		PackageIdentity:     ImportedEmbedderCandidatePackageIdentity,
 		QualityClaim:        false,
 		DefaultAliasChanged: false,
-		LoadPath:            "runtime.LoadPretrainedBERTTextEmbedder",
+		LoadPath:            "runtime.LoadImportedBERTEmbedderCandidate",
 	}, nil
 }
 
 func ResolveImportedEmbedderCandidateRoot(root string) (string, error) {
-	if root != "" {
-		return filepath.Abs(root)
+	if root == "" {
+		return "", fmt.Errorf("imported embedder candidate root is required; pass --root or --package")
 	}
-	if cwd, err := os.Getwd(); err == nil {
-		for dir := cwd; ; dir = filepath.Dir(dir) {
-			if importedEmbedderCandidatePackageExists(dir) {
-				return dir, nil
-			}
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-		}
+	resolved, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("imported embedder candidate package %q not found; pass --root or --package", ImportedEmbedderCandidatePackageRelativePath)
+	if !importedEmbedderCandidatePackageExists(resolved) {
+		return "", fmt.Errorf("imported embedder candidate package %q not found under root %q; pass --package", ImportedEmbedderCandidatePackageRelativePath, resolved)
+	}
+	return resolved, nil
 }
 
 func VerifyImportedEmbedderCandidate(root, packagePath string) (ImportedEmbedderCandidateVerification, error) {
-	info, err := ImportedEmbedderCandidateAssetInfo(root, packagePath)
+	return VerifyImportedEmbedderCandidateWithConfig(ImportedEmbedderCandidateVerifyConfig{
+		Root:                   root,
+		PackagePath:            packagePath,
+		ExpectedSHA256:         ImportedEmbedderCandidatePackageSHA256,
+		ExpectedIdentitySHA256: ImportedEmbedderCandidatePackageIdentity,
+	})
+}
+
+func VerifyImportedEmbedderCandidateWithConfig(cfg ImportedEmbedderCandidateVerifyConfig) (ImportedEmbedderCandidateVerification, error) {
+	expectedSHA := cfg.ExpectedSHA256
+	if expectedSHA == "" {
+		expectedSHA = ImportedEmbedderCandidatePackageSHA256
+	}
+	expectedIdentity := cfg.ExpectedIdentitySHA256
+	if expectedIdentity == "" {
+		expectedIdentity = ImportedEmbedderCandidatePackageIdentity
+	}
+	info, err := ImportedEmbedderCandidateAssetInfo(cfg.Root, cfg.PackagePath)
 	if err != nil {
 		return ImportedEmbedderCandidateVerification{}, err
 	}
+	info.PackageSHA256 = expectedSHA
+	info.PackageIdentity = expectedIdentity
 	report := ImportedEmbedderCandidateVerification{
 		Asset: info,
 		OK:    true,
 	}
-	file, err := verifyDefaultEmbedderFile("package", info.PackagePath, info.PackageSHA256)
+	file, err := verifyDefaultEmbedderFile("package", info.PackagePath, expectedSHA)
 	if err != nil {
 		report.OK = false
 		return report, err
@@ -126,8 +153,8 @@ func VerifyImportedEmbedderCandidate(root, packagePath string) (ImportedEmbedder
 	report.Identity = ImportedEmbedderIdentityCheck{
 		Path:             info.PackagePath,
 		Identity:         identity,
-		ExpectedIdentity: info.PackageIdentity,
-		OK:               identity == info.PackageIdentity,
+		ExpectedIdentity: expectedIdentity,
+		OK:               identity == expectedIdentity,
 	}
 	if !report.Identity.OK {
 		report.OK = false
@@ -140,6 +167,10 @@ func VerifyImportedEmbedderCandidate(root, packagePath string) (ImportedEmbedder
 
 func importedEmbedderCandidatePackageExists(root string) bool {
 	path := filepath.Join(root, ImportedEmbedderCandidatePackageRelativePath)
+	return importedEmbedderCandidatePackagePathExists(path)
+}
+
+func importedEmbedderCandidatePackagePathExists(path string) bool {
 	if st, err := os.Stat(path); err == nil && !st.IsDir() {
 		return true
 	}

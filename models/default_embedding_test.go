@@ -834,8 +834,8 @@ func TestImportedEmbedderCandidateAssetInfoOverrideIsNonDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("imported candidate asset info: %v", err)
 	}
-	if info.AssetID != ImportedEmbedderCandidateAssetID {
-		t.Fatalf("asset id = %q, want %q", info.AssetID, ImportedEmbedderCandidateAssetID)
+	if info.CandidateID != ImportedEmbedderCandidateID {
+		t.Fatalf("candidate id = %q, want %q", info.CandidateID, ImportedEmbedderCandidateID)
 	}
 	if info.ModelName != ImportedEmbedderCandidateModelName {
 		t.Fatalf("model name = %q, want %q", info.ModelName, ImportedEmbedderCandidateModelName)
@@ -852,9 +852,6 @@ func TestImportedEmbedderCandidateAssetInfoOverrideIsNonDefault(t *testing.T) {
 	if info.QualityClaim || info.DefaultAliasChanged {
 		t.Fatalf("candidate unexpectedly claims default or quality: %+v", info)
 	}
-	if info.PackageRelativePath != "" {
-		t.Fatalf("override should clear package relative path, got %q", info.PackageRelativePath)
-	}
 	if info.PackagePath != override {
 		t.Fatalf("package path = %q, want %q", info.PackagePath, override)
 	}
@@ -865,6 +862,13 @@ func TestImportedEmbedderCandidateAssetInfoOverrideIsNonDefault(t *testing.T) {
 
 func TestImportedEmbedderCandidateAssetInfoRootUsesRunArtifactPath(t *testing.T) {
 	root := t.TempDir()
+	packagePath := filepath.Join(root, ImportedEmbedderCandidatePackageRelativePath)
+	if err := os.MkdirAll(filepath.Dir(packagePath), 0o755); err != nil {
+		t.Fatalf("mkdir package dir: %v", err)
+	}
+	if err := os.WriteFile(packagePath, []byte("fixture"), 0o644); err != nil {
+		t.Fatalf("write package fixture: %v", err)
+	}
 	info, err := ImportedEmbedderCandidateAssetInfo(root, "")
 	if err != nil {
 		t.Fatalf("imported candidate asset info with root: %v", err)
@@ -873,7 +877,11 @@ func TestImportedEmbedderCandidateAssetInfoRootUsesRunArtifactPath(t *testing.T)
 	if info.PackagePath != want {
 		t.Fatalf("package path = %q, want %q", info.PackagePath, want)
 	}
-	if info.PackageRelativePath != ImportedEmbedderCandidatePackageRelativePath {
-		t.Fatalf("relative package path = %q", info.PackageRelativePath)
+}
+
+func TestImportedEmbedderCandidateAssetInfoRequiresExplicitPath(t *testing.T) {
+	_, err := ImportedEmbedderCandidateAssetInfo("", "")
+	if err == nil || !strings.Contains(err.Error(), "package path is required") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

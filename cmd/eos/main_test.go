@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -396,14 +398,14 @@ func TestRunImportedEmbedderCandidateJSONIsNonDefaultReference(t *testing.T) {
 	})
 	var payload struct {
 		Asset struct {
-			AssetID             string `json:"asset_id"`
+			CandidateID         string `json:"candidate_id"`
 			ModelName           string `json:"model_name"`
 			SourceModel         string `json:"source_model"`
 			Status              string `json:"status"`
+			PublicIdentityNote  string `json:"public_identity_note"`
 			PackagePath         string `json:"package_path"`
 			QualityClaim        bool   `json:"quality_claim"`
 			DefaultAliasChanged bool   `json:"default_alias_changed"`
-			PackageRelativePath string `json:"package_relative_path"`
 			LoadPath            string `json:"load_path"`
 		} `json:"asset"`
 		Verification *models.ImportedEmbedderCandidateVerification `json:"verification,omitempty"`
@@ -411,8 +413,8 @@ func TestRunImportedEmbedderCandidateJSONIsNonDefaultReference(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &payload); err != nil {
 		t.Fatalf("unmarshal imported candidate JSON: %v\n%s", err, output)
 	}
-	if payload.Asset.AssetID != models.ImportedEmbedderCandidateAssetID {
-		t.Fatalf("asset id = %q", payload.Asset.AssetID)
+	if payload.Asset.CandidateID != models.ImportedEmbedderCandidateID {
+		t.Fatalf("candidate id = %q", payload.Asset.CandidateID)
 	}
 	if payload.Asset.ModelName != models.ImportedEmbedderCandidateModelName {
 		t.Fatalf("model name = %q", payload.Asset.ModelName)
@@ -423,17 +425,97 @@ func TestRunImportedEmbedderCandidateJSONIsNonDefaultReference(t *testing.T) {
 	if payload.Asset.Status != models.ImportedEmbedderCandidateStatus {
 		t.Fatalf("status = %q", payload.Asset.Status)
 	}
-	if payload.Asset.PackagePath != packagePath || payload.Asset.PackageRelativePath != "" {
+	if !strings.Contains(payload.Asset.PublicIdentityNote, "candidate_id is an internal") {
+		t.Fatalf("public identity note = %q", payload.Asset.PublicIdentityNote)
+	}
+	if payload.Asset.PackagePath != packagePath {
 		t.Fatalf("unexpected package path fields: %+v", payload.Asset)
 	}
 	if payload.Asset.QualityClaim || payload.Asset.DefaultAliasChanged {
 		t.Fatalf("candidate unexpectedly claims quality/default: %+v", payload.Asset)
 	}
-	if payload.Asset.LoadPath != "runtime.LoadPretrainedBERTTextEmbedder" {
+	if payload.Asset.LoadPath != "runtime.LoadImportedBERTEmbedderCandidate" {
 		t.Fatalf("load path = %q", payload.Asset.LoadPath)
 	}
 	if payload.Verification != nil {
 		t.Fatalf("verification should be omitted without --verify: %+v", payload.Verification)
+	}
+}
+
+func TestRunImportedEmbedderCandidateRequiresExplicitPackageOrRoot(t *testing.T) {
+	err := runImportedEmbedderCandidate([]string{"--json"})
+	if err == nil || !strings.Contains(err.Error(), "package path is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunImportedEmbedderCandidateVerifyJSONMismatch(t *testing.T) {
+	packagePath := writeCommandPretrainedBERTPackageFixture(t, "BAAI/bge-small-en-v1.5", true)
+	output, err := captureRunOutputAndError(t, []string{
+		"imported-embedder-candidate",
+		"--package", packagePath,
+		"--verify",
+		"--json",
+	})
+	if err == nil {
+		t.Fatal("expected verification mismatch")
+	}
+	var payload struct {
+		Asset struct {
+			CandidateID string `json:"candidate_id"`
+			ModelName   string `json:"model_name"`
+		} `json:"asset"`
+		Verification struct {
+			OK   bool `json:"ok"`
+			File struct {
+				OK             bool   `json:"ok"`
+				SHA256         string `json:"sha256"`
+				ExpectedSHA256 string `json:"expected_sha256"`
+			} `json:"file"`
+		} `json:"verification"`
+	}
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		t.Fatalf("unmarshal verification JSON: %v\n%s", err, output)
+	}
+	if payload.Asset.CandidateID != models.ImportedEmbedderCandidateID || payload.Asset.ModelName != models.ImportedEmbedderCandidateModelName {
+		t.Fatalf("unexpected asset identity: %+v", payload.Asset)
+	}
+	if payload.Verification.OK || payload.Verification.File.OK {
+		t.Fatalf("expected failed file verification: %+v", payload.Verification)
+	}
+	if payload.Verification.File.SHA256 == "" || payload.Verification.File.ExpectedSHA256 != models.ImportedEmbedderCandidatePackageSHA256 {
+		t.Fatalf("unexpected file check: %+v", payload.Verification.File)
+	}
+}
+
+func TestVerifyImportedEmbedderCandidateWithConfigFixtureSuccessAndIdentityMismatch(t *testing.T) {
+	packagePath := writeCommandPretrainedBERTPackageFixture(t, "BAAI/bge-small-en-v1.5", true)
+	pkg, err := eosruntime.ReadPretrainedBERTPackageFile(packagePath)
+	if err != nil {
+		t.Fatalf("read package: %v", err)
+	}
+	packageSHA := commandTestSHA256File(t, packagePath)
+	report, err := models.VerifyImportedEmbedderCandidateWithConfig(models.ImportedEmbedderCandidateVerifyConfig{
+		PackagePath:            packagePath,
+		ExpectedSHA256:         packageSHA,
+		ExpectedIdentitySHA256: pkg.IdentityHash(),
+	})
+	if err != nil {
+		t.Fatalf("verify fixture candidate: %v", err)
+	}
+	if !report.OK || !report.File.OK || !report.Identity.OK {
+		t.Fatalf("unexpected success report: %+v", report)
+	}
+	report, err = models.VerifyImportedEmbedderCandidateWithConfig(models.ImportedEmbedderCandidateVerifyConfig{
+		PackagePath:            packagePath,
+		ExpectedSHA256:         packageSHA,
+		ExpectedIdentitySHA256: strings.Repeat("0", 64),
+	})
+	if err == nil || !strings.Contains(err.Error(), "verification failed") {
+		t.Fatalf("expected identity mismatch, got report=%+v err=%v", report, err)
+	}
+	if report.OK || report.Identity.OK || !report.File.OK {
+		t.Fatalf("unexpected mismatch report: %+v", report)
 	}
 }
 
@@ -7138,4 +7220,14 @@ func captureRunOutputAndError(t *testing.T, args []string) (string, error) {
 		t.Fatalf("close stdout reader: %v", err)
 	}
 	return string(data), runErr
+}
+
+func commandTestSHA256File(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
