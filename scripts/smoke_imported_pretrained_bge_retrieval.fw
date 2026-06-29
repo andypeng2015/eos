@@ -111,6 +111,7 @@ type smokeManifest struct {
 	MaxDocs        int          `json:"max_docs"`
 	MaxQueries     int          `json:"max_queries"`
 	BatchSize      int          `json:"batch_size"`
+	Resume         bool         `json:"resume"`
 	QualityClaim   bool         `json:"quality_claim"`
 	ExportManifest string       `json:"export_manifest"`
 	DenseMetrics   string       `json:"dense_metrics"`
@@ -148,6 +149,7 @@ Environment:
   EOS_IMPORTED_BGE_SMOKE_UNCAPPED=0        # 1 enables full SciFact quality floors
   EOS_IMPORTED_BGE_SMOKE_TOP_K=100
   EOS_IMPORTED_BGE_SMOKE_PROGRESS_EVERY=0
+  EOS_IMPORTED_BGE_SMOKE_RESUME=0          # 1 passes --resume to vector export
   EOS_IMPORTED_BGE_SMOKE_MIN_DENSE_NDCG=0.70 # uncapped default
   EOS_IMPORTED_BGE_SMOKE_MIN_Q8_NDCG=0.70
   EOS_IMPORTED_BGE_SMOKE_MIN_Q4_NDCG=0.66
@@ -464,6 +466,7 @@ func main() {
 	packagePath := rootedPath(root, strings.TrimSpace(os.Getenv("EOS_IMPORTED_BGE_SMOKE_PACKAGE")))
 	usePackage := envBool("EOS_IMPORTED_BGE_SMOKE_USE_PACKAGE", false)
 	uncapped := envBool("EOS_IMPORTED_BGE_SMOKE_UNCAPPED", false)
+	resume := envBool("EOS_IMPORTED_BGE_SMOKE_RESUME", false)
 	defaultMaxDocs := 120
 	defaultMaxQueries := 8
 	if uncapped {
@@ -621,6 +624,9 @@ func main() {
 	}
 	if progressEvery > 0 {
 		exportArgs = append(exportArgs, "--progress-every", strconv.Itoa(progressEvery))
+	}
+	if resume {
+		exportArgs = append(exportArgs, "--resume")
 	}
 	exportArgs = append(exportArgs, rel(root, datasetDir), rel(root, vectorDir))
 	if err := runCapture(root, "export-pretrained-bert-retrieval-vectors", exportArgs, filepath.Join(logDir, "export-pretrained-bert-retrieval-vectors.log")); err != nil {
@@ -807,6 +813,7 @@ func main() {
 		MaxDocs:        maxDocs,
 		MaxQueries:     maxQueries,
 		BatchSize:      batchSize,
+		Resume:         resume,
 		QualityClaim:   false,
 		ExportManifest: rel(root, exportManifestPath),
 		DenseMetrics:   rel(root, denseMetricsPath),
