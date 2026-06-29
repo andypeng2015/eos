@@ -324,6 +324,7 @@ def build_summary(
     compact_native_backend_tensor_ops_source: Path = Path(compact_native.DEFAULT_RUNTIME_BACKEND_TENSOR_OPS_SOURCE),
     compact_native_default_embedding_test: Path = Path(compact_native.DEFAULT_MODELS_DEFAULT_EMBEDDING_TEST),
     compact_native_runtime_embedding_model_test: Path = Path(compact_native.DEFAULT_RUNTIME_EMBEDDING_MODEL_TEST),
+    compact_native_runtime_embedding_trainer_test: Path = Path(compact_native.DEFAULT_RUNTIME_EMBEDDING_TRAINER_TEST),
     compact_native_backend_compact_attention_test: Path = Path(
         compact_native.DEFAULT_RUNTIME_BACKEND_COMPACT_ATTENTION_TEST
     ),
@@ -416,6 +417,7 @@ def build_summary(
         backend_tensor_ops_source=compact_native_backend_tensor_ops_source,
         default_embedding_test=compact_native_default_embedding_test,
         runtime_embedding_model_test=compact_native_runtime_embedding_model_test,
+        runtime_embedding_trainer_test=compact_native_runtime_embedding_trainer_test,
         backend_compact_attention_test=compact_native_backend_compact_attention_test,
         cmd_eos_main_test=compact_native_cmd_eos_main_test,
         bge_listwise_validation_report=compact_native_student_report,
@@ -667,6 +669,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--compact-native-default-embedding-test", default=compact_native.DEFAULT_MODELS_DEFAULT_EMBEDDING_TEST)
     parser.add_argument("--compact-native-runtime-embedding-model-test", default=compact_native.DEFAULT_RUNTIME_EMBEDDING_MODEL_TEST)
     parser.add_argument(
+        "--compact-native-runtime-embedding-trainer-test",
+        default=compact_native.DEFAULT_RUNTIME_EMBEDDING_TRAINER_TEST,
+    )
+    parser.add_argument(
         "--compact-native-backend-compact-attention-test",
         default=compact_native.DEFAULT_RUNTIME_BACKEND_COMPACT_ATTENTION_TEST,
     )
@@ -745,6 +751,7 @@ def main(argv: list[str] | None = None) -> int:
             compact_native_backend_tensor_ops_source=Path(args.compact_native_backend_tensor_ops_source),
             compact_native_default_embedding_test=Path(args.compact_native_default_embedding_test),
             compact_native_runtime_embedding_model_test=Path(args.compact_native_runtime_embedding_model_test),
+            compact_native_runtime_embedding_trainer_test=Path(args.compact_native_runtime_embedding_trainer_test),
             compact_native_backend_compact_attention_test=Path(args.compact_native_backend_compact_attention_test),
             compact_native_cmd_eos_main_test=Path(args.compact_native_cmd_eos_main_test),
             compact_native_heads2_lr_bracket_report=Path(args.compact_native_heads2_lr_bracket_report),

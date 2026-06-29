@@ -157,6 +157,7 @@ def compact_cli_args(paths: dict[str, Path]) -> list[str]:
         "compact_native_backend_tensor_ops_source": "--compact-native-backend-tensor-ops-source",
         "compact_native_default_embedding_test": "--compact-native-default-embedding-test",
         "compact_native_runtime_embedding_model_test": "--compact-native-runtime-embedding-model-test",
+        "compact_native_runtime_embedding_trainer_test": "--compact-native-runtime-embedding-trainer-test",
         "compact_native_backend_compact_attention_test": "--compact-native-backend-compact-attention-test",
         "compact_native_cmd_eos_main_test": "--compact-native-cmd-eos-main-test",
         "compact_native_heads2_lr_bracket_report": "--compact-native-heads2-lr-bracket-report",
@@ -235,6 +236,11 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
         )
         self.assertFalse(summary["packets"]["compact_native_student"]["details"]["promotion_ready"])
         self.assertFalse(summary["packets"]["compact_native_student"]["details"]["training_ready"])
+        self.assertTrue(
+            summary["packets"]["compact_native_student"]["details"]["compact_native_readiness"]["components"][
+                "serving_parity"
+            ]["details"]["trainer_serving_numeric_parity"]
+        )
         self.assertFalse(summary["packets"]["stageabc_pretraining_distillation"]["details"]["training_ready"])
         self.assertEqual(summary["summary"]["quantization_profile_status"], "q8_ready_for_review")
         self.assertEqual(summary["public_identity_policy"]["public_name"], "Eos Embedder 1")
@@ -348,6 +354,7 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                 compact_native_backend_tensor_ops_source=root / "missing-tensor-ops.go",
                 compact_native_default_embedding_test=root / "missing-default-embedding-test.go",
                 compact_native_runtime_embedding_model_test=root / "missing-runtime-embedding-test.go",
+                compact_native_runtime_embedding_trainer_test=root / "missing-runtime-embedding-trainer-test.go",
                 compact_native_backend_compact_attention_test=root / "missing-compact-attention-test.go",
                 compact_native_cmd_eos_main_test=root / "missing-main-test.go",
                 compact_native_heads2_lr_bracket_report=root / "missing-bracket.md",

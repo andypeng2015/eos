@@ -31,6 +31,7 @@ DEFAULT_RUNTIME_EMBEDDING_MODEL_SOURCE = "runtime/embedding_model.go"
 DEFAULT_RUNTIME_BACKEND_TENSOR_OPS_SOURCE = "runtime/backend/tensor_ops.go"
 DEFAULT_MODELS_DEFAULT_EMBEDDING_TEST = "models/default_embedding_test.go"
 DEFAULT_RUNTIME_EMBEDDING_MODEL_TEST = "runtime/embedding_model_test.go"
+DEFAULT_RUNTIME_EMBEDDING_TRAINER_TEST = "runtime/embedding_trainer_test.go"
 DEFAULT_RUNTIME_BACKEND_COMPACT_ATTENTION_TEST = "runtime/backend/compact_attention_ops_test.go"
 DEFAULT_CMD_EOS_MAIN_TEST = "cmd/eos/main_test.go"
 DEFAULT_BGE_LISTWISE_VALIDATION_REPORT = (
@@ -256,6 +257,7 @@ def summarize_serving_parity(
     backend_tensor_ops_source: Path,
     default_embedding_test: Path,
     runtime_embedding_model_test: Path,
+    runtime_embedding_trainer_test: Path,
     backend_compact_attention_test: Path,
     cmd_eos_main_test: Path,
 ) -> dict[str, Any]:
@@ -308,6 +310,17 @@ def summarize_serving_parity(
                 "runtime_compact_multihead_source": "compact_multihead_attention_h2",
             },
         ),
+        "runtime_embedding_trainer_test": (
+            runtime_embedding_trainer_test,
+            {
+                "trainer_serving_parity_test": "TestCompactEmbeddingTrainerServingPackageVectorParity",
+                "compact_checkpoint": "compactTrainStateTestCheckpoint(3)",
+                "writes_embedding_package": "trainer.WriteEmbeddingPackage",
+                "serving_embed_with_role": "model.EmbedWithRole",
+                "trainer_compact_encode": "trainer.encodeCompactSequence",
+                "float_tolerance_assertion": "assertFloat32SlicesClose",
+            },
+        ),
         "backend_compact_attention_test": (
             backend_compact_attention_test,
             {
@@ -355,13 +368,15 @@ def summarize_serving_parity(
             "focused_go_verification": [
                 "go test ./runtime/backend -run TestCompactMultiheadAttentionTensor -count=1",
                 "go test ./runtime -run TestLoadEmbeddingAcceptsCompactMultiHeadServingGraph -count=1",
+                "go test ./runtime -run TestCompactEmbeddingTrainerServingPackageVectorParity -count=1",
                 "go test ./models -run TestInitDefaultEmbeddingPackageCreatesCompactMultiHeadServingGraph -count=1",
                 "go test ./cmd/eos -run TestRunInitModelCreatesCompactMultiHeadServingGraph -count=1",
             ],
-            "numeric_parity_caveat": (
-                "Source and focused tests cover generated serving graphs, runtime loading/embedding, "
-                "and backend masked multi-head attention; no exact trainer-vs-serving numeric parity "
-                "claim is made here."
+            "trainer_serving_numeric_parity": True,
+            "numeric_parity_evidence": (
+                "Exact trainer-to-serving package vector parity is covered by "
+                "TestCompactEmbeddingTrainerServingPackageVectorParity for a compact two-head/two-repeat "
+                "checkpoint and f16 export tolerance."
             ),
         },
     )
@@ -586,6 +601,7 @@ def build_summary(
     backend_tensor_ops_source: Path = Path(DEFAULT_RUNTIME_BACKEND_TENSOR_OPS_SOURCE),
     default_embedding_test: Path = Path(DEFAULT_MODELS_DEFAULT_EMBEDDING_TEST),
     runtime_embedding_model_test: Path = Path(DEFAULT_RUNTIME_EMBEDDING_MODEL_TEST),
+    runtime_embedding_trainer_test: Path = Path(DEFAULT_RUNTIME_EMBEDDING_TRAINER_TEST),
     backend_compact_attention_test: Path = Path(DEFAULT_RUNTIME_BACKEND_COMPACT_ATTENTION_TEST),
     cmd_eos_main_test: Path = Path(DEFAULT_CMD_EOS_MAIN_TEST),
     bge_listwise_validation_report: Path = Path(DEFAULT_BGE_LISTWISE_VALIDATION_REPORT),
@@ -618,6 +634,7 @@ def build_summary(
             backend_tensor_ops_source=backend_tensor_ops_source,
             default_embedding_test=default_embedding_test,
             runtime_embedding_model_test=runtime_embedding_model_test,
+            runtime_embedding_trainer_test=runtime_embedding_trainer_test,
             backend_compact_attention_test=backend_compact_attention_test,
             cmd_eos_main_test=cmd_eos_main_test,
         ),
@@ -678,6 +695,7 @@ def build_summary(
             "backend_tensor_ops_source": str(backend_tensor_ops_source),
             "default_embedding_test": str(default_embedding_test),
             "runtime_embedding_model_test": str(runtime_embedding_model_test),
+            "runtime_embedding_trainer_test": str(runtime_embedding_trainer_test),
             "backend_compact_attention_test": str(backend_compact_attention_test),
             "cmd_eos_main_test": str(cmd_eos_main_test),
             "bge_listwise_validation_report": str(bge_listwise_validation_report),
@@ -757,6 +775,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backend-tensor-ops-source", default=DEFAULT_RUNTIME_BACKEND_TENSOR_OPS_SOURCE)
     parser.add_argument("--default-embedding-test", default=DEFAULT_MODELS_DEFAULT_EMBEDDING_TEST)
     parser.add_argument("--runtime-embedding-model-test", default=DEFAULT_RUNTIME_EMBEDDING_MODEL_TEST)
+    parser.add_argument("--runtime-embedding-trainer-test", default=DEFAULT_RUNTIME_EMBEDDING_TRAINER_TEST)
     parser.add_argument("--backend-compact-attention-test", default=DEFAULT_RUNTIME_BACKEND_COMPACT_ATTENTION_TEST)
     parser.add_argument("--cmd-eos-main-test", default=DEFAULT_CMD_EOS_MAIN_TEST)
     parser.add_argument("--bge-listwise-validation-report", default=DEFAULT_BGE_LISTWISE_VALIDATION_REPORT)
@@ -790,6 +809,7 @@ def main(argv: list[str] | None = None) -> int:
             backend_tensor_ops_source=Path(args.backend_tensor_ops_source),
             default_embedding_test=Path(args.default_embedding_test),
             runtime_embedding_model_test=Path(args.runtime_embedding_model_test),
+            runtime_embedding_trainer_test=Path(args.runtime_embedding_trainer_test),
             backend_compact_attention_test=Path(args.backend_compact_attention_test),
             cmd_eos_main_test=Path(args.cmd_eos_main_test),
             bge_listwise_validation_report=Path(args.bge_listwise_validation_report),

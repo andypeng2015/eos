@@ -115,6 +115,16 @@ def write_compact_native_fixture(root: Path) -> dict[str, Path]:
         "compact_multihead_attention_h2\n",
         encoding="utf-8",
     )
+    runtime_embedding_trainer_test = base / "runtime" / "embedding_trainer_test.go"
+    runtime_embedding_trainer_test.write_text(
+        "TestCompactEmbeddingTrainerServingPackageVectorParity\n"
+        "compactTrainStateTestCheckpoint(3)\n"
+        "trainer.WriteEmbeddingPackage\n"
+        "model.EmbedWithRole\n"
+        "trainer.encodeCompactSequence\n"
+        "assertFloat32SlicesClose\n",
+        encoding="utf-8",
+    )
     backend_compact_attention_test = base / "runtime" / "backend" / "compact_attention_ops_test.go"
     backend_compact_attention_test.write_text(
         "TestCompactMultiheadAttentionTensorMatchesReference\n"
@@ -169,6 +179,7 @@ def write_compact_native_fixture(root: Path) -> dict[str, Path]:
         "compact_native_backend_tensor_ops_source": backend_tensor_ops_source,
         "compact_native_default_embedding_test": default_embedding_test,
         "compact_native_runtime_embedding_model_test": runtime_embedding_model_test,
+        "compact_native_runtime_embedding_trainer_test": runtime_embedding_trainer_test,
         "compact_native_backend_compact_attention_test": backend_compact_attention_test,
         "compact_native_cmd_eos_main_test": cmd_eos_main_test,
         "compact_native_student_report": bge_report,
@@ -205,6 +216,7 @@ class SummarizeCompactNativeReadinessTest(unittest.TestCase):
                 backend_tensor_ops_source=paths["compact_native_backend_tensor_ops_source"],
                 default_embedding_test=paths["compact_native_default_embedding_test"],
                 runtime_embedding_model_test=paths["compact_native_runtime_embedding_model_test"],
+                runtime_embedding_trainer_test=paths["compact_native_runtime_embedding_trainer_test"],
                 backend_compact_attention_test=paths["compact_native_backend_compact_attention_test"],
                 cmd_eos_main_test=paths["compact_native_cmd_eos_main_test"],
                 bge_listwise_validation_report=paths["compact_native_student_report"],
@@ -238,6 +250,16 @@ class SummarizeCompactNativeReadinessTest(unittest.TestCase):
         self.assertEqual(summary["components"]["generic_bootstrap"]["status"], "evidence_ready")
         self.assertEqual(summary["components"]["compact_train_guard"]["status"], "evidence_ready")
         self.assertEqual(summary["components"]["serving_parity"]["status"], "source_and_tests_ready")
+        self.assertTrue(summary["components"]["serving_parity"]["details"]["trainer_serving_numeric_parity"])
+        self.assertIn(
+            "Exact trainer-to-serving package vector parity",
+            summary["components"]["serving_parity"]["details"]["numeric_parity_evidence"],
+        )
+        self.assertTrue(
+            summary["components"]["serving_parity"]["details"]["checks"]["runtime_embedding_trainer_test"][
+                "trainer_serving_parity_test"
+            ]
+        )
         self.assertIn(
             "historical gate report exists but is superseded by current source/test evidence",
             summary["components"]["serving_parity"]["warnings"],
@@ -273,6 +295,7 @@ class SummarizeCompactNativeReadinessTest(unittest.TestCase):
                 backend_tensor_ops_source=root / "missing-tensor-ops.go",
                 default_embedding_test=root / "missing-default-embedding-test.go",
                 runtime_embedding_model_test=root / "missing-runtime-embedding-test.go",
+                runtime_embedding_trainer_test=root / "missing-runtime-embedding-trainer-test.go",
                 backend_compact_attention_test=root / "missing-compact-attention-test.go",
                 cmd_eos_main_test=root / "missing-main-test.go",
                 bge_listwise_validation_report=root / "missing-bge.md",
