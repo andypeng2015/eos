@@ -5313,6 +5313,7 @@ func TestRunTrainEmbedNoTokenizerAllowsRetrievalEvalTokenizer(t *testing.T) {
 		"--no-tokenizer",
 		"--retrieval-eval-dir", filepath.Join(dir, "missing-scifact"),
 		"--retrieval-eval-tokenizer", tokenizerPath,
+		"--retrieval-eval-role-mode", "raw",
 		"--select-metric", "retrieval_ndcg",
 		path,
 		trainPath,
@@ -5320,6 +5321,22 @@ func TestRunTrainEmbedNoTokenizerAllowsRetrievalEvalTokenizer(t *testing.T) {
 	})
 	if !strings.Contains(output, "planned workload:") {
 		t.Fatalf("plan-only output missing workload\noutput:\n%s", output)
+	}
+}
+
+func TestRunTrainEmbedRejectsInvalidRetrievalEvalRoleMode(t *testing.T) {
+	_, err := captureRunOutputAndError(t, []string{
+		"train-embed",
+		"--plan-only",
+		"--retrieval-eval-role-mode", "prefixed",
+		"artifact.mll",
+		"train.jsonl",
+	})
+	if err == nil {
+		t.Fatal("train-embed accepted invalid retrieval eval role mode")
+	}
+	if !strings.Contains(err.Error(), `unsupported retrieval-eval-role-mode "prefixed"`) {
+		t.Fatalf("invalid role-mode error = %v", err)
 	}
 }
 

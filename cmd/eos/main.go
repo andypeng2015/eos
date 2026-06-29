@@ -5294,6 +5294,7 @@ func runTrainEmbed(args []string) error {
 	var retrievalEvalBatchSize int
 	var retrievalEvalTopK int
 	var retrievalEvalTokenizerPath string
+	var retrievalEvalRoleMode string
 	fs.IntVar(&epochs, "epochs", 10, "number of epochs")
 	fs.IntVar(&batchSize, "batch-size", 8, "batch size")
 	fs.BoolVar(&shuffle, "shuffle", true, "shuffle training set each epoch")
@@ -5356,6 +5357,7 @@ func runTrainEmbed(args []string) error {
 	fs.IntVar(&retrievalEvalBatchSize, "retrieval-eval-batch-size", 0, "batch size for retrieval eval embedding (0 = use --batch-size)")
 	fs.IntVar(&retrievalEvalTopK, "retrieval-eval-top-k", 100, "top-k for retrieval eval ranking")
 	fs.StringVar(&retrievalEvalTokenizerPath, "retrieval-eval-tokenizer", "", "tokenizer for raw-text retrieval eval when training uses --no-tokenizer (defaults to --tokenizer or sibling tokenizer)")
+	fs.StringVar(&retrievalEvalRoleMode, "retrieval-eval-role-mode", eosruntime.EmbeddingRoleModeAuto, "embedding role mode for retrieval eval: auto, raw, or query-document")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -5396,6 +5398,10 @@ func runTrainEmbed(args []string) error {
 	}
 	if evalEverySteps < 0 {
 		return fmt.Errorf("eval-every-steps must be non-negative")
+	}
+	parsedRetrievalEvalRoleMode, parseErr := normalizeRetrievalEvalRoleModeForCLI(retrievalEvalRoleMode)
+	if parseErr != nil {
+		return parseErr
 	}
 	if hardNegativesPerQuery < 0 {
 		return fmt.Errorf("hard-negatives-per-query must be non-negative")
@@ -5674,6 +5680,7 @@ func runTrainEmbed(args []string) error {
 			TopK:        retrievalEvalTopK,
 			MaxDocs:     retrievalEvalMaxDocs,
 			MaxQueries:  retrievalEvalMaxQueries,
+			RoleMode:    parsedRetrievalEvalRoleMode,
 		}
 	}
 	workload, workloadErr := estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath, runConfig)
@@ -5755,6 +5762,19 @@ func runTrainEmbed(args []string) error {
 		fmt.Printf("metrics: %s\n", metricsJSONPath)
 	}
 	return nil
+}
+
+func normalizeRetrievalEvalRoleModeForCLI(mode string) (string, error) {
+	switch strings.TrimSpace(mode) {
+	case "", eosruntime.EmbeddingRoleModeAuto:
+		return eosruntime.EmbeddingRoleModeAuto, nil
+	case eosruntime.EmbeddingRoleModeRaw:
+		return eosruntime.EmbeddingRoleModeRaw, nil
+	case eosruntime.EmbeddingRoleModeQueryDocument:
+		return eosruntime.EmbeddingRoleModeQueryDocument, nil
+	default:
+		return "", fmt.Errorf("unsupported retrieval-eval-role-mode %q (supported: %s, %s, %s)", mode, eosruntime.EmbeddingRoleModeAuto, eosruntime.EmbeddingRoleModeRaw, eosruntime.EmbeddingRoleModeQueryDocument)
+	}
 }
 
 func parsePositiveIntWeightMap(raw string) (map[string]int, error) {
