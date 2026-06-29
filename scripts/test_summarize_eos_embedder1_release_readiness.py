@@ -59,8 +59,8 @@ def dense_metrics() -> dict:
     return {
         "schema": "manta.embedding_retrieval_metrics.v1",
         "quality": {
-            "ndcg_at_10": 0.5,
-            "recall_at_100": 0.7,
+            "ndcg_at_10": 0.7,
+            "recall_at_100": 0.9,
         },
     }
 
@@ -72,12 +72,12 @@ def turboquant_metrics() -> dict:
             {
                 "bits": 8,
                 "method": "turboquant_ip_b8",
-                "quality": {"ndcg_at_10": 0.49, "recall_at_100": 0.69},
+                "quality": {"ndcg_at_10": 0.697, "recall_at_100": 0.89},
             },
             {
                 "bits": 4,
                 "method": "turboquant_ip_b4",
-                "quality": {"ndcg_at_10": 0.45, "recall_at_100": 0.65},
+                "quality": {"ndcg_at_10": 0.65, "recall_at_100": 0.85},
             },
         ],
     }
@@ -338,6 +338,9 @@ class SummarizeEosEmbedder1ReleaseReadinessTest(unittest.TestCase):
         self.assertEqual(summary["non_default_candidate_status"], "ready_for_review")
         self.assertEqual(summary["default_swap_status"], "defer")
         self.assertEqual(summary["blockers"]["non_default"], [])
+        self.assertTrue(summary["bge_gate"]["non_default_promotion_policy_pass"])
+        self.assertTrue(summary["bge_gate"]["dense_policy_pass"])
+        self.assertTrue(summary["bge_gate"]["q8_policy_pass"])
         self.assertTrue(summary["non_default_evidence"]["all_valid"])
         self.assertEqual(summary["non_default_evidence"]["gates"]["candidate_smoke"]["status"], "pass")
         self.assertIn("default provider bridge missing", summary["blockers"]["default_swap"])
@@ -412,6 +415,42 @@ class SummarizeEosEmbedder1ReleaseReadinessTest(unittest.TestCase):
         self.assertTrue(
             any("identity inconsistent" in blocker for blocker in summary["blockers"]["non_default"])
         )
+
+    def test_complete_bge_gate_quality_failure_defers_non_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_complete_gate(root)
+            write_json(root / "fiqa" / "eval" / "dense.metrics.json", dense_metrics() | {"quality": {"ndcg_at_10": 0.01, "recall_at_100": 0.02}})
+            bad_turboquant = turboquant_metrics()
+            bad_turboquant["rows"][0]["quality"]["ndcg_at_10"] = 0.005
+            write_json(root / "fiqa" / "eval" / "turboquant-q8-q4.metrics.json", bad_turboquant)
+            evidence = write_valid_non_default_evidence(root)
+            output_tsv = root / "readiness.tsv"
+
+            summary = summarizer.build_summary(
+                bge_gate_root=root,
+                datasets=["scifact", "nfcorpus", "fiqa"],
+                **evidence,
+            )
+            summarizer.write_tsv(output_tsv, summary)
+            with output_tsv.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+
+        self.assertEqual(summary["non_default_candidate_status"], "defer")
+        self.assertTrue(summary["bge_gate"]["all_complete"])
+        self.assertTrue(summary["bge_gate"]["identity_consistent"])
+        self.assertFalse(summary["bge_gate"]["non_default_promotion_policy_pass"])
+        self.assertFalse(summary["bge_gate"]["dense_policy_pass"])
+        self.assertFalse(summary["bge_gate"]["q8_policy_pass"])
+        self.assertTrue(summary["non_default_evidence"]["all_valid"])
+        blockers = "\n".join(summary["blockers"]["non_default"])
+        self.assertIn("selected BGE non-default quality policy failed", blockers)
+        self.assertIn("fiqa: dense below current-default dense baseline", blockers)
+        self.assertIn("fiqa: q8 is not near dense", blockers)
+        keyed = {(row["section"], row["key"]): row for row in rows}
+        self.assertEqual(keyed[("bge_quality_policy", "non_default_promotion_policy_pass")]["status"], "block")
+        self.assertEqual(keyed[("bge_quality_policy_detail", "fiqa.dense")]["status"], "block")
+        self.assertEqual(keyed[("bge_quality_policy_detail", "fiqa.q8")]["status"], "block")
 
     def test_require_non_default_ready_exit_codes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -528,6 +567,8 @@ class SummarizeEosEmbedder1ReleaseReadinessTest(unittest.TestCase):
         self.assertEqual(keyed[("summary", "quality_claim")]["value"], "false")
         self.assertEqual(keyed[("identity", "public_id")]["value"], "eos-embedder-1")
         self.assertEqual(keyed[("bge_gate", "all_complete")]["value"], "true")
+        self.assertEqual(keyed[("bge_quality_policy", "non_default_promotion_policy_pass")]["status"], "pass")
+        self.assertEqual(keyed[("bge_quality_policy_detail", "fiqa.q8")]["status"], "pass")
         self.assertEqual(keyed[("default_swap_gate", "default_provider_bridge")]["status"], "missing")
         self.assertEqual(keyed[("non_default_evidence", "candidate_smoke")]["status"], "pass")
         self.assertIn("query_norm", keyed[("non_default_evidence_detail", "candidate_smoke")]["value"])

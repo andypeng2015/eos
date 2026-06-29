@@ -255,11 +255,28 @@ def active_export_markers_from_bge_summary(summary: dict[str, Any]) -> list[str]
     return markers
 
 
+def compact_bge_quality_policy(aggregate: dict[str, Any]) -> dict[str, Any]:
+    policy = aggregate.get("quality_policy") if isinstance(aggregate.get("quality_policy"), dict) else {}
+    return {
+        "non_default_promotion_policy_pass": policy.get("non_default_promotion_policy_pass"),
+        "dense_policy_pass": policy.get("dense_policy_pass"),
+        "q8_policy_pass": policy.get("q8_policy_pass"),
+        "q4_release_profile_pass": policy.get("q4_release_profile_pass"),
+        "q4_release_profile_decision": policy.get("q4_release_profile_decision"),
+        "quality_policy_blockers": policy.get("blockers", []),
+        "thresholds": policy.get("thresholds", {}),
+        "current_default_dense_baselines": policy.get("current_default_dense_baselines", {}),
+        "macro": policy.get("macro", {}),
+        "per_dataset": policy.get("per_dataset", {}),
+    }
+
+
 def summarize_bge_gate(run_root: Path, datasets: list[str]) -> dict[str, Any]:
     summary = bge_gate.build_summary(run_root=run_root, datasets=datasets)
     aggregate = summary["aggregate"]
     progress_rows = incomplete_bge_progress(summary)
     markers = active_export_markers_from_progress(progress_rows)
+    quality_policy = compact_bge_quality_policy(aggregate)
     return {
         "run_root": str(run_root),
         "datasets": datasets,
@@ -269,6 +286,13 @@ def summarize_bge_gate(run_root: Path, datasets: list[str]) -> dict[str, Any]:
         "expected_dataset_count": aggregate.get("expected_dataset_count"),
         "identity_consistent": aggregate.get("identity_consistent"),
         "promotion_recommendation": aggregate.get("promotion_recommendation"),
+        "non_default_promotion_policy_pass": quality_policy["non_default_promotion_policy_pass"],
+        "dense_policy_pass": quality_policy["dense_policy_pass"],
+        "q8_policy_pass": quality_policy["q8_policy_pass"],
+        "q4_release_profile_pass": quality_policy["q4_release_profile_pass"],
+        "q4_release_profile_decision": quality_policy["q4_release_profile_decision"],
+        "quality_policy_blockers": quality_policy["quality_policy_blockers"],
+        "quality_policy": quality_policy,
         "blockers": aggregate.get("blockers", []),
         "active_export_markers": markers,
         "incomplete_dataset_progress": progress_rows,
@@ -331,7 +355,13 @@ def build_summary(
         blockers.append("selected BGE gate incomplete")
     if not bge["identity_consistent"]:
         blockers.append("selected BGE gate identity inconsistent")
+    if bge["non_default_promotion_policy_pass"] is not True:
+        blockers.append("selected BGE non-default quality policy failed")
+        blockers.extend(f"bge quality policy: {blocker}" for blocker in bge["quality_policy_blockers"])
+    quality_policy_blockers = set(bge["quality_policy_blockers"])
     for blocker in bge["blockers"]:
+        if blocker in quality_policy_blockers:
+            continue
         blockers.append(f"bge gate: {blocker}")
     if bge["active_export_markers"]:
         blockers.append("active or partial export marker present")
@@ -405,7 +435,62 @@ def tsv_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
             "value": summary["bge_gate"]["identity_consistent"],
             "status": "",
         },
+        {
+            "section": "bge_quality_policy",
+            "key": "non_default_promotion_policy_pass",
+            "value": summary["bge_gate"]["non_default_promotion_policy_pass"],
+            "status": "pass" if summary["bge_gate"]["non_default_promotion_policy_pass"] is True else "block",
+        },
+        {
+            "section": "bge_quality_policy",
+            "key": "dense_policy_pass",
+            "value": summary["bge_gate"]["dense_policy_pass"],
+            "status": "pass" if summary["bge_gate"]["dense_policy_pass"] is True else "block",
+        },
+        {
+            "section": "bge_quality_policy",
+            "key": "q8_policy_pass",
+            "value": summary["bge_gate"]["q8_policy_pass"],
+            "status": "pass" if summary["bge_gate"]["q8_policy_pass"] is True else "block",
+        },
+        {
+            "section": "bge_quality_policy",
+            "key": "q4_release_profile_pass",
+            "value": summary["bge_gate"]["q4_release_profile_pass"],
+            "status": "pass" if summary["bge_gate"]["q4_release_profile_pass"] is True else "block",
+        },
+        {
+            "section": "bge_quality_policy",
+            "key": "q4_release_profile_decision",
+            "value": summary["bge_gate"]["q4_release_profile_decision"],
+            "status": "pass"
+            if summary["bge_gate"]["q4_release_profile_pass"] is True
+            else ("diagnostic" if summary["bge_gate"]["q4_release_profile_decision"] else ""),
+        },
+        {
+            "section": "bge_quality_policy",
+            "key": "macro",
+            "value": json.dumps(summary["bge_gate"]["quality_policy"].get("macro", {}), sort_keys=True, separators=(",", ":")),
+            "status": "pass" if summary["bge_gate"]["dense_policy_pass"] is True else "block",
+        },
     ]
+    for dataset, policy in summary["bge_gate"]["quality_policy"].get("per_dataset", {}).items():
+        if not isinstance(policy, dict):
+            continue
+        for key in ("dense", "q8", "q4"):
+            decision = policy.get(key) if isinstance(policy.get(key), dict) else {}
+            rows.append(
+                {
+                    "section": "bge_quality_policy_detail",
+                    "key": f"{dataset}.{key}",
+                    "value": json.dumps(decision, sort_keys=True, separators=(",", ":")),
+                    "status": "pass" if decision.get("pass") is True else "block",
+                }
+            )
+    rows.extend(
+        {"section": "bge_quality_policy_blocker", "key": str(index), "value": blocker, "status": "block"}
+        for index, blocker in enumerate(summary["bge_gate"].get("quality_policy_blockers", []), start=1)
+    )
     rows.extend(
         {"section": "blocker", "key": str(index), "value": blocker, "status": "block"}
         for index, blocker in enumerate(summary["blockers"], start=1)

@@ -203,9 +203,23 @@ def compact_bge_progress(dataset: dict[str, Any]) -> dict[str, Any]:
 
 def compact_bge_summary(summary: dict[str, Any]) -> dict[str, Any]:
     aggregate = summary["aggregate"]
+    quality_policy = aggregate.get("quality_policy") if isinstance(aggregate.get("quality_policy"), dict) else {}
+    compact_quality_policy = {
+        "non_default_promotion_policy_pass": quality_policy.get("non_default_promotion_policy_pass"),
+        "dense_policy_pass": quality_policy.get("dense_policy_pass"),
+        "q8_policy_pass": quality_policy.get("q8_policy_pass"),
+        "q4_release_profile_pass": quality_policy.get("q4_release_profile_pass"),
+        "q4_release_profile_decision": quality_policy.get("q4_release_profile_decision"),
+        "quality_policy_blockers": quality_policy.get("blockers", []),
+        "thresholds": quality_policy.get("thresholds", {}),
+        "current_default_dense_baselines": quality_policy.get("current_default_dense_baselines", {}),
+        "macro": quality_policy.get("macro", {}),
+        "per_dataset": quality_policy.get("per_dataset", {}),
+    }
     datasets: list[dict[str, Any]] = []
     incomplete_progress: list[dict[str, Any]] = []
     for dataset in summary.get("datasets", []):
+        dataset_policy = dataset.get("quality_policy") if isinstance(dataset.get("quality_policy"), dict) else {}
         progress = compact_bge_progress(dataset)
         compact = {
             "dataset": dataset.get("dataset"),
@@ -229,6 +243,7 @@ def compact_bge_summary(summary: dict[str, Any]) -> dict[str, Any]:
             "dense": dataset.get("dense"),
             "q8": dataset.get("q8"),
             "q4": dataset.get("q4"),
+            "quality_policy": dataset_policy,
         }
         datasets.append(compact)
         if dataset.get("status") != "complete":
@@ -245,6 +260,13 @@ def compact_bge_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "quality_claim": aggregate.get("quality_claim"),
         "default_alias_changed": aggregate.get("default_alias_changed"),
         "promotion_recommendation": aggregate.get("promotion_recommendation"),
+        "non_default_promotion_policy_pass": compact_quality_policy["non_default_promotion_policy_pass"],
+        "dense_policy_pass": compact_quality_policy["dense_policy_pass"],
+        "q8_policy_pass": compact_quality_policy["q8_policy_pass"],
+        "q4_release_profile_pass": compact_quality_policy["q4_release_profile_pass"],
+        "q4_release_profile_decision": compact_quality_policy["q4_release_profile_decision"],
+        "quality_policy_blockers": compact_quality_policy["quality_policy_blockers"],
+        "quality_policy": compact_quality_policy,
         "macro": aggregate.get("macro", {}),
         "blockers": aggregate.get("blockers", []),
         "incomplete_dataset_progress": incomplete_progress,
@@ -1045,13 +1067,25 @@ def build_summary(
         model=model,
     )
 
-    bge_ready = bool(bge["all_complete"] and bge["identity_consistent"])
+    bge_ready = bool(
+        bge["all_complete"]
+        and bge["identity_consistent"]
+        and bge["non_default_promotion_policy_pass"] is True
+    )
     non_default_blockers: list[str] = []
     if not bge["all_complete"]:
         non_default_blockers.append("selected BGE gate incomplete")
     if not bge["identity_consistent"]:
         non_default_blockers.append("selected BGE gate identity inconsistent")
-    non_default_blockers.extend(f"bge gate: {blocker}" for blocker in bge.get("blockers", []))
+    if bge["non_default_promotion_policy_pass"] is not True:
+        non_default_blockers.append("selected BGE non-default quality policy failed")
+        non_default_blockers.extend(f"bge quality policy: {blocker}" for blocker in bge["quality_policy_blockers"])
+    quality_policy_blockers = set(bge["quality_policy_blockers"])
+    non_default_blockers.extend(
+        f"bge gate: {blocker}"
+        for blocker in bge.get("blockers", [])
+        if blocker not in quality_policy_blockers
+    )
     non_default_blockers.extend(non_default_evidence["blockers"])
     non_default_blockers.extend(scan["blockers"])
 
@@ -1156,7 +1190,62 @@ def tsv_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
             "value": summary["bge_gate"]["identity_consistent"],
             "status": "",
         },
+        {
+            "section": "bge_quality_policy",
+            "key": "non_default_promotion_policy_pass",
+            "value": summary["bge_gate"]["non_default_promotion_policy_pass"],
+            "status": "pass" if summary["bge_gate"]["non_default_promotion_policy_pass"] is True else "block",
+        },
+        {
+            "section": "bge_quality_policy",
+            "key": "dense_policy_pass",
+            "value": summary["bge_gate"]["dense_policy_pass"],
+            "status": "pass" if summary["bge_gate"]["dense_policy_pass"] is True else "block",
+        },
+        {
+            "section": "bge_quality_policy",
+            "key": "q8_policy_pass",
+            "value": summary["bge_gate"]["q8_policy_pass"],
+            "status": "pass" if summary["bge_gate"]["q8_policy_pass"] is True else "block",
+        },
+        {
+            "section": "bge_quality_policy",
+            "key": "q4_release_profile_pass",
+            "value": summary["bge_gate"]["q4_release_profile_pass"],
+            "status": "pass" if summary["bge_gate"]["q4_release_profile_pass"] is True else "block",
+        },
+        {
+            "section": "bge_quality_policy",
+            "key": "q4_release_profile_decision",
+            "value": summary["bge_gate"]["q4_release_profile_decision"],
+            "status": "pass"
+            if summary["bge_gate"]["q4_release_profile_pass"] is True
+            else ("diagnostic" if summary["bge_gate"]["q4_release_profile_decision"] else ""),
+        },
+        {
+            "section": "bge_quality_policy",
+            "key": "macro",
+            "value": json.dumps(summary["bge_gate"]["quality_policy"].get("macro", {}), sort_keys=True, separators=(",", ":")),
+            "status": "pass" if summary["bge_gate"]["dense_policy_pass"] is True else "block",
+        },
     ]
+    for dataset, policy in summary["bge_gate"]["quality_policy"].get("per_dataset", {}).items():
+        if not isinstance(policy, dict):
+            continue
+        for key in ("dense", "q8", "q4"):
+            decision = policy.get(key) if isinstance(policy.get(key), dict) else {}
+            rows.append(
+                {
+                    "section": "bge_quality_policy_detail",
+                    "key": f"{dataset}.{key}",
+                    "value": json.dumps(decision, sort_keys=True, separators=(",", ":")),
+                    "status": "pass" if decision.get("pass") is True else "block",
+                }
+            )
+    rows.extend(
+        {"section": "bge_quality_policy_blocker", "key": str(index), "value": blocker, "status": "block"}
+        for index, blocker in enumerate(summary["bge_gate"].get("quality_policy_blockers", []), start=1)
+    )
     for gate, data in summary["default_swap_gates"]["gates"].items():
         rows.append(
             {

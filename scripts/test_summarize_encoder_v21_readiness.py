@@ -81,8 +81,8 @@ def dense_metrics() -> dict:
     return {
         "schema": "manta.embedding_retrieval_metrics.v1",
         "quality": {
-            "ndcg_at_10": 0.5,
-            "recall_at_100": 0.7,
+            "ndcg_at_10": 0.7,
+            "recall_at_100": 0.9,
         },
     }
 
@@ -94,12 +94,12 @@ def turboquant_metrics() -> dict:
             {
                 "bits": 8,
                 "method": "turboquant_ip_b8",
-                "quality": {"ndcg_at_10": 0.49, "recall_at_100": 0.69},
+                "quality": {"ndcg_at_10": 0.697, "recall_at_100": 0.89},
             },
             {
                 "bits": 4,
                 "method": "turboquant_ip_b4",
-                "quality": {"ndcg_at_10": 0.45, "recall_at_100": 0.65},
+                "quality": {"ndcg_at_10": 0.65, "recall_at_100": 0.85},
             },
         ],
     }
@@ -157,6 +157,38 @@ class SummarizeEncoderV21ReadinessTest(unittest.TestCase):
         self.assertTrue(summary["baselines"]["tiny"]["matches_expected"])
         self.assertTrue(summary["baselines"]["capped"]["matches_expected"])
         self.assertTrue(summary["bge_gate"]["all_complete"])
+        self.assertTrue(summary["bge_gate"]["non_default_promotion_policy_pass"])
+        self.assertTrue(summary["bge_gate"]["dense_policy_pass"])
+        self.assertTrue(summary["bge_gate"]["q8_policy_pass"])
+
+    def test_bge_quality_policy_failure_blocks_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_root, bge_root, descriptor = write_complete_encoder_fixture(root)
+            bad_q8 = turboquant_metrics()
+            bad_q8["rows"][0]["quality"]["ndcg_at_10"] = 0.45
+            write_json(bge_root / "fiqa" / "eval" / "turboquant-q8-q4.metrics.json", bad_q8)
+            output_tsv = root / "readiness.tsv"
+
+            summary = summarizer.build_summary(
+                run_root=run_root,
+                bge_gate_root=bge_root,
+                descriptor=descriptor,
+                datasets=["scifact", "nfcorpus", "fiqa"],
+            )
+            summarizer.write_tsv(output_tsv, summary)
+            with output_tsv.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+
+        self.assertFalse(summary["launch_allowed"])
+        self.assertTrue(summary["bge_gate"]["all_complete"])
+        self.assertFalse(summary["bge_gate"]["non_default_promotion_policy_pass"])
+        self.assertFalse(summary["bge_gate"]["q8_policy_pass"])
+        self.assertIn("selected BGE non-default quality policy failed", summary["blockers"])
+        self.assertTrue(any("fiqa: q8 is not near dense" in blocker for blocker in summary["blockers"]))
+        keyed = {(row["section"], row["key"]): row for row in rows}
+        self.assertEqual(keyed[("bge_quality_policy", "non_default_promotion_policy_pass")]["status"], "block")
+        self.assertEqual(keyed[("bge_quality_policy_detail", "fiqa.q8")]["status"], "block")
 
     def test_incomplete_fiqa_blocks_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -266,6 +298,8 @@ class SummarizeEncoderV21ReadinessTest(unittest.TestCase):
             str(summarizer.EXPECTED_CAPPED_NDCG_AT_10),
         )
         self.assertEqual(keyed[("bge_gate", "all_complete")]["value"], "true")
+        self.assertEqual(keyed[("bge_quality_policy", "non_default_promotion_policy_pass")]["status"], "pass")
+        self.assertEqual(keyed[("bge_quality_policy_detail", "fiqa.q8")]["status"], "pass")
 
     def test_require_ready_nonzero_when_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

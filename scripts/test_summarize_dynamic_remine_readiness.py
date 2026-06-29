@@ -165,7 +165,7 @@ def guide_manifest(
 def write_bge_ready(root: Path) -> None:
     write_complete_dataset(root, "scifact", 0.7, 0.9, 0.71, 0.89, 0.65, 0.85)
     write_complete_dataset(root, "nfcorpus", 0.3, 0.4, 0.31, 0.41, 0.25, 0.35)
-    write_complete_dataset(root, "fiqa", 0.4, 0.6, 0.39, 0.59, 0.35, 0.55)
+    write_complete_dataset(root, "fiqa", 0.4, 0.6, 0.397, 0.59, 0.35, 0.55)
 
 
 def write_stagea_ready(root: Path) -> None:
@@ -204,8 +204,39 @@ class SummarizeDynamicRemineReadinessTest(unittest.TestCase):
         self.assertFalse(summary["training_run"])
         self.assertEqual(summary["blockers"], [])
         self.assertTrue(summary["bge_gate"]["all_complete"])
+        self.assertTrue(summary["bge_gate"]["non_default_promotion_policy_pass"])
+        self.assertTrue(summary["bge_gate"]["dense_policy_pass"])
+        self.assertTrue(summary["bge_gate"]["q8_policy_pass"])
         self.assertTrue(summary["stagea_bridge"]["ready"])
         self.assertTrue(summary["guide_filter"]["ready"])
+
+    def test_bge_quality_policy_failure_blocks_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            bge_root, stagea_root, descriptor = build_fixture(tmp)
+            write_complete_dataset(bge_root, "fiqa", 0.4, 0.6, 0.35, 0.59, 0.35, 0.55)
+            output_tsv = tmp / "summary.tsv"
+
+            summary = summarizer.build_summary(
+                stagea_root=stagea_root,
+                bge_gate_root=bge_root,
+                descriptor=descriptor,
+                datasets=["scifact", "nfcorpus", "fiqa"],
+            )
+            summarizer.write_tsv(output_tsv, summary)
+            with output_tsv.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+
+        self.assertFalse(summary["launch_allowed"])
+        self.assertTrue(summary["bge_gate"]["all_complete"])
+        self.assertFalse(summary["bge_gate"]["non_default_promotion_policy_pass"])
+        self.assertFalse(summary["bge_gate"]["q8_policy_pass"])
+        self.assertIn("selected BGE non-default quality policy failed", summary["blockers"])
+        self.assertTrue(summary["stagea_bridge"]["ready"])
+        self.assertTrue(summary["guide_filter"]["ready"])
+        keyed = {(row["section"], row["key"]): row for row in rows}
+        self.assertEqual(keyed[("bge_quality_policy", "non_default_promotion_policy_pass")]["status"], "block")
+        self.assertEqual(keyed[("bge_quality_policy_detail", "fiqa.q8")]["status"], "block")
 
     def test_fiqa_bge_incomplete_blocks_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -341,6 +372,8 @@ class SummarizeDynamicRemineReadinessTest(unittest.TestCase):
         self.assertEqual(keyed[("stagea_bridge", "import_score_rows")]["expected"], "1280")
         self.assertEqual(keyed[("guide_filter", "clean_agreement")]["value"], "256")
         self.assertEqual(keyed[("guide_filter", "research_only_preserved")]["status"], "pass")
+        self.assertEqual(keyed[("bge_quality_policy", "non_default_promotion_policy_pass")]["status"], "pass")
+        self.assertEqual(keyed[("bge_quality_policy_detail", "fiqa.q8")]["status"], "pass")
 
 
 if __name__ == "__main__":
