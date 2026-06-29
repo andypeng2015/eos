@@ -17,6 +17,12 @@ LEGAL_GATES = {
     "train_allowed_for_research": True,
     "release_train_allowed": False,
     "commercial_use_allowed": False,
+    "test_rows_train_allowed": False,
+}
+CORE_LEGAL_GATES = {
+    "train_allowed_for_research": True,
+    "release_train_allowed": False,
+    "commercial_use_allowed": False,
 }
 
 
@@ -91,6 +97,41 @@ def collect_text_id(text_to_ids: dict[str, list[str]], text: str, item_id: Any) 
         ids.append(clean)
 
 
+def validate_legal_gates(row: dict[str, Any], gate_counts: Counter[str]) -> None:
+    gates = row.get("legal_gates")
+    if not isinstance(gates, dict):
+        gate_counts["legal_gates_unusable"] += 1
+        return
+
+    valid = True
+    allowed_keys = set(LEGAL_GATES)
+    for key, expected in CORE_LEGAL_GATES.items():
+        if key not in gates:
+            gate_counts[f"{key}_missing"] += 1
+            valid = False
+        elif gates.get(key) != expected:
+            gate_counts[f"{key}_mismatch"] += 1
+            valid = False
+
+    if "test_rows_train_allowed" in gates:
+        if gates.get("test_rows_train_allowed") != LEGAL_GATES["test_rows_train_allowed"]:
+            gate_counts["test_rows_train_allowed_mismatch"] += 1
+            valid = False
+    else:
+        gate_counts["legacy_test_rows_train_allowed_omitted"] += 1
+
+    unexpected_keys = sorted(set(gates) - allowed_keys)
+    if unexpected_keys:
+        gate_counts["legal_gate_unexpected_keys"] += 1
+        valid = False
+
+    if valid:
+        if "test_rows_train_allowed" in gates:
+            gate_counts["canonical_four_gate_rows"] += 1
+        else:
+            gate_counts["legacy_three_gate_rows"] += 1
+
+
 def main() -> int:
     args = parse_args()
     if not args.input_jsonl.is_file():
@@ -117,12 +158,7 @@ def main() -> int:
                 f"{args.input_jsonl}:{line_number}: negative_doc_ids length "
                 f"{len(negative_doc_ids)} does not match negatives {len(negatives)}"
             )
-        gates = row.get("legal_gates") or {}
-        if gates != LEGAL_GATES:
-            gate_counts["legal_gate_mismatch"] += 1
-        for key, expected in LEGAL_GATES.items():
-            if gates.get(key) != expected:
-                gate_counts[f"{key}_mismatch"] += 1
+        validate_legal_gates(row, gate_counts)
         source_counts[stable_text(row.get("source"))] += 1
         rows.append(row)
         collect_text_id(query_text_to_ids, query, row.get("query_id"))
@@ -136,8 +172,18 @@ def main() -> int:
 
     if not rows:
         raise SystemExit("input JSONL had no rows")
-    if gate_counts:
-        raise SystemExit(f"legal gate mismatch in input rows: {dict(gate_counts)}")
+    gate_error_counts = {
+        key: value
+        for key, value in gate_counts.items()
+        if key
+        not in {
+            "canonical_four_gate_rows",
+            "legacy_three_gate_rows",
+            "legacy_test_rows_train_allowed_omitted",
+        }
+    }
+    if gate_error_counts:
+        raise SystemExit(f"legal gate mismatch in input rows: {gate_error_counts}")
 
     query_canonical = {
         text: choose_canonical(ids, "q", text) for text, ids in query_text_to_ids.items()
