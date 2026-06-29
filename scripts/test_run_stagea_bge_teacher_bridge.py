@@ -81,6 +81,8 @@ class StageABGETeacherBridgeTest(unittest.TestCase):
         build = payload["commands"][0]["argv"]
         export = payload["commands"][2]["argv"]
         self.assertEqual(export[0], eos_bin)
+        self.assertEqual(export[1], "export-pretrained-bert-retrieval-vectors")
+        self.assertNotEqual(export[:5], ["env", "GOWORK=off", "go", "run", "./cmd/eos"])
         self.assertEqual(export[export.index("--query-prefix") + 1], bridge.BGE_QUERY_PREFIX)
         self.assertEqual(export[export.index("--document-prefix") + 1], "")
         self.assertEqual(export[export.index("--batch-size") + 1], "8")
@@ -91,6 +93,16 @@ class StageABGETeacherBridgeTest(unittest.TestCase):
         self.assertEqual(build[build.index("--max-corpus-docs") + 1], "1000")
         self.assertEqual(payload["bge_teacher"]["package_sha256"], bridge.BGE_PACKAGE_SHA256)
         self.assertEqual(payload["bge_teacher"]["identity"], bridge.BGE_IDENTITY)
+
+    def test_default_eos_command_disables_parent_go_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = args_for(root, dry_run=True)
+
+            payload = bridge.execute(args)
+
+        export = payload["commands"][2]["argv"]
+        self.assertEqual(export[:5], ["env", "GOWORK=off", "go", "run", "./cmd/eos"])
 
     def test_dry_run_summary_has_no_quality_or_training_claim(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

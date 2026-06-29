@@ -22,7 +22,7 @@ from typing import Any, Callable
 DEFAULT_ACQUISITION_RUN_ROOT = Path("runs/eos-msmarco-passage-corpus-acquisition-v1-20260624T170110Z")
 DEFAULT_CORPUS_ROOT = DEFAULT_ACQUISITION_RUN_ROOT / "beir-msmarco-passage-research-only"
 DEFAULT_PACKAGE = Path("runs/pretrained-bert-current-hf-parity-v1-20260629T090818Z/bge/bge-small-en-v1.5.imported.mll")
-DEFAULT_EOS_BIN = "go run ./cmd/eos"
+DEFAULT_EOS_BIN = "env GOWORK=off go run ./cmd/eos"
 TEACHER_LABEL = "imported_bge_small_en_v1_5"
 BGE_PACKAGE_SHA256 = "841b0d851c06290daeeab4bf4d25cb1dd7bb87920316dac950e1b556a3bae763"
 BGE_IDENTITY = "a356a4b7dc29a8d0f0a7b7bd45e7a9d2afbfa651c1a5bfaa05008c7157ba9637"
@@ -108,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--eos-bin",
         default=DEFAULT_EOS_BIN,
-        help="Eos command. Defaults to 'go run ./cmd/eos'; explicit binary paths are honored.",
+        help="Eos command. Defaults to 'env GOWORK=off go run ./cmd/eos'; explicit binary paths are honored.",
     )
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--split", default="train")
