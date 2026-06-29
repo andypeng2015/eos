@@ -201,6 +201,99 @@ def write_valid_non_default_evidence(root: Path) -> dict[str, Path]:
     return paths
 
 
+def default_provider_bridge_manifest() -> dict:
+    fingerprint = summarizer.backend_fingerprint(
+        bge_summarizer.DEFAULT_PACKAGE_SHA256,
+        bge_summarizer.DEFAULT_IDENTITY_SHA256,
+    )
+    return {
+        "schema": "eos.embedder1_default_provider_bridge_evidence.v1",
+        "package_sha256": bge_summarizer.DEFAULT_PACKAGE_SHA256,
+        "identity_sha256": bge_summarizer.DEFAULT_IDENTITY_SHA256,
+        "default_provider_id": "corkscrewdb-imported-bge-eos-embed-v1-candidate",
+        "dim": 384,
+        "backend_fingerprint": fingerprint,
+        "role_contract": {
+            "query_prefix": bge_summarizer.DEFAULT_QUERY_PREFIX,
+            "document_prefix": bge_summarizer.DEFAULT_DOCUMENT_PREFIX,
+            "pooling": "cls",
+            "normalization": "l2",
+            "max_length": 512,
+        },
+        "default_alias_changed": False,
+        "dry_run": True,
+        "legacy_default_preserved": True,
+    }
+
+
+def default_release_smoke_manifest() -> dict:
+    return {
+        "schema": "eos.embedder1_default_release_smoke.v1",
+        "package_sha256": bge_summarizer.DEFAULT_PACKAGE_SHA256,
+        "identity_sha256": bge_summarizer.DEFAULT_IDENTITY_SHA256,
+        "default_provider_id": "corkscrewdb-imported-bge-eos-embed-v1-candidate",
+        "dim": 384,
+        "query_role_smoke_passed": True,
+        "document_role_smoke_passed": True,
+        "new_384d_db_smoke_passed": True,
+        "mismatch_smoke_passed": True,
+        "quality_claim": False,
+    }
+
+
+def legacy_256d_migration_policy_smoke_manifest() -> dict:
+    return {
+        "schema": "eos.embedder1_legacy_256d_migration_policy_smoke.v1",
+        "legacy_256d_open_passed": True,
+        "legacy_provider_available": True,
+        "mismatch_rejects_clearly": True,
+        "in_place_upgrade_supported": False,
+        "reembed_rebuild_required": True,
+    }
+
+
+def throughput_gate_manifest() -> dict:
+    return {
+        "schema": "eos.embedder1_startup_load_encode_throughput_gate.v1",
+        "package_sha256": bge_summarizer.DEFAULT_PACKAGE_SHA256,
+        "identity_sha256": bge_summarizer.DEFAULT_IDENTITY_SHA256,
+        "cold_load_ms": 4500.0,
+        "first_query_encode_ms": 25.0,
+        "warm_batch64_docs_per_second": 16.0,
+        "peak_rss_mb": 512.0,
+        "explicit_owner_exception": False,
+    }
+
+
+def default_asset_size_policy_manifest() -> dict:
+    return {
+        "schema": "eos.embedder1_default_asset_size_policy.v1",
+        "package_sha256": bge_summarizer.DEFAULT_PACKAGE_SHA256,
+        "identity_sha256": bge_summarizer.DEFAULT_IDENTITY_SHA256,
+        "package_bytes": 179_307_385,
+        "default_in_repo_asset_bytes": 5_271_971,
+        "selected_policy": "explicit_external_package",
+        "large_default_asset_approved": False,
+    }
+
+
+def write_valid_default_evidence(root: Path) -> dict[str, Path]:
+    evidence_root = root / "default-evidence"
+    return {
+        "default_provider_bridge": write_json(evidence_root / "default-provider-bridge.json", default_provider_bridge_manifest()),
+        "default_release_smoke": write_json(evidence_root / "default-release-smoke.json", default_release_smoke_manifest()),
+        "legacy_256d_migration_policy_smoke": write_json(
+            evidence_root / "legacy-256d-migration-policy-smoke.json",
+            legacy_256d_migration_policy_smoke_manifest(),
+        ),
+        "startup_load_encode_throughput_gate": write_json(evidence_root / "throughput-gate.json", throughput_gate_manifest()),
+        "default_asset_size_policy": write_json(
+            evidence_root / "default-asset-size-policy.json",
+            default_asset_size_policy_manifest(),
+        ),
+    }
+
+
 def evidence_cli_args(paths: dict[str, Path]) -> list[str]:
     return [
         "--candidate-smoke-evidence",
@@ -209,6 +302,21 @@ def evidence_cli_args(paths: dict[str, Path]) -> list[str]:
         str(paths["role_aware_provider_smoke_evidence"]),
         "--corkscrewdb-serving-smoke-evidence",
         str(paths["corkscrewdb_serving_smoke_evidence"]),
+    ]
+
+
+def default_evidence_cli_args(paths: dict[str, Path]) -> list[str]:
+    return [
+        "--default-provider-bridge-evidence",
+        str(paths["default_provider_bridge"]),
+        "--default-release-smoke-evidence",
+        str(paths["default_release_smoke"]),
+        "--legacy-256d-migration-evidence",
+        str(paths["legacy_256d_migration_policy_smoke"]),
+        "--throughput-gate-evidence",
+        str(paths["startup_load_encode_throughput_gate"]),
+        "--default-asset-size-policy-evidence",
+        str(paths["default_asset_size_policy"]),
     ]
 
 
@@ -347,6 +455,31 @@ class SummarizeEosEmbedder1ReleaseReadinessTest(unittest.TestCase):
 
         self.assertEqual(code, 2)
 
+    def test_require_default_ready_passes_with_valid_default_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_complete_gate(root)
+            evidence = write_valid_non_default_evidence(root)
+            default_evidence = write_valid_default_evidence(root)
+
+            code = summarizer.main(
+                [
+                    "--bge-gate-root",
+                    str(root),
+                    "--datasets",
+                    "scifact,nfcorpus,fiqa",
+                    "--output-json",
+                    str(root / "summary.json"),
+                    "--output-tsv",
+                    str(root / "summary.tsv"),
+                    "--require-default-ready",
+                ]
+                + evidence_cli_args(evidence)
+                + default_evidence_cli_args(default_evidence)
+            )
+
+        self.assertEqual(code, 0)
+
     def test_tsv_writer_emits_key_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -375,6 +508,117 @@ class SummarizeEosEmbedder1ReleaseReadinessTest(unittest.TestCase):
         self.assertEqual(keyed[("default_swap_gate", "default_provider_bridge")]["status"], "missing")
         self.assertEqual(keyed[("non_default_evidence", "candidate_smoke")]["status"], "pass")
         self.assertIn("query_norm", keyed[("non_default_evidence_detail", "candidate_smoke")]["value"])
+
+    def test_valid_default_evidence_makes_default_ready_when_other_gates_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_complete_gate(root)
+            non_default_evidence = write_valid_non_default_evidence(root)
+            default_evidence = write_valid_default_evidence(root)
+
+            summary = summarizer.build_summary(
+                bge_gate_root=root,
+                datasets=["scifact", "nfcorpus", "fiqa"],
+                default_gate_evidence_paths={key: str(value) for key, value in default_evidence.items()},
+                **non_default_evidence,
+            )
+
+        self.assertEqual(summary["non_default_candidate_status"], "ready_for_review")
+        self.assertEqual(summary["default_swap_status"], "ready_for_review")
+        self.assertTrue(summary["default_swap_gates"]["all_valid"])
+        self.assertEqual(summary["blockers"]["default_swap"], [])
+        self.assertTrue(all(gate["status"] == "pass" for gate in summary["default_swap_gates"]["gates"].values()))
+
+    def test_malformed_default_evidence_fails_with_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_complete_gate(root)
+            non_default_evidence = write_valid_non_default_evidence(root)
+            default_evidence = write_valid_default_evidence(root)
+            default_evidence["default_release_smoke"].write_text("{", encoding="utf-8")
+
+            summary = summarizer.build_summary(
+                bge_gate_root=root,
+                datasets=["scifact", "nfcorpus", "fiqa"],
+                default_gate_evidence_paths={key: str(value) for key, value in default_evidence.items()},
+                **non_default_evidence,
+            )
+
+        self.assertEqual(summary["default_swap_status"], "defer")
+        self.assertEqual(summary["default_swap_gates"]["gates"]["default_release_smoke"]["status"], "fail")
+        blockers = "\n".join(summary["blockers"]["default_swap"])
+        self.assertIn("default release smoke evidence failed validation", blockers)
+        self.assertIn("invalid JSON", blockers)
+
+    def test_default_evidence_identity_mismatch_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_complete_gate(root)
+            non_default_evidence = write_valid_non_default_evidence(root)
+            default_evidence = write_valid_default_evidence(root)
+            bad_bridge = default_provider_bridge_manifest()
+            bad_bridge["identity_sha256"] = "wrong"
+            write_json(default_evidence["default_provider_bridge"], bad_bridge)
+
+            summary = summarizer.build_summary(
+                bge_gate_root=root,
+                datasets=["scifact", "nfcorpus", "fiqa"],
+                default_gate_evidence_paths={key: str(value) for key, value in default_evidence.items()},
+                **non_default_evidence,
+            )
+
+        self.assertEqual(summary["default_swap_status"], "defer")
+        blockers = "\n".join(summary["blockers"]["default_swap"])
+        self.assertIn("default provider bridge evidence failed validation", blockers)
+        self.assertIn("identity mismatch", blockers)
+
+    def test_default_throughput_threshold_failure_blocks_default_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_complete_gate(root)
+            non_default_evidence = write_valid_non_default_evidence(root)
+            default_evidence = write_valid_default_evidence(root)
+            bad_throughput = throughput_gate_manifest()
+            bad_throughput["cold_load_ms"] = 5001.0
+            bad_throughput["warm_batch64_docs_per_second"] = 9.9
+            write_json(default_evidence["startup_load_encode_throughput_gate"], bad_throughput)
+
+            summary = summarizer.build_summary(
+                bge_gate_root=root,
+                datasets=["scifact", "nfcorpus", "fiqa"],
+                default_gate_evidence_paths={key: str(value) for key, value in default_evidence.items()},
+                **non_default_evidence,
+            )
+
+        self.assertEqual(summary["default_swap_status"], "defer")
+        blockers = "\n".join(summary["blockers"]["default_swap"])
+        self.assertIn("cold_load_ms exceeds 5000ms ceiling", blockers)
+        self.assertIn("warm batch64 throughput below 10 docs/s floor", blockers)
+
+    def test_tsv_writer_emits_default_gate_detail_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_complete_gate(root)
+            non_default_evidence = write_valid_non_default_evidence(root)
+            default_evidence = write_valid_default_evidence(root)
+            output_tsv = root / "readiness.tsv"
+            summary = summarizer.build_summary(
+                bge_gate_root=root,
+                datasets=["scifact", "nfcorpus", "fiqa"],
+                default_gate_evidence_paths={key: str(value) for key, value in default_evidence.items()},
+                **non_default_evidence,
+            )
+
+            summarizer.write_tsv(output_tsv, summary)
+            with output_tsv.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+
+        keyed = {(row["section"], row["key"]): row for row in rows}
+        self.assertEqual(keyed[("default_swap_gate", "default_provider_bridge")]["status"], "pass")
+        self.assertIn(
+            "backend_fingerprint",
+            keyed[("default_swap_gate_detail", "default_provider_bridge")]["value"],
+        )
 
     def test_complete_bge_gate_missing_evidence_defers_non_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

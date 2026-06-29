@@ -36,10 +36,24 @@ DEFAULT_ROLE_CONTRACT_SCHEMA = "manta.pretrained_bert_retrieval_role_contract.v1
 DEFAULT_CANDIDATE_SMOKE_SCHEMA = "manta.imported_bge_eos_embed_v1_candidate_smoke.v1"
 DEFAULT_ROLE_AWARE_PROVIDER_SMOKE_SCHEMA = "eos.imported_bge_role_aware_provider_smoke.v1"
 DEFAULT_CORKSCREWDB_SERVING_SMOKE_SCHEMA = "eos.imported_bge_serving_candidate_manifest.v1"
+DEFAULT_PROVIDER_BRIDGE_SCHEMA = "eos.embedder1_default_provider_bridge_evidence.v1"
+DEFAULT_RELEASE_SMOKE_SCHEMA = "eos.embedder1_default_release_smoke.v1"
+LEGACY_256D_MIGRATION_POLICY_SMOKE_SCHEMA = "eos.embedder1_legacy_256d_migration_policy_smoke.v1"
+STARTUP_LOAD_ENCODE_THROUGHPUT_GATE_SCHEMA = "eos.embedder1_startup_load_encode_throughput_gate.v1"
+DEFAULT_ASSET_SIZE_POLICY_SCHEMA = "eos.embedder1_default_asset_size_policy.v1"
 NORM_TOLERANCE = 1e-3
 OFFLINE_DELTA_TOLERANCE = 1e-9
 Q4_P95_MS_CEILING = 25.0
 Q8_P95_MS_CEILING = 50.0
+DEFAULT_COLD_LOAD_MS_CEILING = 5000.0
+DEFAULT_WARM_BATCH64_DOCS_PER_SECOND_FLOOR = 10.0
+DEFAULT_EXTERNAL_PACKAGE_BYTES_CEILING = 200_000_000
+DEFAULT_IN_REPO_ASSET_BYTES_CEILING = 25_000_000
+DEFAULT_ASSET_SIZE_POLICIES = {
+    "explicit_external_package",
+    "lazy_download_package",
+    "approved_large_in_repo_asset",
+}
 DEFAULT_SWAP_GATES = [
     ("default_provider_bridge", "default provider bridge missing"),
     ("default_release_smoke", "default release smoke missing"),
@@ -281,22 +295,40 @@ def default_gate_evidence_map(args: argparse.Namespace) -> dict[str, str | None]
     }
 
 
-def summarize_default_gates(evidence_paths: dict[str, str | None]) -> dict[str, Any]:
+def summarize_default_gates(
+    evidence_paths: dict[str, str | None],
+    *,
+    package_sha256: str,
+    identity_sha256: str,
+    legacy_model_name: str,
+    public_name: str,
+    model: str,
+) -> dict[str, Any]:
+    validators = {
+        "default_provider_bridge": validate_default_provider_bridge,
+        "default_release_smoke": validate_default_release_smoke,
+        "legacy_256d_migration_policy_smoke": validate_legacy_256d_migration_policy_smoke,
+        "startup_load_encode_throughput_gate": validate_startup_load_encode_throughput_gate,
+        "default_asset_size_policy": validate_default_asset_size_policy,
+    }
     gates: dict[str, Any] = {}
-    blockers: list[str] = []
     for gate, missing_message in DEFAULT_SWAP_GATES:
-        raw_path = evidence_paths.get(gate)
-        path = Path(raw_path) if raw_path else None
-        exists = path.exists() if path else False
-        gates[gate] = {
-            "status": "present" if exists else "missing",
-            "evidence_path": str(path) if path else None,
-        }
-        if not exists:
-            blockers.append(missing_message)
+        gates[gate] = summarize_evidence_gate(
+            gate.replace("_", " "),
+            evidence_paths.get(gate),
+            validators[gate],
+            missing_message=missing_message,
+            package_sha256=package_sha256,
+            identity_sha256=identity_sha256,
+            legacy_model_name=legacy_model_name,
+            public_name=public_name,
+            model=model,
+        )
+    blockers = [blocker for gate in gates.values() for blocker in gate.get("blockers", [])]
     return {
         "gates": gates,
-        "all_present": not blockers,
+        "all_present": all(gate.get("status") != "missing" for gate in gates.values()),
+        "all_valid": not blockers,
         "blockers": blockers,
     }
 
@@ -527,11 +559,307 @@ def validate_serving_smoke(
     return blockers, details
 
 
+def identity_field(data: dict[str, Any], key: str) -> Any:
+    if key in data:
+        return data.get(key)
+    if key == "identity_sha256":
+        return nested(data, "package", "identity_sha256")
+    if key == "package_sha256":
+        return nested(data, "package", "sha256")
+    return None
+
+
+def validate_identity_fields(
+    blockers: list[str],
+    data: dict[str, Any],
+    *,
+    package_sha256: str,
+    identity_sha256: str,
+    label: str,
+) -> None:
+    add_check(blockers, identity_field(data, "package_sha256") == package_sha256, f"{label} package sha mismatch")
+    add_check(blockers, identity_field(data, "identity_sha256") == identity_sha256, f"{label} identity mismatch")
+
+
+def role_contract_value(data: dict[str, Any], key: str) -> Any:
+    if key in data:
+        return data.get(key)
+    return nested(data, "role_contract", key)
+
+
+def validate_default_provider_bridge(
+    data: dict[str, Any],
+    *,
+    package_sha256: str,
+    identity_sha256: str,
+    **_: Any,
+) -> tuple[list[str], dict[str, Any]]:
+    blockers: list[str] = []
+    expected_fingerprint = backend_fingerprint(package_sha256, identity_sha256)
+    add_check(blockers, data.get("schema") == DEFAULT_PROVIDER_BRIDGE_SCHEMA, "default provider bridge schema mismatch")
+    validate_identity_fields(
+        blockers,
+        data,
+        package_sha256=package_sha256,
+        identity_sha256=identity_sha256,
+        label="default provider bridge",
+    )
+    provider_id = data.get("provider_id") or data.get("default_provider_id")
+    add_check(blockers, isinstance(provider_id, str) and bool(provider_id), "default provider bridge provider id missing")
+    add_check(blockers, data.get("dim") == bge_gate.DEFAULT_DIM, "default provider bridge dim mismatch")
+    add_check(
+        blockers,
+        data.get("backend_fingerprint") == expected_fingerprint,
+        "default provider bridge backend fingerprint mismatch",
+    )
+    add_check(
+        blockers,
+        role_contract_value(data, "query_prefix") == bge_gate.DEFAULT_QUERY_PREFIX,
+        "default provider bridge query prefix mismatch",
+    )
+    add_check(
+        blockers,
+        role_contract_value(data, "document_prefix") == bge_gate.DEFAULT_DOCUMENT_PREFIX,
+        "default provider bridge document prefix mismatch",
+    )
+    add_check(blockers, role_contract_value(data, "pooling") == bge_gate.DEFAULT_POOLING, "default provider bridge pooling mismatch")
+    add_check(
+        blockers,
+        role_contract_value(data, "normalization") == bge_gate.DEFAULT_NORMALIZATION,
+        "default provider bridge normalization mismatch",
+    )
+    add_check(
+        blockers,
+        role_contract_value(data, "max_length") == bge_gate.DEFAULT_MAX_LENGTH,
+        "default provider bridge max length mismatch",
+    )
+    add_check(
+        blockers,
+        data.get("default_alias_changed") is False or data.get("dry_run") is True,
+        "default provider bridge changed default alias outside dry run",
+    )
+    add_check(
+        blockers,
+        data.get("legacy_default_preserved") is True,
+        "default provider bridge did not preserve legacy default",
+    )
+    details = {
+        "schema": data.get("schema"),
+        "provider_id": provider_id,
+        "dim": data.get("dim"),
+        "backend_fingerprint": data.get("backend_fingerprint"),
+        "default_alias_changed": data.get("default_alias_changed"),
+        "dry_run": data.get("dry_run"),
+        "legacy_default_preserved": data.get("legacy_default_preserved"),
+    }
+    return blockers, details
+
+
+def validate_default_release_smoke(
+    data: dict[str, Any],
+    *,
+    package_sha256: str,
+    identity_sha256: str,
+    **_: Any,
+) -> tuple[list[str], dict[str, Any]]:
+    blockers: list[str] = []
+    add_check(blockers, data.get("schema") == DEFAULT_RELEASE_SMOKE_SCHEMA, "default release smoke schema mismatch")
+    validate_identity_fields(
+        blockers,
+        data,
+        package_sha256=package_sha256,
+        identity_sha256=identity_sha256,
+        label="default release smoke",
+    )
+    add_check(
+        blockers,
+        isinstance(data.get("default_provider_id"), str) and bool(data.get("default_provider_id")),
+        "default release smoke default provider id missing",
+    )
+    add_check(blockers, data.get("dim") == bge_gate.DEFAULT_DIM, "default release smoke dim mismatch")
+    for field in (
+        "query_role_smoke_passed",
+        "document_role_smoke_passed",
+        "new_384d_db_smoke_passed",
+        "mismatch_smoke_passed",
+    ):
+        add_check(blockers, data.get(field) is True, f"default release smoke {field} must be true")
+    add_check(blockers, data.get("quality_claim") is False, "default release smoke quality_claim must be false")
+    details = {
+        "schema": data.get("schema"),
+        "default_provider_id": data.get("default_provider_id"),
+        "dim": data.get("dim"),
+        "query_role_smoke_passed": data.get("query_role_smoke_passed"),
+        "document_role_smoke_passed": data.get("document_role_smoke_passed"),
+        "new_384d_db_smoke_passed": data.get("new_384d_db_smoke_passed"),
+        "mismatch_smoke_passed": data.get("mismatch_smoke_passed"),
+        "quality_claim": data.get("quality_claim"),
+    }
+    return blockers, details
+
+
+def validate_legacy_256d_migration_policy_smoke(
+    data: dict[str, Any],
+    **_: Any,
+) -> tuple[list[str], dict[str, Any]]:
+    blockers: list[str] = []
+    add_check(
+        blockers,
+        data.get("schema") == LEGACY_256D_MIGRATION_POLICY_SMOKE_SCHEMA,
+        "legacy 256d migration policy smoke schema mismatch",
+    )
+    expected = {
+        "legacy_256d_open_passed": True,
+        "legacy_provider_available": True,
+        "mismatch_rejects_clearly": True,
+        "in_place_upgrade_supported": False,
+        "reembed_rebuild_required": True,
+    }
+    for field, value in expected.items():
+        add_check(blockers, data.get(field) is value, f"legacy 256d migration policy smoke {field} must be {str(value).lower()}")
+    details = {"schema": data.get("schema"), **{field: data.get(field) for field in expected}}
+    return blockers, details
+
+
+def validate_startup_load_encode_throughput_gate(
+    data: dict[str, Any],
+    *,
+    package_sha256: str,
+    identity_sha256: str,
+    **_: Any,
+) -> tuple[list[str], dict[str, Any]]:
+    blockers: list[str] = []
+    add_check(
+        blockers,
+        data.get("schema") == STARTUP_LOAD_ENCODE_THROUGHPUT_GATE_SCHEMA,
+        "startup/load/encode throughput gate schema mismatch",
+    )
+    validate_identity_fields(
+        blockers,
+        data,
+        package_sha256=package_sha256,
+        identity_sha256=identity_sha256,
+        label="startup/load/encode throughput gate",
+    )
+    owner_exception = data.get("explicit_owner_exception") is True
+    cold_load_ms = as_number(data.get("cold_load_ms"))
+    first_query_encode_ms = as_number(data.get("first_query_encode_ms"))
+    warm_batch64_docs_per_second = as_number(data.get("warm_batch64_docs_per_second"))
+    peak_rss_mb = as_number(data.get("peak_rss_mb"))
+    add_check(
+        blockers,
+        cold_load_ms is not None and cold_load_ms > 0.0,
+        "startup/load/encode throughput gate cold_load_ms must be > 0",
+    )
+    add_check(
+        blockers,
+        owner_exception or (cold_load_ms is not None and cold_load_ms <= DEFAULT_COLD_LOAD_MS_CEILING),
+        f"startup/load/encode throughput gate cold_load_ms exceeds {DEFAULT_COLD_LOAD_MS_CEILING:g}ms ceiling",
+    )
+    add_check(
+        blockers,
+        first_query_encode_ms is not None and first_query_encode_ms > 0.0,
+        "startup/load/encode throughput gate first_query_encode_ms must be > 0",
+    )
+    add_check(
+        blockers,
+        warm_batch64_docs_per_second is not None and warm_batch64_docs_per_second > 0.0,
+        "startup/load/encode throughput gate warm_batch64_docs_per_second must be > 0",
+    )
+    add_check(
+        blockers,
+        owner_exception
+        or (
+            warm_batch64_docs_per_second is not None
+            and warm_batch64_docs_per_second >= DEFAULT_WARM_BATCH64_DOCS_PER_SECOND_FLOOR
+        ),
+        "startup/load/encode throughput gate warm batch64 throughput below 10 docs/s floor",
+    )
+    add_check(
+        blockers,
+        peak_rss_mb is not None and peak_rss_mb > 0.0,
+        "startup/load/encode throughput gate peak_rss_mb must be > 0",
+    )
+    details = {
+        "schema": data.get("schema"),
+        "cold_load_ms": cold_load_ms,
+        "cold_load_ms_ceiling": DEFAULT_COLD_LOAD_MS_CEILING,
+        "first_query_encode_ms": first_query_encode_ms,
+        "warm_batch64_docs_per_second": warm_batch64_docs_per_second,
+        "warm_batch64_docs_per_second_floor": DEFAULT_WARM_BATCH64_DOCS_PER_SECOND_FLOOR,
+        "peak_rss_mb": peak_rss_mb,
+        "explicit_owner_exception": owner_exception,
+    }
+    return blockers, details
+
+
+def validate_default_asset_size_policy(
+    data: dict[str, Any],
+    *,
+    package_sha256: str,
+    identity_sha256: str,
+    **_: Any,
+) -> tuple[list[str], dict[str, Any]]:
+    blockers: list[str] = []
+    add_check(
+        blockers,
+        data.get("schema") == DEFAULT_ASSET_SIZE_POLICY_SCHEMA,
+        "default asset size policy schema mismatch",
+    )
+    validate_identity_fields(
+        blockers,
+        data,
+        package_sha256=package_sha256,
+        identity_sha256=identity_sha256,
+        label="default asset size policy",
+    )
+    package_bytes = as_number(data.get("package_bytes"))
+    default_in_repo_asset_bytes = as_number(data.get("default_in_repo_asset_bytes"))
+    large_default_asset_approved = data.get("large_default_asset_approved") is True
+    selected_policy = data.get("selected_policy")
+    add_check(blockers, package_bytes is not None and package_bytes > 0.0, "default asset size policy package_bytes must be > 0")
+    add_check(
+        blockers,
+        package_bytes is not None and package_bytes <= DEFAULT_EXTERNAL_PACKAGE_BYTES_CEILING,
+        "default asset size policy package_bytes exceeds 200000000 byte ceiling",
+    )
+    add_check(
+        blockers,
+        default_in_repo_asset_bytes is not None and default_in_repo_asset_bytes >= 0.0,
+        "default asset size policy default_in_repo_asset_bytes must be >= 0",
+    )
+    add_check(
+        blockers,
+        large_default_asset_approved
+        or (
+            default_in_repo_asset_bytes is not None
+            and default_in_repo_asset_bytes <= DEFAULT_IN_REPO_ASSET_BYTES_CEILING
+        ),
+        "default asset size policy default_in_repo_asset_bytes exceeds 25000000 byte ceiling",
+    )
+    add_check(
+        blockers,
+        selected_policy in DEFAULT_ASSET_SIZE_POLICIES,
+        "default asset size policy selected_policy is not approved",
+    )
+    details = {
+        "schema": data.get("schema"),
+        "package_bytes": package_bytes,
+        "package_bytes_ceiling": DEFAULT_EXTERNAL_PACKAGE_BYTES_CEILING,
+        "default_in_repo_asset_bytes": default_in_repo_asset_bytes,
+        "default_in_repo_asset_bytes_ceiling": DEFAULT_IN_REPO_ASSET_BYTES_CEILING,
+        "large_default_asset_approved": large_default_asset_approved,
+        "selected_policy": selected_policy,
+    }
+    return blockers, details
+
+
 def summarize_evidence_gate(
     name: str,
     raw_path: str | Path | None,
     validator: Any,
     *,
+    missing_message: str | None = None,
     package_sha256: str,
     identity_sha256: str,
     legacy_model_name: str,
@@ -542,7 +870,7 @@ def summarize_evidence_gate(
         return {
             "status": "missing",
             "evidence_path": None,
-            "blockers": [f"{name} evidence missing: evidence path not supplied"],
+            "blockers": [missing_message or f"{name} evidence missing: evidence path not supplied"],
             "details": {},
         }
     path = Path(raw_path)
@@ -550,7 +878,7 @@ def summarize_evidence_gate(
         return {
             "status": "missing",
             "evidence_path": str(path),
-            "blockers": [f"{name} evidence missing: {path}"],
+            "blockers": [f"{missing_message}: {path}" if missing_message else f"{name} evidence missing: {path}"],
             "details": {},
         }
     try:
@@ -658,7 +986,14 @@ def build_summary(
     )
     bge = compact_bge_summary(bge_summary)
     scan = scan_public_name_hygiene(scan_paths or [])
-    default_gates = summarize_default_gates(default_gate_evidence_paths or {})
+    default_gates = summarize_default_gates(
+        default_gate_evidence_paths or {},
+        package_sha256=package_sha256,
+        identity_sha256=identity_sha256,
+        legacy_model_name=legacy_model_name,
+        public_name=public_name,
+        model=model,
+    )
     non_default_evidence = summarize_non_default_evidence(
         candidate_smoke_evidence=candidate_smoke_evidence,
         role_aware_provider_smoke_evidence=role_aware_provider_smoke_evidence,
@@ -788,6 +1123,14 @@ def tsv_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
                 "section": "default_swap_gate",
                 "key": gate,
                 "value": data.get("evidence_path"),
+                "status": data.get("status"),
+            }
+        )
+        rows.append(
+            {
+                "section": "default_swap_gate_detail",
+                "key": gate,
+                "value": json.dumps(data.get("details", {}), sort_keys=True, separators=(",", ":")),
                 "status": data.get("status"),
             }
         )
