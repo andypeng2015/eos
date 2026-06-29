@@ -223,12 +223,40 @@ class SummarizeDynamicRemineReadinessTest(unittest.TestCase):
                 descriptor=descriptor,
                 datasets=["scifact", "nfcorpus", "fiqa"],
             )
+            output_tsv = tmp / "summary.tsv"
+            summarizer.write_tsv(output_tsv, summary)
+            with output_tsv.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
 
         self.assertFalse(summary["launch_allowed"])
         self.assertIn("fiqa", summary["bge_gate"]["incomplete_datasets"])
         self.assertTrue(summary["stagea_bridge"]["ready"])
         self.assertTrue(summary["guide_filter"]["ready"])
         self.assertTrue(any("selected BGE gate incomplete" in blocker for blocker in summary["blockers"]))
+        self.assertTrue(
+            any(
+                "fiqa: partial doc vector export lines=3" in marker
+                and "vector progress=3/64286" in marker
+                and "expected_queries=6648" in marker
+                for marker in summary["bge_gate"]["active_export_markers"]
+            )
+        )
+        fiqa_progress = summary["bge_gate"]["incomplete_dataset_progress"][0]
+        self.assertEqual(fiqa_progress["dataset"], "fiqa")
+        self.assertEqual(fiqa_progress["expected_documents"], 57638)
+        self.assertEqual(fiqa_progress["expected_queries"], 6648)
+        self.assertEqual(fiqa_progress["doc_vector_lines"], 3)
+        self.assertIsNone(fiqa_progress["query_vector_lines"])
+        self.assertEqual(fiqa_progress["vector_progress_completed"], 3)
+        self.assertEqual(fiqa_progress["vector_progress_total"], 64286)
+        self.assertAlmostEqual(fiqa_progress["vector_progress_percent"], (3 / 64286) * 100.0)
+        self.assertGreater(fiqa_progress["doc_vector_size_bytes"], 0)
+        self.assertIsNotNone(fiqa_progress["doc_vector_mtime_utc"])
+        keyed = {(row["section"], row["key"]): row for row in rows}
+        self.assertEqual(keyed[("bge_progress", "fiqa.vector_progress_completed")]["value"], "3")
+        self.assertEqual(keyed[("bge_progress", "fiqa.vector_progress_total")]["value"], "64286")
+        self.assertEqual(keyed[("bge_progress", "fiqa.doc_vector_lines")]["value"], "3")
+        self.assertEqual(keyed[("bge_progress", "fiqa.expected_documents")]["value"], "57638")
 
     def test_stagea_score_coverage_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

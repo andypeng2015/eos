@@ -178,8 +178,61 @@ def release_identity(
     }
 
 
+def compact_bge_progress(dataset: dict[str, Any]) -> dict[str, Any]:
+    doc_file = dataset.get("doc_vector_file") if isinstance(dataset.get("doc_vector_file"), dict) else {}
+    query_file = dataset.get("query_vector_file") if isinstance(dataset.get("query_vector_file"), dict) else {}
+    return {
+        "dataset": dataset.get("dataset"),
+        "status": dataset.get("status"),
+        "expected_documents": dataset.get("expected_documents"),
+        "expected_queries": dataset.get("expected_queries"),
+        "doc_vector_lines": dataset.get("doc_vector_lines"),
+        "query_vector_lines": dataset.get("query_vector_lines"),
+        "partial_doc_vector_lines": dataset.get("partial_doc_vector_lines"),
+        "vector_progress_completed": dataset.get("vector_progress_completed"),
+        "vector_progress_total": dataset.get("vector_progress_total"),
+        "vector_progress_percent": dataset.get("vector_progress_percent"),
+        "doc_vector_size_bytes": doc_file.get("size_bytes"),
+        "doc_vector_mtime_utc": doc_file.get("mtime_utc"),
+        "query_vector_size_bytes": query_file.get("size_bytes"),
+        "query_vector_mtime_utc": query_file.get("mtime_utc"),
+        "present_artifacts": dataset.get("present_artifacts", []),
+        "missing_artifacts": dataset.get("missing_artifacts", []),
+    }
+
+
 def compact_bge_summary(summary: dict[str, Any]) -> dict[str, Any]:
     aggregate = summary["aggregate"]
+    datasets: list[dict[str, Any]] = []
+    incomplete_progress: list[dict[str, Any]] = []
+    for dataset in summary.get("datasets", []):
+        progress = compact_bge_progress(dataset)
+        compact = {
+            "dataset": dataset.get("dataset"),
+            "status": dataset.get("status"),
+            "identity_match": dataset.get("identity_match"),
+            "missing_artifacts": dataset.get("missing_artifacts", []),
+            "present_artifacts": dataset.get("present_artifacts", []),
+            "partial_doc_vector_lines": dataset.get("partial_doc_vector_lines"),
+            "expected_documents": progress.get("expected_documents"),
+            "expected_queries": progress.get("expected_queries"),
+            "doc_vector_lines": progress.get("doc_vector_lines"),
+            "query_vector_lines": progress.get("query_vector_lines"),
+            "vector_progress_completed": progress.get("vector_progress_completed"),
+            "vector_progress_total": progress.get("vector_progress_total"),
+            "vector_progress_percent": progress.get("vector_progress_percent"),
+            "doc_vector_size_bytes": progress.get("doc_vector_size_bytes"),
+            "doc_vector_mtime_utc": progress.get("doc_vector_mtime_utc"),
+            "query_vector_size_bytes": progress.get("query_vector_size_bytes"),
+            "query_vector_mtime_utc": progress.get("query_vector_mtime_utc"),
+            "blockers": dataset.get("blockers", []),
+            "dense": dataset.get("dense"),
+            "q8": dataset.get("q8"),
+            "q4": dataset.get("q4"),
+        }
+        datasets.append(compact)
+        if dataset.get("status") != "complete":
+            incomplete_progress.append(progress)
     return {
         "run_root": summary["run_root"],
         "summary_schema": summary.get("schema"),
@@ -194,21 +247,8 @@ def compact_bge_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "promotion_recommendation": aggregate.get("promotion_recommendation"),
         "macro": aggregate.get("macro", {}),
         "blockers": aggregate.get("blockers", []),
-        "datasets": [
-            {
-                "dataset": dataset.get("dataset"),
-                "status": dataset.get("status"),
-                "identity_match": dataset.get("identity_match"),
-                "missing_artifacts": dataset.get("missing_artifacts", []),
-                "present_artifacts": dataset.get("present_artifacts", []),
-                "partial_doc_vector_lines": dataset.get("partial_doc_vector_lines"),
-                "blockers": dataset.get("blockers", []),
-                "dense": dataset.get("dense"),
-                "q8": dataset.get("q8"),
-                "q4": dataset.get("q4"),
-            }
-            for dataset in summary.get("datasets", [])
-        ],
+        "incomplete_dataset_progress": incomplete_progress,
+        "datasets": datasets,
     }
 
 
@@ -1163,6 +1203,19 @@ def tsv_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
         {"section": "warning", "key": str(index), "value": warning, "status": "warn"}
         for index, warning in enumerate(summary["warnings"], start=1)
     )
+    for progress in summary["bge_gate"].get("incomplete_dataset_progress", []):
+        dataset = progress.get("dataset")
+        for key, value in progress.items():
+            if key == "dataset":
+                continue
+            rows.append(
+                {
+                    "section": "bge_progress",
+                    "key": f"{dataset}.{key}",
+                    "value": value,
+                    "status": "block" if progress.get("status") != "complete" else "pass",
+                }
+            )
     return rows
 
 

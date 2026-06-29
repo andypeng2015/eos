@@ -160,12 +160,14 @@ class SummarizeEncoderV21ReadinessTest(unittest.TestCase):
 
     def test_incomplete_fiqa_blocks_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            run_root, bge_root, descriptor = write_complete_encoder_fixture(Path(tmp))
+            root = Path(tmp)
+            run_root, bge_root, descriptor = write_complete_encoder_fixture(root)
             fiqa = bge_root / "fiqa"
             os.remove(fiqa / "vectors" / "query-vectors.jsonl")
             os.remove(fiqa / "vectors" / "manifest.json")
             os.remove(fiqa / "eval" / "dense.metrics.json")
             os.remove(fiqa / "eval" / "turboquant-q8-q4.metrics.json")
+            output_tsv = root / "readiness.tsv"
 
             summary = summarizer.build_summary(
                 run_root=run_root,
@@ -173,11 +175,38 @@ class SummarizeEncoderV21ReadinessTest(unittest.TestCase):
                 descriptor=descriptor,
                 datasets=["scifact", "nfcorpus", "fiqa"],
             )
+            summarizer.write_tsv(output_tsv, summary)
+            with output_tsv.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
 
         self.assertFalse(summary["launch_allowed"])
         self.assertIn("selected BGE gate incomplete", summary["blockers"])
         self.assertIn("active or partial export marker present", summary["blockers"])
         self.assertTrue(any("incomplete datasets: fiqa" in blocker for blocker in summary["blockers"]))
+        self.assertTrue(
+            any(
+                "fiqa: partial doc vector export lines=2" in marker
+                and "vector progress=2/64286" in marker
+                and "expected_documents=57638" in marker
+                for marker in summary["bge_gate"]["active_export_markers"]
+            )
+        )
+        fiqa_progress = summary["bge_gate"]["incomplete_dataset_progress"][0]
+        self.assertEqual(fiqa_progress["dataset"], "fiqa")
+        self.assertEqual(fiqa_progress["expected_documents"], 57638)
+        self.assertEqual(fiqa_progress["expected_queries"], 6648)
+        self.assertEqual(fiqa_progress["doc_vector_lines"], 2)
+        self.assertIsNone(fiqa_progress["query_vector_lines"])
+        self.assertEqual(fiqa_progress["vector_progress_completed"], 2)
+        self.assertEqual(fiqa_progress["vector_progress_total"], 64286)
+        self.assertAlmostEqual(fiqa_progress["vector_progress_percent"], (2 / 64286) * 100.0)
+        self.assertGreater(fiqa_progress["doc_vector_size_bytes"], 0)
+        self.assertIsNotNone(fiqa_progress["doc_vector_mtime_utc"])
+        keyed = {(row["section"], row["key"]): row for row in rows}
+        self.assertEqual(keyed[("bge_progress", "fiqa.vector_progress_completed")]["value"], "2")
+        self.assertEqual(keyed[("bge_progress", "fiqa.vector_progress_total")]["value"], "64286")
+        self.assertEqual(keyed[("bge_progress", "fiqa.doc_vector_lines")]["value"], "2")
+        self.assertEqual(keyed[("bge_progress", "fiqa.expected_queries")]["value"], "6648")
 
     def test_missing_sidecar_blocks_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

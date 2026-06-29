@@ -94,6 +94,77 @@ def legal_gates_are_research_only(gates: dict[str, Any]) -> bool:
     )
 
 
+def compact_bge_progress(dataset: dict[str, Any]) -> dict[str, Any]:
+    doc_file = dataset.get("doc_vector_file") if isinstance(dataset.get("doc_vector_file"), dict) else {}
+    query_file = dataset.get("query_vector_file") if isinstance(dataset.get("query_vector_file"), dict) else {}
+    return {
+        "dataset": dataset.get("dataset"),
+        "status": dataset.get("status"),
+        "expected_documents": dataset.get("expected_documents"),
+        "expected_queries": dataset.get("expected_queries"),
+        "doc_vector_lines": dataset.get("doc_vector_lines"),
+        "query_vector_lines": dataset.get("query_vector_lines"),
+        "partial_doc_vector_lines": dataset.get("partial_doc_vector_lines"),
+        "vector_progress_completed": dataset.get("vector_progress_completed"),
+        "vector_progress_total": dataset.get("vector_progress_total"),
+        "vector_progress_percent": dataset.get("vector_progress_percent"),
+        "doc_vector_size_bytes": doc_file.get("size_bytes"),
+        "doc_vector_mtime_utc": doc_file.get("mtime_utc"),
+        "query_vector_size_bytes": query_file.get("size_bytes"),
+        "query_vector_mtime_utc": query_file.get("mtime_utc"),
+        "present_artifacts": dataset.get("present_artifacts", []),
+        "missing_artifacts": dataset.get("missing_artifacts", []),
+    }
+
+
+def incomplete_bge_progress(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        compact_bge_progress(dataset)
+        for dataset in summary.get("datasets", [])
+        if isinstance(dataset, dict) and dataset.get("status") != "complete"
+    ]
+
+
+def format_progress_marker(progress: dict[str, Any]) -> str:
+    name = progress.get("dataset")
+    completed = progress.get("vector_progress_completed")
+    total = progress.get("vector_progress_total")
+    percent = progress.get("vector_progress_percent")
+    parts: list[str] = []
+    if progress.get("partial_doc_vector_lines") is not None:
+        parts.append(f"partial doc vector export lines={progress.get('partial_doc_vector_lines')}")
+    if completed is not None or total is not None:
+        progress_text = f"vector progress={completed}/{total}"
+        if percent is not None:
+            progress_text += f" ({percent:.6g}%)"
+        parts.append(progress_text)
+    parts.extend(
+        [
+            f"expected_documents={progress.get('expected_documents')}",
+            f"expected_queries={progress.get('expected_queries')}",
+            f"doc_vector_lines={progress.get('doc_vector_lines')}",
+            f"query_vector_lines={progress.get('query_vector_lines')}",
+        ]
+    )
+    if progress.get("doc_vector_size_bytes") is not None:
+        parts.append(f"doc_vector_size_bytes={progress.get('doc_vector_size_bytes')}")
+    if progress.get("doc_vector_mtime_utc") is not None:
+        parts.append(f"doc_vector_mtime_utc={progress.get('doc_vector_mtime_utc')}")
+    if progress.get("query_vector_size_bytes") is not None:
+        parts.append(f"query_vector_size_bytes={progress.get('query_vector_size_bytes')}")
+    if progress.get("query_vector_mtime_utc") is not None:
+        parts.append(f"query_vector_mtime_utc={progress.get('query_vector_mtime_utc')}")
+    return f"{name}: " + "; ".join(parts)
+
+
+def active_export_markers_from_progress(progress_rows: list[dict[str, Any]]) -> list[str]:
+    return [
+        format_progress_marker(progress)
+        for progress in progress_rows
+        if progress.get("partial_doc_vector_lines") is not None or progress.get("present_artifacts")
+    ]
+
+
 def summarize_bge_gate(run_root: Path, datasets: list[str]) -> dict[str, Any]:
     summary = bge_gate.build_summary(run_root=run_root, datasets=datasets)
     aggregate = summary["aggregate"]
@@ -102,13 +173,8 @@ def summarize_bge_gate(run_root: Path, datasets: list[str]) -> dict[str, Any]:
         for dataset in summary.get("datasets", [])
         if isinstance(dataset, dict) and dataset.get("status") != "complete"
     ]
-    active_export_markers: list[str] = []
-    for dataset in summary.get("datasets", []):
-        if not isinstance(dataset, dict) or dataset.get("status") == "complete":
-            continue
-        partial_lines = dataset.get("partial_doc_vector_lines")
-        if partial_lines is not None:
-            active_export_markers.append(f"{dataset.get('dataset')}: partial doc vector export lines={partial_lines}")
+    progress_rows = incomplete_bge_progress(summary)
+    active_export_markers = active_export_markers_from_progress(progress_rows)
     return {
         "run_root": str(run_root),
         "datasets": datasets,
@@ -119,6 +185,7 @@ def summarize_bge_gate(run_root: Path, datasets: list[str]) -> dict[str, Any]:
         "identity_consistent": aggregate.get("identity_consistent"),
         "incomplete_datasets": incomplete,
         "active_export_markers": active_export_markers,
+        "incomplete_dataset_progress": progress_rows,
         "blockers": aggregate.get("blockers", []),
         "summary": summary,
     }
@@ -530,6 +597,19 @@ def tsv_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
         {"section": "warning", "key": str(index), "value": warning, "status": "warn"}
         for index, warning in enumerate(summary["warnings"], start=1)
     )
+    for progress in summary["bge_gate"].get("incomplete_dataset_progress", []):
+        dataset = progress.get("dataset")
+        for key, value in progress.items():
+            if key == "dataset":
+                continue
+            rows.append(
+                {
+                    "section": "bge_progress",
+                    "key": f"{dataset}.{key}",
+                    "value": value,
+                    "status": "block" if progress.get("status") != "complete" else "pass",
+                }
+            )
     return rows
 
 

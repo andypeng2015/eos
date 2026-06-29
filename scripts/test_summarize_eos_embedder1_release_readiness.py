@@ -357,17 +357,40 @@ class SummarizeEosEmbedder1ReleaseReadinessTest(unittest.TestCase):
             write_complete_bge_dataset(root, "nfcorpus")
             write_lines(root / "fiqa" / "vectors" / "doc-vectors.jsonl", 3)
             evidence = write_valid_non_default_evidence(root)
+            output_tsv = root / "readiness.tsv"
 
             summary = summarizer.build_summary(
                 bge_gate_root=root,
                 datasets=["scifact", "nfcorpus", "fiqa"],
                 **evidence,
             )
+            summarizer.write_tsv(output_tsv, summary)
+            with output_tsv.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
 
         self.assertEqual(summary["non_default_candidate_status"], "defer")
+        self.assertEqual(summary["default_swap_status"], "defer")
         self.assertTrue(any("selected BGE gate incomplete" in blocker for blocker in summary["blockers"]["non_default"]))
         self.assertTrue(any("fiqa" in blocker.lower() for blocker in summary["blockers"]["non_default"]))
         self.assertFalse(summary["bge_gate"]["all_complete"])
+        fiqa = next(dataset for dataset in summary["bge_gate"]["datasets"] if dataset["dataset"] == "fiqa")
+        self.assertEqual(fiqa["expected_documents"], 57638)
+        self.assertEqual(fiqa["expected_queries"], 6648)
+        self.assertEqual(fiqa["doc_vector_lines"], 3)
+        self.assertIsNone(fiqa["query_vector_lines"])
+        self.assertEqual(fiqa["vector_progress_completed"], 3)
+        self.assertEqual(fiqa["vector_progress_total"], 64286)
+        self.assertAlmostEqual(fiqa["vector_progress_percent"], (3 / 64286) * 100.0)
+        self.assertGreater(fiqa["doc_vector_size_bytes"], 0)
+        self.assertIsNotNone(fiqa["doc_vector_mtime_utc"])
+        progress = summary["bge_gate"]["incomplete_dataset_progress"][0]
+        self.assertEqual(progress["dataset"], "fiqa")
+        self.assertEqual(progress["vector_progress_completed"], 3)
+        keyed = {(row["section"], row["key"]): row for row in rows}
+        self.assertEqual(keyed[("bge_progress", "fiqa.vector_progress_completed")]["value"], "3")
+        self.assertEqual(keyed[("bge_progress", "fiqa.vector_progress_total")]["value"], "64286")
+        self.assertEqual(keyed[("bge_progress", "fiqa.doc_vector_lines")]["value"], "3")
+        self.assertEqual(keyed[("bge_progress", "fiqa.expected_queries")]["value"], "6648")
 
     def test_identity_mismatch_defers_non_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
