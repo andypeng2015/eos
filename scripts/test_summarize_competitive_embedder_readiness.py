@@ -27,12 +27,31 @@ def write_dynamic_fixture(root: Path) -> tuple[Path, Path]:
     return stagea_root, descriptor
 
 
+def write_major_lever_reports(root: Path) -> tuple[Path, Path]:
+    compact_report = root / "compact-bge-listwise-larger-validation-split211-seed191-v1-report.md"
+    compact_report.write_text(
+        "\n".join(
+            [
+                "# compact report",
+                "- 2000-doc gate: nDCG@10 `+0.062803213`, MAP@100 `+0.050985152`, recall@100 `+0.195312500`.",
+                "- 4000-doc gate: nDCG@10 `+0.057674953`, MAP@100 `+0.048607354`, recall@100 `+0.097656250`.",
+                "This remains evidence-only and research-only. It supports continued validation, not promotion.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    stageabc_report = root / "retrieval-pretraining-distillation-pipeline-map-v1-report.md"
+    stageabc_report.write_text("Stage A row builder. Stage B guide cache. Stage C compact adaptation.\n", encoding="utf-8")
+    return compact_report, stageabc_report
+
+
 class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
     def test_complete_fixture_rolls_up_ready_packets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             encoder_root, bge_root, encoder_descriptor = write_complete_encoder_fixture(root)
             dynamic_root, dynamic_descriptor = write_dynamic_fixture(root)
+            compact_report, stageabc_report = write_major_lever_reports(root)
             non_default_evidence = write_valid_non_default_evidence(root)
             default_evidence = write_valid_default_evidence(root)
 
@@ -43,6 +62,8 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                 dynamic_stagea_root=dynamic_root,
                 dynamic_descriptor=dynamic_descriptor,
                 datasets=["scifact", "nfcorpus", "fiqa"],
+                compact_native_student_report=compact_report,
+                stageabc_pretraining_distillation_report=stageabc_report,
                 embedder1_default_gate_evidence_paths={key: str(value) for key, value in default_evidence.items()},
                 embedder1_candidate_smoke_evidence=non_default_evidence["candidate_smoke_evidence"],
                 embedder1_role_aware_provider_smoke_evidence=non_default_evidence[
@@ -61,6 +82,17 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
         self.assertEqual(summary["packets"]["dynamic_remine"]["status"], "ready_to_launch")
         self.assertEqual(summary["packets"]["eos_embedder1_non_default"]["status"], "ready_for_review")
         self.assertEqual(summary["packets"]["eos_embedder1_default_swap"]["status"], "ready_for_review")
+        self.assertEqual(summary["packets"]["compact_native_student"]["status"], "evidence_only_waiting_validation")
+        self.assertEqual(summary["packets"]["stageabc_pretraining_distillation"]["status"], "planned_not_ready")
+        self.assertEqual(summary["packets"]["role_asymmetry"]["status"], "release_identity_gate_ready")
+        self.assertEqual(summary["packets"]["quantization_profile"]["status"], "q8_ready_for_review")
+        self.assertEqual(
+            summary["packets"]["compact_native_student"]["details"]["parsed_deltas"]["2000_doc_ndcg_delta"],
+            "+0.062803213",
+        )
+        self.assertFalse(summary["packets"]["compact_native_student"]["details"]["promotion_ready"])
+        self.assertFalse(summary["packets"]["stageabc_pretraining_distillation"]["details"]["training_ready"])
+        self.assertEqual(summary["summary"]["quantization_profile_status"], "q8_ready_for_review")
         self.assertEqual(summary["public_identity_policy"]["public_name"], "Eos Embedder 1")
         self.assertEqual(summary["public_identity_policy"]["public_id"], "eos-embedder-1")
         self.assertFalse(summary["public_identity_policy"]["internal_v_labels_are_release_versions"])
@@ -77,6 +109,7 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
             os.remove(fiqa / "eval" / "dense.metrics.json")
             os.remove(fiqa / "eval" / "turboquant-q8-q4.metrics.json")
             dynamic_root, dynamic_descriptor = write_dynamic_fixture(root)
+            compact_report, stageabc_report = write_major_lever_reports(root)
             non_default_evidence = write_valid_non_default_evidence(root)
             output_tsv = root / "rollup.tsv"
 
@@ -87,6 +120,8 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                 dynamic_stagea_root=dynamic_root,
                 dynamic_descriptor=dynamic_descriptor,
                 datasets=["scifact", "nfcorpus", "fiqa"],
+                compact_native_student_report=compact_report,
+                stageabc_pretraining_distillation_report=stageabc_report,
                 embedder1_candidate_smoke_evidence=non_default_evidence["candidate_smoke_evidence"],
                 embedder1_role_aware_provider_smoke_evidence=non_default_evidence[
                     "role_aware_provider_smoke_evidence"
@@ -106,6 +141,10 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
         self.assertEqual(summary["packets"]["dynamic_remine"]["status"], "waiting_on_fiqa")
         self.assertEqual(summary["packets"]["eos_embedder1_non_default"]["status"], "defer")
         self.assertEqual(summary["packets"]["eos_embedder1_default_swap"]["status"], "defer")
+        self.assertEqual(summary["packets"]["compact_native_student"]["status"], "waiting_on_fiqa")
+        self.assertEqual(summary["packets"]["stageabc_pretraining_distillation"]["status"], "planned_not_ready")
+        self.assertEqual(summary["packets"]["role_asymmetry"]["status"], "release_identity_gate_ready")
+        self.assertEqual(summary["packets"]["quantization_profile"]["status"], "waiting_on_fiqa")
         self.assertIn("Wait for the active/incomplete FiQA selected-BGE export", summary["next_action"])
         self.assertIn("`--require-non-default-promotion-policy`", summary["arbiter_next_action"])
         self.assertEqual(summary["active_export"]["dataset"], "fiqa")
@@ -127,8 +166,34 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
         self.assertEqual(keyed[("summary", "waiting_on_fiqa")]["status"], "waiting_on_fiqa")
         self.assertEqual(keyed[("packet", "selected_bge_full_gate")]["status"], "waiting_on_fiqa")
         self.assertEqual(keyed[("packet", "encoder_v21_controlled_training")]["status"], "waiting_on_fiqa")
+        self.assertEqual(keyed[("packet", "compact_native_student")]["status"], "waiting_on_fiqa")
+        self.assertEqual(keyed[("packet", "stageabc_pretraining_distillation")]["status"], "planned_not_ready")
+        self.assertEqual(keyed[("packet", "role_asymmetry")]["status"], "release_identity_gate_ready")
+        self.assertEqual(keyed[("packet", "quantization_profile")]["status"], "waiting_on_fiqa")
         self.assertEqual(keyed[("progress", "fiqa")]["status"], "incomplete")
         self.assertIn("2/64286", keyed[("progress", "fiqa")]["progress"])
+
+    def test_missing_major_lever_reports_defer_without_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            encoder_root, bge_root, encoder_descriptor = write_complete_encoder_fixture(root)
+            dynamic_root, dynamic_descriptor = write_dynamic_fixture(root)
+
+            summary = summarizer.build_summary(
+                bge_gate_root=bge_root,
+                encoder_run_root=encoder_root,
+                encoder_descriptor=encoder_descriptor,
+                dynamic_stagea_root=dynamic_root,
+                dynamic_descriptor=dynamic_descriptor,
+                datasets=["scifact", "nfcorpus", "fiqa"],
+                compact_native_student_report=root / "missing-compact.md",
+                stageabc_pretraining_distillation_report=root / "missing-stageabc.md",
+                clock=lambda: "2026-06-29T00:00:00Z",
+            )
+
+        self.assertEqual(summary["packets"]["compact_native_student"]["status"], "missing_evidence")
+        self.assertEqual(summary["packets"]["stageabc_pretraining_distillation"]["status"], "missing_plan")
+        self.assertEqual(summary["packets"]["role_asymmetry"]["status"], "defer")
 
     def test_require_unblocked_next_action_exits_2_when_waiting_on_fiqa(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -140,6 +205,7 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
             os.remove(fiqa / "eval" / "dense.metrics.json")
             os.remove(fiqa / "eval" / "turboquant-q8-q4.metrics.json")
             dynamic_root, dynamic_descriptor = write_dynamic_fixture(root)
+            compact_report, stageabc_report = write_major_lever_reports(root)
 
             code = summarizer.main(
                 [
@@ -155,6 +221,10 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                     str(dynamic_descriptor),
                     "--datasets",
                     "scifact,nfcorpus,fiqa",
+                    "--compact-native-student-report",
+                    str(compact_report),
+                    "--stageabc-pretraining-distillation-report",
+                    str(stageabc_report),
                     "--output-json",
                     str(root / "rollup.json"),
                     "--output-tsv",
@@ -175,6 +245,7 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
             os.remove(fiqa / "eval" / "dense.metrics.json")
             os.remove(fiqa / "eval" / "turboquant-q8-q4.metrics.json")
             dynamic_root, dynamic_descriptor = write_dynamic_fixture(root)
+            compact_report, stageabc_report = write_major_lever_reports(root)
             output_json = root / "rollup.json"
             command = "eos export-pretrained-bert-retrieval-vectors --dataset fiqa"
 
@@ -192,6 +263,10 @@ class SummarizeCompetitiveEmbedderReadinessTest(unittest.TestCase):
                     str(dynamic_descriptor),
                     "--datasets",
                     "scifact,nfcorpus,fiqa",
+                    "--compact-native-student-report",
+                    str(compact_report),
+                    "--stageabc-pretraining-distillation-report",
+                    str(stageabc_report),
                     "--output-json",
                     str(output_json),
                     "--output-tsv",

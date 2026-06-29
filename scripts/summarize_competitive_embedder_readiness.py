@@ -29,6 +29,12 @@ import summarize_eos_embedder1_release_readiness as embedder1
 SUMMARY_SCHEMA = "eos.competitive_embedder_readiness_rollup.v1"
 DEFAULT_OUTPUT_JSON = ".tiller/scratch/codex/competitive-embedder-goal-readiness-current.json"
 DEFAULT_OUTPUT_TSV = ".tiller/scratch/codex/competitive-embedder-goal-readiness-current.tsv"
+DEFAULT_COMPACT_NATIVE_STUDENT_REPORT = (
+    ".tiller/scratch/codex/compact-bge-listwise-larger-validation-split211-seed191-v1-report.md"
+)
+DEFAULT_STAGEABC_PRETRAINING_DISTILLATION_REPORT = (
+    ".tiller/scratch/codex/retrieval-pretraining-distillation-pipeline-map-v1-report.md"
+)
 
 
 class RollupError(ValueError):
@@ -168,6 +174,164 @@ def packet(
     }
 
 
+def report_path_detail(path: Path) -> dict[str, Any]:
+    return {
+        "evidence_path": str(path),
+        "exists": path.exists(),
+    }
+
+
+def read_optional_text(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
+def parse_compact_native_student_deltas(text: str) -> dict[str, str]:
+    deltas: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- 2000-doc gate:"):
+            parts = stripped.split("`")
+            if len(parts) >= 6:
+                deltas["2000_doc_ndcg_delta"] = parts[1]
+                deltas["2000_doc_map_delta"] = parts[3]
+                deltas["2000_doc_recall_delta"] = parts[5]
+        if stripped.startswith("- 4000-doc gate:"):
+            parts = stripped.split("`")
+            if len(parts) >= 6:
+                deltas["4000_doc_ndcg_delta"] = parts[1]
+                deltas["4000_doc_map_delta"] = parts[3]
+                deltas["4000_doc_recall_delta"] = parts[5]
+    return {key: value for key, value in deltas.items() if value}
+
+
+def compact_native_student_packet(report_path: Path, waiting_on_fiqa: bool) -> dict[str, Any]:
+    text = read_optional_text(report_path)
+    if text is None:
+        return packet(
+            packet_id="compact_native_student",
+            title="Compact native student/listwise distillation",
+            status="missing_evidence",
+            blockers=[f"compact native student report missing: {report_path}"],
+            next_safe_action="Locate or create compact native/listwise validation evidence before planning promotion.",
+            details=report_path_detail(report_path),
+        )
+    status = "waiting_on_fiqa" if waiting_on_fiqa else "evidence_only_waiting_validation"
+    return packet(
+        packet_id="compact_native_student",
+        title="Compact native student/listwise distillation",
+        status=status,
+        blockers=["existing compact native/listwise evidence is validation-only, not promotion proof"],
+        next_safe_action="Third deterministic larger split or broader validation after FiQA clears."
+        if waiting_on_fiqa
+        else "Run a third deterministic larger split or broader validation before any promotion discussion.",
+        details={
+            **report_path_detail(report_path),
+            "parsed_deltas": parse_compact_native_student_deltas(text),
+            "promotion_ready": False,
+            "quality_claim": False,
+        },
+    )
+
+
+def stageabc_pretraining_distillation_packet(report_path: Path) -> dict[str, Any]:
+    text = read_optional_text(report_path)
+    if text is None:
+        return packet(
+            packet_id="stageabc_pretraining_distillation",
+            title="Stage A/B/C pretraining-distillation",
+            status="missing_plan",
+            blockers=[f"Stage A/B/C pipeline map missing: {report_path}"],
+            next_safe_action="Write the Stage A/B/C pipeline map before implementation work.",
+            details=report_path_detail(report_path),
+        )
+    return packet(
+        packet_id="stageabc_pretraining_distillation",
+        title="Stage A/B/C pretraining-distillation",
+        status="planned_not_ready",
+        blockers=[
+            "Stage A row builder, teacher guide cache/filter, and listwise harness are mapped but not implementation-ready"
+        ],
+        next_safe_action="Implement the Stage A row builder, guide cache/filter, and listwise harness before any training.",
+        details={
+            **report_path_detail(report_path),
+            "waiting_on_implementation": True,
+            "training_ready": False,
+            "mentions_stage_a": "Stage A" in text,
+            "mentions_stage_b": "Stage B" in text,
+            "mentions_stage_c": "Stage C" in text,
+        },
+    )
+
+
+def role_asymmetry_packet(release: dict[str, Any]) -> dict[str, Any]:
+    evidence = release.get("non_default_evidence") if isinstance(release.get("non_default_evidence"), dict) else {}
+    gates = evidence.get("gates") if isinstance(evidence.get("gates"), dict) else {}
+    role_gate = gates.get("role_aware_provider_smoke") if isinstance(gates.get("role_aware_provider_smoke"), dict) else {}
+    role_status = role_gate.get("status")
+    if role_status == "pass":
+        status = "release_identity_gate_ready"
+        blockers: list[str] = []
+        action = "Keep query/document role handling in the Eos Embedder 1 release identity checklist."
+    else:
+        status = "defer"
+        blockers = [str(item) for item in role_gate.get("blockers", [])] if isinstance(role_gate.get("blockers"), list) else []
+        if not blockers:
+            blockers = ["role-aware provider smoke evidence is missing or not valid"]
+        action = "Supply valid role-aware provider smoke evidence before treating role asymmetry as release-ready."
+    return packet(
+        packet_id="role_asymmetry",
+        title="Role asymmetry",
+        status=status,
+        blockers=blockers,
+        next_safe_action=action,
+        details={
+            "release_non_default_candidate_status": release.get("non_default_candidate_status"),
+            "role_aware_provider_smoke_status": role_status,
+            "evidence_path": role_gate.get("evidence_path"),
+            "public_name": release.get("public_name"),
+            "public_id": release.get("public_id"),
+            "role_contract": release.get("identity", {}).get("role_contract")
+            if isinstance(release.get("identity"), dict)
+            else None,
+        },
+    )
+
+
+def quantization_profile_packet(bge: dict[str, Any], waiting_on_fiqa: bool) -> dict[str, Any]:
+    policy = bge.get("quality_policy") if isinstance(bge.get("quality_policy"), dict) else {}
+    if waiting_on_fiqa:
+        status = "waiting_on_fiqa"
+        blockers = ["FiQA dense/q8/q4 metrics are incomplete"]
+        action = bge_wait_action()
+    elif policy.get("q8_policy_pass") is True:
+        status = "q8_ready_for_review"
+        blockers = []
+        action = "Review q8 preservation; keep q4 as a separate release-profile decision."
+    else:
+        status = "blocked"
+        blockers = [str(item) for item in policy.get("blockers", [])]
+        action = "Resolve quantization quality-policy blockers before release review."
+    return packet(
+        packet_id="quantization_profile",
+        title="Quantization profile readiness",
+        status=status,
+        blockers=blockers,
+        next_safe_action=action,
+        details={
+            "q8_policy_pass": policy.get("q8_policy_pass"),
+            "q4_release_profile_pass": policy.get("q4_release_profile_pass"),
+            "q4_release_profile_decision": policy.get("q4_release_profile_decision"),
+            "dense_policy_pass": policy.get("dense_policy_pass"),
+            "non_default_promotion_policy_pass": policy.get("non_default_promotion_policy_pass"),
+            "macro": policy.get("macro", {}),
+            "per_dataset": policy.get("per_dataset", {}),
+        },
+    )
+
+
 def bge_wait_action() -> str:
     return (
         "Wait for the active/incomplete FiQA selected-BGE export to finish. "
@@ -193,6 +357,8 @@ def build_summary(
     dynamic_stagea_root: Path,
     dynamic_descriptor: Path,
     datasets: list[str],
+    compact_native_student_report: Path = Path(DEFAULT_COMPACT_NATIVE_STUDENT_REPORT),
+    stageabc_pretraining_distillation_report: Path = Path(DEFAULT_STAGEABC_PRETRAINING_DISTILLATION_REPORT),
     encoder_binary: Path | None = None,
     encoder_tiny_metrics: Path | None = None,
     encoder_capped_metrics: Path | None = None,
@@ -294,6 +460,12 @@ def build_summary(
             progress=release.get("bge_gate", {}).get("incomplete_dataset_progress", []),
             details={"public_name": release["public_name"], "public_id": release["public_id"]},
         ),
+        "compact_native_student": compact_native_student_packet(compact_native_student_report, waiting_on_fiqa),
+        "stageabc_pretraining_distillation": stageabc_pretraining_distillation_packet(
+            stageabc_pretraining_distillation_report
+        ),
+        "role_asymmetry": role_asymmetry_packet(release),
+        "quantization_profile": quantization_profile_packet(bge, waiting_on_fiqa),
     }
 
     if next_action is None:
@@ -324,6 +496,10 @@ def build_summary(
             "dynamic_remine_status": packets["dynamic_remine"]["status"],
             "eos_embedder1_non_default_status": packets["eos_embedder1_non_default"]["status"],
             "eos_embedder1_default_swap_status": packets["eos_embedder1_default_swap"]["status"],
+            "compact_native_student_status": packets["compact_native_student"]["status"],
+            "stageabc_pretraining_distillation_status": packets["stageabc_pretraining_distillation"]["status"],
+            "role_asymmetry_status": packets["role_asymmetry"]["status"],
+            "quantization_profile_status": packets["quantization_profile"]["status"],
             "waiting_on_fiqa": waiting_on_fiqa,
         },
         "next_action": next_action,
@@ -439,6 +615,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--encoder-capped-metrics")
     parser.add_argument("--dynamic-stagea-root", default=dynamic_remine.DEFAULT_STAGEA_ROOT)
     parser.add_argument("--dynamic-descriptor", default=dynamic_remine.DEFAULT_DESCRIPTOR)
+    parser.add_argument("--compact-native-student-report", default=DEFAULT_COMPACT_NATIVE_STUDENT_REPORT)
+    parser.add_argument(
+        "--stageabc-pretraining-distillation-report",
+        default=DEFAULT_STAGEABC_PRETRAINING_DISTILLATION_REPORT,
+    )
     parser.add_argument("--scan-paths", default="")
     parser.add_argument("--candidate-smoke-evidence")
     parser.add_argument("--role-aware-provider-smoke-evidence")
@@ -465,6 +646,8 @@ def main(argv: list[str] | None = None) -> int:
             dynamic_stagea_root=Path(args.dynamic_stagea_root),
             dynamic_descriptor=Path(args.dynamic_descriptor),
             datasets=parse_datasets(args.datasets),
+            compact_native_student_report=Path(args.compact_native_student_report),
+            stageabc_pretraining_distillation_report=Path(args.stageabc_pretraining_distillation_report),
             encoder_binary=Path(args.encoder_binary) if args.encoder_binary else None,
             encoder_tiny_metrics=Path(args.encoder_tiny_metrics) if args.encoder_tiny_metrics else None,
             encoder_capped_metrics=Path(args.encoder_capped_metrics) if args.encoder_capped_metrics else None,
