@@ -5410,6 +5410,68 @@ func TestEvalMetricsPayloadIncludesRetrievalMetrics(t *testing.T) {
 	}
 }
 
+func TestTrainMetricsPayloadIncludesEvalHistoryRetrievalMetrics(t *testing.T) {
+	payload := trainMetricsPayload(
+		"train-embed",
+		"train",
+		"model.mll",
+		"",
+		eosruntime.EmbeddingTrainRunSummary{
+			EvalHistory: []eosruntime.EmbeddingTrainEvalSummary{
+				{
+					Epoch:    1,
+					Step:     3,
+					EvalPass: 2,
+					Trigger:  "step",
+					Improved: true,
+					Eval: &eosruntime.EmbeddingEvalMetrics{
+						RetrievalNDCGAt10:    0.41,
+						RetrievalMAPAt100:    0.32,
+						RetrievalRecallAt100: 0.73,
+					},
+				},
+			},
+		},
+		eosruntime.EmbeddingTrainPackagePaths{},
+		nil,
+	)
+	if len(payload.EvalHistory) != 1 {
+		t.Fatalf("eval history len = %d, want 1", len(payload.EvalHistory))
+	}
+	record := payload.EvalHistory[0]
+	if record.Epoch != 1 || record.Step != 3 || record.EvalPass != 2 || record.Trigger != "step" || !record.Improved {
+		t.Fatalf("eval history metadata = %+v", record)
+	}
+	if record.Eval == nil || record.Eval.RetrievalNDCGAt10 != 0.41 || record.Eval.RetrievalMAPAt100 != 0.32 || record.Eval.RetrievalRecallAt100 != 0.73 {
+		t.Fatalf("eval history retrieval metrics = %+v", record.Eval)
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	var got struct {
+		EvalHistory []struct {
+			Epoch    int    `json:"epoch"`
+			Step     int    `json:"step"`
+			EvalPass int    `json:"eval_pass"`
+			Trigger  string `json:"trigger"`
+			Improved bool   `json:"improved"`
+			Eval     struct {
+				RetrievalNDCG   float32 `json:"retrieval_ndcg_at_10"`
+				RetrievalMAP    float32 `json:"retrieval_map_at_100"`
+				RetrievalRecall float32 `json:"retrieval_recall_at_100"`
+			} `json:"eval"`
+		} `json:"eval_history"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal payload: %v\n%s", err, string(data))
+	}
+	if len(got.EvalHistory) != 1 || got.EvalHistory[0].Eval.RetrievalNDCG != 0.41 || got.EvalHistory[0].Eval.RetrievalMAP != 0.32 || got.EvalHistory[0].Eval.RetrievalRecall != 0.73 {
+		t.Fatalf("json eval history = %+v", got.EvalHistory)
+	}
+}
+
 func TestRunCompareTrainMetricsReportsCurrentAndBaselineDeltas(t *testing.T) {
 	dir := t.TempDir()
 	currentPath := filepath.Join(dir, "current.metrics.json")

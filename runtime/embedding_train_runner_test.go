@@ -338,6 +338,76 @@ func TestEmbeddingTrainerFitImprovesEvalAndTracksBest(t *testing.T) {
 	assertClose(t, finalEval.PairAccuracy, summary.FinalEval.PairAccuracy, 0.000001)
 }
 
+func TestEmbeddingTrainerFitRecordsPairwiseEvalHistory(t *testing.T) {
+	trainer := newTinyTrainableEmbeddingTrainer(t, 0.05)
+	trainSet := tinyEmbeddingPairDataset()
+
+	summary, err := trainer.Fit(trainSet, trainSet, EmbeddingTrainRunConfig{
+		Epochs:         3,
+		BatchSize:      2,
+		Shuffle:        false,
+		Seed:           7,
+		EvalEveryEpoch: 1,
+	})
+	if err != nil {
+		t.Fatalf("fit: %v", err)
+	}
+	if len(summary.History) != 3 {
+		t.Fatalf("history len = %d, want 3", len(summary.History))
+	}
+	if len(summary.EvalHistory) != 4 {
+		t.Fatalf("eval history len = %d, want 4", len(summary.EvalHistory))
+	}
+	if summary.Workload.ActualEvalPasses != len(summary.EvalHistory) {
+		t.Fatalf("actual eval passes = %d, eval history len = %d", summary.Workload.ActualEvalPasses, len(summary.EvalHistory))
+	}
+	wantTriggers := []string{"epoch", "epoch", "epoch", "final"}
+	wantEpochs := []int{1, 2, 3, 3}
+	for i, record := range summary.EvalHistory {
+		if record.Trigger != wantTriggers[i] {
+			t.Fatalf("eval history[%d] trigger = %q, want %q", i, record.Trigger, wantTriggers[i])
+		}
+		if record.Epoch != wantEpochs[i] {
+			t.Fatalf("eval history[%d] epoch = %d, want %d", i, record.Epoch, wantEpochs[i])
+		}
+		if record.EvalPass != i+1 {
+			t.Fatalf("eval history[%d] eval pass = %d, want %d", i, record.EvalPass, i+1)
+		}
+		if record.Eval == nil {
+			t.Fatalf("eval history[%d] missing pairwise eval metrics", i)
+		}
+		if record.ScoreSpectrumEval != nil || record.ListwiseGeometryEval != nil {
+			t.Fatalf("eval history[%d] has non-pairwise metrics: score=%v listwise=%v", i, record.ScoreSpectrumEval, record.ListwiseGeometryEval)
+		}
+	}
+}
+
+func TestEmbeddingTrainerFitEvalOnlyRecordsPairwiseEvalHistory(t *testing.T) {
+	trainer := newTinyTrainableEmbeddingTrainer(t, 0.05)
+	evalSet := tinyEmbeddingPairDataset()
+
+	summary, err := trainer.Fit(nil, evalSet, EmbeddingTrainRunConfig{EvalOnly: true})
+	if err != nil {
+		t.Fatalf("fit eval-only: %v", err)
+	}
+	if len(summary.History) != 0 {
+		t.Fatalf("history len = %d, want 0", len(summary.History))
+	}
+	if len(summary.EvalHistory) != 1 {
+		t.Fatalf("eval history len = %d, want 1", len(summary.EvalHistory))
+	}
+	record := summary.EvalHistory[0]
+	if record.Trigger != "eval_only" {
+		t.Fatalf("eval-only trigger = %q, want eval_only", record.Trigger)
+	}
+	if record.EvalPass != 1 {
+		t.Fatalf("eval-only pass = %d, want 1", record.EvalPass)
+	}
+	if record.Eval == nil || summary.FinalEval == nil {
+		t.Fatalf("missing eval-only metrics: record=%v final=%v", record.Eval, summary.FinalEval)
+	}
+}
+
 func TestEmbeddingTrainerFitStopsEarlyOnPlateau(t *testing.T) {
 	trainer := newTinyTrainableEmbeddingTrainer(t, 0)
 	trainSet := tinyEmbeddingPairDataset()

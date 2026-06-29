@@ -6548,6 +6548,7 @@ type trainMetricsJSON struct {
 	LastListwiseGeometryEval  *listwiseGeometryEvalMetricsJSON `json:"last_listwise_geometry_eval,omitempty"`
 	BestListwiseGeometryEval  *listwiseGeometryEvalMetricsJSON `json:"best_listwise_geometry_eval,omitempty"`
 	FinalListwiseGeometryEval *listwiseGeometryEvalMetricsJSON `json:"final_listwise_geometry_eval,omitempty"`
+	EvalHistory               []trainEvalSummaryJSON           `json:"eval_history,omitempty"`
 	Workload                  trainWorkloadJSON                `json:"workload"`
 	Throughput                trainThroughputJSON              `json:"throughput"`
 	Accelerators              trainAcceleratorsJSON            `json:"accelerators"`
@@ -6564,6 +6565,17 @@ type trainRunSummaryJSON struct {
 	BestStep        int  `json:"best_step"`
 	RestoredBest    bool `json:"restored_best"`
 	StoppedEarly    bool `json:"stopped_early"`
+}
+
+type trainEvalSummaryJSON struct {
+	Epoch                int                              `json:"epoch"`
+	Step                 int                              `json:"step"`
+	EvalPass             int                              `json:"eval_pass"`
+	Trigger              string                           `json:"trigger"`
+	Improved             bool                             `json:"improved"`
+	Eval                 *evalMetricsJSON                 `json:"eval,omitempty"`
+	ScoreSpectrumEval    *scoreSpectrumEvalMetricsJSON    `json:"score_spectrum_eval,omitempty"`
+	ListwiseGeometryEval *listwiseGeometryEvalMetricsJSON `json:"listwise_geometry_eval,omitempty"`
 }
 
 type trainRunConfigJSON struct {
@@ -6789,6 +6801,7 @@ func trainMetricsPayload(command, mode, artifactPath, tokenizerPath string, summ
 		LastListwiseGeometryEval:  listwiseGeometryEvalMetricsPayload(summary.LastListwiseGeometryEval),
 		BestListwiseGeometryEval:  listwiseGeometryEvalMetricsPayload(summary.BestListwiseGeometryEval),
 		FinalListwiseGeometryEval: listwiseGeometryEvalMetricsPayload(summary.FinalListwiseGeometryEval),
+		EvalHistory:               trainEvalHistoryPayload(summary.EvalHistory),
 		Workload:                  trainWorkloadPayload(summary.Workload),
 		Throughput:                trainThroughputPayload(summary),
 		Accelerators:              trainAcceleratorsPayload(summary.EndProfile),
@@ -6808,6 +6821,26 @@ func trainRunSummaryPayload(summary eosruntime.EmbeddingTrainRunSummary) trainRu
 		RestoredBest:    summary.RestoredBest,
 		StoppedEarly:    summary.StoppedEarly,
 	}
+}
+
+func trainEvalHistoryPayload(history []eosruntime.EmbeddingTrainEvalSummary) []trainEvalSummaryJSON {
+	if len(history) == 0 {
+		return nil
+	}
+	payload := make([]trainEvalSummaryJSON, 0, len(history))
+	for _, record := range history {
+		payload = append(payload, trainEvalSummaryJSON{
+			Epoch:                record.Epoch,
+			Step:                 record.Step,
+			EvalPass:             record.EvalPass,
+			Trigger:              record.Trigger,
+			Improved:             record.Improved,
+			Eval:                 evalMetricsPayload(record.Eval),
+			ScoreSpectrumEval:    scoreSpectrumEvalMetricsPayload(record.ScoreSpectrumEval),
+			ListwiseGeometryEval: listwiseGeometryEvalMetricsPayload(record.ListwiseGeometryEval),
+		})
+	}
+	return payload
 }
 
 func trainRunConfigPayload(cfg eosruntime.EmbeddingTrainRunConfig, effectiveLearningRate float32) trainRunConfigJSON {

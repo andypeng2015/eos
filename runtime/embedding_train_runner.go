@@ -167,12 +167,41 @@ type EmbeddingTrainRunSummary struct {
 	RestoredBest              bool
 	StoppedEarly              bool
 	History                   []EmbeddingTrainEpochSummary
+	EvalHistory               []EmbeddingTrainEvalSummary
 	StartProfile              EmbeddingTrainProfile
 	EndProfile                EmbeddingTrainProfile
 	DeltaProfile              EmbeddingTrainProfile
 	Elapsed                   time.Duration
 	TrainDuration             time.Duration
 	EvalDuration              time.Duration
+}
+
+// EmbeddingTrainEvalSummary records one auditable evaluation pass.
+type EmbeddingTrainEvalSummary struct {
+	Epoch                int
+	Step                 int
+	EvalPass             int
+	Trigger              string
+	Improved             bool
+	Eval                 *EmbeddingEvalMetrics
+	ScoreSpectrumEval    *EmbeddingScoreSpectrumEvalMetrics
+	ListwiseGeometryEval *EmbeddingListwiseGeometryEvalMetrics
+}
+
+func appendTrainEvalHistory(summary *EmbeddingTrainRunSummary, epoch, step int, trigger string, improved bool, eval *EmbeddingEvalMetrics, scoreEval *EmbeddingScoreSpectrumEvalMetrics, listwiseEval *EmbeddingListwiseGeometryEvalMetrics) {
+	if summary == nil {
+		return
+	}
+	summary.EvalHistory = append(summary.EvalHistory, EmbeddingTrainEvalSummary{
+		Epoch:                epoch,
+		Step:                 step,
+		EvalPass:             summary.Workload.ActualEvalPasses,
+		Trigger:              trigger,
+		Improved:             improved,
+		Eval:                 cloneEvalMetricsPtr(eval),
+		ScoreSpectrumEval:    cloneScoreSpectrumEvalMetricsPtr(scoreEval),
+		ListwiseGeometryEval: cloneListwiseGeometryEvalMetricsPtr(listwiseEval),
+	})
 }
 
 // Fit trains over a dataset, periodically evaluates, and can restore the best checkpoint.
@@ -260,6 +289,7 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 		summary.Workload.ActualEvalPairs = int64(len(evalSet))
 		summary.Workload.ActualEvalExamples = int64(len(evalSet))
 		maybeReportEvalProgress(cfg, "eval_done", 0, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
+		appendTrainEvalHistory(&summary, 0, t.step, "eval_only", true, summary.FinalEval, nil, nil)
 		summary.EndProfile = t.TrainProfile()
 		summary.DeltaProfile = diffTrainProfile(summary.StartProfile, summary.EndProfile)
 		summary.Workload.ActualTotalPairs = summary.Workload.ActualEvalPairs
@@ -330,8 +360,10 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 				summary.BestEpoch = epoch
 				summary.BestStep = t.step
 				noImproveEvals = 0
+				appendTrainEvalHistory(&summary, epoch, t.step, "epoch", true, record.Eval, nil, nil)
 			} else {
 				noImproveEvals++
+				appendTrainEvalHistory(&summary, epoch, t.step, "epoch", false, record.Eval, nil, nil)
 				if cfg.EarlyStoppingPatience > 0 && noImproveEvals >= cfg.EarlyStoppingPatience {
 					summary.StoppedEarly = true
 					summary.History = append(summary.History, record)
@@ -370,6 +402,7 @@ func (t *EmbeddingTrainer) Fit(trainSet, evalSet []EmbeddingPairExample, cfg Emb
 		summary.Workload.ActualEvalExamples += int64(len(evalSet))
 		summary.FinalEval = cloneEvalMetrics(finalEval)
 		maybeReportEvalProgress(cfg, "eval_done", summary.EpochsCompleted, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
+		appendTrainEvalHistory(&summary, summary.EpochsCompleted, t.step, "final", false, summary.FinalEval, nil, nil)
 		if summary.BestEval == nil {
 			summary.BestEval = cloneEvalMetrics(finalEval)
 			if summary.BestEpoch == 0 {
@@ -519,7 +552,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		return int64(len(evalSet))
 	}
 	hasEval := len(evalSet) > 0 || len(cfg.EvalPairs) > 0
-	recordEval := func(epoch int) (*EmbeddingEvalMetrics, bool, error) {
+	recordEval := func(epoch int, trigger string) (*EmbeddingEvalMetrics, bool, error) {
 		evalStart := time.Now()
 		evalPass := summary.Workload.ActualEvalPasses + 1
 		maybeReportEvalProgress(cfg, "eval_start", epoch, t.step, evalPass, evalExamplesPerPass(), evalPairsPerPass(), runStart)
@@ -548,10 +581,12 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		} else {
 			noImproveEvals++
 		}
-		return cloneEvalMetrics(evalMetrics), improved, nil
+		evalMetricsCopy := cloneEvalMetrics(evalMetrics)
+		appendTrainEvalHistory(&summary, epoch, t.step, trigger, improved, evalMetricsCopy, nil, nil)
+		return evalMetricsCopy, improved, nil
 	}
 	if hasEval && cfg.RestoreBest {
-		if _, _, err := recordEval(0); err != nil {
+		if _, _, err := recordEval(0, "initial"); err != nil {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("initial eval: %w", err)
 		}
 	}
@@ -572,7 +607,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 				if progress.Batch <= 0 || progress.Batch%cfg.EvalEverySteps != 0 {
 					return nil
 				}
-				if _, _, err := recordEval(epoch); err != nil {
+				if _, _, err := recordEval(epoch, "step"); err != nil {
 					return fmt.Errorf("step %d eval: %w", progress.Step, err)
 				}
 				return nil
@@ -595,7 +630,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		summary.Workload.ActualTrainExamples += int64(contrastiveUsableExampleCount(len(indices), cfg.BatchSize))
 
 		if hasEval && epoch%cfg.EvalEveryEpoch == 0 {
-			evalMetrics, improved, err := recordEval(epoch)
+			evalMetrics, improved, err := recordEval(epoch, "epoch")
 			if err != nil {
 				return EmbeddingTrainRunSummary{}, fmt.Errorf("epoch %d eval: %w", epoch, err)
 			}
@@ -640,6 +675,7 @@ func (t *EmbeddingTrainer) FitContrastive(trainSet, evalSet []EmbeddingContrasti
 		summary.Workload.ActualEvalExamples += evalExamplesPerPass()
 		summary.FinalEval = cloneEvalMetrics(finalEval)
 		maybeReportEvalProgress(cfg, "eval_done", summary.EpochsCompleted, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
+		appendTrainEvalHistory(&summary, summary.EpochsCompleted, t.step, "final", false, summary.FinalEval, nil, nil)
 		if summary.BestEval == nil {
 			summary.BestEval = cloneEvalMetrics(finalEval)
 			if summary.BestEpoch == 0 {
@@ -764,7 +800,7 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 		haveBest       bool
 		noImproveEvals int
 	)
-	recordEval := func(epoch int) (*EmbeddingEvalMetrics, bool, error) {
+	recordEval := func(epoch int, trigger string) (*EmbeddingEvalMetrics, bool, error) {
 		evalStart := time.Now()
 		evalPass := summary.Workload.ActualEvalPasses + 1
 		maybeReportEvalProgress(cfg, "eval_start", epoch, t.step, evalPass, int64(len(evalSet)), int64(len(evalSet)), runStart)
@@ -793,10 +829,12 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 		} else {
 			noImproveEvals++
 		}
-		return cloneEvalMetrics(evalMetrics), improved, nil
+		evalMetricsCopy := cloneEvalMetrics(evalMetrics)
+		appendTrainEvalHistory(&summary, epoch, t.step, trigger, improved, evalMetricsCopy, nil, nil)
+		return evalMetricsCopy, improved, nil
 	}
 	if len(evalSet) > 0 && cfg.RestoreBest {
-		if _, _, err := recordEval(0); err != nil {
+		if _, _, err := recordEval(0, "initial"); err != nil {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("initial eval: %w", err)
 		}
 	}
@@ -819,7 +857,7 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 				if progress.Batch <= 0 || progress.Batch%cfg.EvalEverySteps != 0 {
 					return nil
 				}
-				if _, _, err := recordEval(epoch); err != nil {
+				if _, _, err := recordEval(epoch, "step"); err != nil {
 					return fmt.Errorf("step %d eval: %w", progress.Step, err)
 				}
 				return nil
@@ -842,7 +880,7 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 		summary.Workload.ActualTrainExamples += int64(len(indices))
 
 		if len(evalSet) > 0 && epoch%cfg.EvalEveryEpoch == 0 {
-			evalMetrics, improved, err := recordEval(epoch)
+			evalMetrics, improved, err := recordEval(epoch, "epoch")
 			if err != nil {
 				return EmbeddingTrainRunSummary{}, fmt.Errorf("epoch %d eval: %w", epoch, err)
 			}
@@ -885,6 +923,7 @@ func (t *EmbeddingTrainer) FitHardNegatives(trainSet []EmbeddingHardNegativeExam
 		summary.Workload.ActualEvalExamples += int64(len(evalSet))
 		summary.FinalEval = cloneEvalMetrics(finalEval)
 		maybeReportEvalProgress(cfg, "eval_done", summary.EpochsCompleted, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
+		appendTrainEvalHistory(&summary, summary.EpochsCompleted, t.step, "final", false, summary.FinalEval, nil, nil)
 		if summary.BestEval == nil {
 			summary.BestEval = cloneEvalMetrics(finalEval)
 			if summary.BestEpoch == 0 {
@@ -996,6 +1035,12 @@ func (t *EmbeddingTrainer) FitScoreSpectrum(trainSet []EmbeddingScoreSpectrumExa
 			summary.FinalEval = cloneEvalMetrics(finalEval)
 			summary.LastEval = cloneEvalMetrics(finalEval)
 			summary.BestEval = cloneEvalMetrics(finalEval)
+		} else if retrievalEvalMetrics, err := t.retrievalOnlyEvalMetrics(true); err != nil {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("retrieval eval: %w", err)
+		} else if retrievalEvalMetrics != nil {
+			summary.FinalEval = cloneEvalMetrics(*retrievalEvalMetrics)
+			summary.LastEval = cloneEvalMetrics(*retrievalEvalMetrics)
+			summary.BestEval = cloneEvalMetrics(*retrievalEvalMetrics)
 		}
 		if len(scoreSpectrumEvalSet) > 0 {
 			finalScoreEval, err := t.EvaluateScoreSpectrumBatched(scoreSpectrumEvalSet, cfg.BatchSize)
@@ -1013,6 +1058,7 @@ func (t *EmbeddingTrainer) FitScoreSpectrum(trainSet []EmbeddingScoreSpectrumExa
 		summary.Workload.ActualEvalPairs = evalPairs
 		summary.Workload.ActualEvalExamples = evalExamples
 		maybeReportEvalProgress(cfg, "eval_done", 0, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
+		appendTrainEvalHistory(&summary, 0, t.step, "eval_only", true, summary.FinalEval, summary.FinalScoreSpectrumEval, nil)
 		summary.EndProfile = t.TrainProfile()
 		summary.DeltaProfile = diffTrainProfile(summary.StartProfile, summary.EndProfile)
 		summary.Workload.ActualTotalPairs = summary.Workload.ActualEvalPairs
@@ -1031,7 +1077,7 @@ func (t *EmbeddingTrainer) FitScoreSpectrum(trainSet []EmbeddingScoreSpectrumExa
 		haveBest       bool
 		noImproveEvals int
 	)
-	recordEval := func(epoch int) (*EmbeddingEvalMetrics, *EmbeddingScoreSpectrumEvalMetrics, bool, error) {
+	recordEval := func(epoch int, trigger string) (*EmbeddingEvalMetrics, *EmbeddingScoreSpectrumEvalMetrics, bool, error) {
 		evalStart := time.Now()
 		evalPass := summary.Workload.ActualEvalPasses + 1
 		evalExamples, evalPairs := scoreSpectrumEvalProgressWork(evalSet, scoreSpectrumEvalSet)
@@ -1044,6 +1090,11 @@ func (t *EmbeddingTrainer) FitScoreSpectrum(trainSet []EmbeddingScoreSpectrumExa
 			}
 			evalMetrics = cloneEvalMetrics(metrics)
 			summary.LastEval = cloneEvalMetrics(metrics)
+		} else if retrievalEvalMetrics, err := t.retrievalOnlyEvalMetrics(true); err != nil {
+			return nil, nil, false, err
+		} else if retrievalEvalMetrics != nil {
+			evalMetrics = retrievalEvalMetrics
+			summary.LastEval = cloneEvalMetrics(*retrievalEvalMetrics)
 		}
 		var scoreEvalMetrics *EmbeddingScoreSpectrumEvalMetrics
 		if len(scoreSpectrumEvalSet) > 0 {
@@ -1066,7 +1117,7 @@ func (t *EmbeddingTrainer) FitScoreSpectrum(trainSet []EmbeddingScoreSpectrumExa
 			}
 			improved = !haveBest || betterScoreSpectrumEvalMetrics(*scoreEvalMetrics, *summary.BestScoreSpectrumEval, cfg.SelectMetric, cfg.MinDelta)
 		} else {
-			if evalMetrics == nil {
+			if evalMetrics == nil || (len(evalSet) == 0 && !retrievalSelectionMetric(cfg.SelectMetric)) {
 				return nil, nil, false, fmt.Errorf("select_metric %q requires pairwise eval data", cfg.SelectMetric)
 			}
 			improved = !haveBest || betterEvalMetrics(*evalMetrics, *summary.BestEval, cfg.SelectMetric, cfg.MinDelta)
@@ -1090,10 +1141,11 @@ func (t *EmbeddingTrainer) FitScoreSpectrum(trainSet []EmbeddingScoreSpectrumExa
 		} else {
 			noImproveEvals++
 		}
+		appendTrainEvalHistory(&summary, epoch, t.step, trigger, improved, evalMetrics, scoreEvalMetrics, nil)
 		return evalMetrics, scoreEvalMetrics, improved, nil
 	}
 	if (len(evalSet) > 0 || len(scoreSpectrumEvalSet) > 0) && cfg.RestoreBest {
-		if _, _, _, err := recordEval(0); err != nil {
+		if _, _, _, err := recordEval(0, "initial"); err != nil {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("initial eval: %w", err)
 		}
 	}
@@ -1111,7 +1163,7 @@ func (t *EmbeddingTrainer) FitScoreSpectrum(trainSet []EmbeddingScoreSpectrumExa
 				if progress.Batch <= 0 || progress.Batch%cfg.EvalEverySteps != 0 {
 					return nil
 				}
-				if _, _, _, err := recordEval(epoch); err != nil {
+				if _, _, _, err := recordEval(epoch, "step"); err != nil {
 					return fmt.Errorf("step %d eval: %w", progress.Step, err)
 				}
 				return nil
@@ -1135,7 +1187,7 @@ func (t *EmbeddingTrainer) FitScoreSpectrum(trainSet []EmbeddingScoreSpectrumExa
 		summary.Workload.ActualTrainExamples += int64(len(indices))
 
 		if (len(evalSet) > 0 || len(scoreSpectrumEvalSet) > 0) && epoch%cfg.EvalEveryEpoch == 0 {
-			evalMetrics, scoreEvalMetrics, improved, err := recordEval(epoch)
+			evalMetrics, scoreEvalMetrics, improved, err := recordEval(epoch, "epoch")
 			if err != nil {
 				return EmbeddingTrainRunSummary{}, fmt.Errorf("epoch %d eval: %w", epoch, err)
 			}
@@ -1176,6 +1228,10 @@ func (t *EmbeddingTrainer) FitScoreSpectrum(trainSet []EmbeddingScoreSpectrumExa
 				return EmbeddingTrainRunSummary{}, fmt.Errorf("final eval: %w", err)
 			}
 			summary.FinalEval = cloneEvalMetrics(finalEval)
+		} else if retrievalEvalMetrics, err := t.retrievalOnlyEvalMetrics(true); err != nil {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("final retrieval eval: %w", err)
+		} else if retrievalEvalMetrics != nil {
+			summary.FinalEval = cloneEvalMetrics(*retrievalEvalMetrics)
 		}
 		if len(scoreSpectrumEvalSet) > 0 {
 			finalScoreEval, err := t.EvaluateScoreSpectrumBatched(scoreSpectrumEvalSet, cfg.BatchSize)
@@ -1189,6 +1245,7 @@ func (t *EmbeddingTrainer) FitScoreSpectrum(trainSet []EmbeddingScoreSpectrumExa
 		summary.Workload.ActualEvalPairs += evalPairs
 		summary.Workload.ActualEvalExamples += evalExamples
 		maybeReportEvalProgress(cfg, "eval_done", summary.EpochsCompleted, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
+		appendTrainEvalHistory(&summary, summary.EpochsCompleted, t.step, "final", false, summary.FinalEval, summary.FinalScoreSpectrumEval, nil)
 		if summary.FinalEval != nil && summary.BestEval == nil {
 			summary.BestEval = cloneEvalMetrics(*summary.FinalEval)
 		}
@@ -1299,6 +1356,12 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 			summary.FinalEval = cloneEvalMetrics(finalEval)
 			summary.LastEval = cloneEvalMetrics(finalEval)
 			summary.BestEval = cloneEvalMetrics(finalEval)
+		} else if retrievalEvalMetrics, err := t.retrievalOnlyEvalMetrics(true); err != nil {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("retrieval eval: %w", err)
+		} else if retrievalEvalMetrics != nil {
+			summary.FinalEval = cloneEvalMetrics(*retrievalEvalMetrics)
+			summary.LastEval = cloneEvalMetrics(*retrievalEvalMetrics)
+			summary.BestEval = cloneEvalMetrics(*retrievalEvalMetrics)
 		}
 		if len(listwiseEvalSet) > 0 {
 			finalListwiseEval, err := t.EvaluateListwiseGeometryBatched(listwiseEvalSet, cfg.BatchSize)
@@ -1316,6 +1379,7 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 		summary.Workload.ActualEvalPairs = evalPairs
 		summary.Workload.ActualEvalExamples = evalExamples
 		maybeReportEvalProgress(cfg, "eval_done", 0, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
+		appendTrainEvalHistory(&summary, 0, t.step, "eval_only", true, summary.FinalEval, nil, summary.FinalListwiseGeometryEval)
 		summary.EndProfile = t.TrainProfile()
 		summary.DeltaProfile = diffTrainProfile(summary.StartProfile, summary.EndProfile)
 		summary.Workload.ActualTotalPairs = summary.Workload.ActualEvalPairs
@@ -1334,7 +1398,7 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 		haveBest       bool
 		noImproveEvals int
 	)
-	recordEval := func(epoch int) (*EmbeddingEvalMetrics, *EmbeddingListwiseGeometryEvalMetrics, bool, error) {
+	recordEval := func(epoch int, trigger string) (*EmbeddingEvalMetrics, *EmbeddingListwiseGeometryEvalMetrics, bool, error) {
 		evalStart := time.Now()
 		evalPass := summary.Workload.ActualEvalPasses + 1
 		evalExamples, evalPairs := listwiseGeometryEvalProgressWork(evalSet, listwiseEvalSet)
@@ -1347,6 +1411,11 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 			}
 			evalMetrics = cloneEvalMetrics(metrics)
 			summary.LastEval = cloneEvalMetrics(metrics)
+		} else if retrievalEvalMetrics, err := t.retrievalOnlyEvalMetrics(true); err != nil {
+			return nil, nil, false, err
+		} else if retrievalEvalMetrics != nil {
+			evalMetrics = retrievalEvalMetrics
+			summary.LastEval = cloneEvalMetrics(*retrievalEvalMetrics)
 		}
 		var listwiseEvalMetrics *EmbeddingListwiseGeometryEvalMetrics
 		if len(listwiseEvalSet) > 0 {
@@ -1363,7 +1432,8 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 		summary.Workload.ActualEvalExamples += evalExamples
 		maybeReportEvalProgress(cfg, "eval_done", epoch, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
 		improved := false
-		if evalMetrics != nil && (!haveBest || betterEvalMetrics(*evalMetrics, *summary.BestEval, cfg.SelectMetric, cfg.MinDelta)) {
+		selectableEval := evalMetrics != nil && (len(evalSet) > 0 || retrievalSelectionMetric(cfg.SelectMetric))
+		if selectableEval && (!haveBest || betterEvalMetrics(*evalMetrics, *summary.BestEval, cfg.SelectMetric, cfg.MinDelta)) {
 			checkpoint, err := t.Checkpoint()
 			if err != nil {
 				return nil, nil, false, err
@@ -1378,13 +1448,14 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 			summary.BestEpoch = epoch
 			summary.BestStep = t.step
 			noImproveEvals = 0
-		} else if evalMetrics != nil {
+		} else if selectableEval {
 			noImproveEvals++
 		}
+		appendTrainEvalHistory(&summary, epoch, t.step, trigger, improved, evalMetrics, nil, listwiseEvalMetrics)
 		return evalMetrics, listwiseEvalMetrics, improved, nil
 	}
-	if len(evalSet) > 0 && cfg.RestoreBest {
-		if _, _, _, err := recordEval(0); err != nil {
+	if (len(evalSet) > 0 || (len(listwiseEvalSet) > 0 && retrievalSelectionMetric(cfg.SelectMetric) && t.retrievalEvalEnabled)) && cfg.RestoreBest {
+		if _, _, _, err := recordEval(0, "initial"); err != nil {
 			return EmbeddingTrainRunSummary{}, fmt.Errorf("initial eval: %w", err)
 		}
 	}
@@ -1402,7 +1473,7 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 				if progress.Batch <= 0 || progress.Batch%cfg.EvalEverySteps != 0 {
 					return nil
 				}
-				if _, _, _, err := recordEval(epoch); err != nil {
+				if _, _, _, err := recordEval(epoch, "step"); err != nil {
 					return fmt.Errorf("step %d eval: %w", progress.Step, err)
 				}
 				return nil
@@ -1425,14 +1496,14 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 		summary.Workload.ActualTrainPairs += epochPairs
 		summary.Workload.ActualTrainExamples += int64(len(indices))
 		if (len(evalSet) > 0 || len(listwiseEvalSet) > 0) && epoch%cfg.EvalEveryEpoch == 0 {
-			evalMetrics, listwiseEvalMetrics, improved, err := recordEval(epoch)
+			evalMetrics, listwiseEvalMetrics, improved, err := recordEval(epoch, "epoch")
 			if err != nil {
 				return EmbeddingTrainRunSummary{}, fmt.Errorf("epoch %d eval: %w", epoch, err)
 			}
 			record.Eval = evalMetrics
 			record.ListwiseGeometryEval = listwiseEvalMetrics
 			record.Improved = improved
-			if len(evalSet) > 0 && !improved && cfg.EarlyStoppingPatience > 0 && noImproveEvals >= cfg.EarlyStoppingPatience {
+			if (len(evalSet) > 0 || (t.retrievalEvalEnabled && retrievalSelectionMetric(cfg.SelectMetric))) && !improved && cfg.EarlyStoppingPatience > 0 && noImproveEvals >= cfg.EarlyStoppingPatience {
 				summary.StoppedEarly = true
 				summary.History = append(summary.History, record)
 				break
@@ -1464,6 +1535,10 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 				return EmbeddingTrainRunSummary{}, fmt.Errorf("final eval: %w", err)
 			}
 			summary.FinalEval = cloneEvalMetrics(finalEval)
+		} else if retrievalEvalMetrics, err := t.retrievalOnlyEvalMetrics(true); err != nil {
+			return EmbeddingTrainRunSummary{}, fmt.Errorf("final retrieval eval: %w", err)
+		} else if retrievalEvalMetrics != nil {
+			summary.FinalEval = cloneEvalMetrics(*retrievalEvalMetrics)
 		}
 		if len(listwiseEvalSet) > 0 {
 			finalListwiseEval, err := t.EvaluateListwiseGeometryBatched(listwiseEvalSet, cfg.BatchSize)
@@ -1477,6 +1552,7 @@ func (t *EmbeddingTrainer) FitListwiseGeometry(trainSet []EmbeddingTokenizedList
 		summary.Workload.ActualEvalPairs += evalPairs
 		summary.Workload.ActualEvalExamples += evalExamples
 		maybeReportEvalProgress(cfg, "eval_done", summary.EpochsCompleted, t.step, summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalExamples, summary.Workload.ActualEvalPairs, runStart)
+		appendTrainEvalHistory(&summary, summary.EpochsCompleted, t.step, "final", false, summary.FinalEval, nil, summary.FinalListwiseGeometryEval)
 		if summary.BestEval == nil {
 			if summary.FinalEval != nil {
 				summary.BestEval = cloneEvalMetrics(*summary.FinalEval)
@@ -3548,6 +3624,15 @@ func canonicalTrainSelectionMetric(metric string) string {
 	}
 }
 
+func retrievalSelectionMetric(metric string) bool {
+	switch canonicalTrainSelectionMetric(metric) {
+	case "retrieval_ndcg", "retrieval_map_at_100", "retrieval_recall_at_100":
+		return true
+	default:
+		return false
+	}
+}
+
 func validTrainSelectionMetric(metric string) bool {
 	switch canonicalTrainSelectionMetric(metric) {
 	case "loss", "pair_accuracy", "threshold_accuracy", "score_margin", "auc", "top1_accuracy", "top5_accuracy", "top10_accuracy", "mrr", "mean_positive_rank", "mean_rank", "retrieval_ndcg", "retrieval_map_at_100", "retrieval_recall_at_100":
@@ -3676,6 +3761,24 @@ func cloneEvalMetrics(metrics EmbeddingEvalMetrics) *EmbeddingEvalMetrics {
 	return &out
 }
 
+func (t *EmbeddingTrainer) retrievalOnlyEvalMetrics(noPairwiseEval bool) (*EmbeddingEvalMetrics, error) {
+	if t == nil || !noPairwiseEval || !t.retrievalEvalEnabled {
+		return nil, nil
+	}
+	metrics := EmbeddingEvalMetrics{}
+	if err := t.augmentRetrievalMetrics(&metrics); err != nil {
+		return nil, err
+	}
+	return cloneEvalMetrics(metrics), nil
+}
+
+func cloneEvalMetricsPtr(metrics *EmbeddingEvalMetrics) *EmbeddingEvalMetrics {
+	if metrics == nil {
+		return nil
+	}
+	return cloneEvalMetrics(*metrics)
+}
+
 func betterScoreSpectrumEvalMetrics(current, best EmbeddingScoreSpectrumEvalMetrics, metric string, minDelta float32) bool {
 	const eps = 1e-6
 	primaryDelta := float32(math.Max(float64(minDelta), eps))
@@ -3713,7 +3816,21 @@ func cloneScoreSpectrumEvalMetrics(metrics EmbeddingScoreSpectrumEvalMetrics) *E
 	return &out
 }
 
+func cloneScoreSpectrumEvalMetricsPtr(metrics *EmbeddingScoreSpectrumEvalMetrics) *EmbeddingScoreSpectrumEvalMetrics {
+	if metrics == nil {
+		return nil
+	}
+	return cloneScoreSpectrumEvalMetrics(*metrics)
+}
+
 func cloneListwiseGeometryEvalMetrics(metrics EmbeddingListwiseGeometryEvalMetrics) *EmbeddingListwiseGeometryEvalMetrics {
 	out := metrics
 	return &out
+}
+
+func cloneListwiseGeometryEvalMetricsPtr(metrics *EmbeddingListwiseGeometryEvalMetrics) *EmbeddingListwiseGeometryEvalMetrics {
+	if metrics == nil {
+		return nil
+	}
+	return cloneListwiseGeometryEvalMetrics(*metrics)
 }

@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"m31labs.dev/eos/runtime/backends/cuda"
+	"m31labs.dev/eos/runtime/backends/metal"
 )
 
 func TestTokenizeEmbeddingListwiseGeometryBatchesPreservesMatrixAlignment(t *testing.T) {
@@ -372,8 +375,27 @@ func TestEmbeddingTrainerFitListwiseGeometryPairwiseEvalSelectionAndAccounting(t
 	if summary.FinalEval == nil || summary.BestEval == nil || len(summary.History) == 0 {
 		t.Fatalf("summary missing eval/history: %+v", summary)
 	}
+	if len(summary.History) != 2 {
+		t.Fatalf("history len = %d, want one epoch record per epoch", len(summary.History))
+	}
 	if summary.Workload.ActualEvalPasses != 6 || summary.Workload.ActualEvalPairs != int64(6*len(tinyEncoderPairDataset())) || summary.Workload.ActualEvalExamples != int64(6*len(tinyEncoderPairDataset())) {
 		t.Fatalf("eval accounting = passes %d pairs %d examples %d, want 6/%d/%d", summary.Workload.ActualEvalPasses, summary.Workload.ActualEvalPairs, summary.Workload.ActualEvalExamples, 6*len(tinyEncoderPairDataset()), 6*len(tinyEncoderPairDataset()))
+	}
+	if len(summary.EvalHistory) != summary.Workload.ActualEvalPasses {
+		t.Fatalf("eval history len = %d, want actual eval passes %d", len(summary.EvalHistory), summary.Workload.ActualEvalPasses)
+	}
+	triggerCounts := map[string]int{}
+	for i, record := range summary.EvalHistory {
+		if record.EvalPass != i+1 {
+			t.Fatalf("eval history[%d] pass = %d, want %d", i, record.EvalPass, i+1)
+		}
+		if record.Eval == nil {
+			t.Fatalf("eval history[%d] missing pairwise eval: %+v", i, record)
+		}
+		triggerCounts[record.Trigger]++
+	}
+	if triggerCounts["initial"] != 1 || triggerCounts["step"] != 2 || triggerCounts["epoch"] != 2 || triggerCounts["final"] != 1 {
+		t.Fatalf("eval history trigger counts = %+v, want initial=1 step=2 epoch=2 final=1", triggerCounts)
 	}
 	if summary.Workload.PlannedEvalPasses != 6 || summary.Workload.PlannedEvalPairs != int64(6*len(tinyEncoderPairDataset())) {
 		t.Fatalf("planned eval accounting = passes %d pairs %d, want 6/%d", summary.Workload.PlannedEvalPasses, summary.Workload.PlannedEvalPairs, 6*len(tinyEncoderPairDataset()))
@@ -385,6 +407,70 @@ func TestEmbeddingTrainerFitListwiseGeometryPairwiseEvalSelectionAndAccounting(t
 		if record.Eval == nil {
 			t.Fatalf("history record missing eval: %+v", record)
 		}
+	}
+}
+
+func TestEmbeddingTrainerFitListwiseGeometryRetrievalOnlyEvalSelectionAndHistory(t *testing.T) {
+	dataset := writeTinyRetrievalGateFixture(t)
+	corpusPath, queriesPath, qrelsPath := BEIRRetrievalPaths(dataset, "test")
+	tok := tinyEmbeddingTokenizerFile()
+	summary, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitListwiseGeometry(tinyTokenizedListwiseGeometryBatches(false), nil, EmbeddingTrainRunConfig{
+		Epochs:               2,
+		BatchSize:            1,
+		EvalEveryEpoch:       1,
+		EvalEverySteps:       1,
+		RestoreBest:          true,
+		SelectMetric:         "retrieval_recall",
+		Temperature:          0.05,
+		ListwiseGeometryEval: tinyTokenizedListwiseGeometryBatches(false),
+		RetrievalEvalRuntime: New(cuda.New(), metal.New()),
+		RetrievalEval: RetrievalEvalConfig{
+			DatasetName: "tiny",
+			CorpusPath:  corpusPath,
+			QueriesPath: queriesPath,
+			QrelsPath:   qrelsPath,
+			BatchSize:   2,
+		},
+		RetrievalEvalTokenizer: &tok,
+	})
+	if err != nil {
+		t.Fatalf("fit listwise geometry with retrieval-only eval: %v", err)
+	}
+	if !summary.RestoredBest {
+		t.Fatal("expected restore-best to run from retrieval-only selection")
+	}
+	if summary.BestEval == nil || summary.BestEval.RetrievalRecallAt100 <= 0 {
+		t.Fatalf("best eval retrieval recall = %+v, want > 0", summary.BestEval)
+	}
+	if summary.FinalEval == nil || summary.FinalEval.RetrievalRecallAt100 <= 0 || summary.FinalEval.PairCount != 0 {
+		t.Fatalf("final eval = %+v, want retrieval-only metrics with pair_count=0", summary.FinalEval)
+	}
+	if len(summary.History) != 2 {
+		t.Fatalf("history len = %d, want 2 epochs", len(summary.History))
+	}
+	for _, record := range summary.History {
+		if record.Eval == nil || record.Eval.RetrievalRecallAt100 <= 0 || record.Eval.PairCount != 0 {
+			t.Fatalf("epoch %d eval = %+v, want retrieval-only metrics", record.Epoch, record.Eval)
+		}
+		if record.ListwiseGeometryEval == nil {
+			t.Fatalf("epoch %d missing listwise eval metrics", record.Epoch)
+		}
+	}
+	if len(summary.EvalHistory) != summary.Workload.ActualEvalPasses {
+		t.Fatalf("eval history len = %d, want actual eval passes %d", len(summary.EvalHistory), summary.Workload.ActualEvalPasses)
+	}
+	triggerCounts := map[string]int{}
+	for i, record := range summary.EvalHistory {
+		if record.EvalPass != i+1 {
+			t.Fatalf("eval history[%d] pass = %d, want %d", i, record.EvalPass, i+1)
+		}
+		if record.Eval == nil || record.Eval.RetrievalRecallAt100 <= 0 || record.Eval.PairCount != 0 {
+			t.Fatalf("eval history[%d] eval = %+v, want retrieval-only metrics", i, record.Eval)
+		}
+		triggerCounts[record.Trigger]++
+	}
+	if triggerCounts["initial"] != 1 || triggerCounts["step"] != 2 || triggerCounts["epoch"] != 2 || triggerCounts["final"] != 1 {
+		t.Fatalf("eval history trigger counts = %+v, want initial=1 step=2 epoch=2 final=1", triggerCounts)
 	}
 }
 

@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"m31labs.dev/eos/runtime/backends/cuda"
+	"m31labs.dev/eos/runtime/backends/metal"
 )
 
 func TestEmbeddingTrainerTrainScoreSpectrumStep(t *testing.T) {
@@ -404,6 +407,56 @@ func TestEmbeddingTrainerFitScoreSpectrumEvalOnlyDoesNotUpdate(t *testing.T) {
 	}
 	if summary.FinalEval == nil || summary.Workload.ActualEvalPairs == 0 {
 		t.Fatalf("missing eval metrics/workload: final=%v actualEvalPairs=%d", summary.FinalEval, summary.Workload.ActualEvalPairs)
+	}
+}
+
+func TestEmbeddingTrainerFitScoreSpectrumRetrievalOnlyEvalSelectionAndHistory(t *testing.T) {
+	dataset := writeTinyRetrievalGateFixture(t)
+	corpusPath, queriesPath, qrelsPath := BEIRRetrievalPaths(dataset, "test")
+	tok := tinyEmbeddingTokenizerFile()
+	summary, err := newTinyTrainable3DEmbeddingTrainer(t, 0.05).FitScoreSpectrum(tinyEmbeddingScoreSpectrumDataset(), nil, EmbeddingTrainRunConfig{
+		Epochs:               1,
+		BatchSize:            1,
+		EvalEveryEpoch:       1,
+		EvalEverySteps:       1,
+		RestoreBest:          true,
+		SelectMetric:         "retrieval_map",
+		ScoreSpectrumEval:    tinyEmbeddingScoreSpectrumDataset(),
+		RetrievalEvalRuntime: New(cuda.New(), metal.New()),
+		RetrievalEval: RetrievalEvalConfig{
+			DatasetName: "tiny",
+			CorpusPath:  corpusPath,
+			QueriesPath: queriesPath,
+			QrelsPath:   qrelsPath,
+			BatchSize:   2,
+		},
+		RetrievalEvalTokenizer: &tok,
+	})
+	if err != nil {
+		t.Fatalf("fit score-spectrum with retrieval-only eval: %v", err)
+	}
+	if !summary.RestoredBest {
+		t.Fatal("expected restore-best to run from retrieval-only selection")
+	}
+	if summary.BestEval == nil || summary.BestEval.RetrievalMAPAt100 <= 0 {
+		t.Fatalf("best eval = %+v, want retrieval MAP > 0", summary.BestEval)
+	}
+	if summary.FinalEval == nil || summary.FinalEval.RetrievalMAPAt100 <= 0 || summary.FinalEval.PairCount != 0 {
+		t.Fatalf("final eval = %+v, want retrieval-only metrics with pair_count=0", summary.FinalEval)
+	}
+	if summary.FinalScoreSpectrumEval == nil || summary.BestScoreSpectrumEval == nil {
+		t.Fatalf("missing score-spectrum eval metrics: final=%+v best=%+v", summary.FinalScoreSpectrumEval, summary.BestScoreSpectrumEval)
+	}
+	if len(summary.EvalHistory) != summary.Workload.ActualEvalPasses {
+		t.Fatalf("eval history len = %d, want actual eval passes %d", len(summary.EvalHistory), summary.Workload.ActualEvalPasses)
+	}
+	for i, record := range summary.EvalHistory {
+		if record.Eval == nil || record.Eval.RetrievalMAPAt100 <= 0 || record.Eval.PairCount != 0 {
+			t.Fatalf("eval history[%d] eval = %+v, want retrieval-only metrics", i, record.Eval)
+		}
+		if record.ScoreSpectrumEval == nil {
+			t.Fatalf("eval history[%d] missing score-spectrum eval metrics", i)
+		}
 	}
 }
 
