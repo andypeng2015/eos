@@ -49,7 +49,14 @@ LEGAL_GATES = {
     "train_allowed_for_research": True,
     "release_train_allowed": False,
     "commercial_use_allowed": False,
+    "test_rows_train_allowed": False,
 }
+CORE_LEGAL_GATE_KEYS = (
+    "train_allowed_for_research",
+    "release_train_allowed",
+    "commercial_use_allowed",
+)
+OPTIONAL_INPUT_LEGAL_GATE_KEYS = ("test_rows_train_allowed",)
 
 
 @dataclass
@@ -376,18 +383,43 @@ def average_scores(per_teacher_scores: dict[str, list[float]], teacher_order: li
     ]
 
 
+def row_legal_gate_values(row: dict[str, Any], key: str) -> list[Any]:
+    values: list[Any] = []
+    gates = row.get("legal_gates")
+    if isinstance(gates, dict) and key in gates:
+        values.append(gates.get(key))
+    if key in row:
+        values.append(row.get(key))
+    return values
+
+
 def legal_gate_status(rows: list[dict[str, Any]]) -> tuple[dict[str, Any], Counter[str]]:
     counts: Counter[str] = Counter()
     merged = dict(LEGAL_GATES)
     for row in rows:
-        gates = row.get("legal_gates") or {}
-        if gates != LEGAL_GATES:
-            counts["legal_gate_mismatch"] += 1
+        gates = row.get("legal_gates")
+        if isinstance(gates, dict) and gates:
+            counts["rows_with_nested_legal_gates"] += 1
+        if any(key in row for key in LEGAL_GATES):
+            counts["rows_with_top_level_legal_gates"] += 1
+
+        row_has_mismatch = False
         for key, expected in LEGAL_GATES.items():
-            if gates.get(key) != expected:
+            values = row_legal_gate_values(row, key)
+            if not values:
+                if key in CORE_LEGAL_GATE_KEYS:
+                    counts[f"{key}_missing"] += 1
+                    counts[f"{key}_mismatch"] += 1
+                    row_has_mismatch = True
+                elif key in OPTIONAL_INPUT_LEGAL_GATE_KEYS:
+                    counts[f"{key}_missing_optional"] += 1
+                continue
+            if any(value != expected for value in values):
                 counts[f"{key}_mismatch"] += 1
-        if gates:
-            merged.update({key: gates.get(key) for key in LEGAL_GATES})
+                row_has_mismatch = True
+            merged[key] = values[-1]
+        if row_has_mismatch:
+            counts["legal_gate_mismatch"] += 1
     return merged, counts
 
 

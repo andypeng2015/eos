@@ -44,6 +44,7 @@ def base_row(row_id: str, query_id: str, positive_id: str, negative_ids: list[st
             "train_allowed_for_research": True,
             "release_train_allowed": False,
             "commercial_use_allowed": False,
+            "test_rows_train_allowed": False,
         },
     }
 
@@ -146,6 +147,7 @@ class RetrievalTeacherGuideFilterTest(unittest.TestCase):
                     "train_allowed_for_research": True,
                     "release_train_allowed": False,
                     "commercial_use_allowed": False,
+                    "test_rows_train_allowed": False,
                 },
             )
         self.assertEqual(manifest["counts"]["rows_seen"], 4)
@@ -156,8 +158,111 @@ class RetrievalTeacherGuideFilterTest(unittest.TestCase):
         self.assertEqual(manifest["counts"]["conflict_drop"], 1)
         self.assertEqual(manifest["counts"]["missing_score_drop"], 1)
         self.assertEqual(manifest["policy"]["missing_score_policy"], "strict_drop")
+        self.assertEqual(
+            manifest["legal_gates"],
+            {
+                "train_allowed_for_research": True,
+                "release_train_allowed": False,
+                "commercial_use_allowed": False,
+                "test_rows_train_allowed": False,
+            },
+        )
+        self.assertEqual(manifest["legal_gate_accounting"]["counts"].get("legal_gate_mismatch", 0), 0)
+        self.assertEqual(manifest["legal_gate_accounting"]["counts"].get("test_rows_train_allowed_mismatch", 0), 0)
         self.assertTrue(manifest["validation"]["no_row_emitted_without_required_scores"])
         self.assertTrue(manifest["legal_gate_accounting"]["research_only_preserved"])
+
+    def test_cli_accepts_legacy_top_level_legal_gates_without_false_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows_path = root / "rows.jsonl"
+            qwen_path = root / "qwen.jsonl"
+            output_path = root / "filtered.jsonl"
+            manifest_path = root / "manifest.json"
+
+            row = base_row("r-legacy", "q1", "p1", ["n1"])
+            row.pop("legal_gates")
+            row["train_allowed_for_research"] = True
+            row["release_train_allowed"] = False
+            row["commercial_use_allowed"] = False
+            write_jsonl(rows_path, [row])
+            write_jsonl(qwen_path, candidate_scores(row, [0.9, 0.1]))
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--rows-jsonl",
+                    str(rows_path),
+                    "--teacher-cache",
+                    f"qwen={qwen_path}",
+                    "--output-jsonl",
+                    str(output_path),
+                    "--manifest",
+                    str(manifest_path),
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            output_rows = read_jsonl(output_path)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(output_rows), 1)
+        self.assertEqual(
+            output_rows[0]["legal_gates"],
+            {
+                "train_allowed_for_research": True,
+                "release_train_allowed": False,
+                "commercial_use_allowed": False,
+                "test_rows_train_allowed": False,
+            },
+        )
+        legal_counts = manifest["legal_gate_accounting"]["counts"]
+        self.assertEqual(legal_counts.get("legal_gate_mismatch", 0), 0)
+        self.assertEqual(legal_counts.get("test_rows_train_allowed_missing_optional"), 1)
+        self.assertEqual(legal_counts.get("rows_with_top_level_legal_gates"), 1)
+        self.assertTrue(manifest["legal_gate_accounting"]["research_only_preserved"])
+
+    def test_cli_counts_contradictory_legal_gate_as_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows_path = root / "rows.jsonl"
+            qwen_path = root / "qwen.jsonl"
+            output_path = root / "filtered.jsonl"
+            manifest_path = root / "manifest.json"
+
+            row = base_row("r-unsafe", "q1", "p1", ["n1"])
+            row["legal_gates"]["commercial_use_allowed"] = True
+            write_jsonl(rows_path, [row])
+            write_jsonl(qwen_path, candidate_scores(row, [0.9, 0.1]))
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--rows-jsonl",
+                    str(rows_path),
+                    "--teacher-cache",
+                    f"qwen={qwen_path}",
+                    "--output-jsonl",
+                    str(output_path),
+                    "--manifest",
+                    str(manifest_path),
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            output_rows = read_jsonl(output_path)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(output_rows), 1)
+        self.assertEqual(output_rows[0]["legal_gates"]["commercial_use_allowed"], False)
+        legal_counts = manifest["legal_gate_accounting"]["counts"]
+        self.assertEqual(legal_counts.get("legal_gate_mismatch"), 1)
+        self.assertEqual(legal_counts.get("commercial_use_allowed_mismatch"), 1)
+        self.assertFalse(manifest["legal_gate_accounting"]["research_only_preserved"])
 
     def test_cli_accepts_row_level_teacher_scores(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
