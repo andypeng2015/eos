@@ -28,6 +28,7 @@ LEGAL_GATES = {
     "train_allowed_for_research": True,
     "release_train_allowed": False,
     "commercial_use_allowed": False,
+    "test_rows_train_allowed": False,
 }
 
 
@@ -36,9 +37,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--corpus-root", type=Path, default=None)
     parser.add_argument("--acquisition-run-root", type=Path, default=DEFAULT_ACQUISITION_RUN)
     parser.add_argument("--output-root", type=Path, default=None)
+    parser.add_argument("--manifest", type=Path, default=None)
+    parser.add_argument("--split", default="train")
     parser.add_argument("--max-rows", type=int, default=100)
-    parser.add_argument("--negatives-per-row", type=int, default=3)
+    parser.add_argument("--negatives-per-query", "--negatives-per-row", dest="negatives_per_query", type=int, default=3)
     parser.add_argument("--candidate-pool-size", type=int, default=20000)
+    parser.add_argument("--max-corpus-docs", type=int, default=0)
     parser.add_argument("--seed", type=int, default=173)
     parser.add_argument("--drop-sample-limit", type=int, default=50)
     return parser.parse_args()
@@ -197,6 +201,7 @@ def load_needed_corpus_and_negative_pool(
     positives_by_query: dict[str, set[str]],
     dev_positive_doc_ids: set[str],
     candidate_pool_size: int,
+    max_corpus_docs: int,
     rng: random.Random,
 ) -> tuple[dict[str, str], list[tuple[str, str]], Counter[str]]:
     needed_texts: dict[str, str] = {}
@@ -204,11 +209,16 @@ def load_needed_corpus_and_negative_pool(
     train_positive_doc_ids = {doc_id for doc_ids in positives_by_query.values() for doc_id in doc_ids}
     counts: Counter[str] = Counter()
     for line_number, row in iter_jsonl(corpus_path):
+        counts["corpus_jsonl_rows_seen"] += 1
+        if max_corpus_docs > 0 and counts["corpus_docs_scanned"] >= max_corpus_docs:
+            counts["corpus_scan_cap_reached"] = 1
+            break
         doc_id = row_id(row, corpus_path, line_number)
         text = corpus_text(row)
         if not text:
             counts["empty_corpus_text"] += 1
             continue
+        counts["corpus_docs_scanned"] += 1
         if doc_id in needed_doc_ids:
             needed_texts[doc_id] = text
         if doc_id in dev_positive_doc_ids:
@@ -231,11 +241,11 @@ def load_needed_corpus_and_negative_pool(
     return needed_texts, pool, counts
 
 
-def make_row_id(query_id: str, positive_doc_id: str, negative_doc_ids: list[str]) -> str:
+def make_row_id(split: str, query_id: str, positive_doc_id: str, negative_doc_ids: list[str]) -> str:
     payload = json.dumps(
         {
             "dataset": "msmarco-passage",
-            "split": "train",
+            "split": split,
             "query_id": query_id,
             "positive_doc_id": positive_doc_id,
             "negative_doc_ids": negative_doc_ids,
@@ -258,6 +268,7 @@ def build_rows(
     negative_pool: list[tuple[str, str]],
     positives_by_query: dict[str, set[str]],
     dev_positive_doc_ids: set[str],
+    split: str,
     negatives_per_row: int,
     rng: random.Random,
     drop_sample_limit: int,
@@ -321,10 +332,10 @@ def build_rows(
             continue
         row = {
             "schema": ROW_SCHEMA,
-            "row_id": make_row_id(qid, positive_doc_id, negative_doc_ids),
-            "source": "msmarco-passage/train/qrels/random-corpus-hard-negatives",
+            "row_id": make_row_id(split, qid, positive_doc_id, negative_doc_ids),
+            "source": f"msmarco-passage/{split}/qrels/random-corpus-hard-negatives",
             "dataset": "msmarco-passage",
-            "split": "train",
+            "split": split,
             "query_id": qid,
             "positive_doc_id": positive_doc_id,
             "negative_doc_ids": negative_doc_ids,
@@ -338,13 +349,14 @@ def build_rows(
             },
             "legal_gates": dict(LEGAL_GATES),
             "split_policy": {
-                "training_selection_split": "train",
+                "training_selection_split": split,
                 "dev_qrels_used_for": "negative_leak_filtering_and_overlap_accounting_only",
                 "test_or_eval_rows_used": False,
+                "test_rows_train_allowed": False,
             },
             "provenance": {
                 "corpus_format": "BEIR-jsonl",
-                "qrels_source": "qrels/train.tsv",
+                "qrels_source": f"qrels/{split}.tsv",
                 "negative_source": "corpus.jsonl excluding train/dev qrel positives",
             },
         }
@@ -400,31 +412,39 @@ def main() -> None:
     args = parse_args()
     if args.max_rows <= 0:
         raise SystemExit("--max-rows must be positive")
-    if args.negatives_per_row <= 0:
-        raise SystemExit("--negatives-per-row must be positive")
-    if args.candidate_pool_size < args.negatives_per_row:
-        raise SystemExit("--candidate-pool-size must be >= --negatives-per-row")
+    if args.negatives_per_query <= 0:
+        raise SystemExit("--negatives-per-query must be positive")
+    if args.candidate_pool_size < args.negatives_per_query:
+        raise SystemExit("--candidate-pool-size must be >= --negatives-per-query")
+    if args.max_corpus_docs < 0:
+        raise SystemExit("--max-corpus-docs must be >= 0")
+    split = args.split.strip()
+    if not split or "/" in split or "\\" in split:
+        raise SystemExit("--split must be a simple qrels split name")
 
     corpus_root = args.corpus_root
     if corpus_root is None:
         corpus_root = args.acquisition_run_root / "beir-msmarco-passage-research-only"
-    output_root = args.output_root or Path("runs") / f"retrieval-stagea-msmarco-row-builder-v1-{utc_stamp()}"
+    output_root = args.output_root or (args.manifest.parent if args.manifest else Path("runs") / f"retrieval-stagea-msmarco-row-builder-v1-{utc_stamp()}")
     output_root.mkdir(parents=True, exist_ok=True)
 
     corpus_path = corpus_root / "corpus.jsonl"
     queries_path = corpus_root / "queries.jsonl"
-    train_qrels_path = corpus_root / "qrels" / "train.tsv"
+    split_qrels_path = corpus_root / "qrels" / f"{split}.tsv"
     dev_qrels_path = corpus_root / "qrels" / "dev.tsv"
-    for path in (corpus_path, queries_path, train_qrels_path, dev_qrels_path):
+    for path in (corpus_path, queries_path, split_qrels_path):
         if not path.exists():
             raise SystemExit(f"required input missing: {path}")
 
     rng = random.Random(args.seed)
     queries = load_queries(queries_path)
-    train_pairs, positives_by_query, train_qrel_counts = load_qrels(train_qrels_path)
-    dev_pairs, _, dev_qrel_counts = load_qrels(dev_qrels_path)
+    split_pairs, positives_by_query, split_qrel_counts = load_qrels(split_qrels_path)
+    if dev_qrels_path.exists():
+        dev_pairs, _, dev_qrel_counts = load_qrels(dev_qrels_path)
+    else:
+        dev_pairs, dev_qrel_counts = [], Counter()
     dev_positive_doc_ids = {doc_id for _, doc_id in dev_pairs}
-    selected_pairs, selection_counts = select_train_pairs(train_pairs, queries, args.max_rows)
+    selected_pairs, selection_counts = select_train_pairs(split_pairs, queries, args.max_rows)
     selected_doc_ids = {doc_id for _, doc_id in selected_pairs}
     selected_query_ids = {qid for qid, _ in selected_pairs}
 
@@ -434,6 +454,7 @@ def main() -> None:
         positives_by_query,
         dev_positive_doc_ids,
         args.candidate_pool_size,
+        args.max_corpus_docs,
         rng,
     )
     rows, build_report = build_rows(
@@ -443,14 +464,15 @@ def main() -> None:
         negative_pool,
         positives_by_query,
         dev_positive_doc_ids,
-        args.negatives_per_row,
+        split,
+        args.negatives_per_query,
         rng,
         args.drop_sample_limit,
     )
     validation = validate_rows(rows, positives_by_query, dev_positive_doc_ids)
 
     rows_path = output_root / "artifacts" / "msmarco-passage.stagea.train-hard-negatives.jsonl"
-    manifest_path = output_root / "manifest.json"
+    manifest_path = args.manifest or output_root / "manifest.json"
     leak_path = output_root / "reports" / "leak-report.json"
     sample_path = output_root / "reports" / "sample-rows.jsonl"
     write_jsonl(rows_path, rows)
@@ -458,11 +480,11 @@ def main() -> None:
 
     sha_map = read_sha256s(args.acquisition_run_root)
     acquisition_manifest = load_acquisition_manifest(args.acquisition_run_root)
-    train_dev_positive_overlap = len({doc_id for _, doc_id in train_pairs} & dev_positive_doc_ids)
+    split_dev_positive_overlap = len({doc_id for _, doc_id in split_pairs} & dev_positive_doc_ids)
     source_hashes = {
         "corpus.jsonl": sha_map.get("beir-msmarco-passage-research-only/corpus.jsonl"),
         "queries.jsonl": sha_map.get("beir-msmarco-passage-research-only/queries.jsonl"),
-        "qrels/train.tsv": sha_map.get("beir-msmarco-passage-research-only/qrels/train.tsv"),
+        f"qrels/{split}.tsv": sha_map.get(f"beir-msmarco-passage-research-only/qrels/{split}.tsv"),
         "qrels/dev.tsv": sha_map.get("beir-msmarco-passage-research-only/qrels/dev.tsv"),
     }
     source_hashes = {key: value for key, value in source_hashes.items() if value}
@@ -476,12 +498,13 @@ def main() -> None:
         "validation": validation,
         "build_drops": build_report,
         "split_policy": {
-            "training_selection_split": "train",
+            "training_selection_split": split,
             "dev_qrels_used_for": "negative_leak_filtering_and_overlap_accounting_only",
             "test_or_eval_rows_used": False,
+            "test_rows_train_allowed": False,
         },
         "dev_overlap_accounting": {
-            "train_dev_positive_doc_overlap": train_dev_positive_overlap,
+            "split_dev_positive_doc_overlap": split_dev_positive_overlap,
             "dev_positive_doc_ids_excluded_from_negative_pool": corpus_counts.get(
                 "dev_positive_excluded_from_negative_pool", 0
             ),
@@ -496,16 +519,19 @@ def main() -> None:
         "builder_args": {
             "corpus_root": str(corpus_root),
             "acquisition_run_root": str(args.acquisition_run_root),
+            "split": split,
             "max_rows": args.max_rows,
-            "negatives_per_row": args.negatives_per_row,
+            "negatives_per_query": args.negatives_per_query,
             "candidate_pool_size": args.candidate_pool_size,
+            "max_corpus_docs": args.max_corpus_docs,
             "seed": args.seed,
         },
         "legal_gates": dict(LEGAL_GATES),
         "split_policy": {
-            "training_selection_split": "train",
+            "training_selection_split": split,
             "dev_qrels_used_for": "negative_leak_filtering_and_overlap_accounting_only",
             "test_or_eval_rows_used": False,
+            "test_rows_train_allowed": False,
             "release_train_allowed": False,
             "commercial_use_allowed": False,
         },
@@ -518,18 +544,24 @@ def main() -> None:
         },
         "counts": {
             "queries_loaded": len(queries),
-            "train_qrels": dict(train_qrel_counts),
+            "qrels_seen": dict(split_qrel_counts),
+            "split_qrels": dict(split_qrel_counts),
             "dev_qrels": dict(dev_qrel_counts),
             "selected_train_pairs": len(selected_pairs),
+            "selected_qrel_pairs": len(selected_pairs),
             "selected_unique_queries": len(selected_query_ids),
             "selected_positive_docs": len(selected_doc_ids),
             "rows_emitted": len(rows),
-            "negatives_per_row": args.negatives_per_row,
+            "negatives_per_query": args.negatives_per_query,
             "negative_texts_emitted": sum(len(row.get("negatives") or []) for row in rows),
-            "source_mix": {"msmarco-passage/train/qrels/random-corpus-hard-negatives": len(rows)},
+            "negative_candidates_considered": corpus_counts.get("negative_pool_candidates_seen", 0),
+            "negative_candidates_emitted": sum(len(row.get("negatives") or []) for row in rows),
+            "missing_query_skips": selection_counts.get("missing_query_text", 0) + build_report["counts"].get("missing_query_text", 0),
+            "missing_doc_skips": build_report["counts"].get("missing_positive_text", 0),
+            "source_mix": {f"msmarco-passage/{split}/qrels/random-corpus-hard-negatives": len(rows)},
             "selection": dict(selection_counts),
             "corpus_scan": dict(corpus_counts),
-            "train_dev_positive_doc_overlap": train_dev_positive_overlap,
+            "split_dev_positive_doc_overlap": split_dev_positive_overlap,
         },
         "artifacts": {
             "rows_jsonl": str(rows_path),
