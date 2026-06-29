@@ -248,6 +248,22 @@ func TestScoreSpectrumRecoveryLossValidation(t *testing.T) {
 	}
 }
 
+func TestScoreSpectrumEffectiveRecoveryWeightForExampleSoftOnlyZeroDisablesRecovery(t *testing.T) {
+	global := float32(0.25)
+	legacy := EmbeddingScoreSpectrumExample{}
+	if got := scoreSpectrumEffectiveRecoveryWeightForExample(global, legacy); got != global {
+		t.Fatalf("legacy recovery weight = %f, want global %f", got, global)
+	}
+	clean := EmbeddingScoreSpectrumExample{HardLossWeight: 1, SoftLossWeight: 0.25, RecoveryLossWeight: 0.25}
+	if got := scoreSpectrumEffectiveRecoveryWeightForExample(global, clean); got != 0.0625 {
+		t.Fatalf("clean recovery weight = %f, want scaled row weight", got)
+	}
+	softOnly := EmbeddingScoreSpectrumExample{HardLossWeight: 0, SoftLossWeight: 1, RecoveryLossWeight: 0}
+	if got := scoreSpectrumEffectiveRecoveryWeightForExample(global, softOnly); got != 0 {
+		t.Fatalf("soft-only recovery weight = %f, want disabled", got)
+	}
+}
+
 func assertFiniteProbabilityVector(t *testing.T, probs []float32, tol float32, name string) {
 	t.Helper()
 	sum := float32(0)

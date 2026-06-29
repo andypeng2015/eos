@@ -5224,7 +5224,7 @@ func accumulateScoreSpectrumGrads(queries, candidates []*embeddingEncodedSequenc
 		if !scoreSpectrumLossModeIncludesHardSoft(cfg.ScoreSpectrumLossMode) {
 			hardWeight, softWeight = 0, 0
 		}
-		recoveryWeight := scoreSpectrumEffectiveRecoveryWeight(cfg.ScoreSpectrumRecoveryWeight, example.RecoveryLossWeight)
+		recoveryWeight := scoreSpectrumEffectiveRecoveryWeightForExample(cfg.ScoreSpectrumRecoveryWeight, example)
 		query := queryMatrix.row(i)
 		queryNorm := queryMatrix.norms[i]
 		scores := rowScores[:candidateCount]
@@ -5699,6 +5699,16 @@ func scoreSpectrumEffectiveRecoveryWeight(globalWeight, rowWeight float32) float
 		return globalWeight * rowWeight
 	}
 	return globalWeight
+}
+
+func scoreSpectrumEffectiveRecoveryWeightForExample(globalWeight float32, example EmbeddingScoreSpectrumExample) float32 {
+	// Soft-only rows can explicitly disable recovery by carrying a zero recovery
+	// weight with a positive soft objective and no hard objective. Legacy rows
+	// with omitted weights still inherit the global recovery setting.
+	if example.RecoveryLossWeight == 0 && example.HardLossWeight == 0 && example.SoftLossWeight > 0 {
+		return 0
+	}
+	return scoreSpectrumEffectiveRecoveryWeight(globalWeight, example.RecoveryLossWeight)
 }
 
 func validateScoreSpectrumTrainerConfig(cfg EmbeddingTrainConfig) error {
