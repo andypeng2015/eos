@@ -31,6 +31,7 @@ type evalConfig struct {
 	BM25Gate string
 	BM25GateMetric string
 	BM25GateMinRatio string
+	GoWork string
 }
 
 type retrievalMetrics struct {
@@ -78,7 +79,8 @@ Optional:
   EOS_EVAL_BM25_BASELINE=1
   EOS_GATE_BM25_BASELINE=0
   EOS_GATE_BM25_METRIC=ndcg_at_10
-  EOS_GATE_BM25_MIN_RATIO=1.0`)
+  EOS_GATE_BM25_MIN_RATIO=1.0
+  EOS_EVAL_GOWORK=off`)
 }
 
 func getenv(name string, fallback string) string {
@@ -140,10 +142,33 @@ func renderCommand(name string, args []string) string {
 	return strings.Join(parts, " ")
 }
 
+func commandEnv(cfg evalConfig, name string) []string {
+	if name == "go" && cfg.GoWork != "" {
+		return []string{"GOWORK=" + cfg.GoWork}
+	}
+	return nil
+}
+
+func renderCommandWithEnv(env []string, name string, args []string) string {
+	if len(env) == 0 {
+		return renderCommand(name, args)
+	}
+	parts := []string{"env"}
+	for _, item := range env {
+		parts = append(parts, shellQuote(item))
+	}
+	parts = append(parts, shellQuote(name))
+	for arg in args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
 func runCmd(cfg evalConfig, label string, logName string, name string, args []string) error {
 	step(label)
 	logPath := filepath.Join(cfg.LogDir, logName)
-	let rendered = renderCommand(name, args)
+	env := commandEnv(cfg, name)
+	let rendered = renderCommandWithEnv(env, name, args)
 	fmt.Println(f"+ {rendered}")
 	err := os.WriteFile(logPath+".cmd", []byte(rendered+"\n"), 0o644)
 	guard err == nil else return err
@@ -152,6 +177,9 @@ func runCmd(cfg evalConfig, label string, logName string, name string, args []st
 	defer logFile.Close()
 	cmd := exec.Command(name, args...)
 	cmd.Dir = cfg.Root
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
 	cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
 	err = cmd.Run()
@@ -232,6 +260,7 @@ func prepareConfig(root string) (evalConfig, error) {
 		BM25Gate: getenv("EOS_GATE_BM25_BASELINE", "0"),
 		BM25GateMetric: getenv("EOS_GATE_BM25_METRIC", "ndcg_at_10"),
 		BM25GateMinRatio: getenv("EOS_GATE_BM25_MIN_RATIO", "1.0"),
+		GoWork: getenv("EOS_EVAL_GOWORK", getenv("EOS_GO_WORK", "off")),
 	}, nil
 }
 
