@@ -219,32 +219,37 @@ func BuildPretrainedBERTPackageFromDir(dir string, plan PretrainedBERTImportPlan
 }
 
 func ReadPretrainedBERTPackageFile(path string) (PretrainedBERTPackage, error) {
+	pkg, _, err := readPretrainedBERTPackageFileWithSHA256(path)
+	return pkg, err
+}
+
+func readPretrainedBERTPackageFileWithSHA256(path string) (PretrainedBERTPackage, string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return PretrainedBERTPackage{}, err
+		return PretrainedBERTPackage{}, "", err
 	}
 	if !eosartifact.IsMLLBytes(data) {
-		return PretrainedBERTPackage{}, fmt.Errorf("pretrained BERT package %q is not an MLL file", path)
+		return PretrainedBERTPackage{}, "", fmt.Errorf("pretrained BERT package %q is not an MLL file", path)
 	}
 	reader, err := mll.ReadBytes(data, mll.WithDigestVerification())
 	if err != nil {
-		return PretrainedBERTPackage{}, err
+		return PretrainedBERTPackage{}, "", err
 	}
 	if reader.Profile() != mll.ProfileSealed {
-		return PretrainedBERTPackage{}, fmt.Errorf("pretrained BERT package profile = %d, want %d", reader.Profile(), mll.ProfileSealed)
+		return PretrainedBERTPackage{}, "", fmt.Errorf("pretrained BERT package profile = %d, want %d", reader.Profile(), mll.ProfileSealed)
 	}
 	body, ok := reader.Section(tagXPBT)
 	if !ok {
-		return PretrainedBERTPackage{}, fmt.Errorf("pretrained BERT package missing XPBT section")
+		return PretrainedBERTPackage{}, "", fmt.Errorf("pretrained BERT package missing XPBT section")
 	}
 	var pkg PretrainedBERTPackage
 	if err := json.Unmarshal(body, &pkg); err != nil {
-		return PretrainedBERTPackage{}, err
+		return PretrainedBERTPackage{}, "", err
 	}
 	if err := pkg.Validate(); err != nil {
-		return PretrainedBERTPackage{}, err
+		return PretrainedBERTPackage{}, "", err
 	}
-	return pkg, nil
+	return pkg, sha256BytesHex(data), nil
 }
 
 func (p PretrainedBERTPackage) Module() (*eosartifact.Module, error) {

@@ -10,14 +10,17 @@ import (
 
 const (
 	ImportedEmbedderCandidateID                  = "corkscrewdb-imported-bge-eos-embed-v1-candidate"
+	ImportedEmbedderCandidatePublicID            = eosruntime.ImportedBERTEmbedderCandidatePublicID
+	ImportedEmbedderCandidatePublicName          = eosruntime.ImportedBERTEmbedderCandidatePublicName
+	ImportedEmbedderCandidateLegacyModelName     = eosruntime.ImportedBERTEmbedderCandidateLegacyModelName
 	ImportedEmbedderCandidateModelName           = eosruntime.ImportedBERTEmbedderCandidateModelName
-	ImportedEmbedderCandidateDisplayName         = "Eos Embedder 1"
+	ImportedEmbedderCandidateDisplayName         = ImportedEmbedderCandidatePublicName
 	ImportedEmbedderCandidateSourceModel         = eosruntime.ImportedBERTEmbedderCandidateSourceModel
 	ImportedEmbedderCandidateStatus              = "non_default_reference_candidate"
 	ImportedEmbedderCandidatePackageRelativePath = eosruntime.ImportedBERTEmbedderCandidatePackageRelativePathHint
 	ImportedEmbedderCandidatePackageSHA256       = eosruntime.ImportedBERTEmbedderCandidatePackageSHA256
 	ImportedEmbedderCandidatePackageIdentity     = eosruntime.ImportedBERTEmbedderCandidatePackageIdentitySHA256
-	ImportedEmbedderCandidatePublicIdentityNote  = "Public identity is model_name/display_name/source_model; candidate_id is an internal review slug."
+	ImportedEmbedderCandidatePublicIdentityNote  = "Public identity is public_id/model_name/display_name; candidate_id is an internal review slug and legacy_model_name is compatibility metadata."
 	ImportedEmbedderCandidateAssetID             = ImportedEmbedderCandidateID
 	ImportedEmbedderCandidateSourceSnapshot      = eosruntime.ImportedBERTEmbedderCandidateSourceSnapshotCommit
 	ImportedEmbedderCandidateUpstreamModelURL    = eosruntime.ImportedBERTEmbedderCandidateUpstreamModelURL
@@ -36,8 +39,10 @@ const (
 
 type ImportedEmbedderCandidateAsset struct {
 	CandidateID              string `json:"candidate_id"`
+	PublicID                 string `json:"public_id"`
 	ModelName                string `json:"model_name"`
 	DisplayName              string `json:"display_name"`
+	LegacyModelName          string `json:"legacy_model_name"`
 	SourceModel              string `json:"source_model"`
 	Status                   string `json:"status"`
 	PublicIdentityNote       string `json:"public_identity_note"`
@@ -107,8 +112,10 @@ func ImportedEmbedderCandidateAssetInfo(root, packagePath string) (ImportedEmbed
 	path = abs
 	return ImportedEmbedderCandidateAsset{
 		CandidateID:              ImportedEmbedderCandidateID,
+		PublicID:                 ImportedEmbedderCandidatePublicID,
 		ModelName:                ImportedEmbedderCandidateModelName,
 		DisplayName:              ImportedEmbedderCandidateDisplayName,
+		LegacyModelName:          ImportedEmbedderCandidateLegacyModelName,
 		SourceModel:              ImportedEmbedderCandidateSourceModel,
 		Status:                   ImportedEmbedderCandidateStatus,
 		PublicIdentityNote:       ImportedEmbedderCandidatePublicIdentityNote,

@@ -104,8 +104,10 @@ def write_complete_gate(root: Path) -> None:
 def candidate_smoke_manifest() -> dict:
     return {
         "schema": "manta.imported_bge_eos_embed_v1_candidate_smoke.v1",
-        "candidate_model_name": "eos-embed-v1",
+        "candidate_public_id": "eos-embedder-1",
+        "candidate_model_name": "eos-embedder-1",
         "candidate_display_name": "Eos Embedder 1",
+        "legacy_model_name": "eos-embed-v1",
         "candidate_status": "non_default_reference_candidate",
         "source_model": "BAAI/bge-small-en-v1.5",
         "quality_claim": False,
@@ -135,6 +137,11 @@ def role_aware_provider_smoke_manifest() -> dict:
     )
     return {
         "schema": "eos.imported_bge_role_aware_provider_smoke.v1",
+        "public_id": "eos-embedder-1",
+        "public_model_name": "eos-embedder-1",
+        "display_name": "Eos Embedder 1",
+        "legacy_model_name": "eos-embed-v1",
+        "source_model": "BAAI/bge-small-en-v1.5",
         "provider_id": "corkscrewdb-imported-bge-eos-embed-v1-candidate",
         "dim": 384,
         "backend_fingerprint": fingerprint,
@@ -159,6 +166,10 @@ def corkscrewdb_serving_smoke_manifest() -> dict:
     return {
         "schema": "eos.imported_bge_serving_candidate_manifest.v1",
         "candidate": {
+            "public_identity": "eos-embedder-1",
+            "display_name": "Eos Embedder 1",
+            "model_name": "eos-embedder-1",
+            "legacy_model_name": "eos-embed-v1",
             "quality_claim": False,
             "default_alias_changed": False,
         },

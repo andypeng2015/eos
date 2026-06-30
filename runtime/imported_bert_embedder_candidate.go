@@ -6,7 +6,10 @@ import (
 )
 
 const (
-	ImportedBERTEmbedderCandidateModelName               = "eos-embed-v1"
+	ImportedBERTEmbedderCandidatePublicID                = "eos-embedder-1"
+	ImportedBERTEmbedderCandidatePublicName              = "Eos Embedder 1"
+	ImportedBERTEmbedderCandidateLegacyModelName         = "eos-embed-v1"
+	ImportedBERTEmbedderCandidateModelName               = ImportedBERTEmbedderCandidatePublicID
 	ImportedBERTEmbedderCandidateSourceModel             = "BAAI/bge-small-en-v1.5"
 	ImportedBERTEmbedderCandidatePackageSHA256           = "841b0d851c06290daeeab4bf4d25cb1dd7bb87920316dac950e1b556a3bae763"
 	ImportedBERTEmbedderCandidatePackageIdentitySHA256   = "a356a4b7dc29a8d0f0a7b7bd45e7a9d2afbfa651c1a5bfaa05008c7157ba9637"
@@ -46,16 +49,12 @@ func LoadVerifiedImportedBERTEmbedder(ctx context.Context, cfg ImportedBERTEmbed
 	if cfg.Runtime == nil {
 		return nil, fmt.Errorf("runtime is required")
 	}
-	packageSHA, err := sha256FileHex(cfg.PackagePath)
+	pkg, packageSHA, err := readPretrainedBERTPackageFileWithSHA256(cfg.PackagePath)
 	if err != nil {
-		return nil, fmt.Errorf("hash package: %w", err)
+		return nil, err
 	}
 	if cfg.ExpectedSHA256 != "" && packageSHA != cfg.ExpectedSHA256 {
 		return nil, fmt.Errorf("package sha256 mismatch: got %s want %s", packageSHA, cfg.ExpectedSHA256)
-	}
-	pkg, err := ReadPretrainedBERTPackageFile(cfg.PackagePath)
-	if err != nil {
-		return nil, err
 	}
 	identity := pkg.IdentityHash()
 	if cfg.ExpectedIdentitySHA256 != "" && identity != cfg.ExpectedIdentitySHA256 {
@@ -64,8 +63,8 @@ func LoadVerifiedImportedBERTEmbedder(ctx context.Context, cfg ImportedBERTEmbed
 	if cfg.ExpectedPackageModelName != "" && pkg.ModelName != cfg.ExpectedPackageModelName {
 		return nil, fmt.Errorf("package model_name mismatch: got %q want %q", pkg.ModelName, cfg.ExpectedPackageModelName)
 	}
-	return LoadPretrainedBERTTextEmbedder(ctx, PretrainedBERTTextEmbedderConfig{
+	return loadPretrainedBERTTextEmbedderFromValidatedPackage(ctx, PretrainedBERTTextEmbedderConfig{
 		PackagePath: cfg.PackagePath,
 		Runtime:     cfg.Runtime,
-	})
+	}, pkg, packageSHA)
 }

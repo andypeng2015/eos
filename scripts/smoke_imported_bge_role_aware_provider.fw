@@ -314,7 +314,11 @@ func run() error {
 	if asset.CandidateID != providerID {
 		return fmt.Errorf("candidate id = %%q, want %%q", asset.CandidateID, providerID)
 	}
-	if asset.ModelName != eosruntime.ImportedBERTEmbedderCandidateModelName || asset.SourceModel != eosruntime.ImportedBERTEmbedderCandidateSourceModel {
+	if asset.PublicID != eosruntime.ImportedBERTEmbedderCandidatePublicID ||
+		asset.ModelName != eosruntime.ImportedBERTEmbedderCandidatePublicID ||
+		asset.DisplayName != eosruntime.ImportedBERTEmbedderCandidatePublicName ||
+		asset.LegacyModelName != eosruntime.ImportedBERTEmbedderCandidateLegacyModelName ||
+		asset.SourceModel != eosruntime.ImportedBERTEmbedderCandidateSourceModel {
 		return fmt.Errorf("candidate identity mismatch: %%+v", asset)
 	}
 	pkg, err := eosruntime.ReadPretrainedBERTPackageFile(candidateMLL)
@@ -458,8 +462,10 @@ func run() error {
 		"candidate_package_sha256": sum,
 		"candidate_identity": identity,
 		"package_model_name": pkg.ModelName,
+		"public_id": asset.PublicID,
 		"public_model_name": asset.ModelName,
 		"display_name": asset.DisplayName,
+		"legacy_model_name": asset.LegacyModelName,
 		"source_model": asset.SourceModel,
 		"provider_id": provider.ProviderID(),
 		"backend_fingerprint": provider.BackendFingerprint(),
@@ -579,7 +585,16 @@ func validateManifest(path string) (map[string]interface{}, error) {
 	if err := checkString("provider_id", providerID); err != nil {
 		return nil, err
 	}
-	if err := checkString("public_model_name", "eos-embed-v1"); err != nil {
+	if err := checkString("public_id", "eos-embedder-1"); err != nil {
+		return nil, err
+	}
+	if err := checkString("public_model_name", "eos-embedder-1"); err != nil {
+		return nil, err
+	}
+	if err := checkString("display_name", "Eos Embedder 1"); err != nil {
+		return nil, err
+	}
+	if err := checkString("legacy_model_name", "eos-embed-v1"); err != nil {
 		return nil, err
 	}
 	if err := checkString("source_model", "BAAI/bge-small-en-v1.5"); err != nil {

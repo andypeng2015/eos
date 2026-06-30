@@ -399,7 +399,10 @@ func TestRunImportedEmbedderCandidateJSONIsNonDefaultReference(t *testing.T) {
 	var payload struct {
 		Asset struct {
 			CandidateID              string `json:"candidate_id"`
+			PublicID                 string `json:"public_id"`
 			ModelName                string `json:"model_name"`
+			DisplayName              string `json:"display_name"`
+			LegacyModelName          string `json:"legacy_model_name"`
 			SourceModel              string `json:"source_model"`
 			Status                   string `json:"status"`
 			PublicIdentityNote       string `json:"public_identity_note"`
@@ -433,8 +436,17 @@ func TestRunImportedEmbedderCandidateJSONIsNonDefaultReference(t *testing.T) {
 	if payload.Asset.CandidateID != models.ImportedEmbedderCandidateID {
 		t.Fatalf("candidate id = %q", payload.Asset.CandidateID)
 	}
+	if payload.Asset.PublicID != models.ImportedEmbedderCandidatePublicID {
+		t.Fatalf("public id = %q", payload.Asset.PublicID)
+	}
 	if payload.Asset.ModelName != models.ImportedEmbedderCandidateModelName {
 		t.Fatalf("model name = %q", payload.Asset.ModelName)
+	}
+	if payload.Asset.ModelName != models.ImportedEmbedderCandidatePublicID || payload.Asset.LegacyModelName != models.ImportedEmbedderCandidateLegacyModelName {
+		t.Fatalf("unexpected public/legacy model fields: %+v", payload.Asset)
+	}
+	if payload.Asset.DisplayName != models.ImportedEmbedderCandidatePublicName {
+		t.Fatalf("display name = %q", payload.Asset.DisplayName)
 	}
 	if payload.Asset.SourceModel != models.ImportedEmbedderCandidateSourceModel {
 		t.Fatalf("source model = %q", payload.Asset.SourceModel)
@@ -442,7 +454,8 @@ func TestRunImportedEmbedderCandidateJSONIsNonDefaultReference(t *testing.T) {
 	if payload.Asset.Status != models.ImportedEmbedderCandidateStatus {
 		t.Fatalf("status = %q", payload.Asset.Status)
 	}
-	if !strings.Contains(payload.Asset.PublicIdentityNote, "candidate_id is an internal") {
+	if !strings.Contains(payload.Asset.PublicIdentityNote, "public_id/model_name/display_name") ||
+		!strings.Contains(payload.Asset.PublicIdentityNote, "legacy_model_name is compatibility") {
 		t.Fatalf("public identity note = %q", payload.Asset.PublicIdentityNote)
 	}
 	if payload.Asset.PackagePath != packagePath {
@@ -523,8 +536,10 @@ func TestRunImportedEmbedderCandidateVerifyJSONMismatch(t *testing.T) {
 	}
 	var payload struct {
 		Asset struct {
-			CandidateID string `json:"candidate_id"`
-			ModelName   string `json:"model_name"`
+			CandidateID     string `json:"candidate_id"`
+			PublicID        string `json:"public_id"`
+			ModelName       string `json:"model_name"`
+			LegacyModelName string `json:"legacy_model_name"`
 		} `json:"asset"`
 		Verification struct {
 			OK   bool `json:"ok"`
@@ -538,7 +553,10 @@ func TestRunImportedEmbedderCandidateVerifyJSONMismatch(t *testing.T) {
 	if err := json.Unmarshal([]byte(output), &payload); err != nil {
 		t.Fatalf("unmarshal verification JSON: %v\n%s", err, output)
 	}
-	if payload.Asset.CandidateID != models.ImportedEmbedderCandidateID || payload.Asset.ModelName != models.ImportedEmbedderCandidateModelName {
+	if payload.Asset.CandidateID != models.ImportedEmbedderCandidateID ||
+		payload.Asset.PublicID != models.ImportedEmbedderCandidatePublicID ||
+		payload.Asset.ModelName != models.ImportedEmbedderCandidateModelName ||
+		payload.Asset.LegacyModelName != models.ImportedEmbedderCandidateLegacyModelName {
 		t.Fatalf("unexpected asset identity: %+v", payload.Asset)
 	}
 	if payload.Verification.OK || payload.Verification.File.OK {

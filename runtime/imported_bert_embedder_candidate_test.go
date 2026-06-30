@@ -35,6 +35,12 @@ func TestLoadImportedBERTEmbedderCandidateLoadsPackage(t *testing.T) {
 	if embedder == nil {
 		t.Fatal("embedder is nil")
 	}
+	if got := embedder.PackageSHA256(); got != packageSHA {
+		t.Fatalf("PackageSHA256() = %q, want %q", got, packageSHA)
+	}
+	if got := embedder.PackageIdentitySHA256(); got != pkg.IdentitySHA256 {
+		t.Fatalf("PackageIdentitySHA256() = %q, want %q", got, pkg.IdentitySHA256)
+	}
 	if pkg.ModelName == ImportedBERTEmbedderCandidateModelName {
 		t.Fatalf("fixture package should use source package model name, got public candidate name %q", pkg.ModelName)
 	}
@@ -51,6 +57,19 @@ func TestLoadImportedBERTEmbedderCandidateRejectsNonCandidateFixture(t *testing.
 	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixtureWithST(t, "masked_mean", 4)
 	packagePath := writeTinyPretrainedBERTPackageFromFixture(t, sourceDir, modulePath, weightsPath)
 	_, err := LoadImportedBERTEmbedderCandidate(context.Background(), packagePath, New(cuda.New()))
+	if err == nil || !strings.Contains(err.Error(), "package sha256 mismatch") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadVerifiedImportedBERTEmbedderRejectsSHA256Mismatch(t *testing.T) {
+	sourceDir, modulePath, weightsPath := writeTinyPretrainedBERTExportFixtureWithST(t, "masked_mean", 4)
+	packagePath := writeTinyPretrainedBERTPackageFromFixture(t, sourceDir, modulePath, weightsPath)
+	_, err := LoadVerifiedImportedBERTEmbedder(context.Background(), ImportedBERTEmbedderCandidateConfig{
+		PackagePath:    packagePath,
+		ExpectedSHA256: strings.Repeat("0", 64),
+		Runtime:        New(cuda.New()),
+	})
 	if err == nil || !strings.Contains(err.Error(), "package sha256 mismatch") {
 		t.Fatalf("unexpected error: %v", err)
 	}

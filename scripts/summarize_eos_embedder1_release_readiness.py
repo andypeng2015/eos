@@ -305,7 +305,27 @@ def iter_scan_files(paths: list[Path]) -> list[Path]:
     return sorted(files)
 
 
-def scan_public_name_hygiene(paths: list[Path]) -> dict[str, Any]:
+STALE_PUBLIC_IDENTITY_KEYS = {
+    "candidate_model_name",
+    "model_name",
+    "public_identity",
+    "public_model_name",
+}
+
+
+def stale_public_identity_match(line: str, legacy_model_name: str) -> str | None:
+    if legacy_model_name not in line:
+        return None
+    lowered = line.lower()
+    if "legacy_model_name" in lowered or "legacy/internal" in lowered:
+        return None
+    for key in STALE_PUBLIC_IDENTITY_KEYS:
+        if key in lowered:
+            return key
+    return None
+
+
+def scan_public_name_hygiene(paths: list[Path], *, legacy_model_name: str = DEFAULT_LEGACY_MODEL_NAME) -> dict[str, Any]:
     matches: list[dict[str, Any]] = []
     missing: list[str] = []
     scan_files = iter_scan_files(paths)
@@ -320,21 +340,25 @@ def scan_public_name_hygiene(paths: list[Path]) -> dict[str, Any]:
             with path.open("r", encoding="utf-8", errors="ignore") as handle:
                 for line_number, line in enumerate(handle, start=1):
                     lowered = line.lower()
-                    if not PUBLIC_V6_PATTERN.search(line):
+                    stale_key = stale_public_identity_match(line, legacy_model_name)
+                    public_v6 = bool(PUBLIC_V6_PATTERN.search(line))
+                    if public_v6 and ("internal" in lowered or "run label" in lowered or "experiment" in lowered):
+                        public_v6 = False
+                    if stale_key is None and not public_v6:
                         continue
-                    if "internal" in lowered or "run label" in lowered or "experiment" in lowered:
-                        continue
+                    reason = f"stale public identity key {stale_key}" if stale_key else "public version 6"
                     matches.append(
                         {
                             "path": str(path),
                             "line": line_number,
+                            "reason": reason,
                             "text": line.strip(),
                         }
                     )
         except OSError:
             continue
     blockers = [
-        f"public-name hygiene: {match['path']}:{match['line']} contains public v6"
+        f"public-name hygiene: {match['path']}:{match['line']} contains {match['reason']}"
         for match in matches
     ]
     warnings = [f"scan path missing: {path}" for path in missing]
@@ -362,6 +386,7 @@ def summarize_default_gates(
     *,
     package_sha256: str,
     identity_sha256: str,
+    public_id: str,
     legacy_model_name: str,
     public_name: str,
     model: str,
@@ -382,6 +407,7 @@ def summarize_default_gates(
             missing_message=missing_message,
             package_sha256=package_sha256,
             identity_sha256=identity_sha256,
+            public_id=public_id,
             legacy_model_name=legacy_model_name,
             public_name=public_name,
             model=model,
@@ -410,14 +436,21 @@ def validate_candidate_smoke(
     *,
     package_sha256: str,
     identity_sha256: str,
+    public_id: str,
     legacy_model_name: str,
     public_name: str,
     model: str,
 ) -> tuple[list[str], dict[str, Any]]:
     blockers: list[str] = []
     add_check(blockers, data.get("schema") == DEFAULT_CANDIDATE_SMOKE_SCHEMA, "candidate smoke schema mismatch")
-    add_check(blockers, data.get("candidate_model_name") == legacy_model_name, "candidate smoke model name mismatch")
+    add_check(blockers, data.get("candidate_public_id") == public_id, "candidate smoke public id mismatch")
+    add_check(blockers, data.get("candidate_model_name") == public_id, "candidate smoke public model name mismatch")
     add_check(blockers, data.get("candidate_display_name") == public_name, "candidate smoke display name mismatch")
+    add_check(
+        blockers,
+        data.get("legacy_model_name") in (None, legacy_model_name),
+        "candidate smoke legacy model name mismatch",
+    )
     add_check(
         blockers,
         data.get("candidate_status") == "non_default_reference_candidate",
@@ -468,8 +501,10 @@ def validate_candidate_smoke(
     )
     details = {
         "schema": data.get("schema"),
+        "candidate_public_id": data.get("candidate_public_id"),
         "candidate_model_name": data.get("candidate_model_name"),
         "candidate_display_name": data.get("candidate_display_name"),
+        "legacy_model_name": data.get("legacy_model_name"),
         "package_sha256": nested(data, "package", "sha256"),
         "identity_sha256": nested(data, "package", "identity_sha256"),
         "query_norm": nested(data, "direct_embed_smoke", "query_norm"),
@@ -484,11 +519,20 @@ def validate_role_aware_provider_smoke(
     *,
     package_sha256: str,
     identity_sha256: str,
+    public_id: str,
+    legacy_model_name: str,
+    public_name: str,
+    model: str,
     **_: Any,
 ) -> tuple[list[str], dict[str, Any]]:
     blockers: list[str] = []
     expected_fingerprint = backend_fingerprint(package_sha256, identity_sha256)
     add_check(blockers, data.get("schema") == DEFAULT_ROLE_AWARE_PROVIDER_SMOKE_SCHEMA, "role-aware provider smoke schema mismatch")
+    add_check(blockers, data.get("public_id") == public_id, "role-aware provider public id mismatch")
+    add_check(blockers, data.get("public_model_name") == public_id, "role-aware provider public model name mismatch")
+    add_check(blockers, data.get("display_name") == public_name, "role-aware provider display name mismatch")
+    add_check(blockers, data.get("legacy_model_name") == legacy_model_name, "role-aware provider legacy model name mismatch")
+    add_check(blockers, data.get("source_model") == model, "role-aware provider source model mismatch")
     add_check(blockers, data.get("provider_id") == DEFAULT_CANDIDATE_PROVIDER_ID, "role-aware provider id mismatch")
     add_check(blockers, data.get("dim") == bge_gate.DEFAULT_DIM, "role-aware provider dim mismatch")
     add_check(
@@ -528,6 +572,11 @@ def validate_role_aware_provider_smoke(
     )
     details = {
         "schema": data.get("schema"),
+        "public_id": data.get("public_id"),
+        "public_model_name": data.get("public_model_name"),
+        "display_name": data.get("display_name"),
+        "legacy_model_name": data.get("legacy_model_name"),
+        "source_model": data.get("source_model"),
         "provider_id": data.get("provider_id"),
         "dim": data.get("dim"),
         "backend_fingerprint": data.get("backend_fingerprint"),
@@ -545,10 +594,21 @@ def validate_serving_smoke(
     *,
     package_sha256: str,
     identity_sha256: str,
+    public_id: str,
+    legacy_model_name: str,
+    public_name: str,
     **_: Any,
 ) -> tuple[list[str], dict[str, Any]]:
     blockers: list[str] = []
     add_check(blockers, data.get("schema") == DEFAULT_CORKSCREWDB_SERVING_SMOKE_SCHEMA, "CorkScrewDB serving smoke schema mismatch")
+    add_check(blockers, nested(data, "candidate", "public_identity") == public_id, "CorkScrewDB serving public identity mismatch")
+    add_check(blockers, nested(data, "candidate", "model_name") == public_id, "CorkScrewDB serving public model name mismatch")
+    add_check(blockers, nested(data, "candidate", "display_name") == public_name, "CorkScrewDB serving display name mismatch")
+    add_check(
+        blockers,
+        nested(data, "candidate", "legacy_model_name") == legacy_model_name,
+        "CorkScrewDB serving legacy model name mismatch",
+    )
     add_check(blockers, nested(data, "candidate", "quality_claim") is False, "CorkScrewDB serving quality_claim must be false")
     add_check(
         blockers,
@@ -924,6 +984,7 @@ def summarize_evidence_gate(
     missing_message: str | None = None,
     package_sha256: str,
     identity_sha256: str,
+    public_id: str,
     legacy_model_name: str,
     public_name: str,
     model: str,
@@ -949,6 +1010,7 @@ def summarize_evidence_gate(
             data,
             package_sha256=package_sha256,
             identity_sha256=identity_sha256,
+            public_id=public_id,
             legacy_model_name=legacy_model_name,
             public_name=public_name,
             model=model,
@@ -975,6 +1037,7 @@ def summarize_non_default_evidence(
     corkscrewdb_serving_smoke_evidence: str | Path | None,
     package_sha256: str,
     identity_sha256: str,
+    public_id: str,
     legacy_model_name: str,
     public_name: str,
     model: str,
@@ -986,6 +1049,7 @@ def summarize_non_default_evidence(
             validate_candidate_smoke,
             package_sha256=package_sha256,
             identity_sha256=identity_sha256,
+            public_id=public_id,
             legacy_model_name=legacy_model_name,
             public_name=public_name,
             model=model,
@@ -996,6 +1060,7 @@ def summarize_non_default_evidence(
             validate_role_aware_provider_smoke,
             package_sha256=package_sha256,
             identity_sha256=identity_sha256,
+            public_id=public_id,
             legacy_model_name=legacy_model_name,
             public_name=public_name,
             model=model,
@@ -1006,6 +1071,7 @@ def summarize_non_default_evidence(
             validate_serving_smoke,
             package_sha256=package_sha256,
             identity_sha256=identity_sha256,
+            public_id=public_id,
             legacy_model_name=legacy_model_name,
             public_name=public_name,
             model=model,
@@ -1035,6 +1101,7 @@ def build_summary(
     candidate_smoke_evidence: str | Path | None = None,
     role_aware_provider_smoke_evidence: str | Path | None = None,
     corkscrewdb_serving_smoke_evidence: str | Path | None = None,
+    expected_counts: dict[str, dict[str, int]] | None = None,
     scan_paths: list[Path] | None = None,
     clock: Any = utc_now,
 ) -> dict[str, Any]:
@@ -1045,13 +1112,15 @@ def build_summary(
         identity_sha256=identity_sha256,
         model=model,
         snapshot=snapshot,
+        expected_counts=expected_counts,
     )
     bge = compact_bge_summary(bge_summary)
-    scan = scan_public_name_hygiene(scan_paths or [])
+    scan = scan_public_name_hygiene(scan_paths or [], legacy_model_name=legacy_model_name)
     default_gates = summarize_default_gates(
         default_gate_evidence_paths or {},
         package_sha256=package_sha256,
         identity_sha256=identity_sha256,
+        public_id=public_id,
         legacy_model_name=legacy_model_name,
         public_name=public_name,
         model=model,
@@ -1062,6 +1131,7 @@ def build_summary(
         corkscrewdb_serving_smoke_evidence=corkscrewdb_serving_smoke_evidence,
         package_sha256=package_sha256,
         identity_sha256=identity_sha256,
+        public_id=public_id,
         legacy_model_name=legacy_model_name,
         public_name=public_name,
         model=model,
@@ -1335,6 +1405,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--identity-sha256", default=bge_gate.DEFAULT_IDENTITY_SHA256)
     parser.add_argument("--model", default=bge_gate.DEFAULT_MODEL)
     parser.add_argument("--snapshot", default=bge_gate.DEFAULT_SNAPSHOT)
+    parser.add_argument(
+        "--expected-counts",
+        help="Override expected BGE vector counts as dataset:documents:queries[,dataset:documents:queries...]",
+    )
     parser.add_argument("--scan-paths", default="")
     parser.add_argument("--output-json")
     parser.add_argument("--output-tsv")
@@ -1380,6 +1454,7 @@ def main(argv: list[str] | None = None) -> int:
             candidate_smoke_evidence=args.candidate_smoke_evidence,
             role_aware_provider_smoke_evidence=args.role_aware_provider_smoke_evidence,
             corkscrewdb_serving_smoke_evidence=args.corkscrewdb_serving_smoke_evidence,
+            expected_counts=bge_gate.parse_expected_counts(args.expected_counts),
             scan_paths=parse_scan_paths(args.scan_paths),
         )
         write_json(output_json, summary)

@@ -837,11 +837,20 @@ func TestImportedEmbedderCandidateAssetInfoOverrideIsNonDefault(t *testing.T) {
 	if info.CandidateID != ImportedEmbedderCandidateID {
 		t.Fatalf("candidate id = %q, want %q", info.CandidateID, ImportedEmbedderCandidateID)
 	}
+	if info.PublicID != ImportedEmbedderCandidatePublicID {
+		t.Fatalf("public id = %q, want %q", info.PublicID, ImportedEmbedderCandidatePublicID)
+	}
 	if info.ModelName != ImportedEmbedderCandidateModelName {
 		t.Fatalf("model name = %q, want %q", info.ModelName, ImportedEmbedderCandidateModelName)
 	}
-	if info.ModelName != DefaultEmbeddingModelName {
-		t.Fatalf("model name = %q", info.ModelName)
+	if info.ModelName != ImportedEmbedderCandidatePublicID || info.ModelName == DefaultEmbeddingModelName {
+		t.Fatalf("public model name = %q, default legacy name = %q", info.ModelName, DefaultEmbeddingModelName)
+	}
+	if info.DisplayName != ImportedEmbedderCandidatePublicName {
+		t.Fatalf("display name = %q, want %q", info.DisplayName, ImportedEmbedderCandidatePublicName)
+	}
+	if info.LegacyModelName != ImportedEmbedderCandidateLegacyModelName {
+		t.Fatalf("legacy model name = %q, want %q", info.LegacyModelName, ImportedEmbedderCandidateLegacyModelName)
 	}
 	if info.SourceModel != ImportedEmbedderCandidateSourceModel {
 		t.Fatalf("source model = %q", info.SourceModel)

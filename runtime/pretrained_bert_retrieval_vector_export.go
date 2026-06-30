@@ -219,10 +219,14 @@ func LoadPretrainedBERTTextEmbedder(ctx context.Context, cfg PretrainedBERTTextE
 }
 
 func loadPretrainedBERTTextEmbedderFromPackage(ctx context.Context, cfg PretrainedBERTTextEmbedderConfig) (*PretrainedBERTTextEmbedder, error) {
-	pkg, err := ReadPretrainedBERTPackageFile(cfg.PackagePath)
+	pkg, packageSHA, err := readPretrainedBERTPackageFileWithSHA256(cfg.PackagePath)
 	if err != nil {
 		return nil, err
 	}
+	return loadPretrainedBERTTextEmbedderFromValidatedPackage(ctx, cfg, pkg, packageSHA)
+}
+
+func loadPretrainedBERTTextEmbedderFromValidatedPackage(ctx context.Context, cfg PretrainedBERTTextEmbedderConfig, pkg PretrainedBERTPackage, packageSHA string) (*PretrainedBERTTextEmbedder, error) {
 	config := pkg.Config
 	stMeta := pkg.STMetadata
 	maxLength, maxLengthSource := resolvePretrainedBERTMaxLength(cfg.MaxLength, config, stMeta)
@@ -260,10 +264,6 @@ func loadPretrainedBERTTextEmbedderFromPackage(ctx context.Context, cfg Pretrain
 	program, err := cfg.Runtime.Load(ctx, module, weights.LoadOptions()...)
 	if err != nil {
 		return nil, err
-	}
-	packageSHA, err := sha256FileHex(cfg.PackagePath)
-	if err != nil {
-		return nil, fmt.Errorf("hash package: %w", err)
 	}
 	fileHashes := make(map[string]string, len(pkg.Files))
 	for _, file := range pkg.Files {

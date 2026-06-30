@@ -362,12 +362,18 @@ def build_summary(
     embedder1_candidate_smoke_evidence: str | Path | None = None,
     embedder1_role_aware_provider_smoke_evidence: str | Path | None = None,
     embedder1_corkscrewdb_serving_smoke_evidence: str | Path | None = None,
+    expected_counts: dict[str, dict[str, int]] | None = None,
     embedder1_scan_paths: list[Path] | None = None,
     active_export_pid: int | None = None,
     active_export_command: str | None = None,
     clock: Any = utc_now,
 ) -> dict[str, Any]:
-    bge_summary = bge_gate.build_summary(run_root=bge_gate_root, datasets=datasets, clock=clock)
+    bge_summary = bge_gate.build_summary(
+        run_root=bge_gate_root,
+        datasets=datasets,
+        expected_counts=expected_counts,
+        clock=clock,
+    )
     bge = compact_bge_gate(bge_summary)
     encoder = encoder_v21.build_summary(
         run_root=encoder_run_root,
@@ -393,6 +399,7 @@ def build_summary(
         candidate_smoke_evidence=embedder1_candidate_smoke_evidence,
         role_aware_provider_smoke_evidence=embedder1_role_aware_provider_smoke_evidence,
         corkscrewdb_serving_smoke_evidence=embedder1_corkscrewdb_serving_smoke_evidence,
+        expected_counts=expected_counts,
         scan_paths=embedder1_scan_paths or [],
         clock=clock,
     )
@@ -650,6 +657,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-tsv", default=DEFAULT_OUTPUT_TSV)
     parser.add_argument("--datasets", default=bge_gate.DEFAULT_DATASETS)
     parser.add_argument("--bge-gate-root", default=bge_gate.DEFAULT_RUN_ROOT)
+    parser.add_argument(
+        "--expected-counts",
+        help="Override selected-BGE vector counts as dataset:documents:queries[,dataset:documents:queries...]",
+    )
     parser.add_argument("--encoder-run-root", default=encoder_v21.DEFAULT_RUN_ROOT)
     parser.add_argument("--encoder-descriptor", default=encoder_v21.DEFAULT_DESCRIPTOR)
     parser.add_argument("--encoder-binary")
@@ -802,6 +813,7 @@ def main(argv: list[str] | None = None) -> int:
             embedder1_candidate_smoke_evidence=args.candidate_smoke_evidence,
             embedder1_role_aware_provider_smoke_evidence=args.role_aware_provider_smoke_evidence,
             embedder1_corkscrewdb_serving_smoke_evidence=args.corkscrewdb_serving_smoke_evidence,
+            expected_counts=bge_gate.parse_expected_counts(args.expected_counts),
             embedder1_scan_paths=parse_scan_paths(args.scan_paths),
             active_export_pid=args.active_export_pid,
             active_export_command=args.active_export_command,

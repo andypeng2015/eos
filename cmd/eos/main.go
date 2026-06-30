@@ -560,7 +560,9 @@ func runImportedEmbedderCandidate(args []string) error {
 	}
 
 	fmt.Printf("model: %s\n", info.ModelName)
+	fmt.Printf("public_id: %s\n", info.PublicID)
 	fmt.Printf("display_name: %s\n", info.DisplayName)
+	fmt.Printf("legacy_model_name: %s\n", info.LegacyModelName)
 	fmt.Printf("source_model: %s\n", info.SourceModel)
 	fmt.Printf("candidate_id: %s\n", info.CandidateID)
 	fmt.Printf("status: %s\n", info.Status)
