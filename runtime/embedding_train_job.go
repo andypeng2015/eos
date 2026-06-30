@@ -48,6 +48,9 @@ func TrainEmbeddingPackageFromContrastiveFiles(artifactPath, trainPath, evalPath
 		evalPath = trainPath
 		trainPath = ""
 	}
+	if cfg.VectorDistillTrain {
+		return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("vector distillation training requires text tokenization; remove --no-tokenizer or set --tokenizer")
+	}
 	if cfg.ScoreSpectrumTrain {
 		var trainSet []EmbeddingScoreSpectrumExample
 		if !cfg.EvalOnly {
@@ -294,6 +297,31 @@ func TrainEmbeddingPackageFromTextContrastiveFiles(artifactPath, tokenizerPath, 
 		}
 		var evalPairs []EmbeddingPairExample
 		summary, err := trainer.FitListwiseGeometry(trainSet, evalPairs, cfg)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+		}
+		if cfg.EvalOnly && len(trainSet) == 0 {
+			return summary, defaultEmbeddingTrainPackagePaths(artifactPath), nil
+		}
+		paths, err := trainer.WriteTrainingPackage(artifactPath)
+		if err != nil {
+			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
+		}
+		return summary, paths, nil
+	}
+	if cfg.VectorDistillTrain {
+		var trainSet []EmbeddingTokenizedVectorDistillExample
+		if !cfg.EvalOnly {
+			trainText, err := ReadEmbeddingVectorDistillExamplesFile(trainPath)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("read train vector-distill dataset: %w", err)
+			}
+			trainSet, err = TokenizeEmbeddingVectorDistillExamples(trainText, tokenizer)
+			if err != nil {
+				return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, fmt.Errorf("tokenize train vector-distill dataset: %w", err)
+			}
+		}
+		summary, err := trainer.FitVectorDistill(trainSet, cfg)
 		if err != nil {
 			return EmbeddingTrainRunSummary{}, EmbeddingTrainPackagePaths{}, err
 		}

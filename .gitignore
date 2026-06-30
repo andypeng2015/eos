@@ -16,3 +16,6 @@ docs/plans/
 .codex/
 .tiller/
 scripts/__pycache__/
+
+# Local Python venvs (teacher models / parity oracle only — never part of the build).
+.venv*/

@@ -5262,9 +5262,11 @@ func runTrainEmbed(args []string) error {
 	var hardNegativeTrain bool
 	var scoreSpectrumTrain bool
 	var listwiseGeometryTrain bool
+	var vectorDistillTrain bool
 	var movementDiagnostics bool
 	var allowResearchOnlyScoreSpectrum bool
 	var allowResearchOnlyListwiseGeometry bool
+	var allowResearchOnlyVectorDistill bool
 	var scoreSpectrumEvalPath string
 	var scoreSpectrumLossMode string
 	var scoreSpectrumRecoveryWeight float64
@@ -5325,9 +5327,11 @@ func runTrainEmbed(args []string) error {
 	fs.BoolVar(&hardNegativeTrain, "hard-negative-train", false, "group labeled pair JSONL into query-positive-hard-negative contrastive batches")
 	fs.BoolVar(&scoreSpectrumTrain, "score-spectrum-train", false, "treat the training JSONL as grouped score-spectrum examples with row-local candidates")
 	fs.BoolVar(&listwiseGeometryTrain, "listwise-geometry-train", false, "treat the training JSONL as listwise query/document teacher geometry batches")
+	fs.BoolVar(&vectorDistillTrain, "vector-distill-train", false, "treat the training JSONL as (text, teacher_vector) vector-distillation examples")
 	fs.BoolVar(&movementDiagnostics, "movement-diagnostics", false, "record aggregate gradient and parameter-delta movement diagnostics for listwise geometry training")
 	fs.BoolVar(&allowResearchOnlyScoreSpectrum, "allow-research-only-score-spectrum", false, "allow research-only score-spectrum training rows")
 	fs.BoolVar(&allowResearchOnlyListwiseGeometry, "allow-research-only-listwise-geometry", false, "allow research-only listwise geometry training rows")
+	fs.BoolVar(&allowResearchOnlyVectorDistill, "allow-research-only-vector-distill", false, "allow research-only vector-distillation training rows")
 	fs.StringVar(&scoreSpectrumEvalPath, "score-spectrum-eval", "", "path to grouped score-spectrum JSONL for native score-spectrum eval")
 	fs.StringVar(&scoreSpectrumLossMode, "score-spectrum-loss-mode", "", "score-spectrum loss mode: hard_soft, recovery, or hard_soft_recovery")
 	fs.Float64Var(&scoreSpectrumRecoveryWeight, "score-spectrum-recovery-weight", 0, "global recovery loss weight for score-spectrum training")
@@ -5427,13 +5431,13 @@ func runTrainEmbed(args []string) error {
 		return fmt.Errorf("score-spectrum-recovery-tau must be finite and non-negative")
 	}
 	trainModeCount := 0
-	for _, enabled := range []bool{pairwiseTrain, hardNegativeTrain, scoreSpectrumTrain, listwiseGeometryTrain} {
+	for _, enabled := range []bool{pairwiseTrain, hardNegativeTrain, scoreSpectrumTrain, listwiseGeometryTrain, vectorDistillTrain} {
 		if enabled {
 			trainModeCount++
 		}
 	}
 	if trainModeCount > 1 {
-		return fmt.Errorf("set only one of --pairwise-train, --hard-negative-train, --score-spectrum-train, or --listwise-geometry-train")
+		return fmt.Errorf("set only one of --pairwise-train, --hard-negative-train, --score-spectrum-train, --listwise-geometry-train, or --vector-distill-train")
 	}
 	parsedSourceWeights, parseErr := parsePositiveIntWeightMap(hardNegativeSourceWeights)
 	if parseErr != nil {
@@ -5533,6 +5537,9 @@ func runTrainEmbed(args []string) error {
 	if allowResearchOnlyListwiseGeometry && !listwiseGeometryTrain {
 		return fmt.Errorf("--allow-research-only-listwise-geometry requires --listwise-geometry-train")
 	}
+	if allowResearchOnlyVectorDistill && !vectorDistillTrain {
+		return fmt.Errorf("--allow-research-only-vector-distill requires --vector-distill-train")
+	}
 	parsedScoreSpectrumLossMode := ""
 	if strings.TrimSpace(scoreSpectrumLossMode) != "" {
 		var parseErr error
@@ -5583,6 +5590,26 @@ func runTrainEmbed(args []string) error {
 	} else {
 		maxListwiseTrainPairs = 0
 		maxListwiseEvalPairs = 0
+	}
+	if vectorDistillTrain {
+		if !progressEveryProvided && progressEvery == 0 {
+			progressEvery = 1
+		}
+		if len(parsedMatryoshkaDims) > 0 {
+			return fmt.Errorf("--vector-distill-train does not support --matryoshka-dims")
+		}
+		if len(parsedTurboQuantPrefixBits) > 0 || len(parsedTurboQuantPrefixObjectives) > 0 {
+			return fmt.Errorf("--vector-distill-train does not support TurboQuant prefix objectives")
+		}
+		if len(parsedTurboQuantCompactObjectives) > 0 {
+			return fmt.Errorf("--vector-distill-train does not support TurboQuant compact objectives")
+		}
+		if len(parsedTurboQuantRankMarginObjectives) > 0 {
+			return fmt.Errorf("--vector-distill-train does not support TurboQuant rank-margin objectives")
+		}
+		if noTokenizer {
+			return fmt.Errorf("--vector-distill-train requires text tokenization; remove --no-tokenizer or set --tokenizer")
+		}
 	}
 	path := fs.Arg(0)
 	trainPath := fs.Arg(1)
@@ -5643,9 +5670,11 @@ func runTrainEmbed(args []string) error {
 		HardNegativeTrain:                 hardNegativeTrain,
 		ScoreSpectrumTrain:                scoreSpectrumTrain,
 		ListwiseGeometryTrain:             listwiseGeometryTrain,
+		VectorDistillTrain:                vectorDistillTrain,
 		MovementDiagnostics:               movementDiagnostics,
 		AllowResearchOnlyScoreSpectrum:    allowResearchOnlyScoreSpectrum,
 		AllowResearchOnlyListwiseGeometry: allowResearchOnlyListwiseGeometry,
+		AllowResearchOnlyVectorDistill:    allowResearchOnlyVectorDistill,
 		ScoreSpectrumEvalPath:             scoreSpectrumEvalPath,
 		MaxListwiseGeometryTrainPairs:     maxListwiseTrainPairs,
 		MaxListwiseGeometryEvalPairs:      maxListwiseEvalPairs,
@@ -5944,9 +5973,15 @@ func parseNonNegativeFloatMap(raw string) (map[string]float32, error) {
 }
 
 func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg eosruntime.EmbeddingTrainRunConfig) (eosruntime.EmbeddingTrainWorkload, error) {
-	if cfg.EvalOnly && evalPath == "" && cfg.ScoreSpectrumEvalPath == "" && !cfg.ListwiseGeometryTrain {
+	if cfg.EvalOnly && evalPath == "" && cfg.ScoreSpectrumEvalPath == "" && !cfg.ListwiseGeometryTrain && !cfg.VectorDistillTrain {
 		evalPath = trainPath
 		trainPath = ""
+	}
+	if cfg.EvalOnly && cfg.VectorDistillTrain {
+		if tokenizerPath == "" {
+			return eosruntime.EmbeddingTrainWorkload{}, fmt.Errorf("vector distillation training requires text tokenization; remove --no-tokenizer or set --tokenizer")
+		}
+		return eosruntime.EstimateVectorDistillTrainWorkload(0, 0, cfg), nil
 	}
 	if cfg.EvalOnly && cfg.ScoreSpectrumTrain {
 		evalCount := 0
@@ -6090,6 +6125,13 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg e
 			tokenized := tokenizedListwiseGeometryWorkloadShape(trainSet)
 			return eosruntime.EstimateListwiseGeometryTrainWorkload(tokenized, 0, cfg), nil
 		}
+		if cfg.VectorDistillTrain {
+			trainSet, err := eosruntime.ReadEmbeddingVectorDistillExamplesFile(trainPath)
+			if err != nil {
+				return eosruntime.EmbeddingTrainWorkload{}, err
+			}
+			return eosruntime.EstimateVectorDistillTrainWorkload(len(trainSet), 0, cfg), nil
+		}
 		if cfg.HardNegativeTrain {
 			trainSet, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(trainPath)
 			if err != nil {
@@ -6192,6 +6234,9 @@ func estimateTrainEmbedWorkload(tokenizerPath, trainPath, evalPath string, cfg e
 	}
 	if cfg.ListwiseGeometryTrain {
 		return eosruntime.EmbeddingTrainWorkload{}, fmt.Errorf("listwise geometry training requires text tokenization; remove --no-tokenizer or set --tokenizer")
+	}
+	if cfg.VectorDistillTrain {
+		return eosruntime.EmbeddingTrainWorkload{}, fmt.Errorf("vector distillation training requires text tokenization; remove --no-tokenizer or set --tokenizer")
 	}
 	if cfg.HardNegativeTrain {
 		trainSet, err := eosruntime.ReadEmbeddingHardNegativeExamplesFile(trainPath)
@@ -6718,8 +6763,10 @@ type trainRunConfigJSON struct {
 	HardNegativeTrain                 bool                                   `json:"hard_negative_train"`
 	ScoreSpectrumTrain                bool                                   `json:"score_spectrum_train"`
 	ListwiseGeometryTrain             bool                                   `json:"listwise_geometry_train"`
+	VectorDistillTrain                bool                                   `json:"vector_distill_train,omitempty"`
 	MovementDiagnostics               bool                                   `json:"movement_diagnostics"`
 	AllowResearchOnlyListwiseGeometry bool                                   `json:"allow_research_only_listwise_geometry,omitempty"`
+	AllowResearchOnlyVectorDistill    bool                                   `json:"allow_research_only_vector_distill,omitempty"`
 	MaxListwiseGeometryTrainPairs     int64                                  `json:"max_listwise_geometry_train_pairs,omitempty"`
 	MaxListwiseGeometryEvalPairs      int64                                  `json:"max_listwise_geometry_eval_pairs,omitempty"`
 	ScoreSpectrumEvalPath             string                                 `json:"score_spectrum_eval_path,omitempty"`

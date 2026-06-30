@@ -29,9 +29,11 @@ type EmbeddingTrainRunConfig struct {
 	HardNegativeTrain                 bool
 	ScoreSpectrumTrain                bool
 	ListwiseGeometryTrain             bool
+	VectorDistillTrain                bool
 	MovementDiagnostics               bool
 	AllowResearchOnlyScoreSpectrum    bool
 	AllowResearchOnlyListwiseGeometry bool
+	AllowResearchOnlyVectorDistill    bool
 	HardNegativesPerQuery             int
 	HardNegativeSourceWeights         map[string]int
 	LengthBucketBatches               bool
