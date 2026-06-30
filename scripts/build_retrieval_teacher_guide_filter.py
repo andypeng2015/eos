@@ -118,6 +118,7 @@ def parse_args() -> argparse.Namespace:
         choices=["drop", "emit_soft_only"],
         default="drop",
     )
+    parser.add_argument("--exclude-dev-positive-flags", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--drop-sample-limit", type=int, default=50)
     return parser.parse_args()
 
@@ -345,6 +346,21 @@ def candidate_records(row: dict[str, Any], example_index: int) -> list[dict[str,
     return records
 
 
+def has_dev_positive_negative_flag(row: dict[str, Any]) -> bool:
+    flags = row.get("candidate_dev_positive_flags") or {}
+    if not isinstance(flags, dict):
+        return bool(flags)
+
+    def flag_value_truthy(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(flag_value_truthy(nested) for nested in value.values())
+        if isinstance(value, list):
+            return any(flag_value_truthy(nested) for nested in value)
+        return bool(value)
+
+    return any(flag_value_truthy(value) for value in flags.values())
+
+
 def lookup_score(cache: TeacherCache, cand: dict[str, Any]) -> ScoreHit | None:
     key_candidates = [
         ("row_doc", cand["row_id"], cand["candidate_doc_id"]),
@@ -478,6 +494,25 @@ def main() -> None:
         counts["rows_seen"] += 1
         source = stable_text(row.get("source"))
         source_counts[source]["rows_seen"] += 1
+        dev_positive_flags = row.get("candidate_dev_positive_flags") or {}
+        if has_dev_positive_negative_flag(row):
+            counts["dev_positive_flag_rows"] += 1
+            source_counts[source]["dev_positive_flag_rows"] += 1
+            if args.exclude_dev_positive_flags:
+                counts["dev_positive_flag_drop"] += 1
+                source_counts[source]["dev_positive_flag_drop"] += 1
+                add_drop_sample(
+                    drop_samples,
+                    args.drop_sample_limit,
+                    {
+                        "example_index": example_index,
+                        "row_id": row.get("row_id"),
+                        "query_id": row.get("query_id"),
+                        "reason": "dev_positive_negative_flag",
+                        "flags": dev_positive_flags,
+                    },
+                )
+                continue
         candidates = candidate_records(row, example_index)
         if not candidates or not candidates[0]["candidate"] or not candidates[0]["query"]:
             counts["malformed_row_drop"] += 1
@@ -626,6 +661,8 @@ def main() -> None:
             "ambiguous_epsilon": args.ambiguous_epsilon,
             "ambiguous_policy": args.ambiguous_policy,
             "conflict_policy": args.conflict_policy,
+            "exclude_dev_positive_flags": args.exclude_dev_positive_flags,
+            "dev_positive_flag_drop_reason": "dev_positive_negative_flag",
         },
         "legal_gates": dict(LEGAL_GATES),
         "legal_gate_accounting": {

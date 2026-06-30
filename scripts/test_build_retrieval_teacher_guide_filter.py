@@ -71,6 +71,136 @@ def candidate_scores(row: dict, scores: list[float]) -> list[dict]:
 
 
 class RetrievalTeacherGuideFilterTest(unittest.TestCase):
+    def test_cli_excludes_dev_positive_flagged_rows_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows_path = root / "rows.jsonl"
+            qwen_path = root / "qwen.jsonl"
+            output_path = root / "filtered.jsonl"
+            manifest_path = root / "manifest.json"
+
+            flagged = base_row("r-flagged", "q1", "p1", ["n1"])
+            flagged["candidate_dev_positive_flags"] = {"n1": {"dev": True}}
+            clean = base_row("r-clean", "q2", "p2", ["n2"])
+            rows = [flagged, clean]
+            write_jsonl(rows_path, rows)
+            write_jsonl(
+                qwen_path,
+                candidate_scores(flagged, [0.9, 0.1])
+                + candidate_scores(clean, [0.8, 0.2]),
+            )
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--rows-jsonl",
+                    str(rows_path),
+                    "--teacher-cache",
+                    f"qwen={qwen_path}",
+                    "--output-jsonl",
+                    str(output_path),
+                    "--manifest",
+                    str(manifest_path),
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            output_rows = read_jsonl(output_path)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual([row["row_id"] for row in output_rows], ["r-clean"])
+        self.assertEqual(manifest["policy"]["exclude_dev_positive_flags"], True)
+        self.assertEqual(manifest["counts"]["dev_positive_flag_rows"], 1)
+        self.assertEqual(manifest["counts"]["dev_positive_flag_drop"], 1)
+        self.assertEqual(manifest["counts"]["clean_agreement"], 1)
+        self.assertEqual(manifest["counts"]["rows_emitted"], 1)
+        self.assertEqual(manifest["coverage"]["drop_samples"][0]["reason"], "dev_positive_negative_flag")
+        self.assertEqual(manifest["coverage"]["drop_samples"][0]["row_id"], "r-flagged")
+        self.assertEqual(manifest["coverage"]["drop_samples"][0]["query_id"], "q1")
+        self.assertEqual(manifest["coverage"]["drop_samples"][0]["flags"], {"n1": {"dev": True}})
+
+    def test_cli_does_not_exclude_all_false_nested_dev_positive_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows_path = root / "rows.jsonl"
+            qwen_path = root / "qwen.jsonl"
+            output_path = root / "filtered.jsonl"
+            manifest_path = root / "manifest.json"
+
+            row = base_row("r-false-flags", "q1", "p1", ["n1"])
+            row["candidate_dev_positive_flags"] = {
+                "n1": {"dev": False, "manual": 0, "nested": {"heldout": None}, "list": [False, 0, None]}
+            }
+            write_jsonl(rows_path, [row])
+            write_jsonl(qwen_path, candidate_scores(row, [0.9, 0.1]))
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--rows-jsonl",
+                    str(rows_path),
+                    "--teacher-cache",
+                    f"qwen={qwen_path}",
+                    "--output-jsonl",
+                    str(output_path),
+                    "--manifest",
+                    str(manifest_path),
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            output_rows = read_jsonl(output_path)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual([row["row_id"] for row in output_rows], ["r-false-flags"])
+        self.assertEqual(manifest["counts"].get("dev_positive_flag_rows", 0), 0)
+        self.assertEqual(manifest["counts"].get("dev_positive_flag_drop", 0), 0)
+
+    def test_cli_no_exclude_dev_positive_flags_preserves_old_behavior_and_counts_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows_path = root / "rows.jsonl"
+            qwen_path = root / "qwen.jsonl"
+            output_path = root / "filtered.jsonl"
+            manifest_path = root / "manifest.json"
+
+            row = base_row("r-flagged", "q1", "p1", ["n1"])
+            row["candidate_dev_positive_flags"] = {"n1": {"dev": True}}
+            write_jsonl(rows_path, [row])
+            write_jsonl(qwen_path, candidate_scores(row, [0.9, 0.1]))
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--rows-jsonl",
+                    str(rows_path),
+                    "--teacher-cache",
+                    f"qwen={qwen_path}",
+                    "--output-jsonl",
+                    str(output_path),
+                    "--manifest",
+                    str(manifest_path),
+                    "--no-exclude-dev-positive-flags",
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            output_rows = read_jsonl(output_path)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual([row["row_id"] for row in output_rows], ["r-flagged"])
+        self.assertEqual(output_rows[0]["candidate_dev_positive_flags"], {"n1": {"dev": True}})
+        self.assertEqual(output_rows[0]["teacher_guide"]["policy"], "clean_agreement")
+        self.assertEqual(manifest["policy"]["exclude_dev_positive_flags"], False)
+        self.assertEqual(manifest["counts"]["dev_positive_flag_rows"], 1)
+        self.assertEqual(manifest["counts"].get("dev_positive_flag_drop", 0), 0)
+
     def test_cli_joins_scores_and_accounts_policy_drops(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
