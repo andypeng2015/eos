@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
 	"runtime/debug"
 	"time"
 )
@@ -307,7 +308,7 @@ func (t *EmbeddingTrainer) runVectorDistillEpoch(
 			Elapsed:            time.Since(runStart),
 		})
 
-		metrics, updatedProj, err := t.trainVectorDistillBatch(batch, proj, teacherDim)
+		metrics, updatedProj, err := t.trainVectorDistillBatch(batch, proj, teacherDim, cfg.VectorDistillDefaultRole, cfg.VectorDistillRelationalWeight)
 		if err != nil {
 			return EmbeddingTrainMetrics{}, proj, err
 		}
@@ -346,13 +347,42 @@ func (t *EmbeddingTrainer) runVectorDistillEpoch(
 	}, proj, nil
 }
 
+// vectorDistillRoleIndex resolves a per-example role string ("query",
+// "document", "raw", or "" for legacy rows written before the role field
+// existed) to the model's role-embedding index. Empty roles fall back to
+// defaultRole; the returned bool tells the caller whether the fallback fired
+// so it can log a one-time warning.
+func (t *EmbeddingTrainer) vectorDistillRoleIndex(role, defaultRole string) (int32, bool, error) {
+	usedFallback := false
+	effective := role
+	if effective == "" {
+		effective = defaultRole
+		usedFallback = true
+	}
+	switch effective {
+	case EmbeddingRoleQuery:
+		return t.queryRoleIndex(), usedFallback, nil
+	case EmbeddingRoleDocument:
+		return t.documentRoleIndex(), usedFallback, nil
+	case EmbeddingRoleRaw:
+		return t.rawRoleIndex(), usedFallback, nil
+	default:
+		return 0, false, fmt.Errorf("unsupported vector-distill role %q (want %q, %q, or %q)", effective, EmbeddingRoleQuery, EmbeddingRoleDocument, EmbeddingRoleRaw)
+	}
+}
+
 // trainVectorDistillBatch runs one optimizer step over a batch of
 // (text, teacher_vector) examples.  The distillation projection state is
 // returned (created on first call) so the caller can persist it across batches.
+// defaultRole is applied to examples with no explicit per-row role (legacy
+// rows); relationalWeight, when > 0, activates the in-batch relational
+// similarity-matrix term over the raw (pre-projection) student vectors.
 func (t *EmbeddingTrainer) trainVectorDistillBatch(
 	batch []EmbeddingTokenizedVectorDistillExample,
 	proj *vectorDistillProjectionState,
 	teacherDim int,
+	defaultRole string,
+	relationalWeight float32,
 ) (EmbeddingTrainMetrics, *vectorDistillProjectionState, error) {
 	if !t.isCompactTrainer() {
 		return EmbeddingTrainMetrics{}, proj, fmt.Errorf("vector distillation requires compact_transformer_v1")
@@ -360,14 +390,26 @@ func (t *EmbeddingTrainer) trainVectorDistillBatch(
 	if len(batch) == 0 {
 		return EmbeddingTrainMetrics{}, proj, fmt.Errorf("vector distillation batch is empty")
 	}
+	if defaultRole == "" {
+		defaultRole = EmbeddingRoleQuery
+	}
 
-	// Build sequence inputs
+	// Build sequence inputs, resolving each example's own role (falling back
+	// to defaultRole for legacy rows without an explicit "role" field).
 	inputs := make([]embeddingSequenceInput, len(batch))
 	for i, ex := range batch {
+		roleIndex, usedFallback, rerr := t.vectorDistillRoleIndex(ex.Role, defaultRole)
+		if rerr != nil {
+			return EmbeddingTrainMetrics{}, proj, fmt.Errorf("example %d (%s): %w", i, ex.ID, rerr)
+		}
+		if usedFallback && !t.vectorDistillDefaultRoleWarned {
+			fmt.Fprintf(os.Stderr, "vector-distill: example %q has no explicit \"role\"; falling back to default role %q (add \"role\" to JSONL rows or pass --vector-distill-default-role to silence this warning)\n", ex.ID, defaultRole)
+			t.vectorDistillDefaultRoleWarned = true
+		}
 		inputs[i] = embeddingSequenceInput{
 			tokens: ex.Tokens,
 			mask:   ex.Mask,
-			role:   t.queryRoleIndex(),
+			role:   roleIndex,
 			label:  fmt.Sprintf("batch %d", i),
 		}
 	}
@@ -390,6 +432,70 @@ func (t *EmbeddingTrainer) trainVectorDistillBatch(
 		proj = newVectorDistillProjectionState(studentDim, teacherDim, rand.New(rand.NewSource(42)))
 	}
 
+	// Optional in-batch relational term over the RAW (pre-projection) student
+	// vectors — computed once for the whole batch since it depends on every
+	// pair, then merged per-example into gradStudent below.
+	var relationalLoss float32
+	var relationalGrads [][]float32
+	if relationalWeight > 0 {
+		students := make([][]float32, len(encoded))
+		teachers := make([][]float32, len(encoded))
+		for i, enc := range encoded {
+			students[i] = enc.pooled
+			teachers[i] = batch[i].TeacherVector
+		}
+		relationalLoss, relationalGrads, err = VectorDistillRelationalLossAndGrad(students, teachers, relationalWeight)
+		if err != nil {
+			return EmbeddingTrainMetrics{}, proj, fmt.Errorf("relational loss: %w", err)
+		}
+	}
+
+	grads, gradW, totalLoss, err := t.computeVectorDistillBatchGradients(batch, encoded, proj, forward, relationalGrads)
+	if err != nil {
+		return EmbeddingTrainMetrics{}, proj, err
+	}
+
+	// Scale: average over batch
+	batchScale := float32(1) / float32(len(batch))
+
+	// Update student parameters
+	t.applyCompactOptimizerUpdates(grads, batchScale)
+
+	// Update projection with its own AdamW (same LR/hyper-params as student)
+	proj.Step++
+	applyVectorDistillProjectionAdamW(
+		proj.W, proj.Mom1, proj.Mom2, gradW,
+		t.config.LearningRate, t.config.Beta1, t.config.Beta2, t.config.Epsilon, t.config.WeightDecay,
+		proj.Step,
+	)
+
+	return EmbeddingTrainMetrics{
+		// relationalLoss is already a batch-level mean (not per-example), so
+		// it is added once rather than scaled by batchScale.
+		Loss:      totalLoss*batchScale + relationalLoss,
+		BatchSize: len(batch),
+	}, proj, nil
+}
+
+// computeVectorDistillBatchGradients runs the per-example projection forward
+// pass, the pointwise MSE+cosine loss, and backprop through the projection
+// and encoder for every example in the batch, merging in the (optional)
+// in-batch relational gradient for each example's raw student vector. It
+// returns the RAW (pre-batchScale, pre-AdamW) accumulated encoder gradient
+// state, the raw projection-weight gradient, and the summed (not yet
+// batch-scaled) pointwise loss. This is split out of trainVectorDistillBatch
+// so tests can inspect the merged gradient directly — the effective weight of
+// the relational term (see the "Pre-multiply by len(batch)" comment below) is
+// only observable before the caller's batchScale/AdamW step, since AdamW's
+// per-coordinate normalization on the very first optimizer step erases most
+// gradient-magnitude information.
+func (t *EmbeddingTrainer) computeVectorDistillBatchGradients(
+	batch []EmbeddingTokenizedVectorDistillExample,
+	encoded []*embeddingEncodedSequence,
+	proj *vectorDistillProjectionState,
+	forward *embeddingForwardWeights,
+	relationalGrads [][]float32,
+) (*compactEmbeddingGradState, []float32, float32, error) {
 	grads := newCompactEmbeddingGradState(t.compactState)
 	gradW := make([]float32, proj.InputDim*proj.OutDim)
 	totalLoss := float32(0)
@@ -411,7 +517,7 @@ func (t *EmbeddingTrainer) trainVectorDistillBatch(
 		// Loss and gradient w.r.t. projected vector
 		lossResult, lerr := VectorDistillLossAndGrad(projVec, teacher)
 		if lerr != nil {
-			return EmbeddingTrainMetrics{}, proj, fmt.Errorf("example %d: %w", i, lerr)
+			return nil, nil, 0, fmt.Errorf("example %d: %w", i, lerr)
 		}
 		totalLoss += lossResult.Loss
 
@@ -419,30 +525,33 @@ func (t *EmbeddingTrainer) trainVectorDistillBatch(
 		gradStudent := make([]float32, proj.InputDim)
 		accumulateVectorDistillProjectionGrads(student, lossResult.GradProj, proj.W, gradStudent, gradW)
 
+		// Merge in the relational term's gradient w.r.t. the same raw student
+		// vector (computed directly, not through the projection).
+		//
+		// VectorDistillRelationalLossAndGrad returns the complete analytic
+		// gradient of the whole-batch relational loss. The batchScale the
+		// caller applies afterwards (1/len(batch)) is correct for the
+		// pointwise term — it converts a sum over examples into a mean —
+		// but it would incorrectly shrink the relational term's effective
+		// weight by 1/N as well, since that term is already a batch-level
+		// (not per-example-summed) quantity. Pre-multiply by len(batch) here
+		// so the later batchScale exactly cancels, keeping the relational
+		// term's effective weight equal to relationalWeight regardless of
+		// batch size. See TestVectorDistillRelationalGradientMergeIsBatchSizeInvariant.
+		if relationalGrads != nil {
+			n := float32(len(batch))
+			for k, g := range relationalGrads[i] {
+				gradStudent[k] += g * n
+			}
+		}
+
 		// Backprop gradStudent through the encoder
 		if berr := t.backpropCompactEncodedSequence(enc, gradStudent, forward.compact, grads); berr != nil {
-			return EmbeddingTrainMetrics{}, proj, fmt.Errorf("example %d backprop: %w", i, berr)
+			return nil, nil, 0, fmt.Errorf("example %d backprop: %w", i, berr)
 		}
 	}
 
-	// Scale: average over batch
-	batchScale := float32(1) / float32(len(batch))
-
-	// Update student parameters
-	t.applyCompactOptimizerUpdates(grads, batchScale)
-
-	// Update projection with its own AdamW (same LR/hyper-params as student)
-	proj.Step++
-	applyVectorDistillProjectionAdamW(
-		proj.W, proj.Mom1, proj.Mom2, gradW,
-		t.config.LearningRate, t.config.Beta1, t.config.Beta2, t.config.Epsilon, t.config.WeightDecay,
-		proj.Step,
-	)
-
-	return EmbeddingTrainMetrics{
-		Loss:      totalLoss * batchScale,
-		BatchSize: len(batch),
-	}, proj, nil
+	return grads, gradW, totalLoss, nil
 }
 
 // EstimateVectorDistillTrainWorkload returns a planned-work summary for

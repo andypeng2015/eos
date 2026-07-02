@@ -76,6 +76,92 @@ func TestBetterEvalMetricsSelectsHigherRetrievalRecall(t *testing.T) {
 	}
 }
 
+// normalizedTrainRunConfig must default an unset SelectMetric to the
+// retrieval-gated metric (not the legacy pairwise default) whenever the
+// caller supplied a complete retrieval eval gate (runtime + corpus/queries/
+// qrels paths). This mirrors the CLI auto-upgrade in cmd/eos's
+// runTrainEmbed for direct API callers who leave SelectMetric unset.
+func TestNormalizedTrainRunConfigDefaultsToRetrievalNDCGWhenGateConfigured(t *testing.T) {
+	cfg := EmbeddingTrainRunConfig{
+		RetrievalEvalRuntime: &Runtime{},
+		RetrievalEval: RetrievalEvalConfig{
+			CorpusPath:  "corpus.jsonl",
+			QueriesPath: "queries.jsonl",
+			QrelsPath:   "qrels.tsv",
+		},
+	}
+	got := normalizedTrainRunConfig(cfg)
+	if got.SelectMetric != "retrieval_ndcg" {
+		t.Fatalf("SelectMetric = %q, want %q", got.SelectMetric, "retrieval_ndcg")
+	}
+}
+
+// Without a complete retrieval eval gate, an unset SelectMetric must keep
+// defaulting to the legacy pairwise metric (score_margin) so existing direct
+// API callers are unaffected.
+func TestNormalizedTrainRunConfigKeepsPairwiseDefaultWithoutRetrievalGate(t *testing.T) {
+	cfg := EmbeddingTrainRunConfig{}
+	got := normalizedTrainRunConfig(cfg)
+	if got.SelectMetric != "score_margin" {
+		t.Fatalf("SelectMetric = %q, want %q", got.SelectMetric, "score_margin")
+	}
+}
+
+// A partially configured retrieval eval gate (e.g. missing QrelsPath) must
+// not trip the retrieval-gated default — the gate itself would not enable
+// (see EmbeddingTrainer.configureRetrievalEval), so defaulting to it would be
+// misleading.
+func TestNormalizedTrainRunConfigKeepsPairwiseDefaultWithIncompleteRetrievalGate(t *testing.T) {
+	cfg := EmbeddingTrainRunConfig{
+		RetrievalEvalRuntime: &Runtime{},
+		RetrievalEval: RetrievalEvalConfig{
+			CorpusPath:  "corpus.jsonl",
+			QueriesPath: "queries.jsonl",
+		},
+	}
+	got := normalizedTrainRunConfig(cfg)
+	if got.SelectMetric != "score_margin" {
+		t.Fatalf("SelectMetric = %q, want %q", got.SelectMetric, "score_margin")
+	}
+}
+
+// Explicit callers who set SelectMetric always win, even when they set it to
+// a pairwise metric alongside a complete retrieval eval gate.
+func TestNormalizedTrainRunConfigPreservesExplicitSelectMetricWithRetrievalGate(t *testing.T) {
+	cfg := EmbeddingTrainRunConfig{
+		SelectMetric:         "top1_accuracy",
+		RetrievalEvalRuntime: &Runtime{},
+		RetrievalEval: RetrievalEvalConfig{
+			CorpusPath:  "corpus.jsonl",
+			QueriesPath: "queries.jsonl",
+			QrelsPath:   "qrels.tsv",
+		},
+	}
+	got := normalizedTrainRunConfig(cfg)
+	if got.SelectMetric != "top1_accuracy" {
+		t.Fatalf("SelectMetric = %q, want explicit %q preserved", got.SelectMetric, "top1_accuracy")
+	}
+}
+
+func TestRetrievalEvalGateConfiguredRequiresRuntimeAndAllThreePaths(t *testing.T) {
+	complete := RetrievalEvalConfig{CorpusPath: "c", QueriesPath: "q", QrelsPath: "r"}
+	if !retrievalEvalGateConfigured(EmbeddingTrainRunConfig{RetrievalEvalRuntime: &Runtime{}, RetrievalEval: complete}) {
+		t.Fatal("complete config with runtime must be configured")
+	}
+	if retrievalEvalGateConfigured(EmbeddingTrainRunConfig{RetrievalEval: complete}) {
+		t.Fatal("nil runtime must not be considered configured")
+	}
+	if retrievalEvalGateConfigured(EmbeddingTrainRunConfig{RetrievalEvalRuntime: &Runtime{}, RetrievalEval: RetrievalEvalConfig{CorpusPath: "c", QueriesPath: "q"}}) {
+		t.Fatal("missing QrelsPath must not be considered configured")
+	}
+	if retrievalEvalGateConfigured(EmbeddingTrainRunConfig{RetrievalEvalRuntime: &Runtime{}, RetrievalEval: RetrievalEvalConfig{QueriesPath: "q", QrelsPath: "r"}}) {
+		t.Fatal("missing CorpusPath must not be considered configured")
+	}
+	if retrievalEvalGateConfigured(EmbeddingTrainRunConfig{RetrievalEvalRuntime: &Runtime{}, RetrievalEval: RetrievalEvalConfig{CorpusPath: "c", QrelsPath: "r"}}) {
+		t.Fatal("missing QueriesPath must not be considered configured")
+	}
+}
+
 // A capped corpus must still include the qrels-relevant docs, otherwise nDCG is
 // meaningless (the gate silently reads 0 when the cap drops all relevant docs —
 // e.g. -retrieval-eval-max-docs 2000 on fiqa, whose relevant docs are late in

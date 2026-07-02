@@ -189,3 +189,139 @@ func TestAccumulateVectorDistillProjectionGradsBackpropIsCorrect(t *testing.T) {
 		}
 	}
 }
+
+// TestVectorDistillRelationalLossAndGradHandComputedThreeVectorCase checks the
+// forward loss value against a hand-computed 3-vector case:
+//
+//	students: s0=[1,0], s1=[0,1], s2=[1,0]   (s0,s2 identical; s1 orthogonal)
+//	teachers: t0=[1,0], t1=[0,1], t2=[0,1]   (t1,t2 identical; t0 orthogonal to both)
+//
+// Off-diagonal cosine entries (both directions, matrix is symmetric):
+//
+//	S_student: (0,1)=0 (0,2)=1 (1,2)=0   S_teacher: (0,1)=0 (0,2)=0 (1,2)=1
+//	diffs:     (0,1)=0 (0,2)=1 (1,2)=-1
+//
+// mean((S_student-S_teacher)^2) over all 6 off-diagonal entries
+// = (0+0+1+1+1+1)/6 = 2/3, so loss = weight * 2/3.
+func TestVectorDistillRelationalLossAndGradHandComputedThreeVectorCase(t *testing.T) {
+	students := [][]float32{{1, 0}, {0, 1}, {1, 0}}
+	teachers := [][]float32{{1, 0}, {0, 1}, {0, 1}}
+	weight := float32(1)
+
+	loss, grads, err := VectorDistillRelationalLossAndGrad(students, teachers, weight)
+	if err != nil {
+		t.Fatalf("VectorDistillRelationalLossAndGrad error: %v", err)
+	}
+	wantLoss := float32(2.0 / 3.0)
+	if math.Abs(float64(loss-wantLoss)) > 1e-5 {
+		t.Errorf("loss = %f, want %f", loss, wantLoss)
+	}
+	if len(grads) != 3 {
+		t.Fatalf("len(grads) = %d, want 3", len(grads))
+	}
+	// s0 and s2 are identical inputs but are not symmetric in the loss (s0
+	// pairs with a mismatched teacher pair (0,2), s2 pairs with a different
+	// mismatched teacher pair via (1,2) through s1), so nothing forces their
+	// gradients to match; just confirm every component is finite and at
+	// least one gradient is non-zero (the term is active).
+	var anyNonZero bool
+	for _, g := range grads {
+		if len(g) != 2 {
+			t.Fatalf("grad dim = %d, want 2", len(g))
+		}
+		for _, v := range g {
+			if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+				t.Fatalf("grad component is not finite: %v", grads)
+			}
+			if v != 0 {
+				anyNonZero = true
+			}
+		}
+	}
+	if !anyNonZero {
+		t.Fatalf("all relational gradients are zero, want at least one non-zero: %v", grads)
+	}
+}
+
+// TestVectorDistillRelationalLossAndGradFiniteDifferenceCheck verifies the
+// analytic per-vector gradient against a central-difference approximation on
+// a small (3 vectors, dim 3) synthetic batch with non-axis-aligned values.
+func TestVectorDistillRelationalLossAndGradFiniteDifferenceCheck(t *testing.T) {
+	students := [][]float32{
+		{0.6, -0.3, 0.2},
+		{0.1, 0.8, -0.4},
+		{-0.5, 0.2, 0.9},
+	}
+	teachers := [][]float32{
+		{0.2, 0.5, -0.1},
+		{-0.3, 0.4, 0.6},
+		{0.7, -0.2, 0.1},
+	}
+	weight := float32(0.7)
+
+	_, grads, err := VectorDistillRelationalLossAndGrad(students, teachers, weight)
+	if err != nil {
+		t.Fatalf("VectorDistillRelationalLossAndGrad error: %v", err)
+	}
+
+	eps := float32(1e-3)
+	for i := range students {
+		for k := range students[i] {
+			plus := cloneVectorBatch(students)
+			plus[i][k] += eps
+			lossPlus, _, err := VectorDistillRelationalLossAndGrad(plus, teachers, weight)
+			if err != nil {
+				t.Fatalf("loss plus: %v", err)
+			}
+
+			minus := cloneVectorBatch(students)
+			minus[i][k] -= eps
+			lossMinus, _, err := VectorDistillRelationalLossAndGrad(minus, teachers, weight)
+			if err != nil {
+				t.Fatalf("loss minus: %v", err)
+			}
+
+			fdGrad := (lossPlus - lossMinus) / (2 * eps)
+			if math.Abs(float64(grads[i][k]-fdGrad)) > 1e-2 {
+				t.Errorf("grads[%d][%d] analytic=%f fd=%f", i, k, grads[i][k], fdGrad)
+			}
+		}
+	}
+}
+
+// TestVectorDistillRelationalLossAndGradInactiveForSmallBatchOrZeroWeight
+// verifies the term is a no-op (loss=0, nil grads, nil error) when the batch
+// has fewer than 2 examples or the weight is non-positive, matching the
+// "0 disables" contract of --vector-distill-relational-weight.
+func TestVectorDistillRelationalLossAndGradInactiveForSmallBatchOrZeroWeight(t *testing.T) {
+	single := [][]float32{{1, 0}}
+	pair := [][]float32{{1, 0}, {0, 1}}
+
+	if loss, grads, err := VectorDistillRelationalLossAndGrad(single, single, 1); err != nil || loss != 0 || grads != nil {
+		t.Fatalf("batch size 1: loss=%v grads=%v err=%v, want inactive", loss, grads, err)
+	}
+	if loss, grads, err := VectorDistillRelationalLossAndGrad(pair, pair, 0); err != nil || loss != 0 || grads != nil {
+		t.Fatalf("zero weight: loss=%v grads=%v err=%v, want inactive", loss, grads, err)
+	}
+	if loss, grads, err := VectorDistillRelationalLossAndGrad(nil, nil, 1); err != nil || loss != 0 || grads != nil {
+		t.Fatalf("empty batch: loss=%v grads=%v err=%v, want inactive", loss, grads, err)
+	}
+}
+
+// TestVectorDistillRelationalLossAndGradRejectsCountMismatch verifies the
+// student/teacher count check.
+func TestVectorDistillRelationalLossAndGradRejectsCountMismatch(t *testing.T) {
+	students := [][]float32{{1, 0}, {0, 1}}
+	teachers := [][]float32{{1, 0}}
+	if _, _, err := VectorDistillRelationalLossAndGrad(students, teachers, 1); err == nil {
+		t.Fatal("expected error for student/teacher count mismatch, got nil")
+	}
+}
+
+func cloneVectorBatch(batch [][]float32) [][]float32 {
+	out := make([][]float32, len(batch))
+	for i, v := range batch {
+		out[i] = append([]float32(nil), v...)
+	}
+	return out
+}

@@ -14,22 +14,31 @@ import (
 
 // EmbeddingTrainRunConfig controls dataset-level native training.
 type EmbeddingTrainRunConfig struct {
-	Epochs                            int
-	BatchSize                         int
-	Shuffle                           bool
-	Seed                              int64
-	EvalEveryEpoch                    int
-	EvalEverySteps                    int
-	EarlyStoppingPatience             int
-	SelectMetric                      string
-	MinDelta                          float32
-	RestoreBest                       bool
-	EvalOnly                          bool
-	PairwiseTrain                     bool
-	HardNegativeTrain                 bool
-	ScoreSpectrumTrain                bool
-	ListwiseGeometryTrain             bool
-	VectorDistillTrain                bool
+	Epochs                int
+	BatchSize             int
+	Shuffle               bool
+	Seed                  int64
+	EvalEveryEpoch        int
+	EvalEverySteps        int
+	EarlyStoppingPatience int
+	SelectMetric          string
+	MinDelta              float32
+	RestoreBest           bool
+	EvalOnly              bool
+	PairwiseTrain         bool
+	HardNegativeTrain     bool
+	ScoreSpectrumTrain    bool
+	ListwiseGeometryTrain bool
+	VectorDistillTrain    bool
+	// VectorDistillDefaultRole is the role ("query", "document", or "raw")
+	// applied to vector-distill rows that omit an explicit "role" field.
+	// Defaults to "query" in normalizedTrainRunConfig to preserve pre-role
+	// behavior (all vector-distill rows previously trained under query role).
+	VectorDistillDefaultRole string
+	// VectorDistillRelationalWeight enables (when > 0) an in-batch relational
+	// (similarity-matrix) distillation term over the RAW student pooled
+	// vectors, supervising the served geometry directly. 0 disables it.
+	VectorDistillRelationalWeight     float32
 	MovementDiagnostics               bool
 	AllowResearchOnlyScoreSpectrum    bool
 	AllowResearchOnlyListwiseGeometry bool
@@ -3069,6 +3078,18 @@ func expandContrastiveExamples(examples []EmbeddingContrastiveExample) []Embeddi
 	return out
 }
 
+// retrievalEvalGateConfigured reports whether cfg carries a complete
+// BEIR-style retrieval eval gate (runtime plus corpus/queries/qrels paths),
+// mirroring EmbeddingTrainer.configureRetrievalEval's own enablement check.
+// Callers use this to decide whether an unset SelectMetric should default to
+// the retrieval-gated metric instead of the legacy pairwise default.
+func retrievalEvalGateConfigured(cfg EmbeddingTrainRunConfig) bool {
+	return cfg.RetrievalEvalRuntime != nil &&
+		strings.TrimSpace(cfg.RetrievalEval.CorpusPath) != "" &&
+		strings.TrimSpace(cfg.RetrievalEval.QueriesPath) != "" &&
+		strings.TrimSpace(cfg.RetrievalEval.QrelsPath) != ""
+}
+
 func normalizedTrainRunConfig(cfg EmbeddingTrainRunConfig) EmbeddingTrainRunConfig {
 	if cfg.EvalOnly {
 		cfg.Epochs = 0
@@ -3082,13 +3103,26 @@ func normalizedTrainRunConfig(cfg EmbeddingTrainRunConfig) EmbeddingTrainRunConf
 		cfg.EvalEveryEpoch = 1
 	}
 	if cfg.SelectMetric == "" {
-		cfg.SelectMetric = "score_margin"
+		// Direct API callers who configure a complete retrieval eval gate but
+		// leave SelectMetric unset get the retrieval-gated default instead of
+		// the legacy pairwise metric, matching the CLI's auto-upgrade in
+		// cmd/eos's runTrainEmbed. Callers who explicitly set SelectMetric
+		// (including explicitly to "score_margin" or any pairwise metric)
+		// are never touched here.
+		if retrievalEvalGateConfigured(cfg) {
+			cfg.SelectMetric = "retrieval_ndcg"
+		} else {
+			cfg.SelectMetric = "score_margin"
+		}
 	}
 	if cfg.Seed == 0 {
 		cfg.Seed = 1
 	}
 	if cfg.HardNegativesPerQuery == 0 {
 		cfg.HardNegativesPerQuery = 1
+	}
+	if cfg.VectorDistillDefaultRole == "" {
+		cfg.VectorDistillDefaultRole = EmbeddingRoleQuery
 	}
 	cfg.GroupedLossWeight = effectiveGroupedLossWeight(cfg.ContrastiveLoss, cfg.GroupedLossWeight)
 	cfg.HardNegativeSourceWeights = normalizeHardNegativeSourceWeights(cfg.HardNegativeSourceWeights)

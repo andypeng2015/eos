@@ -5263,6 +5263,8 @@ func runTrainEmbed(args []string) error {
 	var scoreSpectrumTrain bool
 	var listwiseGeometryTrain bool
 	var vectorDistillTrain bool
+	var vectorDistillDefaultRole string
+	var vectorDistillRelationalWeight float64
 	var movementDiagnostics bool
 	var allowResearchOnlyScoreSpectrum bool
 	var allowResearchOnlyListwiseGeometry bool
@@ -5328,6 +5330,8 @@ func runTrainEmbed(args []string) error {
 	fs.BoolVar(&scoreSpectrumTrain, "score-spectrum-train", false, "treat the training JSONL as grouped score-spectrum examples with row-local candidates")
 	fs.BoolVar(&listwiseGeometryTrain, "listwise-geometry-train", false, "treat the training JSONL as listwise query/document teacher geometry batches")
 	fs.BoolVar(&vectorDistillTrain, "vector-distill-train", false, "treat the training JSONL as (text, teacher_vector) vector-distillation examples")
+	fs.StringVar(&vectorDistillDefaultRole, "vector-distill-default-role", eosruntime.EmbeddingRoleQuery, "role (query, document, or raw) applied to vector-distill JSONL rows that omit an explicit \"role\" field")
+	fs.Float64Var(&vectorDistillRelationalWeight, "vector-distill-relational-weight", 0, "weight for an opt-in in-batch relational (similarity-matrix) distillation term over raw student vectors (0 disables); requires --vector-distill-train")
 	fs.BoolVar(&movementDiagnostics, "movement-diagnostics", false, "record aggregate gradient and parameter-delta movement diagnostics for listwise geometry training")
 	fs.BoolVar(&allowResearchOnlyScoreSpectrum, "allow-research-only-score-spectrum", false, "allow research-only score-spectrum training rows")
 	fs.BoolVar(&allowResearchOnlyListwiseGeometry, "allow-research-only-listwise-geometry", false, "allow research-only listwise geometry training rows")
@@ -5378,6 +5382,24 @@ func runTrainEmbed(args []string) error {
 	if fs.NArg() < 2 || fs.Arg(0) == "" || fs.Arg(1) == "" {
 		return fmt.Errorf("usage: eos train-embed [flags] <artifact.mll> <train.jsonl> [eval.jsonl]\n       eos train-embed --eval-only [flags] <artifact.mll> <eval.jsonl>")
 	}
+	// Retrieval-gated selection default: when --retrieval-eval-dir is set and
+	// the caller did not explicitly pass --select-metric, upgrade the
+	// selection metric to the retrieval nDCG@10 gate instead of the legacy
+	// pairwise default. Explicit --select-metric always wins. This guards the
+	// recorded failure mode where --restore-best silently restored an
+	// untrained step-0 checkpoint because selection ran on a pairwise metric
+	// uncorrelated with retrieval (see commit 2861ac9).
+	retrievalEvalDirSet := strings.TrimSpace(retrievalEvalDir) != ""
+	selectMetricProvided := flagWasProvided(fs, "select-metric")
+	if retrievalEvalDirSet && !selectMetricProvided {
+		selectMetric = trainEmbedRetrievalGatedSelectMetric
+		fmt.Fprintf(os.Stderr, "select-metric: auto-selected %q because --retrieval-eval-dir was set without an explicit --select-metric (retrieval-gated checkpoint selection)\n", selectMetric)
+	}
+	if restoreBest && !evalOnly && !retrievalEvalDirSet && !isRetrievalSelectMetric(selectMetric) {
+		if mode := activeRetrievalOrientedTrainMode(hardNegativeTrain, scoreSpectrumTrain, listwiseGeometryTrain, vectorDistillTrain); mode != "" {
+			fmt.Fprint(os.Stderr, restoreBestPairwiseSelectionWarning(mode, selectMetric))
+		}
+	}
 	if learningRate < 0 {
 		return fmt.Errorf("lr must be non-negative")
 	}
@@ -5398,6 +5420,9 @@ func runTrainEmbed(args []string) error {
 	}
 	if turboQuantRankMargin < 0 || math.IsNaN(turboQuantRankMargin) || math.IsInf(turboQuantRankMargin, 0) {
 		return fmt.Errorf("turboquant-rank-margin must be finite and non-negative")
+	}
+	if vectorDistillRelationalWeight < 0 || math.IsNaN(vectorDistillRelationalWeight) || math.IsInf(vectorDistillRelationalWeight, 0) {
+		return fmt.Errorf("vector-distill-relational-weight must be finite and non-negative")
 	}
 	if progressEvery < 0 {
 		return fmt.Errorf("progress-every must be non-negative")
@@ -5540,6 +5565,16 @@ func runTrainEmbed(args []string) error {
 	if allowResearchOnlyVectorDistill && !vectorDistillTrain {
 		return fmt.Errorf("--allow-research-only-vector-distill requires --vector-distill-train")
 	}
+	if flagWasProvided(fs, "vector-distill-default-role") && !vectorDistillTrain {
+		return fmt.Errorf("--vector-distill-default-role requires --vector-distill-train")
+	}
+	if vectorDistillRelationalWeight != 0 && !vectorDistillTrain {
+		return fmt.Errorf("--vector-distill-relational-weight requires --vector-distill-train")
+	}
+	parsedVectorDistillDefaultRole, parseErr := normalizeVectorDistillRoleForCLI(vectorDistillDefaultRole)
+	if parseErr != nil {
+		return fmt.Errorf("vector-distill-default-role: %w", parseErr)
+	}
 	parsedScoreSpectrumLossMode := ""
 	if strings.TrimSpace(scoreSpectrumLossMode) != "" {
 		var parseErr error
@@ -5671,6 +5706,8 @@ func runTrainEmbed(args []string) error {
 		ScoreSpectrumTrain:                scoreSpectrumTrain,
 		ListwiseGeometryTrain:             listwiseGeometryTrain,
 		VectorDistillTrain:                vectorDistillTrain,
+		VectorDistillDefaultRole:          parsedVectorDistillDefaultRole,
+		VectorDistillRelationalWeight:     float32(vectorDistillRelationalWeight),
 		MovementDiagnostics:               movementDiagnostics,
 		AllowResearchOnlyScoreSpectrum:    allowResearchOnlyScoreSpectrum,
 		AllowResearchOnlyListwiseGeometry: allowResearchOnlyListwiseGeometry,
@@ -5814,6 +5851,19 @@ func normalizeRetrievalEvalRoleModeForCLI(mode string) (string, error) {
 	}
 }
 
+func normalizeVectorDistillRoleForCLI(role string) (string, error) {
+	switch strings.TrimSpace(role) {
+	case "", eosruntime.EmbeddingRoleQuery:
+		return eosruntime.EmbeddingRoleQuery, nil
+	case eosruntime.EmbeddingRoleDocument:
+		return eosruntime.EmbeddingRoleDocument, nil
+	case eosruntime.EmbeddingRoleRaw:
+		return eosruntime.EmbeddingRoleRaw, nil
+	default:
+		return "", fmt.Errorf("unsupported vector-distill role %q (supported: %s, %s, %s)", role, eosruntime.EmbeddingRoleQuery, eosruntime.EmbeddingRoleDocument, eosruntime.EmbeddingRoleRaw)
+	}
+}
+
 func parsePositiveIntWeightMap(raw string) (map[string]int, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -5916,6 +5966,66 @@ func flagWasProvided(fs *flag.FlagSet, name string) bool {
 		}
 	})
 	return provided
+}
+
+// trainEmbedRetrievalGatedSelectMetric is the selection metric identifier
+// the retrieval eval gate reports (nDCG@10 over the configured BEIR-style
+// held-out set; see EmbeddingEvalMetrics.RetrievalNDCGAt10 and
+// evalRankMetric's "retrieval_ndcg" case in runtime/embedding_train_runner.go).
+// train-embed auto-selects this metric when --retrieval-eval-dir is set
+// without an explicit --select-metric.
+const trainEmbedRetrievalGatedSelectMetric = "retrieval_ndcg"
+
+// isRetrievalSelectMetric reports whether metric names one of the retrieval
+// eval gate's selection metrics (nDCG@10, MAP@100, or recall@100 over a
+// --retrieval-eval-dir held-out set). It mirrors the accepted spellings in
+// runtime's canonicalTrainSelectionMetric/validTrainSelectionMetric.
+func isRetrievalSelectMetric(metric string) bool {
+	switch strings.TrimSpace(metric) {
+	case "retrieval_ndcg", "retrieval_ndcg_at_10", "retrieval_map", "retrieval_map_at_100", "retrieval_recall", "retrieval_recall_at_100":
+		return true
+	default:
+		return false
+	}
+}
+
+// activeRetrievalOrientedTrainMode returns the flag name of the enabled
+// retrieval-oriented training mode, or "" when none are enabled. train-embed
+// enforces at most one of these being set.
+func activeRetrievalOrientedTrainMode(hardNegativeTrain, scoreSpectrumTrain, listwiseGeometryTrain, vectorDistillTrain bool) string {
+	switch {
+	case hardNegativeTrain:
+		return "--hard-negative-train"
+	case scoreSpectrumTrain:
+		return "--score-spectrum-train"
+	case listwiseGeometryTrain:
+		return "--listwise-geometry-train"
+	case vectorDistillTrain:
+		return "--vector-distill-train"
+	default:
+		return ""
+	}
+}
+
+// restoreBestPairwiseSelectionWarning renders a loud, multi-line stderr
+// warning for --restore-best runs of retrieval-oriented training modes that
+// select checkpoints on a pairwise/non-retrieval metric without a
+// --retrieval-eval-dir gate. This guards the recorded failure mode (commit
+// 2861ac9's diagnosis): restore-best with pairwise selection has previously
+// restored untrained step-0 checkpoints (2026-06-09, 2026-06-29). It does not
+// fail the run — existing scripts must keep working.
+func restoreBestPairwiseSelectionWarning(mode, selectMetric string) string {
+	return fmt.Sprintf("\n"+
+		"########################################################################\n"+
+		"# WARNING: %s is training with --restore-best enabled and\n"+
+		"# --select-metric=%s (a pairwise/non-retrieval metric), and no\n"+
+		"# --retrieval-eval-dir is set.\n"+
+		"#\n"+
+		"# restore-best with pairwise selection has previously restored untrained\n"+
+		"# step-0 checkpoints; pass --retrieval-eval-dir to gate selection on\n"+
+		"# retrieval.\n"+
+		"########################################################################\n\n",
+		mode, selectMetric)
 }
 
 func parsePositiveFloatList(raw string) ([]float32, error) {

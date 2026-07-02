@@ -12,10 +12,14 @@ const embeddingVectorDistillExampleSchemaV1 = "eos.vector_distill_example.v1"
 // EmbeddingVectorDistillExample is one JSONL row of a vector-distillation dataset.
 // Each row pairs raw text with a pre-computed teacher embedding vector.
 type EmbeddingVectorDistillExample struct {
-	Schema                  string
-	ID                      string
-	Text                    string
-	TeacherVector           []float32
+	Schema        string
+	ID            string
+	Text          string
+	TeacherVector []float32
+	// Role is the role the text was embedded under when the teacher vector was
+	// produced ("query", "document", or "raw"). Empty means unset: legacy rows
+	// without this field fall back to a trainer-configured default role.
+	Role                    string
 	TrainAllowedForResearch bool
 	ReleaseTrainAllowed     bool
 	CommercialUseAllowed    bool
@@ -28,6 +32,7 @@ type EmbeddingTokenizedVectorDistillExample struct {
 	Tokens                  []int32
 	Mask                    []int32
 	TeacherVector           []float32
+	Role                    string
 	TrainAllowedForResearch bool
 	ReleaseTrainAllowed     bool
 	CommercialUseAllowed    bool
@@ -38,6 +43,7 @@ type embeddingVectorDistillRecord struct {
 	ID                      string    `json:"id"`
 	Text                    string    `json:"text"`
 	TeacherVector           []float32 `json:"teacher_vector"`
+	Role                    string    `json:"role,omitempty"`
 	TrainAllowedForResearch bool      `json:"train_allowed_for_research,omitempty"`
 	ReleaseTrainAllowed     bool      `json:"release_train_allowed,omitempty"`
 	CommercialUseAllowed    bool      `json:"commercial_use_allowed,omitempty"`
@@ -93,6 +99,7 @@ func TokenizeEmbeddingVectorDistillExamples(examples []EmbeddingVectorDistillExa
 			Tokens:                  encoded.tokens,
 			Mask:                    encoded.mask,
 			TeacherVector:           append([]float32(nil), ex.TeacherVector...),
+			Role:                    ex.Role,
 			TrainAllowedForResearch: ex.TrainAllowedForResearch,
 			ReleaseTrainAllowed:     ex.ReleaseTrainAllowed,
 			CommercialUseAllowed:    ex.CommercialUseAllowed,
@@ -119,11 +126,18 @@ func (r embeddingVectorDistillRecord) example() (EmbeddingVectorDistillExample, 
 			return EmbeddingVectorDistillExample{}, fmt.Errorf("example %q teacher_vector[%d] must be finite", r.ID, i)
 		}
 	}
+	switch r.Role {
+	case "", EmbeddingRoleQuery, EmbeddingRoleDocument, EmbeddingRoleRaw:
+		// ok: empty means unset (fallback applies at training time)
+	default:
+		return EmbeddingVectorDistillExample{}, fmt.Errorf("example %q role %q must be %q, %q, %q, or omitted", r.ID, r.Role, EmbeddingRoleQuery, EmbeddingRoleDocument, EmbeddingRoleRaw)
+	}
 	return EmbeddingVectorDistillExample{
 		Schema:                  r.Schema,
 		ID:                      r.ID,
 		Text:                    r.Text,
 		TeacherVector:           append([]float32(nil), r.TeacherVector...),
+		Role:                    r.Role,
 		TrainAllowedForResearch: r.TrainAllowedForResearch,
 		ReleaseTrainAllowed:     r.ReleaseTrainAllowed,
 		CommercialUseAllowed:    r.CommercialUseAllowed,

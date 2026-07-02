@@ -5403,6 +5403,228 @@ func TestRunTrainEmbedNoTokenizerAllowsRetrievalEvalTokenizer(t *testing.T) {
 	}
 }
 
+// These tests drive train-embed's retrieval-gated selection defaults: with
+// --restore-best on, runs that didn't explicitly pass --select-metric
+// retrieval_ndcg and --retrieval-eval-dir have previously silently restored
+// the untrained step-0 checkpoint (see commit 2861ac9's diagnosis).
+
+func TestRunTrainEmbedAutoSelectsRetrievalNDCGWhenRetrievalEvalDirSetWithoutExplicitMetric(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	dir := t.TempDir()
+	trainPath := filepath.Join(dir, "train.tokens.jsonl")
+	examples := []eosruntime.EmbeddingContrastiveExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
+	}
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
+		t.Fatalf("write train dataset: %v", err)
+	}
+	tokenizer := eosruntime.TokenizerFile{
+		Version:      eosruntime.TokenizerFileVersion,
+		Tokens:       []string{"<pad>", "<unk>", "alpha", "beta"},
+		PadToken:     "<pad>",
+		UnknownToken: "<unk>",
+	}
+	tokenizerPath := filepath.Join(dir, "retrieval.tokenizer.mll")
+	if err := tokenizer.WriteFile(tokenizerPath); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	_, stderr, err := captureRunStderrAndOutput(t, []string{
+		"train-embed",
+		"--plan-only",
+		"--no-tokenizer",
+		"--retrieval-eval-dir", filepath.Join(dir, "missing-scifact"),
+		"--retrieval-eval-tokenizer", tokenizerPath,
+		"--retrieval-eval-role-mode", "raw",
+		path,
+		trainPath,
+	})
+	if err != nil {
+		t.Fatalf("run train-embed: %v", err)
+	}
+	if !strings.Contains(stderr, `select-metric: auto-selected "retrieval_ndcg"`) {
+		t.Fatalf("stderr missing retrieval-gated auto-selection log line\nstderr:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "--retrieval-eval-dir") {
+		t.Fatalf("stderr auto-selection line must name --retrieval-eval-dir\nstderr:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "restore-best with pairwise selection") {
+		t.Fatalf("no restore-best warning expected once retrieval-eval-dir gates selection\nstderr:\n%s", stderr)
+	}
+}
+
+func TestRunTrainEmbedExplicitSelectMetricWinsOverRetrievalEvalDirAutoSelect(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	dir := t.TempDir()
+	trainPath := filepath.Join(dir, "train.tokens.jsonl")
+	examples := []eosruntime.EmbeddingContrastiveExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
+	}
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
+		t.Fatalf("write train dataset: %v", err)
+	}
+	tokenizer := eosruntime.TokenizerFile{
+		Version:      eosruntime.TokenizerFileVersion,
+		Tokens:       []string{"<pad>", "<unk>", "alpha", "beta"},
+		PadToken:     "<pad>",
+		UnknownToken: "<unk>",
+	}
+	tokenizerPath := filepath.Join(dir, "retrieval.tokenizer.mll")
+	if err := tokenizer.WriteFile(tokenizerPath); err != nil {
+		t.Fatalf("write tokenizer: %v", err)
+	}
+	_, stderr, err := captureRunStderrAndOutput(t, []string{
+		"train-embed",
+		"--plan-only",
+		"--no-tokenizer",
+		"--retrieval-eval-dir", filepath.Join(dir, "missing-scifact"),
+		"--retrieval-eval-tokenizer", tokenizerPath,
+		"--retrieval-eval-role-mode", "raw",
+		"--select-metric", "top1_accuracy",
+		path,
+		trainPath,
+	})
+	if err != nil {
+		t.Fatalf("run train-embed: %v", err)
+	}
+	if strings.Contains(stderr, "auto-selected") {
+		t.Fatalf("explicit --select-metric must not be overridden\nstderr:\n%s", stderr)
+	}
+}
+
+func TestRunTrainEmbedWarnsOnRestoreBestPairwiseSelectionForHardNegativeTrain(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	dir := t.TempDir()
+	trainPath := filepath.Join(dir, "hard-train.jsonl")
+	examples := []eosruntime.EmbeddingHardNegativeExample{
+		{QueryTokens: []int32{1}, PositiveTokens: []int32{1}, NegativeTokens: [][]int32{{2}}, QueryMask: []int32{1}, PositiveMask: []int32{1}, NegativeMasks: [][]int32{{1}}, Source: "fiqa"},
+		{QueryTokens: []int32{2}, PositiveTokens: []int32{2}, NegativeTokens: [][]int32{{1}}, QueryMask: []int32{1}, PositiveMask: []int32{1}, NegativeMasks: [][]int32{{1}}, Source: "scifact"},
+	}
+	if err := eosruntime.WriteEmbeddingHardNegativeExamplesFile(trainPath, examples); err != nil {
+		t.Fatalf("write hard-negative train dataset: %v", err)
+	}
+	// restore-best defaults to true and select-metric defaults to
+	// top1_accuracy; no --retrieval-eval-dir is passed, so this must warn.
+	_, stderr, err := captureRunStderrAndOutput(t, []string{
+		"train-embed", "--hard-negative-train", "--hard-negatives-per-query", "1",
+		"--epochs", "1", "--batch-size", "2",
+		path, trainPath,
+	})
+	if err != nil {
+		t.Fatalf("run train-embed: %v", err)
+	}
+	for _, want := range []string{
+		"WARNING",
+		"--hard-negative-train",
+		"--restore-best",
+		"restore-best with pairwise selection has previously restored untrained",
+		"step-0 checkpoints",
+		"--retrieval-eval-dir",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr missing %q in restore-best pairwise selection warning\nstderr:\n%s", want, stderr)
+		}
+	}
+}
+
+// TestRunTrainEmbedNoWarningForEvalOnly verifies the restore-best
+// pairwise-selection warning does not fire under --eval-only: no selection
+// (and hence no restore-best checkpoint choice) ever happens in the
+// eval-only path, so the warning would be spurious there.
+func TestRunTrainEmbedNoWarningForEvalOnly(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	dir := t.TempDir()
+	trainPath := filepath.Join(dir, "hard-train.jsonl")
+	examples := []eosruntime.EmbeddingHardNegativeExample{
+		{QueryTokens: []int32{1}, PositiveTokens: []int32{1}, NegativeTokens: [][]int32{{2}}, QueryMask: []int32{1}, PositiveMask: []int32{1}, NegativeMasks: [][]int32{{1}}, Source: "fiqa"},
+		{QueryTokens: []int32{2}, PositiveTokens: []int32{2}, NegativeTokens: [][]int32{{1}}, QueryMask: []int32{1}, PositiveMask: []int32{1}, NegativeMasks: [][]int32{{1}}, Source: "scifact"},
+	}
+	if err := eosruntime.WriteEmbeddingHardNegativeExamplesFile(trainPath, examples); err != nil {
+		t.Fatalf("write hard-negative train dataset: %v", err)
+	}
+	// Same restore-best=true (default) and pairwise select-metric default that
+	// TestRunTrainEmbedWarnsOnRestoreBestPairwiseSelectionForHardNegativeTrain
+	// exercises, but with --eval-only set: no selection happens in this path,
+	// so the warning must not fire.
+	_, stderr, err := captureRunStderrAndOutput(t, []string{
+		"train-embed", "--eval-only", "--hard-negative-train", "--hard-negatives-per-query", "1",
+		path, trainPath,
+	})
+	if err != nil {
+		t.Fatalf("run train-embed --eval-only: %v", err)
+	}
+	if strings.Contains(stderr, "restore-best with pairwise selection") {
+		t.Fatalf("no warning expected under --eval-only (no selection occurs)\nstderr:\n%s", stderr)
+	}
+}
+
+func TestRunTrainEmbedNoWarningWhenRestoreBestDisabled(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	dir := t.TempDir()
+	trainPath := filepath.Join(dir, "hard-train.jsonl")
+	examples := []eosruntime.EmbeddingHardNegativeExample{
+		{QueryTokens: []int32{1}, PositiveTokens: []int32{1}, NegativeTokens: [][]int32{{2}}, QueryMask: []int32{1}, PositiveMask: []int32{1}, NegativeMasks: [][]int32{{1}}, Source: "fiqa"},
+		{QueryTokens: []int32{2}, PositiveTokens: []int32{2}, NegativeTokens: [][]int32{{1}}, QueryMask: []int32{1}, PositiveMask: []int32{1}, NegativeMasks: [][]int32{{1}}, Source: "scifact"},
+	}
+	if err := eosruntime.WriteEmbeddingHardNegativeExamplesFile(trainPath, examples); err != nil {
+		t.Fatalf("write hard-negative train dataset: %v", err)
+	}
+	_, stderr, err := captureRunStderrAndOutput(t, []string{
+		"train-embed", "--hard-negative-train", "--hard-negatives-per-query", "1",
+		"--epochs", "1", "--batch-size", "2", "--restore-best=false",
+		path, trainPath,
+	})
+	if err != nil {
+		t.Fatalf("run train-embed: %v", err)
+	}
+	if strings.Contains(stderr, "restore-best with pairwise selection") {
+		t.Fatalf("no warning expected once --restore-best is disabled\nstderr:\n%s", stderr)
+	}
+}
+
+func TestRunTrainEmbedNoWarningForPlainContrastiveTrain(t *testing.T) {
+	path := writeTrainableArtifact(t)
+	if err := run([]string{"init-train", "--dim", "D=4", "--dim", "E=3", path}); err != nil {
+		t.Fatalf("run init-train: %v", err)
+	}
+	trainPath := filepath.Join(t.TempDir(), "train.jsonl")
+	examples := []eosruntime.EmbeddingContrastiveExample{
+		{QueryTokens: []int32{1, 2}, PositiveTokens: []int32{1, 2}},
+		{QueryTokens: []int32{2, 3}, PositiveTokens: []int32{2, 3}},
+	}
+	if err := eosruntime.WriteEmbeddingContrastiveExamplesFile(trainPath, examples); err != nil {
+		t.Fatalf("write train dataset: %v", err)
+	}
+	// Plain contrastive training (no hard-negative/score-spectrum/listwise-
+	// geometry/vector-distill mode) is not one of the retrieval-oriented
+	// modes the warning targets, so existing plain-contrastive scripts must
+	// stay silent even with restore-best's true default and no
+	// --retrieval-eval-dir.
+	_, stderr, err := captureRunStderrAndOutput(t, []string{
+		"train-embed", "--epochs", "1", "--batch-size", "2", path, trainPath,
+	})
+	if err != nil {
+		t.Fatalf("run train-embed: %v", err)
+	}
+	if strings.Contains(stderr, "restore-best with pairwise selection") {
+		t.Fatalf("no warning expected for plain contrastive training\nstderr:\n%s", stderr)
+	}
+}
+
 func TestRunTrainEmbedRejectsInvalidRetrievalEvalRoleMode(t *testing.T) {
 	_, err := captureRunOutputAndError(t, []string{
 		"train-embed",
@@ -7316,6 +7538,52 @@ func captureRunOutputAndError(t *testing.T, args []string) (string, error) {
 		t.Fatalf("close stdout reader: %v", err)
 	}
 	return string(data), runErr
+}
+
+// captureRunStderrAndOutput runs args and returns both the stdout and stderr
+// output alongside any error, for tests asserting on warning/log lines that
+// train-embed writes to stderr (e.g. the retrieval-gated select-metric
+// auto-upgrade log line and the restore-best pairwise selection warning).
+func captureRunStderrAndOutput(t *testing.T, args []string) (stdout string, stderr string, runErr error) {
+	t.Helper()
+	origStdout := os.Stdout
+	origStderr := os.Stderr
+	outReader, outWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stdout pipe: %v", err)
+	}
+	errReader, errWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stderr pipe: %v", err)
+	}
+	os.Stdout = outWriter
+	os.Stderr = errWriter
+	defer func() {
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+	}()
+	runErr = run(args)
+	if err := outWriter.Close(); err != nil {
+		t.Fatalf("close stdout writer: %v", err)
+	}
+	if err := errWriter.Close(); err != nil {
+		t.Fatalf("close stderr writer: %v", err)
+	}
+	outData, err := io.ReadAll(outReader)
+	if err != nil {
+		t.Fatalf("read stdout capture: %v", err)
+	}
+	errData, err := io.ReadAll(errReader)
+	if err != nil {
+		t.Fatalf("read stderr capture: %v", err)
+	}
+	if err := outReader.Close(); err != nil {
+		t.Fatalf("close stdout reader: %v", err)
+	}
+	if err := errReader.Close(); err != nil {
+		t.Fatalf("close stderr reader: %v", err)
+	}
+	return string(outData), string(errData), runErr
 }
 
 func commandTestSHA256File(t *testing.T, path string) string {

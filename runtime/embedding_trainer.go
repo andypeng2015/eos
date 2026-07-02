@@ -245,6 +245,9 @@ type EmbeddingTrainer struct {
 	forwardNeedsBind        bool
 	forwardBindSkips        int64
 	scratchF32              [][]float32
+	// vectorDistillDefaultRoleWarned tracks whether FitVectorDistill has already
+	// logged the one-time warning about rows falling back to the default role.
+	vectorDistillDefaultRoleWarned bool
 }
 
 // SetScoreSpectrumLineage records score-spectrum provenance that must follow

@@ -68,7 +68,7 @@ func VectorDistillLossAndGrad(proj, teacher []float32) (VectorDistillLossResult,
 	gradProj := make([]float32, d)
 	cosineLossScale := float32(0.5)
 	for k := range proj {
-		mseGrad := float32(1)/float32(d) * (proj[k] - teacher[k]) // 0.5 * 2/d * diff
+		mseGrad := float32(1) / float32(d) * (proj[k] - teacher[k]) // 0.5 * 2/d * diff
 		var cosGrad float32
 		if cosineGradProj != nil {
 			cosGrad = -cosineLossScale * cosineGradProj[k] // -0.5 * d_cosine/d_proj
@@ -110,6 +110,62 @@ func accumulateVectorDistillProjectionGrads(
 		}
 		gradStudent[i] += gs
 	}
+}
+
+// VectorDistillRelationalLossAndGrad computes the opt-in in-batch relational
+// (similarity-matrix) distillation term between RAW student pooled vectors
+// (pre-projection) and teacher vectors:
+//
+//	S_student[i][j] = cosine(student[i], student[j])
+//	S_teacher[i][j] = cosine(teacher[i], teacher[j])
+//	loss = weight * mean_{i != j} (S_student[i][j] - S_teacher[i][j])^2
+//
+// Unlike the pointwise term, gradients flow directly into the raw student
+// vectors (never through the ephemeral projection), so this term supervises
+// the geometry actually served at inference time. The term is inactive
+// (loss=0, nil grads, nil error) when weight <= 0 or fewer than 2 students are
+// given, since an in-batch similarity matrix needs at least 2 rows.
+func VectorDistillRelationalLossAndGrad(students, teachers [][]float32, weight float32) (float32, [][]float32, error) {
+	n := len(students)
+	if weight <= 0 || n < 2 {
+		return 0, nil, nil
+	}
+	if len(teachers) != n {
+		return 0, nil, fmt.Errorf("vector_distill_relational: student count %d != teacher count %d", n, len(teachers))
+	}
+
+	normS := make([]float32, n)
+	normT := make([]float32, n)
+	for i := 0; i < n; i++ {
+		normS[i] = vectorNorm(students[i])
+		normT[i] = vectorNorm(teachers[i])
+	}
+
+	grads := make([][]float32, n)
+	for i := range grads {
+		grads[i] = make([]float32, len(students[i]))
+	}
+
+	// M counts every off-diagonal entry of the N×N similarity matrix (both
+	// S[i][j] and S[j][i], which are equal). Each unordered pair below stands
+	// in for both, hence the factor-of-2 forward accumulation and factor-of-4
+	// gradient scale (see runtime/embedding_vector_distill_loss_test.go for the
+	// derivation check against a hand-computed case).
+	m := float32(n * (n - 1))
+	var sumSq float32
+	for i := 0; i < n; i++ {
+		for j := i + 1; j < n; j++ {
+			sStudent := cosineScoreWithNorms(students[i], students[j], normS[i], normS[j])
+			sTeacher := cosineScoreWithNorms(teachers[i], teachers[j], normT[i], normT[j])
+			diff := sStudent - sTeacher
+			sumSq += 2 * diff * diff
+
+			scale := weight * 4 * diff / m
+			accumulateCosineGradFromScore(students[i], students[j], normS[i], normS[j], sStudent, scale, grads[i], grads[j])
+		}
+	}
+	loss := weight * sumSq / m
+	return loss, grads, nil
 }
 
 // applyVectorDistillProjectionAdamW applies an AdamW step to the distillation
