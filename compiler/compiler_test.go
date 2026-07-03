@@ -605,6 +605,61 @@ func TestBuildTinyDecodeSource(t *testing.T) {
 	}
 }
 
+// TestRoPEKernelCUDAVariantCarriesABIMarkerAndSeqLenParam guards two halves
+// of the CUDA rope stale-artifact fix together: (1) emitKernelVariants tags
+// the CUDA "rope" kernel variant's Meta with "rope_abi": "v2" (see
+// ropeKernelABIVersion) so tooling can see at a glance which ABI generation
+// a kernel was emitted with, and (2) the actual emitted CUDA source (what
+// runtime/backends/cuda's validateRoPEKernelABI re-derives ABI compatibility
+// from, since that's what nvrtc compiles and the GPU executes) declares the
+// `seq_len` parameter the 5-argument runRoPEKernel/launchRoPE launcher
+// passes. It also checks a sibling non-rope kernel (softmax) is NOT tagged
+// with rope_abi, so the marker doesn't leak onto unrelated kernels.
+func TestRoPEKernelCUDAVariantCarriesABIMarkerAndSeqLenParam(t *testing.T) {
+	src := []byte(sourceForPreset(PresetTinyDecode))
+
+	bundle, err := Build(src, Options{ModuleName: "tiny_decode"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	foundRoPE := false
+	foundSoftmax := false
+	for _, kernel := range bundle.Artifact.Kernels {
+		var cudaVariant *eosartifact.KernelVariant
+		for i := range kernel.Variants {
+			if kernel.Variants[i].Backend == eosartifact.BackendCUDA {
+				cudaVariant = &kernel.Variants[i]
+				break
+			}
+		}
+		if cudaVariant == nil {
+			t.Fatalf("kernel %q missing CUDA variant", kernel.Name)
+		}
+		switch kernel.Name {
+		case "rope":
+			foundRoPE = true
+			if got := cudaVariant.Meta["rope_abi"]; got != ropeKernelABIVersion {
+				t.Fatalf("rope CUDA variant Meta[rope_abi] = %q, want %q", got, ropeKernelABIVersion)
+			}
+			if !strings.Contains(cudaVariant.Entry, "rope") {
+				t.Fatalf("rope CUDA variant entry = %q, want it to mention rope", cudaVariant.Entry)
+			}
+			if !strings.Contains(cudaVariant.Source, "int seq_len") {
+				t.Fatalf("rope CUDA source missing seq_len parameter:\n%s", cudaVariant.Source)
+			}
+		case "softmax":
+			foundSoftmax = true
+			if _, ok := cudaVariant.Meta["rope_abi"]; ok {
+				t.Fatalf("softmax CUDA variant should not carry a rope_abi tag, got Meta=%+v", cudaVariant.Meta)
+			}
+		}
+	}
+	if !foundRoPE || !foundSoftmax {
+		t.Fatalf("expected rope and softmax kernels in tiny_decode preset, got %+v", bundle.Artifact.Kernels)
+	}
+}
+
 func TestBuildTinyScoreSource(t *testing.T) {
 	src := []byte(sourceForPreset(PresetTinyScore))
 

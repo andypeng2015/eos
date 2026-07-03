@@ -438,6 +438,11 @@ static int eosCudaLaunchRowWise(EosCudaRuntime* rt, EosCudaKernel* kernel, unsig
 	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
 }
 
+static int eosCudaLaunchRoPE(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr in0, CUdeviceptr out0, int rows, int cols, int seqLen, char** err) {
+	void* args[] = {&in0, &out0, &rows, &cols, &seqLen};
+	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
+}
+
 static int eosCudaLaunchElementWise(EosCudaRuntime* rt, EosCudaKernel* kernel, unsigned int grid, unsigned int block, CUdeviceptr lhs, CUdeviceptr rhs, CUdeviceptr out0, int elements, char** err) {
 	void* args[] = {&lhs, &rhs, &out0, &elements};
 	return eosCudaLaunch1D(rt, kernel, grid, block, args, err);
@@ -780,6 +785,8 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -1911,6 +1918,11 @@ const (
 	cudaShapeElementWiseBinary
 	cudaShapeElementWiseUnary
 	cudaShapeRowScore
+	// cudaShapeRoPE is like cudaShapeRowWise but the launched kernel also
+	// receives the original sequence length so it can recover each token's
+	// intra-sequence position (row % seq_len) instead of using the flattened
+	// [B*T] row index as the rotary position directly.
+	cudaShapeRoPE
 )
 
 func newDeviceRuntime() (*deviceRuntime, error) {
@@ -2000,6 +2012,22 @@ func (rt *deviceRuntime) attachDeviceExecution(prog *backend.NativeKernelProgram
 		prog.LaunchConfig["execution_mode"] = "host_fallback"
 		return nil
 	}
+	if shapeKind == cudaShapeRoPE {
+		// classifyCUDAKernel routed here purely on the backend-neutral
+		// kernel.Body[0].Op == "rope". The GPU code that will actually run,
+		// though, is whatever source was JIT-compiled from
+		// prog.Compiled.Source -- persisted verbatim inside the sealed .mll
+		// artifact at compile time. Artifacts sealed before the seq_len fix
+		// carry the OLD 4-param `rope_cuda(in0, out0, rows, cols)` source.
+		// runRoPEKernel/launchRoPE unconditionally pass 5 args; per the CUDA
+		// driver ABI (cuLaunchKernel with a raw void* args[] array) a
+		// 4-param kernel silently ignores the extra 5th argument rather than
+		// erroring, so the old batch-position-leaking bug would keep
+		// executing with no error at all. Fail loudly here instead.
+		if err := validateRoPEKernelABI(kernel.Name, prog.Compiled); err != nil {
+			return err
+		}
+	}
 	deviceKernel, err := rt.compileKernel(prog.Compiled, shapeKind)
 	if err != nil {
 		return err
@@ -2066,6 +2094,8 @@ func (rt *deviceRuntime) runKernel(deviceKernel *deviceKernel, kernel eosartifac
 	switch deviceKernel.shapeKind {
 	case cudaShapeRowWise:
 		return rt.runRowWiseKernel(deviceKernel, kernel, prog, inputs)
+	case cudaShapeRoPE:
+		return rt.runRoPEKernel(deviceKernel, kernel, prog, inputs)
 	case cudaShapeElementWiseBinary:
 		return rt.runElementWiseKernel(deviceKernel, kernel, prog, inputs)
 	case cudaShapeElementWiseUnary:
@@ -2110,6 +2140,59 @@ func (rt *deviceRuntime) runRowWiseKernel(deviceKernel *deviceKernel, kernel eos
 	block := C.uint(firstIntValue(prog.LaunchConfig["launch_block_size"], 128))
 	grid := C.uint((rows + int(block) - 1) / int(block))
 	if err := rt.launchRowWise(deviceKernel.ptr, grid, block, inBuf, outBuf, rowsArg, colsArg); err != nil {
+		return nil, err
+	}
+	if err := rt.downloadFloat32(outHost, outBuf); err != nil {
+		return nil, err
+	}
+	return []*backend.Tensor{newOutputTensor(kernel, outShape, outHost)}, nil
+}
+
+// runRoPEKernel is runRowWiseKernel's counterpart for the "rope" op. Unlike
+// the other row-wise ops (normalize/layernorm/softmax), RoPE's result for a
+// given row depends on that token's position *within its own sequence*. For
+// a rank-3 [B, T, D] input the row-wise launch flattens B and T into a single
+// `rows = B*T` grid, so the kernel additionally needs `seq_len = T` to
+// recover the true position via `row % seq_len` — otherwise identical tokens
+// rotate differently depending on which batch row they land in (see
+// compiler.ropeBody / cudaNativeEmitter). For rank-2 [T, D] input there is no
+// batching, so seq_len == rows and the modulo is a no-op.
+func (rt *deviceRuntime) runRoPEKernel(deviceKernel *deviceKernel, kernel eosartifact.Kernel, prog *backend.NativeKernelProgram, inputs []*backend.Tensor) ([]*backend.Tensor, error) {
+	if len(inputs) != 1 {
+		return nil, fmt.Errorf("kernel %q expected 1 input for rope launch, got %d", kernel.Name, len(inputs))
+	}
+	in := inputs[0]
+	if in == nil || (len(in.Shape) != 2 && len(in.Shape) != 3) {
+		return nil, fmt.Errorf("kernel %q expected rank-2 or rank-3 input", kernel.Name)
+	}
+	outShape := append([]int(nil), in.Shape...)
+	rows := in.Shape[0]
+	cols := in.Shape[len(in.Shape)-1]
+	seqLen := rows
+	if len(in.Shape) == 3 {
+		seqLen = in.Shape[1]
+		rows = in.Shape[0] * in.Shape[1]
+	}
+	if rows == 0 || cols == 0 {
+		return []*backend.Tensor{newOutputTensor(kernel, outShape, make([]float32, rows*cols))}, nil
+	}
+	inBuf, err := rt.uploadFloat32(in.F32)
+	if err != nil {
+		return nil, err
+	}
+	defer rt.freeBuffer(inBuf)
+	outHost := make([]float32, rows*cols)
+	outBuf, err := rt.allocFloat32(len(outHost))
+	if err != nil {
+		return nil, err
+	}
+	defer rt.freeBuffer(outBuf)
+	rowsArg := C.int(rows)
+	colsArg := C.int(cols)
+	seqLenArg := C.int(seqLen)
+	block := C.uint(firstIntValue(prog.LaunchConfig["launch_block_size"], 128))
+	grid := C.uint((rows + int(block) - 1) / int(block))
+	if err := rt.launchRoPE(deviceKernel.ptr, grid, block, inBuf, outBuf, rowsArg, colsArg, seqLenArg); err != nil {
 		return nil, err
 	}
 	if err := rt.downloadFloat32(outHost, outBuf); err != nil {
@@ -2233,8 +2316,10 @@ func classifyCUDAKernel(kernel eosartifact.Kernel) cudaShapeKind {
 		return cudaShapeUnsupported
 	}
 	switch kernel.Body[0].Op {
-	case "normalize", "rmsnorm", "layernorm", "softmax", "rope":
+	case "normalize", "rmsnorm", "layernorm", "softmax":
 		return cudaShapeRowWise
+	case "rope":
+		return cudaShapeRoPE
 	case "binary_add", "binary_sub", "binary_mul", "binary_div":
 		return cudaShapeElementWiseBinary
 	case "dequant", "gelu":
@@ -2244,6 +2329,51 @@ func classifyCUDAKernel(kernel eosartifact.Kernel) cudaShapeKind {
 	default:
 		return cudaShapeUnsupported
 	}
+}
+
+// ropeEntrySignaturePattern locates a CUDA kernel entry point's declared
+// parameter list: `void <entry>(...)`. It is scoped to the named entry point
+// (rather than a bare `strings.Contains(source, "seq_len")` on the whole
+// source blob) so that an unrelated "seq_len" token elsewhere in the file
+// can't produce a false pass.
+var ropeEntrySignaturePattern = regexp.MustCompile(`\bvoid\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)`)
+
+// ropeEntryParams returns the parenthesized parameter-list text for the
+// named CUDA kernel entry point declared in source, e.g. for
+// `extern "C" __global__ void rope_cuda(const float* in0, float* out0, int
+// rows, int cols, int seq_len)` and entry "rope_cuda" it returns
+// "const float* in0, float* out0, int rows, int cols, int seq_len".
+func ropeEntryParams(source, entry string) (string, bool) {
+	for _, m := range ropeEntrySignaturePattern.FindAllStringSubmatch(source, -1) {
+		if m[1] == entry {
+			return m[2], true
+		}
+	}
+	return "", false
+}
+
+// validateRoPEKernelABI guards against stale-artifact rope kernels: `.mll`
+// modules sealed before the seq_len fix (see compiler.go's
+// emitCUDARoPEKernel / cudaNativeEmitter.ropeBody) persist a 4-parameter
+// `rope_cuda(in0, out0, rows, cols)` kernel source with the old, batch-
+// row-leaking `theta = row / powf(...)` math baked in. The current
+// runRoPEKernel/launchRoPE always launch with 5 arguments (in0, out0, rows,
+// cols, seq_len); dispatching those 5 args at a 4-param kernel doesn't
+// error -- the CUDA driver's raw `void* args[]` launch ABI has no arity
+// checking, so the extra seq_len pointer is simply never read and the old
+// bug keeps executing silently.
+//
+// This inspects prog.Compiled.Source/Entry -- the actual bytes nvrtc is
+// about to JIT-compile and the GPU is about to execute -- rather than only
+// trusting the KernelVariant.Meta["rope_abi"] provenance tag set by
+// emitKernelVariants, since a source/metadata desync (stale tag, hand-built
+// artifact, future refactor) must not be able to mask a stale kernel body.
+func validateRoPEKernelABI(kernelName string, compiled backend.CompiledKernel) error {
+	params, ok := ropeEntryParams(compiled.Source, compiled.Entry)
+	if !ok || !strings.Contains(params, "seq_len") {
+		return fmt.Errorf("stale rope kernel ABI for kernel %q (compiled before seq_len fix): recompile/reseal the module with a current eos binary (init-model --bootstrap-from <old.mll>)", kernelName)
+	}
+	return nil
 }
 
 func newOutputTensor(kernel eosartifact.Kernel, shape []int, data []float32) *backend.Tensor {
@@ -3314,6 +3444,14 @@ func (rt *deviceRuntime) freeBuffer(ptr C.CUdeviceptr) error {
 func (rt *deviceRuntime) launchRowWise(kernel *C.EosCudaKernel, grid, block C.uint, in0, out0 C.CUdeviceptr, rows, cols C.int) error {
 	var errStr *C.char
 	if C.eosCudaLaunchRowWise(rt.ptr, kernel, grid, block, in0, out0, rows, cols, &errStr) != 0 {
+		return cStringError(errStr)
+	}
+	return nil
+}
+
+func (rt *deviceRuntime) launchRoPE(kernel *C.EosCudaKernel, grid, block C.uint, in0, out0 C.CUdeviceptr, rows, cols, seqLen C.int) error {
+	var errStr *C.char
+	if C.eosCudaLaunchRoPE(rt.ptr, kernel, grid, block, in0, out0, rows, cols, seqLen, &errStr) != 0 {
 		return cStringError(errStr)
 	}
 	return nil

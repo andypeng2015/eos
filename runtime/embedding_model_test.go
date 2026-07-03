@@ -3,6 +3,7 @@ package eosruntime
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -582,6 +583,164 @@ pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16
 	}
 	want := append(append([]float32(nil), longResult.Embeddings.F32...), shortResult.Embeddings.F32...)
 	assertTensorClose(t, batchResult.Embeddings, []int{2, 2}, want)
+}
+
+// TestEmbeddingModelEmbedBatchIsBatchSizeInvariantWithRoPE guards against a
+// regression where a CUDA-compiled "rope" kernel used the flattened
+// [B*T] row index as the rotary position instead of the token's position
+// within its own sequence (row % seq_len). That bug made a document's
+// embedding depend on which other rows happened to share its device-side
+// batched call -- i.e. on `--batch-size` -- even though the same exact
+// tokens were being embedded. See compiler.go's cudaNativeEmitter.ropeBody
+// and runtime/backends/cuda/native_linux.go's runRoPEKernel.
+//
+// This asserts that the SAME mixed-length token sequences produce identical
+// embeddings whether embedded alone (batch size 1), together (batch size 8),
+// or repeated to fill a larger ragged batch (batch size 32) -- mirroring how
+// runtime/retrieval_eval.go groups same-length rows into batch-size-sized
+// chunks and runtime/embedding_model.go's embedBatchByTokenLength further
+// buckets ragged batches by exact token length before dispatch.
+func TestEmbeddingModelEmbedBatchIsBatchSizeInvariantWithRoPE(t *testing.T) {
+	src := []byte(`
+param token_embedding: f16[V, D] @weight("weights/token_embedding")
+param attn_q: f16[D, D] @weight("weights/attn_q")
+param attn_k: f16[D, D] @weight("weights/attn_k")
+param attn_v: f16[D, D] @weight("weights/attn_v")
+param attn_o: f16[D, D] @weight("weights/attn_o")
+param projection: f16[D, E] @weight("weights/projection")
+
+pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[E] {
+    let hidden_raw = gather(token_embedding, tokens)
+    let hidden = rope(hidden_raw)
+    let q = @matmul(hidden, attn_q)
+    let k = @matmul(hidden, attn_k)
+    let v = @matmul(hidden, attn_v)
+    let kt = transpose(k)
+    let scores = @matmul(q, kt)
+    let probs = softmax(scores)
+    let mixed = @matmul(probs, v)
+    let attended = @matmul(mixed, attn_o)
+    let projected = @matmul(attended, projection)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+
+pipeline embed_pooled_batch(tokens: i32[B, T], attention_mask: i32[B, T]) -> f16[B, E] {
+    let hidden_raw = gather(token_embedding, tokens)
+    let hidden = rope(hidden_raw)
+    let q = @matmul(hidden, attn_q)
+    let k = @matmul(hidden, attn_k)
+    let v = @matmul(hidden, attn_v)
+    let kt = transpose(k)
+    let scores = @matmul(q, kt)
+    let probs = softmax(scores)
+    let mixed = @matmul(probs, v)
+    let attended = @matmul(mixed, attn_o)
+    let projected = @matmul(attended, projection)
+    let normalized = normalize(projected)
+    return mean_pool(normalized, attention_mask)
+}
+`)
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "tiny_rope_attention_embed"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	rt := New(cuda.New(), metal.New())
+	model, err := rt.LoadEmbedding(context.Background(), bundle.Artifact, tinyRoPEAttentionEmbeddingManifest(), tinyRoPEAttentionEmbedWeights()...)
+	if err != nil {
+		t.Fatalf("load embedding: %v", err)
+	}
+	t.Logf("backend under test: %s", model.Backend())
+
+	// 8 mixed-length token sequences (lengths 1..8) drawn from the 9-row
+	// vocab, so every row's rotary positions and hidden state differ.
+	base := make([][]int32, 8)
+	for length := 1; length <= 8; length++ {
+		seq := make([]int32, length)
+		for i := 0; i < length; i++ {
+			seq[i] = int32((i + length) % 9)
+		}
+		base[length-1] = seq
+	}
+
+	// Batch-size-1 baseline: embed every sequence completely alone.
+	want := make([][]float32, len(base))
+	for i, tokens := range base {
+		result, err := model.EmbedBatch(context.Background(), [][]int32{tokens})
+		if err != nil {
+			t.Fatalf("embed alone %d: %v", i, err)
+		}
+		want[i] = append([]float32(nil), result.Embeddings.F32...)
+	}
+	dim := len(want[0])
+
+	assertRowsMatch := func(t *testing.T, label string, got *backend.Tensor, rows [][]float32) {
+		t.Helper()
+		if got == nil || len(got.Shape) != 2 || got.Shape[0] != len(rows) || got.Shape[1] != dim {
+			t.Fatalf("%s: unexpected result %v", label, got)
+		}
+		for i, wantRow := range rows {
+			gotRow := got.F32[i*dim : (i+1)*dim]
+			for c := range wantRow {
+				if diff := math.Abs(float64(gotRow[c] - wantRow[c])); diff > 5e-3 {
+					t.Fatalf("%s: row %d component %d = %v, want %v (diff %v) -- embedding depends on batch composition/position, not just token content", label, i, c, gotRow[c], wantRow[c], diff)
+				}
+			}
+		}
+	}
+
+	// Batch-size-8: all 8 mixed-length sequences in one ragged call. Must
+	// exactly match the batch-of-1 baseline per sequence.
+	result8, err := model.EmbedBatch(context.Background(), base)
+	if err != nil {
+		t.Fatalf("embed batch of 8: %v", err)
+	}
+	assertRowsMatch(t, "batch-of-8", result8.Embeddings, want)
+
+	// Batch-size-32: repeat the same 8 sequences four times so several
+	// identical-length, identical-content rows land at different offsets
+	// within the same underlying length-grouped device call.
+	batch32 := make([][]int32, 0, 32)
+	want32 := make([][]float32, 0, 32)
+	for r := 0; r < 4; r++ {
+		batch32 = append(batch32, base...)
+		want32 = append(want32, want...)
+	}
+	result32, err := model.EmbedBatch(context.Background(), batch32)
+	if err != nil {
+		t.Fatalf("embed batch of 32: %v", err)
+	}
+	assertRowsMatch(t, "batch-of-32", result32.Embeddings, want32)
+}
+
+func tinyRoPEAttentionEmbeddingManifest() EmbeddingManifest {
+	manifest := tinyAttentionEmbeddingManifest()
+	manifest.Name = "tiny_rope_attention_embed"
+	manifest.PositionEncoding = EmbeddingPositionEncodingRoPE
+	manifest.Tokenizer.VocabSize = 9
+	manifest.Tokenizer.MaxSequence = 10
+	return manifest
+}
+
+func tinyRoPEAttentionEmbedWeights() []LoadOption {
+	identity := backend.NewTensorF16([]int{2, 2}, []float32{
+		1, 0,
+		0, 1,
+	})
+	const vocab = 9
+	values := make([]float32, vocab*2)
+	for i := 0; i < vocab; i++ {
+		values[i*2] = float32(i)*0.11 + 0.05
+		values[i*2+1] = float32(i)*-0.07 + 0.02
+	}
+	return []LoadOption{
+		WithWeight("token_embedding", backend.NewTensorF16([]int{vocab, 2}, values)),
+		WithWeight("attn_q", identity.Clone()),
+		WithWeight("attn_k", identity.Clone()),
+		WithWeight("attn_v", identity.Clone()),
+		WithWeight("attn_o", identity.Clone()),
+		WithWeight("projection", identity.Clone()),
+	}
 }
 
 func tinyEmbeddingManifest() EmbeddingManifest {

@@ -684,6 +684,7 @@ type kernelBackendEmitter struct {
 
 type nativeKernelEmitter struct {
 	rowKernel     func(lir.Kernel, string) string
+	ropeKernel    func(lir.Kernel, string) string
 	scoreKernel   func(lir.Kernel, string) string
 	geluKernel    func(lir.Kernel) string
 	binaryKernel  func(lir.Kernel, string) string
@@ -749,6 +750,7 @@ var kernelBackendEmitters = []kernelBackendEmitter{
 
 var cudaNativeEmitter = nativeKernelEmitter{
 	rowKernel:     emitCUDARowKernel,
+	ropeKernel:    emitCUDARoPEKernel,
 	scoreKernel:   emitCUDAScoreKernel,
 	geluKernel:    emitCUDAGELUKernel,
 	binaryKernel:  emitCUDAElementwiseBinaryKernel,
@@ -812,9 +814,10 @@ var cudaNativeEmitter = nativeKernelEmitter{
 	ropeBody: `
     int row = (int)(blockIdx.x * blockDim.x + threadIdx.x);
     if (row >= rows) return;
+    int pos = (seq_len > 0) ? (row % seq_len) : row;
     int base = row * cols;
     for (int c = 0; c + 1 < cols; c += 2) {
-        float theta = ((float)row) / powf(10000.0f, ((float)c) / (float)cols);
+        float theta = ((float)pos) / powf(10000.0f, ((float)c) / (float)cols);
         float cos_theta = cosf(theta);
         float sin_theta = sinf(theta);
         float x0 = in0[base + c];
@@ -982,6 +985,18 @@ var metalNativeEmitter = nativeKernelEmitter{
 	},
 }
 
+// ropeKernelABIVersion tags "rope" kernel variants emitted by the current
+// compiler (5-arg in0/out0/rows/cols/seq_len CUDA signature, see
+// emitCUDARoPEKernel) as opposed to the pre-fix 4-arg signature that computed
+// the rotary position from the flattened batch row instead of the
+// intra-sequence position. It is a provenance marker only: the CUDA
+// backend's stale-ABI guard (runtime/backends/cuda/native_linux.go's
+// validateRoPEKernelABI) does not trust this tag by itself and re-derives
+// ABI compatibility from the compiled Source text, which is what actually
+// gets JIT-compiled and executed and therefore can't drift out of sync with
+// reality the way a metadata tag could.
+const ropeKernelABIVersion = "v2"
+
 func emitKernelVariants(kernel lir.Kernel) []eosartifact.KernelVariant {
 	meta := map[string]string{
 		"tile":         scheduleTileString(kernel.Hints.Tile),
@@ -991,6 +1006,9 @@ func emitKernelVariants(kernel lir.Kernel) []eosartifact.KernelVariant {
 		"subgroup_2d":  scheduleTileString(kernel.Hints.Subgroup2D),
 		"halo":         scheduleTileString(kernel.Hints.Halo),
 		"memory":       kernel.Hints.Memory,
+	}
+	if len(kernel.Body) > 0 && kernel.Body[0].Op == "rope" {
+		meta["rope_abi"] = ropeKernelABIVersion
 	}
 	variants := make([]eosartifact.KernelVariant, 0, len(kernelBackendEmitters))
 	for _, emitter := range kernelBackendEmitters {
@@ -1122,6 +1140,9 @@ func emitNativeKernelSourceWithEmitter(emitter nativeKernelEmitter, kernel lir.K
 		if len(kernel.Inputs) != 1 || len(kernel.Outputs) != 1 {
 			return "", false
 		}
+		if emitter.ropeKernel != nil {
+			return emitter.ropeKernel(kernel, emitter.ropeBody), true
+		}
 		if emitter.rowKernel == nil {
 			return "", false
 		}
@@ -1164,6 +1185,22 @@ func emitCUDARowKernel(kernel lir.Kernel, body string) string {
 	b.WriteString("extern \"C\" __global__ void ")
 	b.WriteString(kernel.Name)
 	b.WriteString("_cuda(const float* in0, float* out0, int rows, int cols) {\n")
+	b.WriteString(body)
+	b.WriteString("}\n")
+	return b.String()
+}
+
+// emitCUDARoPEKernel is like emitCUDARowKernel but takes an extra seq_len
+// parameter. RoPE's rotation angle depends on a token's position *within its
+// own sequence*, not on its flattened row index across a batched [B, T, D]
+// launch (row = b*T + t). Passing seq_len lets the kernel body recover the
+// true intra-sequence position via `row % seq_len`, keeping the embedding for
+// a given token content independent of which batch row it lands in.
+func emitCUDARoPEKernel(kernel lir.Kernel, body string) string {
+	var b strings.Builder
+	b.WriteString("extern \"C\" __global__ void ")
+	b.WriteString(kernel.Name)
+	b.WriteString("_cuda(const float* in0, float* out0, int rows, int cols, int seq_len) {\n")
 	b.WriteString(body)
 	b.WriteString("}\n")
 	return b.String()

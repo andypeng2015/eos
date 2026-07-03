@@ -119,6 +119,96 @@ pipeline embed_pooled(tokens: i32[T], attention_mask: i32[T]) -> f16[D] {
 	}
 }
 
+// TestCUDARoPEBatchedRowsAreBatchPositionInvariant guards the CUDA "rope"
+// kernel against a regression where it used the flattened [B*T] row index
+// (blockIdx.x*blockDim.x+threadIdx.x) as the rotary position directly,
+// instead of the token's position within its own sequence (row % seq_len).
+// That bug made a token's rotated hidden state -- and therefore its final
+// embedding -- depend on which batch row it happened to land in during a
+// batched device call, i.e. on `--batch-size`, even for byte-identical
+// input content. See compiler.go's cudaNativeEmitter.ropeBody and
+// runtime/backends/cuda/native_linux.go's runRoPEKernel/classifyCUDAKernel.
+//
+// It builds a rank-3 [Q, T, D] batched gather+rope pipeline, replicates the
+// SAME token sequence across every batch row, and asserts: (1) every batch
+// row matches row 0 on both host and CUDA (position must reset per
+// sequence, not accumulate across rows), and (2) CUDA matches the host
+// reference row-for-row.
+func TestCUDARoPEBatchedRowsAreBatchPositionInvariant(t *testing.T) {
+	const src = `
+param token_embedding: f16[V, D] @weight("weights/token_embedding")
+
+pipeline rope_probe(tokens: i32[Q, T]) -> f16[Q, T, D] {
+    let hidden = gather(token_embedding, tokens)
+    return rope(hidden)
+}
+`
+	const q, tlen, dim, vocab = 4, 5, 8, 12
+	weights := map[string]*backend.Tensor{
+		"token_embedding": parityGenTensor("f16", vocab, dim, 1),
+	}
+	toks := make([]int32, q*tlen)
+	for row := 0; row < q; row++ {
+		for tpos := 0; tpos < tlen; tpos++ {
+			toks[row*tlen+tpos] = int32(tpos % vocab)
+		}
+	}
+	host := parityRunRopeBatched(t, metal.New(), []byte(src), weights, toks, q, tlen)
+	dev := parityRunRopeBatched(t, New(), []byte(src), weights, toks, q, tlen)
+
+	rowWidth := tlen * dim
+	for row := 0; row < q; row++ {
+		hostRow := host[row*rowWidth : (row+1)*rowWidth]
+		hostRow0 := host[0:rowWidth]
+		if idx, ok := nearlyEqualF32(hostRow0, hostRow, 1e-5); !ok {
+			t.Fatalf("host reference row %d diverges from row 0 at %d (host=%g row=%g) for identical input rows -- host reference regressed too", row, idx, hostRow0[idx], hostRow[idx])
+		}
+		devRow := dev[row*rowWidth : (row+1)*rowWidth]
+		devRow0 := dev[0:rowWidth]
+		if idx, ok := nearlyEqualF32(devRow0, devRow, 1e-4); !ok {
+			t.Fatalf("CUDA rope row %d diverges from row 0 at %d (row0=%g row%d=%g) for IDENTICAL input tokens -- rotary position is leaking the batch row index (compiler.go cudaNativeEmitter.ropeBody)", row, idx, devRow0[idx], row, devRow[idx])
+		}
+		if idx, ok := nearlyEqualF32(hostRow, devRow, 1e-3); !ok {
+			t.Fatalf("CUDA rope row %d diverges from host reference at %d (host=%g cuda=%g)", row, idx, hostRow[idx], devRow[idx])
+		}
+	}
+}
+
+// parityRunRopeBatched builds and runs a rank-3 [Q, T] -> [Q, T, D] pipeline
+// (used to probe RoPE's batched row behavior directly) and returns the flat
+// f32 output.
+func parityRunRopeBatched(t *testing.T, b backend.Backend, src []byte, weights map[string]*backend.Tensor, tokens []int32, q, tlen int) []float32 {
+	t.Helper()
+	bundle, err := compiler.Build(src, compiler.Options{ModuleName: "rope_probe"})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	loadOpts := make([]eosruntime.LoadOption, 0, len(weights))
+	for name, tensor := range weights {
+		loadOpts = append(loadOpts, eosruntime.WithWeight(name, tensor))
+	}
+	prog, err := eosruntime.New(b).Load(context.Background(), bundle.Artifact, loadOpts...)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	result, err := prog.Run(context.Background(), backend.Request{
+		Entry: "rope_probe",
+		Inputs: map[string]any{
+			"tokens": backend.NewTensorI32([]int{q, tlen}, tokens),
+		},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for _, o := range result.Outputs {
+		if tn, ok := o.Data.(*backend.Tensor); ok {
+			return tn.F32
+		}
+	}
+	t.Fatal("no output tensor in result")
+	return nil
+}
+
 // TestCUDAEncoderEmbedMatchesHost guards the full encoder forward (the real
 // manta-embed-v1 shape: 2x [attention(q/k/v/o, transpose, softmax) -> residual
 // + layernorm -> ffn(gelu) -> residual + layernorm] -> normalize -> mean_pool)
