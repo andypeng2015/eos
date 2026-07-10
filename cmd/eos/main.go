@@ -2666,6 +2666,8 @@ func runMineRetrievalHardNegatives(args []string) error {
 	maxExamples := fs.Int("max-examples", 0, "limit mined hard-negative examples")
 	maxDocs := fs.Int("max-docs", 0, "limit corpus documents for smoke checks")
 	maxQueries := fs.Int("max-queries", 0, "limit qrels queries for smoke checks")
+	dfPruneThreshold := fs.Float64("df-prune-threshold", eosruntime.DefaultBM25MiningDFPruneThreshold, "skip query terms whose document frequency exceeds this fraction of the corpus during BM25 candidate generation (fraction of corpus documents; <=0 or >=1 disables pruning)")
+	miningWorkers := fs.Int("mining-workers", 0, "parallel query workers mining against the shared read-only BM25 index (<=0: auto, min(8, GOMAXPROCS))")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2700,6 +2702,8 @@ func runMineRetrievalHardNegatives(args []string) error {
 		MaxExamples:          *maxExamples,
 		MaxDocs:              *maxDocs,
 		MaxQueries:           *maxQueries,
+		DFPruneThreshold:     *dfPruneThreshold,
+		MiningWorkers:        *miningWorkers,
 	})
 	if err != nil {
 		return err
@@ -2711,6 +2715,7 @@ func runMineRetrievalHardNegatives(args []string) error {
 		summary.DatasetName, summary.Examples, summary.PositivePairs, summary.Negatives, summary.Queries)
 	fmt.Printf("skipped: queries_without_text=%d positives_without_text=%d queries_without_negatives=%d duplicate_positive_text_negatives=%d\n",
 		summary.SkippedQueriesNoText, summary.SkippedPositiveDocs, summary.SkippedQueriesNoNegative, summary.DuplicatePositiveTextNegativesSkipped)
+	fmt.Printf("config: df_prune_threshold=%.4f mining_workers=%d\n", summary.DFPruneThreshold, summary.MiningWorkers)
 	fmt.Printf("output: %s\n", outputPath)
 	return nil
 }

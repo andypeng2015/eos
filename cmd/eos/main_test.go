@@ -3141,6 +3141,102 @@ func TestRunMineRetrievalHardNegativesWritesTextJSONL(t *testing.T) {
 	}
 }
 
+func writeMineRetrievalHardNegativesFixture(t *testing.T, dir string) (datasetDir, outputPath string) {
+	t.Helper()
+	datasetDir = filepath.Join(dir, "dataset")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "corpus.jsonl"), []byte(
+		`{"_id":"d1","text":"alpha target"}`+"\n"+
+			`{"_id":"d2","text":"alpha distractor"}`+"\n"+
+			`{"_id":"d3","text":"omega unrelated"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "queries.jsonl"), []byte(`{"_id":"q1","text":"alpha"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "qrels", "train.tsv"), []byte("query-id\tcorpus-id\tscore\nq1\td1\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	outputPath = filepath.Join(dir, "hard-negatives.jsonl")
+	return datasetDir, outputPath
+}
+
+func TestRunMineRetrievalHardNegativesDefaultDFPruneThresholdAndMiningWorkersAreEchoed(t *testing.T) {
+	dir := t.TempDir()
+	datasetDir, outputPath := writeMineRetrievalHardNegativesFixture(t, dir)
+
+	output := captureRunOutput(t, []string{"mine-retrieval-hard-negatives", "--dataset", "tiny", "--negatives", "1", datasetDir, outputPath})
+	wantPrefix := fmt.Sprintf("config: df_prune_threshold=%.4f mining_workers=", eosruntime.DefaultBM25MiningDFPruneThreshold)
+	if !strings.Contains(output, wantPrefix) {
+		t.Fatalf("mine-retrieval-hard-negatives output missing default config echo %q\noutput:\n%s", wantPrefix, output)
+	}
+}
+
+// writeMineRetrievalHardNegativesMultiQueryFixture is like
+// writeMineRetrievalHardNegativesFixture but with three independent
+// query/positive/negative topics instead of one, so that a
+// "--mining-workers 3" request genuinely runs with 3 workers instead of
+// being clamped down to len(queries): MineBM25TextHardNegatives clamps its
+// effective worker count to the number of queries being mined (a worker
+// with no query to process would be wasted), so a single-query fixture
+// cannot distinguish "the --mining-workers flag reached the runtime" from
+// "the flag was silently dropped and fell back to the (also-clamped-to-1)
+// auto default." query1/d1/d2/d3 intentionally match
+// writeMineRetrievalHardNegativesFixture exactly so tests asserting on that
+// first query's mined example keep the same expectations.
+func writeMineRetrievalHardNegativesMultiQueryFixture(t *testing.T, dir string) (datasetDir, outputPath string) {
+	t.Helper()
+	datasetDir = filepath.Join(dir, "dataset")
+	if err := os.MkdirAll(filepath.Join(datasetDir, "qrels"), 0o755); err != nil {
+		t.Fatalf("mkdir dataset: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "corpus.jsonl"), []byte(
+		`{"_id":"d1","text":"alpha target"}`+"\n"+
+			`{"_id":"d2","text":"alpha distractor"}`+"\n"+
+			`{"_id":"d3","text":"omega unrelated"}`+"\n"+
+			`{"_id":"d4","text":"beta target"}`+"\n"+
+			`{"_id":"d5","text":"beta distractor"}`+"\n"+
+			`{"_id":"d6","text":"gamma target"}`+"\n"+
+			`{"_id":"d7","text":"gamma distractor"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write corpus: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "queries.jsonl"), []byte(
+		`{"_id":"q1","text":"alpha"}`+"\n"+
+			`{"_id":"q2","text":"beta"}`+"\n"+
+			`{"_id":"q3","text":"gamma"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write queries: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(datasetDir, "qrels", "train.tsv"), []byte(
+		"query-id\tcorpus-id\tscore\nq1\td1\t1\nq2\td4\t1\nq3\td6\t1\n"), 0o644); err != nil {
+		t.Fatalf("write qrels: %v", err)
+	}
+	outputPath = filepath.Join(dir, "hard-negatives.jsonl")
+	return datasetDir, outputPath
+}
+
+func TestRunMineRetrievalHardNegativesDFPruneThresholdAndMiningWorkersFlagsPlumb(t *testing.T) {
+	dir := t.TempDir()
+	datasetDir, outputPath := writeMineRetrievalHardNegativesMultiQueryFixture(t, dir)
+
+	output := captureRunOutput(t, []string{
+		"mine-retrieval-hard-negatives", "--dataset", "tiny", "--negatives", "1",
+		"--df-prune-threshold", "0.5", "--mining-workers", "3",
+		datasetDir, outputPath,
+	})
+	if !strings.Contains(output, "config: df_prune_threshold=0.5000 mining_workers=3") {
+		t.Fatalf("mine-retrieval-hard-negatives output missing explicit df-prune-threshold/mining-workers config echo\noutput:\n%s", output)
+	}
+	examples, err := eosruntime.ReadEmbeddingTextHardNegativeExamplesFile(outputPath)
+	if err != nil {
+		t.Fatalf("read hard negatives: %v", err)
+	}
+	if len(examples) != 3 || examples[0].Negatives[0] != "alpha distractor" {
+		t.Fatalf("examples = %+v", examples)
+	}
+}
+
 func TestRunMineRetrievalModelHardNegativesWritesTextJSONL(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "eos-embed-v1.mll")

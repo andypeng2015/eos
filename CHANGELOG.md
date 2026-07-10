@@ -15,6 +15,7 @@
 
 - Eos source parsing now uses a Go-authored gotreesitter grammar and lowers the CST into the existing compiler AST.
 - Default embedding package initialization now exposes `encoder_repeats` through the Go config and `eos init-model --encoder-repeats`.
+- `mine-retrieval-hard-negatives` now defaults `--df-prune-threshold` to 0.10, skipping query terms whose document frequency exceeds 10% of the corpus during BM25 candidate generation (validated 500/500 exact top-8 + rank-order match vs exhaustive on a real 300k-doc MS MARCO pool; pass `--df-prune-threshold 0` for the old exhaustive behavior). This affects `scripts/acquire_manta_embed_v1_datasets.fw` regeneration. The miner also gained `--mining-workers` to mine queries in parallel against the shared read-only BM25 index; output is deterministic regardless of worker count.
 
 ### Fixed
 

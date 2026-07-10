@@ -344,6 +344,9 @@ func computeHybridRetrievalQuality(ctx context.Context, queries, docs []retrieva
 	relevantPairs := 0
 	skippedRelevantDocs := 0
 	skippedNoRelevant := 0
+	// Reused across every query in this loop instead of allocating a fresh
+	// map[int]bool candidate-dedup set per query.
+	bm25Scratch := newBM25CandidateScratch(len(index.Documents))
 	for _, query := range queries {
 		if err := ctx.Err(); err != nil {
 			return RetrievalEvalQualityMetrics{}, 0, 0, 0, 0, err
@@ -362,7 +365,7 @@ func computeHybridRetrievalQuality(ctx context.Context, queries, docs []retrieva
 			continue
 		}
 		denseScores := topRetrievalScores(query.Vector, docs, topK)
-		bm25Scores := topBM25Scores(bm25Queries[query.ID], index, topK)
+		bm25Scores := topBM25Scores(bm25Queries[query.ID], index, topK, bm25Scratch)
 		scores := fuseHybridScores(denseScores, bm25Scores, topK, cfg)
 		evaluatedQueries++
 		relevantPairs += len(filteredRels)
