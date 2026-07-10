@@ -23,6 +23,33 @@ type loadConfig struct {
 	candidateMetadata map[int64]map[string]string
 	memoryPlan        *MemoryPlan
 	packageManifest   *PackageManifest
+	requireBackend    eosartifact.BackendKind
+}
+
+// EnvRequireBackend, when set to a backend kind (e.g. "cuda", "metal",
+// "vulkan", "directml", "webgpu"), pins Load to that backend and disables
+// silent multi-backend fallback: if the required backend rejects the
+// module for any reason -- CanLoad returns false, a required capability is
+// missing, or Load itself errors (e.g. the CUDA stale-RoPE-ABI guard added
+// in f0782712 rejecting a pre-fix artifact) -- Load returns that rejection
+// immediately instead of trying the next registered backend. This is the
+// CLI-reachable escape hatch for eval/serving entry points (cmd/eos,
+// cmd/retrievaldump) that must not silently drift onto a slower or
+// semantically different backend, such as the CPU-backed metal stub on
+// Linux (runtime/backends/metal/native_stub.go): export
+// EOS_REQUIRE_BACKEND=cuda before invoking the eos CLI, or pass
+// WithRequireBackend(eosartifact.BackendCUDA) programmatically.
+// WithRequireBackend takes precedence over the env var when both are set.
+const EnvRequireBackend = "EOS_REQUIRE_BACKEND"
+
+// WithRequireBackend forces Load to return a backend's rejection instead of
+// silently falling back to a later candidate when kind rejects the module.
+// See EnvRequireBackend for the equivalent env var (checked when this
+// option is not supplied) and for the full fail-loud rationale.
+func WithRequireBackend(kind eosartifact.BackendKind) LoadOption {
+	return func(cfg *loadConfig) {
+		cfg.requireBackend = kind
+	}
 }
 
 // Program is a loaded executable module.
@@ -40,6 +67,17 @@ func New(backends ...backend.Backend) *Runtime {
 }
 
 // Load selects a compatible backend and prepares the program.
+//
+// Backend selection falls back candidate by candidate: if backends[0]
+// rejects the module, backends[1] is tried, and so on. A rejected
+// candidate is recorded in reasons for the final aggregate error in case
+// every candidate rejects the module. When a fallback candidate ultimately
+// succeeds, every earlier candidate whose Load call actually failed (as
+// opposed to being merely unsupported or missing a capability) is reported
+// with a stderr warning naming the failed backend, its verbatim error, and
+// the backend Load fell back to -- see warnBackendFallback. To refuse
+// fallback entirely and surface a rejection instead, set EnvRequireBackend
+// or pass WithRequireBackend.
 func (rt *Runtime) Load(ctx context.Context, mod *eosartifact.Module, opts ...LoadOption) (*Program, error) {
 	if mod == nil {
 		return nil, fmt.Errorf("nil module")
@@ -57,21 +95,46 @@ func (rt *Runtime) Load(ctx context.Context, mod *eosartifact.Module, opts ...Lo
 	if err := validateParamBindings(mod, cfg.weights); err != nil {
 		return nil, err
 	}
+
+	requireBackend := cfg.requireBackend
+	if requireBackend == "" {
+		if v := strings.TrimSpace(os.Getenv(EnvRequireBackend)); v != "" {
+			requireBackend = eosartifact.BackendKind(strings.ToLower(v))
+		}
+	}
+	if requireBackend != "" && !rt.hasBackend(requireBackend) {
+		return nil, fmt.Errorf("eos-runtime: required backend %q is not registered in this runtime (see %s / WithRequireBackend); registered backends: %s", requireBackend, EnvRequireBackend, strings.Join(rt.backendKinds(), ", "))
+	}
+
 	var reasons []string
+	var loadFailures []backendLoadFailure
 	for _, candidate := range rt.backends {
+		kind := candidate.Kind()
+		strict := requireBackend != "" && kind == requireBackend
 		if !candidate.CanLoad(mod) {
-			reasons = append(reasons, fmt.Sprintf("%s: unsupported backend", candidate.Kind()))
+			if strict {
+				return nil, fmt.Errorf("eos-runtime: required backend %q rejected module %q: unsupported backend (refusing to fall back; see %s / WithRequireBackend)", kind, mod.Name, EnvRequireBackend)
+			}
+			reasons = append(reasons, fmt.Sprintf("%s: unsupported backend", kind))
 			continue
 		}
 		if missing := missingBackendCapabilities(candidate, mod); len(missing) > 0 {
-			reasons = append(reasons, fmt.Sprintf("%s: missing capabilities [%s]", candidate.Kind(), strings.Join(missing, ", ")))
+			if strict {
+				return nil, fmt.Errorf("eos-runtime: required backend %q rejected module %q: missing capabilities [%s] (refusing to fall back; see %s / WithRequireBackend)", kind, mod.Name, strings.Join(missing, ", "), EnvRequireBackend)
+			}
+			reasons = append(reasons, fmt.Sprintf("%s: missing capabilities [%s]", kind, strings.Join(missing, ", ")))
 			continue
 		}
 		exec, err := loadBackendExecutor(ctx, candidate, mod, cfg.weights, cfg.packageManifest)
 		if err != nil {
-			reasons = append(reasons, fmt.Sprintf("%s: %v", candidate.Kind(), err))
+			if strict {
+				return nil, fmt.Errorf("eos-runtime: required backend %q failed to load module %q: %w (refusing to fall back; see %s / WithRequireBackend)", kind, mod.Name, err, EnvRequireBackend)
+			}
+			reasons = append(reasons, fmt.Sprintf("%s: %v", kind, err))
+			loadFailures = append(loadFailures, backendLoadFailure{kind: kind, err: err})
 			continue
 		}
+		warnBackendFallback(mod, loadFailures, kind)
 		return &Program{
 			module:            mod,
 			executor:          exec,
@@ -83,6 +146,50 @@ func (rt *Runtime) Load(ctx context.Context, mod *eosartifact.Module, opts ...Lo
 		return nil, fmt.Errorf("no compatible backend for module %q", mod.Name)
 	}
 	return nil, fmt.Errorf("no compatible backend for module %q: %s", mod.Name, strings.Join(reasons, "; "))
+}
+
+// hasBackend reports whether kind is among rt's registered backends.
+func (rt *Runtime) hasBackend(kind eosartifact.BackendKind) bool {
+	for _, candidate := range rt.backends {
+		if candidate.Kind() == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// backendKinds lists rt's registered backend kinds, in registration order.
+func (rt *Runtime) backendKinds() []string {
+	kinds := make([]string, 0, len(rt.backends))
+	for _, candidate := range rt.backends {
+		kinds = append(kinds, string(candidate.Kind()))
+	}
+	return kinds
+}
+
+// backendLoadFailure records a candidate backend whose Load call returned
+// an error during Runtime.Load's fallback search.
+type backendLoadFailure struct {
+	kind eosartifact.BackendKind
+	err  error
+}
+
+// warnBackendFallback emits one stderr line per backend whose Load call
+// failed before Load fell back to selected. Each line names the failed
+// backend, preserves its error verbatim -- e.g. the CUDA stale-RoPE-ABI
+// guard's "recompile/reseal the module" message -- and names the backend
+// that was ultimately selected, so a Load rejection is never silently
+// swallowed by the fallback path. Backends skipped only because CanLoad
+// returned false or a capability was missing are routine multi-backend
+// routing, not failures, so they are not warned about here (they still
+// appear in the aggregate error if every candidate is rejected). Callers
+// that must not tolerate any fallback should use EnvRequireBackend /
+// WithRequireBackend instead of relying on this warning.
+func warnBackendFallback(mod *eosartifact.Module, failures []backendLoadFailure, selected eosartifact.BackendKind) {
+	for _, failure := range failures {
+		fmt.Fprintf(os.Stderr, "eos-runtime: WARNING backend %q failed to load module %q: %v -- falling back to backend %q (set %s=%s to fail instead of falling back)\n",
+			failure.kind, mod.Name, failure.err, selected, EnvRequireBackend, failure.kind)
+	}
 }
 
 // LoadFile reads a serialized .mll artifact and loads it.

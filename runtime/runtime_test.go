@@ -2,7 +2,10 @@ package eosruntime
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +24,11 @@ type stubBackend struct {
 	kind         eosartifact.BackendKind
 	capabilities []string
 	loads        int
+	// failErr, when set, makes Load return this error verbatim instead of
+	// succeeding -- used to simulate a rejecting backend such as CUDA's
+	// stale-RoPE-ABI guard (runtime/backends/cuda/native_linux.go's
+	// validateRoPEKernelABI) without needing real GPU hardware.
+	failErr error
 }
 
 func (b *stubBackend) Kind() eosartifact.BackendKind { return b.kind }
@@ -35,7 +43,56 @@ func (b *stubBackend) CanLoad(mod *eosartifact.Module) bool {
 
 func (b *stubBackend) Load(_ context.Context, _ *eosartifact.Module, _ map[string]backend.WeightBinding) (backend.Executor, error) {
 	b.loads++
+	if b.failErr != nil {
+		return nil, b.failErr
+	}
 	return stubExecutor{kind: b.kind}, nil
+}
+
+// alwaysRejectBackend rejects every module via CanLoad, so Load must never
+// be reachable -- used to test strict-mode gating on the CanLoad rejection
+// path (as opposed to a Load() call failure).
+type alwaysRejectBackend struct {
+	kind  eosartifact.BackendKind
+	loads int
+}
+
+func (b *alwaysRejectBackend) Kind() eosartifact.BackendKind { return b.kind }
+
+func (b *alwaysRejectBackend) CanLoad(*eosartifact.Module) bool { return false }
+
+func (b *alwaysRejectBackend) Load(context.Context, *eosartifact.Module, map[string]backend.WeightBinding) (backend.Executor, error) {
+	b.loads++
+	return nil, fmt.Errorf("alwaysRejectBackend.Load should never be called (CanLoad is false)")
+}
+
+// captureStderr redirects os.Stderr for the duration of fn and returns
+// everything written to it, mirroring cmd/eos/main_test.go's
+// captureRunStderrAndOutput os.Pipe idiom for asserting on warning/log
+// lines written directly to stderr.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stderr
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stderr pipe: %v", err)
+	}
+	os.Stderr = writer
+	defer func() {
+		os.Stderr = orig
+	}()
+	fn()
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close stderr writer: %v", err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read stderr capture: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close stderr reader: %v", err)
+	}
+	return string(data)
 }
 
 type stubExecutor struct {
@@ -143,6 +200,292 @@ func TestLoadReportsMissingBackendCapabilities(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), eosartifact.CapabilityCandidatePack) {
 		t.Fatalf("expected candidate_pack in error, got %v", err)
+	}
+}
+
+// abiGuardStyleError mimics the CUDA stale-RoPE-ABI guard's error text
+// (validateRoPEKernelABI in runtime/backends/cuda/native_linux.go, added by
+// f0782712) so tests can assert it survives fallback/strict-mode handling
+// verbatim without requiring real CUDA hardware.
+func abiGuardStyleError() error {
+	return errors.New(`stale rope kernel ABI for kernel "embed_layer0" (compiled before seq_len fix): recompile/reseal the module with a current eos binary (init-model --bootstrap-from <old.mll>)`)
+}
+
+func TestLoadWarnsOnFallbackAfterLoadFailure(t *testing.T) {
+	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_embed", Preset: compiler.PresetTinyEmbed})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	abiErr := abiGuardStyleError()
+	cudaFails := &stubBackend{kind: eosartifact.BackendCUDA, failErr: abiErr}
+	metalOK := &stubBackend{kind: eosartifact.BackendMetal}
+	rt := New(cudaFails, metalOK)
+
+	var prog *Program
+	stderr := captureStderr(t, func() {
+		var loadErr error
+		prog, loadErr = rt.Load(context.Background(), bundle.Artifact, tinyEmbedWeights()...)
+		if loadErr != nil {
+			t.Fatalf("load: %v", loadErr)
+		}
+	})
+
+	if got := prog.Backend(); got != eosartifact.BackendMetal {
+		t.Fatalf("backend = %q, want %q", got, eosartifact.BackendMetal)
+	}
+	if cudaFails.loads != 1 {
+		t.Fatalf("cuda load attempts = %d, want 1", cudaFails.loads)
+	}
+	if metalOK.loads != 1 {
+		t.Fatalf("metal load attempts = %d, want 1", metalOK.loads)
+	}
+
+	lines := strings.Split(strings.TrimRight(stderr, "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("stderr lines = %d, want 1: %q", len(lines), stderr)
+	}
+	warning := lines[0]
+	if !strings.Contains(warning, string(eosartifact.BackendCUDA)) {
+		t.Fatalf("warning missing failed backend name: %q", warning)
+	}
+	if !strings.Contains(warning, abiErr.Error()) {
+		t.Fatalf("warning does not preserve underlying error verbatim: %q", warning)
+	}
+	if !strings.Contains(warning, string(eosartifact.BackendMetal)) {
+		t.Fatalf("warning missing selected fallback backend name: %q", warning)
+	}
+	if !strings.Contains(warning, EnvRequireBackend) {
+		t.Fatalf("warning missing strict-mode escape hatch mention: %q", warning)
+	}
+}
+
+func TestLoadWarnsPerFailedBackendAcrossMultipleFallbacks(t *testing.T) {
+	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_embed", Preset: compiler.PresetTinyEmbed})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	cudaErr := errors.New("cuda device init failed: no CUDA-capable device is detected")
+	metalErr := errors.New("metal device init failed: no Metal-capable device is detected")
+	cudaFails := &stubBackend{kind: eosartifact.BackendCUDA, failErr: cudaErr}
+	metalFails := &stubBackend{kind: eosartifact.BackendMetal, failErr: metalErr}
+	vulkanOK := &stubBackend{kind: eosartifact.BackendVulkan}
+	rt := New(cudaFails, metalFails, vulkanOK)
+
+	var prog *Program
+	stderr := captureStderr(t, func() {
+		var loadErr error
+		prog, loadErr = rt.Load(context.Background(), bundle.Artifact, tinyEmbedWeights()...)
+		if loadErr != nil {
+			t.Fatalf("load: %v", loadErr)
+		}
+	})
+
+	if got := prog.Backend(); got != eosartifact.BackendVulkan {
+		t.Fatalf("backend = %q, want %q", got, eosartifact.BackendVulkan)
+	}
+
+	lines := strings.Split(strings.TrimRight(stderr, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("stderr lines = %d, want 2: %q", len(lines), stderr)
+	}
+	if !strings.Contains(lines[0], string(eosartifact.BackendCUDA)) || !strings.Contains(lines[0], cudaErr.Error()) || !strings.Contains(lines[0], string(eosartifact.BackendVulkan)) {
+		t.Fatalf("first warning malformed: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], string(eosartifact.BackendMetal)) || !strings.Contains(lines[1], metalErr.Error()) || !strings.Contains(lines[1], string(eosartifact.BackendVulkan)) {
+		t.Fatalf("second warning malformed: %q", lines[1])
+	}
+}
+
+func TestLoadStrictModeOptionSurfacesLoadErrorInsteadOfFallback(t *testing.T) {
+	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_embed", Preset: compiler.PresetTinyEmbed})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	abiErr := abiGuardStyleError()
+	cudaFails := &stubBackend{kind: eosartifact.BackendCUDA, failErr: abiErr}
+	metalOK := &stubBackend{kind: eosartifact.BackendMetal}
+	rt := New(cudaFails, metalOK)
+
+	opts := append(append([]LoadOption{}, tinyEmbedWeights()...), WithRequireBackend(eosartifact.BackendCUDA))
+	var loadErr error
+	stderr := captureStderr(t, func() {
+		_, loadErr = rt.Load(context.Background(), bundle.Artifact, opts...)
+	})
+	if loadErr == nil {
+		t.Fatal("expected strict-mode load error, got nil")
+	}
+	if !errors.Is(loadErr, abiErr) {
+		t.Fatalf("expected error chain to wrap abiErr, got %v", loadErr)
+	}
+	if !strings.Contains(loadErr.Error(), abiErr.Error()) {
+		t.Fatalf("error does not preserve underlying message verbatim: %v", loadErr)
+	}
+	if !strings.Contains(loadErr.Error(), string(eosartifact.BackendCUDA)) {
+		t.Fatalf("error missing required backend name: %v", loadErr)
+	}
+	if cudaFails.loads != 1 {
+		t.Fatalf("cuda load attempts = %d, want 1", cudaFails.loads)
+	}
+	if metalOK.loads != 0 {
+		t.Fatalf("metal load attempts = %d, want 0 (fallback must not be attempted in strict mode)", metalOK.loads)
+	}
+	if stderr != "" {
+		t.Fatalf("expected no fallback warning in strict mode, got %q", stderr)
+	}
+}
+
+func TestLoadStrictModeSurfacesCanLoadRejectionInsteadOfFallback(t *testing.T) {
+	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_embed", Preset: compiler.PresetTinyEmbed})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	cudaRejects := &alwaysRejectBackend{kind: eosartifact.BackendCUDA}
+	metalOK := &stubBackend{kind: eosartifact.BackendMetal}
+	rt := New(cudaRejects, metalOK)
+
+	opts := append(append([]LoadOption{}, tinyEmbedWeights()...), WithRequireBackend(eosartifact.BackendCUDA))
+	_, err = rt.Load(context.Background(), bundle.Artifact, opts...)
+	if err == nil {
+		t.Fatal("expected strict-mode CanLoad rejection error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unsupported backend") {
+		t.Fatalf("expected unsupported backend reason, got %v", err)
+	}
+	if !strings.Contains(err.Error(), string(eosartifact.BackendCUDA)) {
+		t.Fatalf("error missing required backend name: %v", err)
+	}
+	if cudaRejects.loads != 0 {
+		t.Fatalf("cuda Load attempts = %d, want 0 (CanLoad already false)", cudaRejects.loads)
+	}
+	if metalOK.loads != 0 {
+		t.Fatalf("metal load attempts = %d, want 0 (fallback must not be attempted in strict mode)", metalOK.loads)
+	}
+}
+
+func TestLoadStrictModeRejectsUnregisteredRequiredBackend(t *testing.T) {
+	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_embed", Preset: compiler.PresetTinyEmbed})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	metalOK := &stubBackend{kind: eosartifact.BackendMetal}
+	rt := New(metalOK)
+
+	opts := append(append([]LoadOption{}, tinyEmbedWeights()...), WithRequireBackend(eosartifact.BackendCUDA))
+	_, err = rt.Load(context.Background(), bundle.Artifact, opts...)
+	if err == nil {
+		t.Fatal("expected error for unregistered required backend")
+	}
+	if !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("expected 'not registered' error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), string(eosartifact.BackendMetal)) {
+		t.Fatalf("error should list registered backends, got %v", err)
+	}
+	if metalOK.loads != 0 {
+		t.Fatalf("metal load attempts = %d, want 0", metalOK.loads)
+	}
+}
+
+func TestLoadStrictModeViaEnvVarSurfacesErrorInsteadOfFallback(t *testing.T) {
+	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_embed", Preset: compiler.PresetTinyEmbed})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	abiErr := abiGuardStyleError()
+	cudaFails := &stubBackend{kind: eosartifact.BackendCUDA, failErr: abiErr}
+	metalOK := &stubBackend{kind: eosartifact.BackendMetal}
+	rt := New(cudaFails, metalOK)
+
+	t.Setenv(EnvRequireBackend, "CUDA") // exercise case-insensitive matching too
+	_, err = rt.Load(context.Background(), bundle.Artifact, tinyEmbedWeights()...)
+	if err == nil {
+		t.Fatal("expected strict-mode load error via env var, got nil")
+	}
+	if !errors.Is(err, abiErr) {
+		t.Fatalf("expected error chain to wrap abiErr, got %v", err)
+	}
+	if metalOK.loads != 0 {
+		t.Fatalf("metal load attempts = %d, want 0 (fallback must not be attempted with %s set)", metalOK.loads, EnvRequireBackend)
+	}
+}
+
+func TestLoadStrictModeOptionTakesPrecedenceOverEnvVar(t *testing.T) {
+	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_embed", Preset: compiler.PresetTinyEmbed})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	abiErr := abiGuardStyleError()
+	cudaFails := &stubBackend{kind: eosartifact.BackendCUDA, failErr: abiErr}
+	metalOK := &stubBackend{kind: eosartifact.BackendMetal}
+	rt := New(cudaFails, metalOK)
+
+	// Env says "require metal" but the explicit option says "require cuda";
+	// the option must win, so the cuda failure must surface instead of
+	// silently accepting the metal load that the env var alone would allow.
+	t.Setenv(EnvRequireBackend, "metal")
+	opts := append(append([]LoadOption{}, tinyEmbedWeights()...), WithRequireBackend(eosartifact.BackendCUDA))
+	_, err = rt.Load(context.Background(), bundle.Artifact, opts...)
+	if err == nil {
+		t.Fatal("expected strict-mode load error from option, got nil")
+	}
+	if !errors.Is(err, abiErr) {
+		t.Fatalf("expected error chain to wrap abiErr (option must win over env var), got %v", err)
+	}
+	if metalOK.loads != 0 {
+		t.Fatalf("metal load attempts = %d, want 0", metalOK.loads)
+	}
+}
+
+func TestLoadSuccessfulFirstBackendEmitsNoFallbackWarning(t *testing.T) {
+	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_embed", Preset: compiler.PresetTinyEmbed})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	rt := New(cuda.New(), metal.New())
+	var prog *Program
+	stderr := captureStderr(t, func() {
+		var loadErr error
+		prog, loadErr = rt.Load(context.Background(), bundle.Artifact, tinyEmbedWeights()...)
+		if loadErr != nil {
+			t.Fatalf("load: %v", loadErr)
+		}
+	})
+	if got := prog.Backend(); got != eosartifact.BackendCUDA {
+		t.Fatalf("backend = %q, want %q", got, eosartifact.BackendCUDA)
+	}
+	if stderr != "" {
+		t.Fatalf("expected no warning output on successful first-backend load, got %q", stderr)
+	}
+}
+
+func TestLoadSingleBackendPathEmitsNoFallbackWarning(t *testing.T) {
+	bundle, err := compiler.Build(nil, compiler.Options{ModuleName: "tiny_embed", Preset: compiler.PresetTinyEmbed})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	rt := New(metal.New())
+	var prog *Program
+	stderr := captureStderr(t, func() {
+		var loadErr error
+		prog, loadErr = rt.Load(context.Background(), bundle.Artifact, tinyEmbedWeights()...)
+		if loadErr != nil {
+			t.Fatalf("load: %v", loadErr)
+		}
+	})
+	if got := prog.Backend(); got != eosartifact.BackendMetal {
+		t.Fatalf("backend = %q, want %q", got, eosartifact.BackendMetal)
+	}
+	if stderr != "" {
+		t.Fatalf("expected no warning output on single-backend load, got %q", stderr)
 	}
 }
 
